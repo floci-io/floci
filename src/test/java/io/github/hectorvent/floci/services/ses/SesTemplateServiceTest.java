@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Tag;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -14,9 +15,13 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.ParameterizedTest;
 
 import java.security.SecureRandom;
+import java.time.Clock;
+import java.time.Instant;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -37,7 +42,8 @@ class SesTemplateServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(), new SecureRandom());
+        service = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(), new SecureRandom(),
+                Clock.systemUTC());
     }
 
     private static EmailTemplate template(String name) {
@@ -98,15 +104,27 @@ class SesTemplateServiceTest {
     }
 
     @Test
-    void list_isSortedByCreationAndPerRegion() {
+    void create_andUpdate_stampTheInjectedClock() {
+        SesTemplateService ticking = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(),
+                new SecureRandom(), new MutableClock());
+
+        Instant created = ticking.createTemplate(template("welcome"), REGION).getCreatedTimestamp();
+        ticking.updateTemplate(template("welcome"), REGION);
+
+        EmailTemplate stored = ticking.getTemplate("welcome", REGION);
+        assertEquals(created, stored.getCreatedTimestamp());
+        assertEquals(created.plusMillis(1), stored.getLastUpdatedTimestamp());
+    }
+
+    @Test
+    void list_isPerRegion() {
         service.createTemplate(template("a"), REGION);
         service.createTemplate(template("b"), REGION);
         service.createTemplate(template("other"), "eu-west-1");
 
-        List<EmailTemplate> list = service.listTemplates(REGION);
-        assertEquals(2, list.size());
-        assertEquals("a", list.get(0).getTemplateName());
-        assertEquals("b", list.get(1).getTemplateName());
+        List<String> names = service.listTemplates(REGION).stream()
+                .map(EmailTemplate::getTemplateName).toList();
+        assertThat(names, containsInAnyOrder("a", "b"));
     }
 
     @Test

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
@@ -22,6 +23,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 import io.quarkus.runtime.StartupEvent;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -79,12 +81,30 @@ public class AutoScalingReconciler {
     }
 
     void reconcileAll() {
-        for (AutoScalingGroup asg : asgService.describeAutoScalingGroups(null, null)) {
-            try {
-                reconcile(asg);
-            } catch (Exception e) {
-                LOG.warnv("Reconcile failed for ASG {0}: {1}", asg.getAutoScalingGroupName(), e.getMessage());
+        Set<String> accountIds;
+        try {
+            accountIds = asgService.autoScalingGroupAccountIds();
+        } catch (Exception e) {
+            LOG.warnv("Could not enumerate Auto Scaling group accounts: {0}", e.getMessage());
+            return;
+        }
+        for (String accountId : accountIds) {
+            RequestScopes.runAs(accountId, () -> reconcileAccount(accountId));
+        }
+    }
+
+    private void reconcileAccount(String accountId) {
+        try {
+            for (AutoScalingGroup asg : asgService.describeAutoScalingGroups(null, null)) {
+                try {
+                    reconcile(asg);
+                } catch (Exception e) {
+                    LOG.warnv("Reconcile failed for ASG {0} in account {1}: {2}",
+                            asg.getAutoScalingGroupName(), accountId, e.getMessage());
+                }
             }
+        } catch (Exception e) {
+            LOG.warnv("Could not reconcile Auto Scaling groups in account {0}: {1}", accountId, e.getMessage());
         }
     }
 
@@ -102,8 +122,9 @@ public class AutoScalingReconciler {
         } else if (activeCapacity > desired) {
             scaleIn(asg, (int) (activeCapacity - desired));
         }
-        asgService.saveAutoScalingGroup(asg);
-        asgService.completeInstanceRefreshIfSettled(asg.getRegion(), asg.getAutoScalingGroupName());
+        if (asgService.saveAutoScalingGroupIfPresent(asg)) {
+            asgService.completeInstanceRefreshIfSettled(asg.getRegion(), asg.getAutoScalingGroupName());
+        }
     }
 
     static long activeCapacity(AutoScalingGroup asg) {
@@ -148,7 +169,7 @@ public class AutoScalingReconciler {
             }
         }
         if (changed) {
-            asgService.saveAutoScalingGroup(asg);
+            asgService.saveAutoScalingGroupIfPresent(asg);
         }
     }
 
@@ -167,7 +188,7 @@ public class AutoScalingReconciler {
         deregisterFromTargetGroups(asg, instanceIds);
         deregisterFromClassicLoadBalancers(asg, instanceIds);
         asg.getInstances().removeIf(instance -> instanceIds.contains(instance.getInstanceId()));
-        asgService.saveAutoScalingGroup(asg);
+        asgService.saveAutoScalingGroupIfPresent(asg);
         asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
                 "Removing stale EC2 instance reference(s): " + instanceIds,
                 "Persisted Auto Scaling state referenced instance containers that are no longer running.",
@@ -279,7 +300,7 @@ public class AutoScalingReconciler {
         }
 
         asg.getInstances().removeIf(instance -> instanceIds.contains(instance.getInstanceId()));
-        asgService.saveAutoScalingGroup(asg);
+        asgService.saveAutoScalingGroupIfPresent(asg);
         asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
                 "Terminating EC2 instance(s) for refresh: " + instanceIds,
                 "An instance refresh requested replacement of active instances.",
@@ -318,6 +339,7 @@ public class AutoScalingReconciler {
                     launchSource.iamInstanceProfile(),
                     launchSource.associatePublicIpAddress());
 
+            List<String> launchedInstanceIds = new ArrayList<>();
             for (Instance ec2Inst : reservation.getInstances()) {
                 AsgInstance asgInst = new AsgInstance();
                 asgInst.setInstanceId(ec2Inst.getInstanceId());
@@ -330,10 +352,18 @@ public class AutoScalingReconciler {
                 asgInst.setLaunchTemplateVersion(launchSource.launchTemplateVersion());
                 asgInst.setInstanceType(launchSource.instanceType());
                 asg.getInstances().add(asgInst);
+                launchedInstanceIds.add(ec2Inst.getInstanceId());
                 LOG.infov("ASG {0}: launched instance {1} (Pending)",
                         asg.getAutoScalingGroupName(), ec2Inst.getInstanceId());
             }
-            asgService.saveAutoScalingGroup(asg);
+            if (!asgService.saveAutoScalingGroupIfPresent(asg) && !launchedInstanceIds.isEmpty()) {
+                try {
+                    ec2Service.terminateInstances(asg.getRegion(), launchedInstanceIds);
+                } catch (Exception e) {
+                    LOG.warnv("ASG {0}: failed to clean up instances {1} after group deletion: {2}",
+                            asg.getAutoScalingGroupName(), launchedInstanceIds, e.getMessage());
+                }
+            }
         } catch (Exception e) {
             LOG.warnv("ASG {0}: failed to launch instances: {1}",
                     asg.getAutoScalingGroupName(), e.getMessage());
@@ -384,7 +414,7 @@ public class AutoScalingReconciler {
         }
 
         asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
-        asgService.saveAutoScalingGroup(asg);
+        asgService.saveAutoScalingGroupIfPresent(asg);
         asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
                 "Terminating EC2 instance(s): " + instanceIds,
                 "An instance was terminated in response to a desired capacity change.",

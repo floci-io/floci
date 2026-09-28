@@ -12,11 +12,14 @@ public class Cluster {
     private String nodeType;
     private String masterUsername;
     private String masterPassword;
+    private String masterPasswordSecretArn;
+    private String masterPasswordSecretKmsKeyId;
     private String clusterStatus;
     private Endpoint endpoint;
     private String clusterSubnetGroupName;
     private String clusterParameterGroupName;
     private List<String> vpcSecurityGroupIds = new ArrayList<>();
+    private List<String> iamRoleArns = new ArrayList<>();
 
     public String getClusterIdentifier() { return clusterIdentifier; }
     public void setClusterIdentifier(String clusterIdentifier) { this.clusterIdentifier = clusterIdentifier; }
@@ -26,6 +29,10 @@ public class Cluster {
     public void setMasterUsername(String masterUsername) { this.masterUsername = masterUsername; }
     public String getMasterPassword() { return masterPassword; }
     public void setMasterPassword(String masterPassword) { this.masterPassword = masterPassword; }
+    public String getMasterPasswordSecretArn() { return masterPasswordSecretArn; }
+    public void setMasterPasswordSecretArn(String masterPasswordSecretArn) { this.masterPasswordSecretArn = masterPasswordSecretArn; }
+    public String getMasterPasswordSecretKmsKeyId() { return masterPasswordSecretKmsKeyId; }
+    public void setMasterPasswordSecretKmsKeyId(String masterPasswordSecretKmsKeyId) { this.masterPasswordSecretKmsKeyId = masterPasswordSecretKmsKeyId; }
     public String getClusterStatus() { return clusterStatus; }
     public void setClusterStatus(String clusterStatus) { this.clusterStatus = clusterStatus; }
     public Endpoint getEndpoint() { return endpoint; }
@@ -36,6 +43,39 @@ public class Cluster {
     public void setClusterParameterGroupName(String clusterParameterGroupName) { this.clusterParameterGroupName = clusterParameterGroupName; }
     public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
     public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) { this.vpcSecurityGroupIds = vpcSecurityGroupIds; }
+    public List<String> getIamRoleArns() { return iamRoleArns; }
+    public void setIamRoleArns(List<String> iamRoleArns) { this.iamRoleArns = iamRoleArns; }
+
+    // Audit logging config as set by EnableLogging; no log delivery is emulated.
+    private boolean loggingEnabled = false;
+    private String loggingBucketName;
+    private String loggingS3KeyPrefix;
+
+    public boolean isLoggingEnabled() { return loggingEnabled; }
+    public void setLoggingEnabled(boolean loggingEnabled) { this.loggingEnabled = loggingEnabled; }
+    public String getLoggingBucketName() { return loggingBucketName; }
+    public void setLoggingBucketName(String loggingBucketName) { this.loggingBucketName = loggingBucketName; }
+    public String getLoggingS3KeyPrefix() { return loggingS3KeyPrefix; }
+    public void setLoggingS3KeyPrefix(String loggingS3KeyPrefix) { this.loggingS3KeyPrefix = loggingS3KeyPrefix; }
+
+    private String loggingDestinationType;
+    private List<String> loggingExports;
+    private String loggingS3TableKmsKeyId;
+    private String loggingS3TableGranularity;
+
+    public String getLoggingDestinationType() { return loggingDestinationType; }
+    public void setLoggingDestinationType(String loggingDestinationType) { this.loggingDestinationType = loggingDestinationType; }
+    public List<String> getLoggingExports() { return loggingExports; }
+    public void setLoggingExports(List<String> loggingExports) { this.loggingExports = loggingExports; }
+    public String getLoggingS3TableKmsKeyId() { return loggingS3TableKmsKeyId; }
+    public void setLoggingS3TableKmsKeyId(String loggingS3TableKmsKeyId) { this.loggingS3TableKmsKeyId = loggingS3TableKmsKeyId; }
+    public String getLoggingS3TableGranularity() { return loggingS3TableGranularity; }
+    public void setLoggingS3TableGranularity(String loggingS3TableGranularity) { this.loggingS3TableGranularity = loggingS3TableGranularity; }
+
+    private boolean multiAZ = false;
+
+    public boolean isMultiAZ() { return multiAZ; }
+    public void setMultiAZ(boolean multiAZ) { this.multiAZ = multiAZ; }
 
     // Real backend address of this cluster's PostgreSQL container. `endpoint` now points at the
     // auth proxy, not the container, so the container address is kept here for proxy wiring and

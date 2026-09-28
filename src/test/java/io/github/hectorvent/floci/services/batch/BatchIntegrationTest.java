@@ -81,6 +81,49 @@ class BatchIntegrationTest {
     }
 
     @Test
+    void cancelAndTerminateJobExposeAwsRoutes() {
+        String suffix = uniqueSuffix();
+        String queueArn = createQueue("batch-control-queue-" + suffix,
+                createComputeEnvironment("batch-control-ce-" + suffix));
+        String definitionArn = registerJobDefinition("batch-control-job-" + suffix, "[]", "[]");
+        String jobId = submit(queueArn, definitionArn, "batch-control-submit-" + suffix);
+
+        givenJson("""
+                {"jobId":"%s","reason":"No longer needed"}
+                """.formatted(jobId))
+        .when()
+            .post("/v1/canceljob")
+        .then()
+            .statusCode(200);
+
+        givenJson("""
+                {"jobId":"%s","reason":"Stop requested"}
+                """.formatted(jobId))
+        .when()
+            .post("/v1/terminatejob")
+        .then()
+            .statusCode(200);
+
+        givenJson("""
+                {"jobId":"%s"}
+                """.formatted(jobId))
+        .when()
+            .post("/v1/canceljob")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ClientException"));
+
+        givenJson("""
+                {"jobId":"missing-job","reason":"Stop requested"}
+                """)
+        .when()
+            .post("/v1/terminatejob")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ClientException"));
+    }
+
+    @Test
     void jobDefinitionRevisionsAndDeregister() {
         String suffix = uniqueSuffix();
         String queueArn = createQueue("batch-rev-queue-" + suffix, createComputeEnvironment("batch-rev-ce-" + suffix));
@@ -710,6 +753,58 @@ class BatchIntegrationTest {
         .then()
             .statusCode(200)
             .body("jobs", hasSize(0));
+    }
+
+    @Test
+    void tagRoutesTagListAndUntagAResource() {
+        String suffix = uniqueSuffix();
+        String computeArn = createComputeEnvironment("batch-tags-ce-" + suffix);
+
+        givenJson("{\"tags\":{\"team\":\"a\",\"tier\":\"gold\"}}")
+        .when()
+            .post("/v1/tags/" + computeArn)
+        .then()
+            .statusCode(200);
+        givenJson("{\"tags\":{\"env\":\"blue\"}}")
+        .when()
+            .post("/v1/tags/" + computeArn)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/tags/" + computeArn)
+        .then()
+            .statusCode(200)
+            .body("tags.team", equalTo("a"))
+            .body("tags.tier", equalTo("gold"))
+            .body("tags.env", equalTo("blue"));
+
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("tagKeys", "tier", "env")
+        .when()
+            .delete("/v1/tags/" + computeArn)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/tags/" + computeArn)
+        .then()
+            .statusCode(200)
+            .body("tags.team", equalTo("a"))
+            .body("tags.size()", equalTo(1));
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/tags/arn:aws:batch:us-east-1:000000000000:job-queue/never-" + suffix)
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-Errortype", "ClientException");
     }
 
     private static io.restassured.specification.RequestSpecification givenJson(String body) {

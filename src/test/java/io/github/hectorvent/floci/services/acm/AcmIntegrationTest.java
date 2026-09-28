@@ -271,7 +271,7 @@ class AcmIntegrationTest {
     @Test
     @Order(12)
     void getCertificate() throws Exception {
-        var response = getCertificatePems(createdCertificateArn);
+        JsonPath response = getCertificatePems(createdCertificateArn);
 
         X509Certificate leaf = assertLeafChainsToLocalCa(response.getString("Certificate"),
                 response.getString("CertificateChain"));
@@ -353,7 +353,7 @@ class AcmIntegrationTest {
             .statusCode(200)
             .extract().jsonPath().getString("CertificateArn");
 
-        var response = getCertificatePems(arn);
+        JsonPath response = getCertificatePems(arn);
 
         assertLeafChainsToLocalCa(response.getString("Certificate"), response.getString("CertificateChain"));
     }
@@ -361,7 +361,7 @@ class AcmIntegrationTest {
     @Test
     @Order(17)
     void ecCertificateKeepsItsKeyAlgorithmAndChainsToTheSameCa() throws Exception {
-        var response = getCertificatePems(ecCertificateArn);
+        JsonPath response = getCertificatePems(ecCertificateArn);
 
         X509Certificate leaf = assertLeafChainsToLocalCa(response.getString("Certificate"),
                 response.getString("CertificateChain"));

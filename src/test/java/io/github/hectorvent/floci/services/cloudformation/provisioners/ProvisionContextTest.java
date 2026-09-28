@@ -70,6 +70,17 @@ class ProvisionContextTest {
     }
 
     @Test
+    void resolveOrDefaultReturnsTheValueOtherwiseTheDefault() {
+        ProvisionContext ctx = context(null);
+
+        assertEquals("HTTP", ctx.resolveOrDefault(props("{\"ProtocolType\":\"HTTP\"}"), "ProtocolType", "WEBSOCKET"));
+        assertEquals("WEBSOCKET", ctx.resolveOrDefault(props("{}"), "ProtocolType", "WEBSOCKET"), "absent falls back");
+        assertEquals("WEBSOCKET", ctx.resolveOrDefault(props("{\"ProtocolType\":\"\"}"), "ProtocolType", "WEBSOCKET"),
+                "blank falls back");
+        assertEquals("WEBSOCKET", ctx.resolveOrDefault(null, "ProtocolType", "WEBSOCKET"), "null props falls back");
+    }
+
+    @Test
     void stablePhysicalNamePrefersTheTemplatesName() {
         assertEquals("chosen",
                 context("prior").stablePhysicalName("chosen", "Bucket", 63, true));
@@ -115,6 +126,21 @@ class ProvisionContextTest {
                 "tag order follows the template, not hash order");
         assertEquals("z", tags.get("zeta"));
         assertEquals("", tags.get("novalue"), "a missing Value becomes empty, not null");
+    }
+
+    @Test
+    void resolveTagsReadsTheMapShapeSomeTypesDeclare() {
+        // AWS::Batch::* declare Tags as {key: value} rather than [{Key, Value}]; the map form
+        // resolves each value and keeps template order too.
+        Map<String, String> tags = context(null).resolveTags(
+                props("""
+                        {"Tags": {"zeta": "z", "alpha": "a", "empty": ""}}
+                        """),
+                "Tags");
+
+        assertEquals(List.of("zeta", "alpha", "empty"), List.copyOf(tags.keySet()));
+        assertEquals("z", tags.get("zeta"));
+        assertEquals("", tags.get("empty"));
     }
 
     @Test

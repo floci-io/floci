@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -247,7 +248,7 @@ public class BedrockAgentCoreGatewayRuleService {
         }
         String arn = requiredText(reference, "bundleArn", field + ".bundleArn");
         String version = requiredText(reference, "bundleVersion", field + ".bundleVersion");
-        if (!arn.matches("arn:aws[a-zA-Z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:configuration-bundle/[a-zA-Z][a-zA-Z0-9-_]{0,99}-[a-zA-Z0-9]{10}")) {
+        if (!arn.matches("arn:" + AwsArnUtils.PARTITION_REGEX + ":bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:configuration-bundle/[a-zA-Z][a-zA-Z0-9-_]{0,99}-[a-zA-Z0-9]{10}")) {
             throw new AwsException("ValidationException", field + ".bundleArn is invalid", 400);
         }
         if (!version.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")) {
@@ -290,7 +291,7 @@ public class BedrockAgentCoreGatewayRuleService {
             }
             JsonNode principal = entry.get("iamPrincipal");
             String arn = requiredText(principal, "arn", "iamPrincipal.arn");
-            if (arn.length() > 2048 || !arn.matches("(arn:aws[a-zA-Z-]*:iam::(\\d{12}|\\*):(user|role)/[\\w+=,.@*?/-]+|arn:aws[a-zA-Z-]*:sts::(\\d{12}|\\*):assumed-role/[\\w+=,.@*?/-]+)")) {
+            if (arn.length() > 2048 || !arn.matches("(arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::(\\d{12}|\\*):(user|role)/[\\w+=,.@*?/-]+|arn:" + AwsArnUtils.PARTITION_REGEX + ":sts::(\\d{12}|\\*):assumed-role/[\\w+=,.@*?/-]+)")) {
                 throw new AwsException("ValidationException", "iamPrincipal.arn is invalid", 400);
             }
             if (principal.hasNonNull("operator")) {

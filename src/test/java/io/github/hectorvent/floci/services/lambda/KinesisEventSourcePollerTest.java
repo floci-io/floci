@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.pipes.PipesFilterMatcher;
 import io.vertx.core.Vertx;
@@ -61,6 +62,7 @@ class KinesisEventSourcePollerTest {
     private KinesisService kinesisService;
     private LambdaExecutorService executorService;
     private LambdaFunctionStore functionStore;
+    private LambdaAliasStore aliasStore;
     private EsmStore esmStore;
 
     @BeforeEach
@@ -75,10 +77,11 @@ class KinesisEventSourcePollerTest {
         kinesisService = mock(KinesisService.class);
         executorService = mock(LambdaExecutorService.class);
         functionStore = mock(LambdaFunctionStore.class);
+        aliasStore = mock(LambdaAliasStore.class);
         esmStore = mock(EsmStore.class);
 
         poller = new KinesisEventSourcePoller(mock(Vertx.class), kinesisService, executorService,
-                functionStore, esmStore, config, MAPPER, new PipesFilterMatcher(MAPPER));
+                new LambdaTargetResolver(functionStore, aliasStore), esmStore, config, MAPPER, new PipesFilterMatcher(MAPPER));
     }
 
     private EventSourceMapping esm(String... patterns) {
@@ -158,6 +161,47 @@ class KinesisEventSourcePollerTest {
                 }
             }
         }
+    }
+
+    @Test
+    void versionQualifiedMappingInvokesThatVersion() {
+        stubFunction();
+        LambdaFunction version1 = stubVersion("1");
+        stubStreamWith(List.of(record("s1", "p1", "{}")));
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
+        EventSourceMapping esm = esm();
+        esm.setFunctionArn("arn:aws:lambda:" + REGION + ":" + ACCOUNT + ":function:fn:1");
+
+        poller.pollAndInvoke(esm);
+
+        verify(executorService, timeout(2000)).invoke(eq(version1), any(), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void aliasQualifiedMappingInvokesTheAliasVersion() {
+        stubFunction();
+        LambdaFunction version2 = stubVersion("2");
+        LambdaAlias alias = new LambdaAlias();
+        alias.setName("live");
+        alias.setFunctionName("fn");
+        alias.setFunctionVersion("2");
+        when(aliasStore.getForAccount(ACCOUNT, REGION, "fn", "live")).thenReturn(Optional.of(alias));
+        stubStreamWith(List.of(record("s1", "p1", "{}")));
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
+        EventSourceMapping esm = esm();
+        esm.setFunctionArn("arn:aws:lambda:" + REGION + ":" + ACCOUNT + ":function:fn:live");
+
+        poller.pollAndInvoke(esm);
+
+        verify(executorService, timeout(2000)).invoke(eq(version2), any(), eq(InvocationType.RequestResponse));
+    }
+
+    private LambdaFunction stubVersion(String version) {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("fn");
+        fn.setVersion(version);
+        when(functionStore.getForAccount(ACCOUNT, REGION, "fn", version)).thenReturn(Optional.of(fn));
+        return fn;
     }
 
     @Test

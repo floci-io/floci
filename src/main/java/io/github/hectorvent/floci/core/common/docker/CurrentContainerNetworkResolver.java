@@ -46,6 +46,14 @@ public class CurrentContainerNetworkResolver {
         return resolve().map(CurrentContainerNetwork::name);
     }
 
+    public Optional<String> resolveContainerId() {
+        if (!containerDetector.isRunningInContainer()) {
+            return Optional.empty();
+        }
+        String containerId = currentContainerId();
+        return containerId.isBlank() ? Optional.empty() : Optional.of(containerId);
+    }
+
     public Optional<String> resolveContainerIp() {
         return resolve().map(CurrentContainerNetwork::ipAddress);
     }

@@ -40,6 +40,9 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
     @Inject
     SesSuppressionService suppressionService;
 
+    @Inject
+    SesConfigurationSetService configSetService;
+
     @Test
     @Order(1)
     void createConfigurationSet() {
@@ -234,7 +237,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
         .then()
                 .statusCode(200);
 
-        sesService.putConfigurationSetSuppressionOptions(csBounceOnly, List.of("BOUNCE"), REGION);
+        configSetService.putSuppressionOptions(csBounceOnly, List.of("BOUNCE"), REGION);
 
         List<String> effective = sesService.getEffectiveSuppressedReasons(csBounceOnly, REGION);
         assertEquals(List.of("BOUNCE"), effective);
@@ -253,7 +256,7 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
         .then()
                 .statusCode(200);
 
-        sesService.putConfigurationSetSuppressionOptions(csEmpty, List.of(), REGION);
+        configSetService.putSuppressionOptions(csEmpty, List.of(), REGION);
 
         List<String> effective = sesService.getEffectiveSuppressedReasons(csEmpty, REGION);
         assertTrue(effective.isEmpty(),

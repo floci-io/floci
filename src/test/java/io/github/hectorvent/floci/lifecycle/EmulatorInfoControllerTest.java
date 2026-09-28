@@ -17,9 +17,17 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -83,5 +91,82 @@ class EmulatorInfoControllerTest {
 
         verify(sageMakerTeardown).stopManagedContainers();
         verify(storageFactory).clearAll();
+    }
+
+    @Test
+    @DisplayName("Should call beforeReset on every service before the wipe and afterReset after every clear")
+    void reset_bracketsTheWipeWithBeforeAndAfterHooks() {
+        Resettable second = mock(Resettable.class);
+        when(containerTeardowns.iterator()).thenReturn(List.<ContainerTeardown>of().iterator());
+        when(resettables.iterator()).thenReturn(List.of(resettable, second).iterator());
+
+        controller.reset();
+
+        InOrder order = inOrder(storageFactory, resettable, second);
+        order.verify(resettable).beforeReset();
+        order.verify(second).beforeReset();
+        order.verify(storageFactory).clearAll();
+        order.verify(resettable).clear();
+        order.verify(second).clear();
+        order.verify(second).afterReset();
+        order.verify(resettable).afterReset();
+    }
+
+    @Test
+    @DisplayName("Should still call afterReset when the storage wipe fails, then rethrow")
+    void reset_runsAfterResetWhenTheWipeFails() {
+        doThrow(new IllegalStateException("wipe failed")).when(storageFactory).clearAll();
+        when(containerTeardowns.iterator()).thenReturn(List.<ContainerTeardown>of().iterator());
+        when(resettables.iterator()).thenReturn(List.of(resettable).iterator());
+
+        assertThrows(IllegalStateException.class, controller::reset);
+
+        verify(resettable).beforeReset();
+        verify(resettable).afterReset();
+        verify(resettable, never()).clear();
+    }
+
+    @Test
+    @DisplayName("Should call afterReset on every service, even those after a beforeReset that failed, then rethrow")
+    void reset_runsAfterResetOnEveryServiceWhenABeforeResetFails() {
+        Resettable failing = mock(Resettable.class);
+        Resettable later = mock(Resettable.class);
+        doThrow(new IllegalStateException("drain timed out")).when(failing).beforeReset();
+        when(containerTeardowns.iterator()).thenReturn(List.of(sageMakerTeardown).iterator());
+        when(resettables.iterator()).thenReturn(List.of(resettable, failing, later).iterator());
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, controller::reset);
+
+        assertEquals("drain timed out", thrown.getMessage());
+        // The teardown already shut down the pools that afterReset() restores, so the service
+        // whose beforeReset() never ran needs afterReset() just as much as the ones that ran.
+        InOrder order = inOrder(sageMakerTeardown, resettable, failing, later);
+        order.verify(sageMakerTeardown).stopManagedContainers();
+        order.verify(resettable).beforeReset();
+        order.verify(failing).beforeReset();
+        order.verify(later).afterReset();
+        order.verify(failing).afterReset();
+        order.verify(resettable).afterReset();
+        verify(later, never()).beforeReset();
+        verify(storageFactory, never()).clearAll();
+        verify(resettable, never()).clear();
+        verify(later, never()).clear();
+    }
+
+    @Test
+    void resetRefusedByPreflightChangesNothing() {
+        Resettable refusing = mock(Resettable.class);
+        IllegalStateException refusal = new IllegalStateException("backend refuses reset");
+        doThrow(refusal).when(refusing).checkReset();
+        lenient().when(containerTeardowns.iterator()).thenReturn(List.of(sageMakerTeardown).iterator());
+        when(resettables.iterator()).thenReturn(List.of(resettable, refusing).iterator());
+
+        assertSame(refusal, assertThrows(IllegalStateException.class, controller::reset));
+
+        verify(resettable).checkReset();
+        verify(refusing).checkReset();
+        verifyNoMoreInteractions(resettable, refusing);
+        verify(sageMakerTeardown, never()).stopManagedContainers();
+        verifyNoInteractions(storageFactory);
     }
 }

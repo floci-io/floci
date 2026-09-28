@@ -76,7 +76,8 @@ class AcmIssuanceServiceTest {
 
     @Test
     void pendingCertificateReportsPendingValidationUntilTheWaitHasPassed(@TempDir Path dir) throws Exception {
-        AcmService service = newService(dir, 1);
+        PersistentStorage<String, Certificate> store = store(dir);
+        AcmService service = newService(dir, store, 1);
         Certificate requested = request(service, null);
         String arn = requested.getArn();
 
@@ -88,7 +89,7 @@ class AcmIssuanceServiceTest {
         assertTrue(stillPending.getDomainValidationOptions().stream()
                 .allMatch(validation -> "PENDING_VALIDATION".equals(validation.validationStatus())));
 
-        Thread.sleep(1200);
+        elapseValidationWait(store, arn, 1);
 
         Certificate issued = service.describeCertificate(arn, REGION);
         assertEquals(CertificateStatus.ISSUED, issued.getStatus());
@@ -99,9 +100,10 @@ class AcmIssuanceServiceTest {
 
     @Test
     void settledCertificateIsPersistedNotRecomputed(@TempDir Path dir) throws Exception {
-        AcmService service = newService(dir, 1);
+        PersistentStorage<String, Certificate> store = store(dir);
+        AcmService service = newService(dir, store, 1);
         String arn = request(service, null).getArn();
-        Thread.sleep(1200);
+        elapseValidationWait(store, arn, 1);
         service.getCertificate(arn, REGION);
 
         // A restarted service with a wait that has not passed yet would leave a pending certificate
@@ -115,12 +117,13 @@ class AcmIssuanceServiceTest {
 
     @Test
     void listCertificatesSettlesPendingCertificatesBeforeFilteringByStatus(@TempDir Path dir) throws Exception {
-        AcmService service = newService(dir, 1);
+        PersistentStorage<String, Certificate> store = store(dir);
+        AcmService service = newService(dir, store, 1);
         String arn = request(service, null).getArn();
         assertTrue(service.listCertificates(List.of(CertificateStatus.ISSUED), null, REGION, 100, null)
                 .certificates().isEmpty(), "still pending");
 
-        Thread.sleep(1200);
+        elapseValidationWait(store, arn, 1);
 
         List<Certificate> issued = service.listCertificates(List.of(CertificateStatus.ISSUED), null, REGION, 100, null)
                 .certificates();
@@ -205,6 +208,19 @@ class AcmIssuanceServiceTest {
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         return new AcmService(store, generator, FlociCertificateAuthority.loadOrCreate(dir.resolve("tls")),
                 regionResolver, validationWaitSeconds);
+    }
+
+    /**
+     * Moves the certificate's creation back past the validation wait, so the next read settles it.
+     * The service reads this same store, so this is the wait having elapsed rather than a wait for
+     * it to elapse.
+     */
+    private static void elapseValidationWait(StorageBackend<String, Certificate> store, String arn,
+                                             int validationWaitSeconds) {
+        String key = REGION + "::" + arn.substring(arn.lastIndexOf('/') + 1);
+        Certificate cert = store.get(key).orElseThrow();
+        cert.setCreatedAt(cert.getCreatedAt().minusSeconds(validationWaitSeconds + 1L));
+        store.put(key, cert);
     }
 
     private static PersistentStorage<String, Certificate> store(Path dir) {

@@ -526,7 +526,8 @@ public class ApiGatewayV2OpenApiImporter {
             putIfPresent(request, "authorizerPayloadFormatVersion",
                     stringValue(authDef.get("authorizerPayloadFormatVersion")));
             if (authDef.get("authorizerResultTtlInSeconds") instanceof Number ttl) {
-                request.put("authorizerResultTtlInSeconds", ttl);
+                // Range-checked while planning so a rejected ReimportApi keeps the previous definition.
+                request.put("authorizerResultTtlInSeconds", ApiGatewayV2Service.authorizerResultTtl(ttl));
             }
             if (authDef.get("enableSimpleResponses") != null) {
                 request.put("enableSimpleResponses", authDef.get("enableSimpleResponses"));

@@ -32,15 +32,16 @@ import java.util.List;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBoolean;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.unexpectedStartError;
 
 /**
- * SES V2 contact-list and contact endpoints ({@code /v2/email/contact-lists}), split out of
- * {@link SesController}. Every operation is a single-domain call on {@link SesContactService}, so
- * this controller does not touch the {@link SesService} facade at all; the send-path opt-out
- * collection that also reads contacts stays behind the facade.
+ * SES V2 contact-list and contact endpoints ({@code /v2/email/contact-lists}). Every operation
+ * is a single-domain call on {@link SesContactService}, so this controller does not touch the
+ * {@link SesService} facade at all; the send-path opt-out collection that also reads contacts
+ * stays behind the facade.
  */
 @Path("/v2/email")
 @Produces(MediaType.APPLICATION_JSON)
@@ -96,9 +97,7 @@ public class SesContactController {
         for (ContactList cl : contactService.listContactLists(region)) {
             ObjectNode item = lists.addObject();
             item.put("ContactListName", cl.getContactListName());
-            if (cl.getLastUpdatedTimestamp() != null) {
-                item.put("LastUpdatedTimestamp", cl.getLastUpdatedTimestamp().getEpochSecond());
-            }
+            putTimestamp(item, "LastUpdatedTimestamp", cl.getLastUpdatedTimestamp());
         }
         return Response.ok(result).build();
     }
@@ -186,12 +185,8 @@ public class SesContactController {
                 to.put("Description", t.getDescription());
             }
         }
-        if (cl.getCreatedTimestamp() != null) {
-            result.put("CreatedTimestamp", cl.getCreatedTimestamp().getEpochSecond());
-        }
-        if (cl.getLastUpdatedTimestamp() != null) {
-            result.put("LastUpdatedTimestamp", cl.getLastUpdatedTimestamp().getEpochSecond());
-        }
+        putTimestamp(result, "CreatedTimestamp", cl.getCreatedTimestamp());
+        putTimestamp(result, "LastUpdatedTimestamp", cl.getLastUpdatedTimestamp());
         ArrayNode tags = result.putArray("Tags");
         for (Tag tag : cl.getTags()) {
             ObjectNode tn = tags.addObject();
@@ -376,12 +371,10 @@ public class SesContactController {
         if (full && c.getAttributesData() != null) {
             result.put("AttributesData", c.getAttributesData());
         }
-        if (full && c.getCreatedTimestamp() != null) {
-            result.put("CreatedTimestamp", c.getCreatedTimestamp().getEpochSecond());
+        if (full) {
+            putTimestamp(result, "CreatedTimestamp", c.getCreatedTimestamp());
         }
-        if (c.getLastUpdatedTimestamp() != null) {
-            result.put("LastUpdatedTimestamp", c.getLastUpdatedTimestamp().getEpochSecond());
-        }
+        putTimestamp(result, "LastUpdatedTimestamp", c.getLastUpdatedTimestamp());
         return result;
     }
 }

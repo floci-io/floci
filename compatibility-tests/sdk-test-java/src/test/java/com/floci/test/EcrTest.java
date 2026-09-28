@@ -151,4 +151,68 @@ class EcrTest {
                 b -> b.repositoryNames("does-not-exist-" + System.nanoTime())))
                 .isInstanceOf(RepositoryNotFoundException.class);
     }
+
+    @Test
+    @Order(11)
+    @DisplayName("Pull through cache rules round-trip through the AWS SDK")
+    void pullThroughCacheRuleLifecycle() {
+        String firstPrefix = "sdk-docker-hub";
+        String secondPrefix = "sdk-kubernetes";
+        try {
+            CreatePullThroughCacheRuleResponse created = ecr.createPullThroughCacheRule(builder -> builder
+                    .ecrRepositoryPrefix(firstPrefix)
+                    .upstreamRegistryUrl("registry-1.docker.io"));
+            ecr.createPullThroughCacheRule(builder -> builder
+                    .ecrRepositoryPrefix(secondPrefix)
+                    .upstreamRegistryUrl("registry.k8s.io"));
+
+            assertThat(created.ecrRepositoryPrefix()).isEqualTo(firstPrefix);
+            assertThat(created.upstreamRegistry()).isEqualTo(UpstreamRegistry.DOCKER_HUB);
+            assertThat(created.upstreamRepositoryPrefix()).isEqualTo("ROOT");
+            assertThat(created.createdAt()).isNotNull();
+
+            DescribePullThroughCacheRulesResponse firstPage = ecr.describePullThroughCacheRules(
+                    builder -> builder.maxResults(1));
+            DescribePullThroughCacheRulesResponse secondPage = ecr.describePullThroughCacheRules(
+                    builder -> builder.maxResults(1).nextToken(firstPage.nextToken()));
+            DescribePullThroughCacheRulesResponse filtered = ecr.describePullThroughCacheRules(
+                    builder -> builder.ecrRepositoryPrefixes(firstPrefix));
+
+            assertThat(firstPage.pullThroughCacheRules()).hasSize(1);
+            assertThat(firstPage.nextToken()).isNotBlank();
+            assertThat(secondPage.pullThroughCacheRules()).hasSize(1);
+            assertThat(filtered.pullThroughCacheRules())
+                    .extracting(PullThroughCacheRule::ecrRepositoryPrefix)
+                    .containsExactly(firstPrefix);
+
+            String credentialArn =
+                    "arn:aws:secretsmanager:us-east-1:000000000000:secret:ecr-pullthroughcache/sdk";
+            UpdatePullThroughCacheRuleResponse updated = ecr.updatePullThroughCacheRule(builder -> builder
+                    .ecrRepositoryPrefix(firstPrefix)
+                    .credentialArn(credentialArn));
+            ValidatePullThroughCacheRuleResponse validated = ecr.validatePullThroughCacheRule(
+                    builder -> builder.ecrRepositoryPrefix(firstPrefix));
+
+            assertThat(updated.credentialArn()).isEqualTo(credentialArn);
+            assertThat(updated.updatedAt()).isNotNull();
+            assertThat(validated.isValid()).isTrue();
+            assertThat(validated.credentialArn()).isEqualTo(credentialArn);
+            assertThat(validated.upstreamRegistryUrl()).isEqualTo("registry-1.docker.io");
+
+            DeletePullThroughCacheRuleResponse deleted = ecr.deletePullThroughCacheRule(
+                    builder -> builder.ecrRepositoryPrefix(firstPrefix));
+            assertThat(deleted.ecrRepositoryPrefix()).isEqualTo(firstPrefix);
+            assertThatThrownBy(() -> ecr.deletePullThroughCacheRule(
+                    builder -> builder.ecrRepositoryPrefix(firstPrefix)))
+                    .isInstanceOf(PullThroughCacheRuleNotFoundException.class);
+        } finally {
+            for (String prefix : List.of(firstPrefix, secondPrefix)) {
+                try {
+                    ecr.deletePullThroughCacheRule(builder -> builder.ecrRepositoryPrefix(prefix));
+                } catch (PullThroughCacheRuleNotFoundException expected) {
+                    // The rule was already deleted by the lifecycle assertion.
+                }
+            }
+        }
+    }
 }

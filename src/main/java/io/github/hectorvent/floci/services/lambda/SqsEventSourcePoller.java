@@ -35,7 +35,7 @@ import java.util.stream.Collectors;
 /**
  * Polls SQS queues on behalf of Lambda Event Source Mappings.
  * Uses Vert.x periodic timers so polling is non-blocking.
- * Injects LambdaExecutorService + LambdaFunctionStore directly (not LambdaService)
+ * Injects LambdaExecutorService + LambdaTargetResolver directly (not LambdaService)
  * to avoid a circular CDI dependency.
  */
 @ApplicationScoped
@@ -49,7 +49,7 @@ public class SqsEventSourcePoller implements Resettable {
     private final Vertx vertx;
     private final SqsService sqsService;
     private final LambdaExecutorService executorService;
-    private final LambdaFunctionStore functionStore;
+    private final LambdaTargetResolver targetResolver;
     private final EsmStore esmStore;
     private final long pollIntervalMs;
     private final String baseUrl;
@@ -72,14 +72,14 @@ public class SqsEventSourcePoller implements Resettable {
     @Inject
     public SqsEventSourcePoller(Vertx vertx, SqsService sqsService,
                                 LambdaExecutorService executorService,
-                                LambdaFunctionStore functionStore,
+                                LambdaTargetResolver targetResolver,
                                 EsmStore esmStore, EmulatorConfig config,
                                 ObjectMapper objectMapper,
                                 PipesFilterMatcher filterMatcher) {
         this.vertx = vertx;
         this.sqsService = sqsService;
         this.executorService = executorService;
-        this.functionStore = functionStore;
+        this.targetResolver = targetResolver;
         this.esmStore = esmStore;
         this.pollIntervalMs = config.services().lambda().pollIntervalMs();
         this.baseUrl = config.effectiveBaseUrl();
@@ -165,8 +165,7 @@ public class SqsEventSourcePoller implements Resettable {
                 // Look up the function first so we can set an appropriate visibility
                 // timeout: fn.timeout + 30s keeps messages hidden while Lambda runs.
                 // Use account-scoped lookup since this runs outside request scope.
-                LambdaFunction fn = functionStore.getForAccount(esm.getAccountId(), esm.getRegion(), esm.getFunctionName())
-                        .orElse(null);
+                LambdaFunction fn = targetResolver.resolveMappingTarget(esm).orElse(null);
                 if (fn == null) {
                     LOG.warnv("ESM {0}: function {1} not found in region {2}, skipping",
                             esm.getUuid(), esm.getFunctionName(), esm.getRegion());

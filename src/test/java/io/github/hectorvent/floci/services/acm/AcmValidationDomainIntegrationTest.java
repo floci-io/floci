@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.acm;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -118,7 +119,7 @@ class AcmValidationDomainIntegrationTest {
             .body("__type", Matchers.equalTo("InvalidDomainValidationOptionsException"));
     }
 
-    private static io.restassured.response.ValidatableResponse requestCertificate(String body) {
+    private static ValidatableResponse requestCertificate(String body) {
         return given()
             .header("X-Amz-Target", "CertificateManager.RequestCertificate")
             .contentType(ACM_CONTENT_TYPE)
@@ -128,7 +129,7 @@ class AcmValidationDomainIntegrationTest {
         .then();
     }
 
-    private static io.restassured.response.ValidatableResponse describeCertificate(String certificateArn) {
+    private static ValidatableResponse describeCertificate(String certificateArn) {
         return given()
             .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
             .contentType(ACM_CONTENT_TYPE)

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.scheduler;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -8,7 +9,12 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleGroup;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -26,6 +32,11 @@ public class SchedulerService {
     // AWS EventBridge Scheduler name constraints: [0-9a-zA-Z-_.]+, 1-64 chars.
     private static final Pattern NAME_PATTERN = Pattern.compile("[0-9a-zA-Z\\-_.]{1,64}");
     private static final String DEFAULT_GROUP = "default";
+    // FAIL_ON_TRAILING_TOKENS matters here: without it an Input of "{} garbage" parses as the
+    // leading object and the rest is silently dropped, so a value AWS rejects would be stored.
+    private static final ObjectReader JSON = new ObjectMapper()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .readerFor(JsonNode.class);
 
     private final StorageBackend<String, ScheduleGroup> groupStore;
     private final StorageBackend<String, Schedule> scheduleStore;
@@ -228,6 +239,7 @@ public class SchedulerService {
         Schedule updated = new Schedule();
         updated.setName(req.getName());
         updated.setArn(existing.getArn());
+        updated.setAccountId(existing.getAccountId());
         updated.setGroupName(effectiveGroup);
         updated.setState(req.getState() != null ? req.getState() : "ENABLED");
         updated.setScheduleExpression(req.getScheduleExpression());
@@ -373,6 +385,38 @@ public class SchedulerService {
                 || req.getTarget().getDeadLetterConfig().getArn().isBlank())) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value null at 'target.deadLetterConfig.arn' failed to satisfy constraint: Member must not be null", 400);
+        }
+        String input = req.getTarget().getInput();
+        if (input != null && requiresJsonInput(req.getTarget().getArn()) && !isWellFormedJson(input)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'target.input' failed to satisfy constraint: Member must be well-formed JSON for Lambda, Step Functions, and EventBridge targets", 400);
+        }
+    }
+
+    /**
+     * Templated Lambda, Step Functions and EventBridge targets require well-formed JSON
+     * {@code Input} (API reference, {@code Target.Input}); other templated targets accept any
+     * text, and universal ({@code aws-sdk}) targets are only checked when invoked.
+     */
+    private static boolean requiresJsonInput(String targetArn) {
+        return AwsArnUtils.isArnFor(targetArn, "lambda")
+                || AwsArnUtils.isArnFor(targetArn, "states")
+                || AwsArnUtils.isArnFor(targetArn, "events");
+    }
+
+    /**
+     * A blank value is rejected up front: {@code Input} has a minimum length of 1, and
+     * {@code readTree} returns a missing node for it instead of failing.
+     */
+    private static boolean isWellFormedJson(String value) {
+        if (value.isBlank()) {
+            return false;
+        }
+        try {
+            JSON.readTree(value);
+            return true;
+        } catch (JsonProcessingException e) {
+            return false;
         }
     }
 

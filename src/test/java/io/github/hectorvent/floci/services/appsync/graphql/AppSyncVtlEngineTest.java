@@ -83,6 +83,13 @@ class AppSyncVtlEngineTest {
         }
 
         @Test
+        void b2b_ctxArgsAlias() {
+            AppSyncVtlContext ctx = ctxWith(builder -> builder.arguments(Map.of("id", "123")));
+            AppSyncVtlResult result = engine.evaluate("$ctx.args.id", ctx);
+            assertEquals("123", result.output());
+        }
+
+        @Test
         void b3_argsShortcut() {
             var ctx = ctxWith(b -> b.arguments(Map.of("id", "123")));
             var result = engine.evaluate("$args.id", ctx);
@@ -104,10 +111,10 @@ class AppSyncVtlEngineTest {
         }
 
         @Test
-        void b6_contextSourceEmptyForTopLevel() {
-            var ctx = ctxWith(b -> b.source(Map.of()));
+        void b6_contextSourceNullForTopLevel() {
+            var ctx = ctxWith(b -> b.source(null));
             var result = engine.evaluate("$util.toJson($context.source)", ctx);
-            assertEquals("{}", result.output());
+            assertEquals("null", result.output());
         }
 
         @Test

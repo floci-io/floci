@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -18,6 +19,7 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -27,12 +29,13 @@ import org.jboss.logging.Logger;
 import java.util.List;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 
 /**
- * SES V2 email-template endpoints ({@code /v2/email/templates}), split out of
- * {@link SesController}. Talks to {@link SesTemplateService} directly; only
+ * SES V2 email-template endpoints ({@code /v2/email/templates}). Talks to
+ * {@link SesTemplateService} directly; only
  * {@code DeleteEmailTemplate} goes through the {@link SesService} facade, which wraps the delete in
  * the tenant-association guard.
  */
@@ -84,19 +87,22 @@ public class SesTemplateController {
 
     @GET
     @Path("/templates")
-    public Response listEmailTemplates(@Context HttpHeaders headers) {
+    public Response listEmailTemplates(@Context HttpHeaders headers,
+                                       @QueryParam("PageSize") String pageSize,
+                                       @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        List<EmailTemplate> templates = templateService.listTemplates(region);
+        PaginatedResult<EmailTemplate> page = SesListPaging.V2_LIST_EMAIL_TEMPLATES.page(
+                templateService.listTemplates(region), SesListPaging::templateCursor,
+                SesListPaging.parseQueryPageSize(pageSize), nextToken);
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode items = result.putArray("TemplatesMetadata");
-        for (EmailTemplate t : templates) {
+        for (EmailTemplate t : page.items()) {
             ObjectNode item = objectMapper.createObjectNode();
             item.put("TemplateName", t.getTemplateName());
-            if (t.getCreatedTimestamp() != null) {
-                item.put("CreatedTimestamp", t.getCreatedTimestamp().getEpochSecond());
-            }
+            putTimestamp(item, "CreatedTimestamp", t.getCreatedTimestamp());
             items.add(item);
         }
+        result.put("NextToken", page.nextToken());
         return Response.ok(result).build();
     }
 

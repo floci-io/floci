@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
+import java.util.Optional;
+
 public final class AwsArnUtils {
 
     private AwsArnUtils() {}
@@ -26,14 +28,24 @@ public final class AwsArnUtils {
          * gets {@code aws-us-gov}, and everything else gets {@code aws}. See
          * {@link AwsRegions#partitionFor}.
          *
-         * <p>Global services pass an empty region and therefore keep {@code aws}. That is a known
-         * gap rather than a decision: an IAM ARN in a GovCloud deployment really is
-         * {@code arn:aws-us-gov:iam::…}, but nothing in the region argument can say so. Those call
-         * sites need a partition from the deployment, not from the resource, and they are left
-         * alone until there is one.
+         * <p>Global services pass an empty region, and nothing in that argument can say which
+         * partition they belong to, so this keeps {@code aws} for them. A call site that knows the
+         * request's partition mints those through {@link #global} (or
+         * {@link RegionResolver#buildGlobalArn}); the fallback here stays only until every
+         * regionless call site has moved, after which a blank region becomes an error.
          */
         public static Arn of(String service, String region, String accountId, String resource) {
             return new Arn(AwsRegions.partitionFor(region), service, region, accountId, resource);
+        }
+
+        /**
+         * Factory for the ARN of a global service, which carries no region and whose partition
+         * is the caller's: {@code arn:<partition>:<service>::<accountId>:<resource>}. The
+         * partition is taken as given and never derived; a static utility must not reach into
+         * the request scope, or the same call would mint different ARNs depending on the thread.
+         */
+        public static Arn global(String partition, String service, String accountId, String resource) {
+            return new Arn(partition, service, "", accountId, resource);
         }
 
         @Override
@@ -130,21 +142,30 @@ public final class AwsArnUtils {
     }
 
     /**
-     * True when the ARN names a partition other than {@code aws}, the only one Floci emulates.
-     * An empty partition field is not foreign: callers that omit it are naming a local
-     * resource.
-     *
-     * <p>Deliberately a literal {@code aws} rather than {@link #PARTITION_REGEX}. That constant
-     * exists to recognise a legal ARN in any partition; this asks the opposite question, whether
-     * the ARN names a partition this emulator can serve, and the answer is only ever the
-     * commercial one.
+     * The resource segment of {@code value} when it is an ARN naming {@code service} in any
+     * partition, e.g. {@code bucket/key} for {@code arn:aws-cn:s3:::bucket/key}; empty otherwise.
+     * The partition-tolerant replacement for {@code startsWith("arn:aws:s3:::")} followed by a
+     * {@code substring} of that literal's length.
      */
-    public static boolean isForeignPartition(Arn arn) {
+    public static Optional<String> resourceIfArnFor(String value, String service) {
+        if (!isArnFor(value, service)) {
+            return Optional.empty();
+        }
+        return Optional.of(value.split(":", 6)[5]);
+    }
+
+    /**
+     * True when the ARN names a partition other than {@code localPartition}, the one the current
+     * request belongs to ({@link RegionResolver#getPartition()}). An empty partition field is
+     * not foreign: callers that omit it are naming a local resource. Mirrors
+     * {@link #isForeignAccount}: foreign is relative to the caller, never to a fixed {@code aws}.
+     */
+    public static boolean isForeignPartition(Arn arn, String localPartition) {
         if (arn == null) {
             return false;
         }
         String partition = arn.partition();
-        return partition != null && !partition.isEmpty() && !"aws".equals(partition);
+        return partition != null && !partition.isEmpty() && !partition.equals(localPartition);
     }
 
     /**
@@ -157,6 +178,35 @@ public final class AwsArnUtils {
         }
         String account = arn.accountId();
         return account != null && !account.isEmpty() && !account.equals(localAccountId);
+    }
+
+    /**
+     * The bucket and key named by an S3 object ARN ({@code arn:aws:s3:::bucket/key}, or the
+     * region/account-bearing form {@code arn:aws:s3:region:account:bucket/key}).
+     *
+     * <p>Returns {@code null} rather than throwing when the value is not one: not an ARN, not
+     * the {@code s3} service, or a resource without both a bucket and a key. Callers decide
+     * whether that is a registration error (ECS rejecting a FireLens {@code config-file-value})
+     * or a launch error.
+     */
+    public static S3ObjectRef parseS3ObjectArn(String value) {
+        if (!isArn(value)) {
+            return null;
+        }
+        Arn arn = parse(value);
+        if (!"s3".equals(arn.service())) {
+            return null;
+        }
+        String resource = arn.resource();
+        int slash = resource.indexOf('/');
+        if (slash <= 0 || slash == resource.length() - 1) {
+            return null;
+        }
+        return new S3ObjectRef(resource.substring(0, slash), resource.substring(slash + 1));
+    }
+
+    /** The bucket and key of an S3 object ARN, as returned by {@link #parseS3ObjectArn}. */
+    public record S3ObjectRef(String bucket, String key) {
     }
 
     /**

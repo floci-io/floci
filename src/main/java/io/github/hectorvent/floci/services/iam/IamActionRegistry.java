@@ -1,25 +1,21 @@
 package io.github.hectorvent.floci.services.iam;
 
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.URLDecoder;
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.regex.Pattern;
-
-import org.jboss.logging.Logger;
-
+import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedMap;
+import org.jboss.logging.Logger;
+
+import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Maps (credentialScope, httpMethod, requestPath) → IAM action string.
  *
  * For Query-protocol services (SQS, SNS, IAM, STS, ...) the Action form
- * parameter is mapped directly to {@code <service>:<Action>}.
+ * parameter, or the controller's Operation fallback, is mapped directly to
+ * {@code <service>:<Action>}.
  *
  * For REST-JSON services the first matching rule wins (specific before wildcard).
  */
@@ -99,8 +95,9 @@ public class IamActionRegistry {
     /**
      * Resolves the IAM action for an incoming request.
      *
-     * For Query-protocol services the action comes directly from the {@code Action}
-     * form param (e.g. {@code sqs:SendMessage}).
+     * For Query-protocol requests the action comes from {@code Action} or
+     * {@code Operation} (e.g. {@code sqs:SendMessage}). REST requests never
+     * read these caller-controlled fields as an IAM action.
      *
      * For JSON 1.1 protocol the action comes from {@code X-Amz-Target}
      * (e.g. {@code DynamoDB_20120810.PutItem} → {@code dynamodb:PutItem}).
@@ -110,16 +107,12 @@ public class IamActionRegistry {
      * Returns {@code null} when the action is unknown (caller treats this as ALLOW).
      */
     public String resolve(String credentialScope, ContainerRequestContext ctx) {
-        // Query-protocol: Action param → service:Action.
-        // AWS SDKs send Query-protocol calls (IAM, STS, EC2, SQS, SNS, ...) as
-        // POST with Action=... in the application/x-www-form-urlencoded body,
-        // not the URL query string — so we look in both places.
-        String queryAction = ctx.getUriInfo().getQueryParameters().getFirst("Action");
-        if (queryAction == null || queryAction.isBlank()) {
-            queryAction = readFormAction(ctx);
-        }
-        if (queryAction != null && !queryAction.isBlank()) {
-            return credentialScope + ":" + queryAction;
+        // REST requests with Action or Operation fields still use their method and path rules.
+        if (isQueryRequest(ctx)) {
+            String queryAction = queryAction(ctx);
+            if (queryAction != null && !queryAction.isBlank()) {
+                return credentialScope + ":" + queryAction;
+            }
         }
 
         // JSON 1.1: X-Amz-Target → service:OperationName
@@ -131,7 +124,7 @@ public class IamActionRegistry {
 
         // REST-JSON: match against rule table
         String method = ctx.getMethod().toUpperCase();
-        String path   = ctx.getUriInfo().getPath();
+        String path = ctx.getUriInfo().getPath();
         if (!path.startsWith("/")) path = "/" + path;
 
         // S3 sub-resource override: the URL path alone doesn't distinguish
@@ -158,71 +151,128 @@ public class IamActionRegistry {
         return null;
     }
 
-    // Subresources S3Controller dispatches ahead of accelerate in its PUT and GET
-    // chains (acl and tagging are resolved above). When one rides along, that
-    // operation is what executes, so the accelerate mapping must not claim the
-    // request. Mirrors the controller's dispatch order — extend together.
-    private static final List<String> PUT_SUBRESOURCES_BEFORE_ACCELERATE = List.of(
-            "notification", "versioning", "object-lock", "website", "logging", "policy",
-            "cors", "lifecycle", "encryption", "publicAccessBlock", "ownershipControls",
-            "requestPayment");
-    private static final List<String> GET_SUBRESOURCES_BEFORE_ACCELERATE = List.of(
-            "uploads", "notification", "versioning", "versions", "location", "object-lock",
-            "website", "logging", "policy", "cors", "lifecycle", "encryption",
-            "publicAccessBlock", "ownershipControls", "requestPayment");
-    // S3Controller's DELETE chain dispatches these ahead of replication (tagging is
-    // resolved above). Accelerate is NOT here: on DELETE it is dispatched after
-    // replication. Mirrors the controller's dispatch order — extend together.
-    private static final List<String> DELETE_SUBRESOURCES_BEFORE_REPLICATION = List.of(
-            "website", "policy", "cors", "lifecycle", "encryption",
-            "publicAccessBlock", "ownershipControls");
-
     /**
-     * Resolves S3 sub-resource ops (ACL, tagging, retention, etc.) that
-     * cannot be distinguished from the parent op by HTTP method + path alone.
-     * Returns null when no sub-resource is present so the caller falls back
-     * to the standard rule table.
+     * Returns the Query-protocol action from the form body while preserving the entity stream for
+     * the controller. The controller dispatches only the form body, using the same Action-first,
+     * Operation-second rule. A URL Action must not override the operation that will execute.
      */
-    private static String resolveS3SubResourceAction(String method, ContainerRequestContext ctx) {
-        var params = ctx.getUriInfo().getQueryParameters();
-        boolean acl = params.containsKey("acl");
-        boolean tagging = params.containsKey("tagging");
-        boolean accelerate = params.containsKey("accelerate");
-        boolean replication = params.containsKey("replication");
-        if (!acl && !tagging && !accelerate && !replication) {
-            return null;
+    public String queryAction(ContainerRequestContext ctx) {
+        return AwsQueryServiceResolver.action(
+                RequestBodyReader.formField(ctx, "Action"),
+                RequestBodyReader.formField(ctx, "Operation"));
+    }
+
+    /** The same form POST at the root that the Query controller dispatches. */
+    public static boolean isQueryRequest(ContainerRequestContext ctx) {
+        if (!"POST".equalsIgnoreCase(ctx.getMethod()) || ctx.getUriInfo() == null) {
+            return false;
         }
-        // /{bucket}?acl → bucket-level; /{bucket}/{key}?acl → object-level
         String path = ctx.getUriInfo().getPath();
-        // Strip leading slash, then check whether there is a key segment after the bucket.
-        // A trailing slash is a valid key character, so /bucket/folder/?acl is an object
-        // request — we cannot use endsWith("/") to infer bucket-level.
+        MediaType mediaType = ctx.getMediaType();
+        return (path == null || path.isEmpty() || "/".equals(path))
+                && mediaType != null
+                && "application".equalsIgnoreCase(mediaType.getType())
+                && "x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype());
+    }
+
+    /** One bucket sub-resource operation: the query parameter that selects it, and the IAM action. */
+    private record SubResourceAction(String queryParameter, String action) {}
+
+    private static SubResourceAction sub(String queryParameter, String action) {
+        return new SubResourceAction(queryParameter, action);
+    }
+
+    private static final List<SubResourceAction> GET_BUCKET_SUBRESOURCES = List.of(
+            sub("uploads",           "s3:ListBucketMultipartUploads"),
+            sub("notification",      "s3:GetBucketNotification"),
+            sub("versioning",        "s3:GetBucketVersioning"),
+            sub("versions",          "s3:ListBucketVersions"),
+            sub("location",          "s3:GetBucketLocation"),
+            sub("tagging",           "s3:GetBucketTagging"),
+            sub("object-lock",       "s3:GetBucketObjectLockConfiguration"),
+            sub("website",           "s3:GetBucketWebsite"),
+            sub("logging",           "s3:GetBucketLogging"),
+            sub("policy",            "s3:GetBucketPolicy"),
+            sub("cors",              "s3:GetBucketCORS"),
+            sub("lifecycle",         "s3:GetLifecycleConfiguration"),
+            sub("acl",               "s3:GetBucketAcl"),
+            sub("encryption",        "s3:GetEncryptionConfiguration"),
+            sub("publicAccessBlock", "s3:GetBucketPublicAccessBlock"),
+            sub("ownershipControls", "s3:GetBucketOwnershipControls"),
+            sub("requestPayment",    "s3:GetBucketRequestPayment"),
+            sub("accelerate",        "s3:GetAccelerateConfiguration"),
+            sub("replication",       "s3:GetReplicationConfiguration"),
+            sub("metrics",           "s3:GetMetricsConfiguration"));
+
+    private static final List<SubResourceAction> PUT_BUCKET_SUBRESOURCES = List.of(
+            sub("notification",      "s3:PutBucketNotification"),
+            sub("versioning",        "s3:PutBucketVersioning"),
+            sub("tagging",           "s3:PutBucketTagging"),
+            sub("object-lock",       "s3:PutBucketObjectLockConfiguration"),
+            sub("website",           "s3:PutBucketWebsite"),
+            sub("logging",           "s3:PutBucketLogging"),
+            sub("policy",            "s3:PutBucketPolicy"),
+            sub("cors",              "s3:PutBucketCORS"),
+            sub("lifecycle",         "s3:PutLifecycleConfiguration"),
+            sub("acl",               "s3:PutBucketAcl"),
+            sub("encryption",        "s3:PutEncryptionConfiguration"),
+            sub("publicAccessBlock", "s3:PutBucketPublicAccessBlock"),
+            sub("ownershipControls", "s3:PutBucketOwnershipControls"),
+            sub("requestPayment",    "s3:PutBucketRequestPayment"),
+            sub("accelerate",        "s3:PutAccelerateConfiguration"),
+            sub("replication",       "s3:PutReplicationConfiguration"),
+            sub("metrics",           "s3:PutMetricsConfiguration"));
+
+    // AWS gives only DeleteBucketPolicy and DeleteBucketWebsite their own action; removing any other
+    // sub-resource is authorised by the same Put* action that sets it. ?accelerate is absent because
+    // S3Controller rejects DELETE on it with 405, so no mapping should claim the request.
+    private static final List<SubResourceAction> DELETE_BUCKET_SUBRESOURCES = List.of(
+            sub("tagging",           "s3:DeleteBucketTagging"),
+            sub("website",           "s3:DeleteBucketWebsite"),
+            sub("policy",            "s3:DeleteBucketPolicy"),
+            sub("cors",              "s3:PutBucketCORS"),
+            sub("lifecycle",         "s3:PutLifecycleConfiguration"),
+            sub("encryption",        "s3:PutEncryptionConfiguration"),
+            sub("publicAccessBlock", "s3:PutBucketPublicAccessBlock"),
+            sub("ownershipControls", "s3:PutBucketOwnershipControls"),
+            sub("replication",       "s3:PutReplicationConfiguration"),
+            sub("metrics",           "s3:PutMetricsConfiguration"));
+
+    private static String resolveS3SubResourceAction(String method, ContainerRequestContext ctx) {
+        MultivaluedMap<String, String> params = ctx.getUriInfo().getQueryParameters();
+        // /{bucket}?acl -> bucket-level; /{bucket}/{key}?acl -> object-level.
+        // A trailing slash is a valid key character, so /bucket/folder/?acl is an object request -
+        // we cannot use endsWith("/") to infer bucket-level.
+        String path = ctx.getUriInfo().getPath();
         String stripped = path.startsWith("/") ? path.substring(1) : path;
         int firstSlash = stripped.indexOf('/');
         boolean isBucketLevel = firstSlash < 0 || firstSlash == stripped.length() - 1;
-        if (acl) {
-            if (isBucketLevel) {
-                return switch (method) {
-                    case "GET" -> "s3:GetBucketAcl";
-                    case "PUT" -> "s3:PutBucketAcl";
-                    default -> null;
-                };
+        if (!isBucketLevel) {
+            return objectSubResourceAction(method, params);
+        }
+        List<SubResourceAction> chain = switch (method) {
+            case "GET" -> GET_BUCKET_SUBRESOURCES;
+            case "PUT" -> PUT_BUCKET_SUBRESOURCES;
+            case "DELETE" -> DELETE_BUCKET_SUBRESOURCES;
+            default -> List.of();
+        };
+        for (SubResourceAction entry : chain) {
+            if (params.containsKey(entry.queryParameter())) {
+                return entry.action();
             }
+        }
+        return null;
+    }
+
+    private static String objectSubResourceAction(String method, MultivaluedMap<String, String> params) {
+        if (params.containsKey("acl")) {
             return switch (method) {
                 case "GET" -> "s3:GetObjectAcl";
                 case "PUT" -> "s3:PutObjectAcl";
                 default -> null;
             };
         }
-        if (tagging) {
-            if (isBucketLevel) {
-                return switch (method) {
-                    case "GET" -> "s3:GetBucketTagging";
-                    case "PUT" -> "s3:PutBucketTagging";
-                    case "DELETE" -> "s3:DeleteBucketTagging";
-                    default -> null;
-                };
-            }
+        if (params.containsKey("tagging")) {
             return switch (method) {
                 case "GET" -> "s3:GetObjectTagging";
                 case "PUT" -> "s3:PutObjectTagging";
@@ -230,104 +280,7 @@ public class IamActionRegistry {
                 default -> null;
             };
         }
-        // Accelerate and replication are bucket-only subresources; on an object path
-        // both are inert — the object routes ignore them — so only a bucket-level
-        // request maps here; everything else falls through to the standard rule table.
-        if (!isBucketLevel) {
-            return null;
-        }
-        // S3Controller's PUT and GET chains dispatch accelerate ahead of replication,
-        // so accelerate resolves when both ride along. Its DELETE chain routes
-        // replication and never routes accelerate to an operation, so on DELETE
-        // replication resolves even when accelerate is also present.
-        if (accelerate && !(replication && "DELETE".equals(method))) {
-            List<String> dispatchedFirst = "PUT".equals(method)
-                    ? PUT_SUBRESOURCES_BEFORE_ACCELERATE
-                    : GET_SUBRESOURCES_BEFORE_ACCELERATE;
-            for (String subresource : dispatchedFirst) {
-                if (params.containsKey(subresource)) {
-                    return null;
-                }
-            }
-            return switch (method) {
-                case "GET" -> "s3:GetAccelerateConfiguration";
-                case "PUT" -> "s3:PutAccelerateConfiguration";
-                // AWS defines no DELETE for the subresource.
-                default -> null;
-            };
-        }
-        // Replication. On PUT and GET this is only reached without ?accelerate, so the
-        // accelerate before-lists cover everything dispatched ahead of replication too.
-        List<String> dispatchedFirst = switch (method) {
-            case "PUT" -> PUT_SUBRESOURCES_BEFORE_ACCELERATE;
-            case "GET" -> GET_SUBRESOURCES_BEFORE_ACCELERATE;
-            default -> DELETE_SUBRESOURCES_BEFORE_REPLICATION;
-        };
-        for (String subresource : dispatchedFirst) {
-            if (params.containsKey(subresource)) {
-                return null;
-            }
-        }
-        return switch (method) {
-            case "GET" -> "s3:GetReplicationConfiguration";
-            case "PUT" -> "s3:PutReplicationConfiguration";
-            // AWS authorizes DeleteBucketReplication with the put action.
-            case "DELETE" -> "s3:PutReplicationConfiguration";
-            default -> null;
-        };
-    }
-
-    /**
-     * Reads {@code Action} from a {@code application/x-www-form-urlencoded}
-     * request body and restores the entity stream so downstream consumers
-     * (e.g. {@code AwsQueryController}'s {@code MultivaluedMap} injection)
-     * can still parse the form themselves. Returns {@code null} if the
-     * request is not form-encoded or the body has no {@code Action} field.
-     */
-    private static String readFormAction(ContainerRequestContext ctx) {
-        MediaType mt = ctx.getMediaType();
-        if (mt == null
-                || !"application".equalsIgnoreCase(mt.getType())
-                || !"x-www-form-urlencoded".equalsIgnoreCase(mt.getSubtype())) {
-            return null;
-        }
-        InputStream in = ctx.getEntityStream();
-        if (in == null) {
-            return null;
-        }
-        byte[] body;
-        try {
-            body = in.readAllBytes();
-        } catch (IOException e) {
-            LOG.debugv(e, "Failed to buffer form body for IAM action resolution");
-            return null;
-        }
-        ctx.setEntityStream(new ByteArrayInputStream(body));
-        if (body.length == 0) {
-            return null;
-        }
-        Charset charset = resolveCharset(mt);
-        String form = new String(body, charset);
-        for (String pair : form.split("&")) {
-            int eq = pair.indexOf('=');
-            String key = eq < 0 ? pair : pair.substring(0, eq);
-            if (!"Action".equals(URLDecoder.decode(key, charset))) {
-                continue;
-            }
-            return eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), charset);
-        }
         return null;
     }
 
-    private static Charset resolveCharset(MediaType mt) {
-        String name = mt.getParameters().get("charset");
-        if (name == null || name.isBlank()) {
-            return StandardCharsets.UTF_8;
-        }
-        try {
-            return Charset.forName(name);
-        } catch (RuntimeException e) {
-            return StandardCharsets.UTF_8;
-        }
-    }
 }

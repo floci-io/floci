@@ -30,6 +30,7 @@ public class SchemaCreationWorker {
     private static final Logger LOG = Logger.getLogger(SchemaCreationWorker.class);
 
     private final SchemaRegistry schemaRegistry;
+    private final SidecarSchemaCompiler schemaCompiler;
     private final AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore;
     private final AccountAwareStorageBackend<String> schemaStore;
     private final EmulatorConfig config;
@@ -39,11 +40,13 @@ public class SchemaCreationWorker {
 
     @Inject
     public SchemaCreationWorker(SchemaRegistry schemaRegistry,
+                                SidecarSchemaCompiler schemaCompiler,
                                 AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore,
                                 AccountAwareStorageBackend<String> schemaStore,
                                 EmulatorConfig config,
                                 ObjectMapper objectMapper) {
         this.schemaRegistry = schemaRegistry;
+        this.schemaCompiler = schemaCompiler;
         this.schemaStatusStore = schemaStatusStore;
         this.schemaStore = schemaStore;
         this.config = config;
@@ -85,6 +88,7 @@ public class SchemaCreationWorker {
 
     private void process(String apiId, String sdl, String accountId) {
         try {
+            schemaCompiler.validate(sdl);
             schemaRegistry.register(apiId, sdl);
             // Worker thread has no request context; write under the submitting account.
             schemaStore.putForAccount(accountId, apiId, sdl);
@@ -150,30 +154,30 @@ public class SchemaCreationWorker {
     }
 
     /**
-     * Rehydrates executable schemas from persisted SDL into {@link SchemaRegistry}
-     * after storage load / orphan recovery so GraphQL execute works across restarts.
-     * Scans every account (startup has no request context); apiIds are globally unique.
-     * Parse failures are logged and skipped.
+     * Rehydrates persisted SDL into {@link SchemaRegistry} after storage load / orphan recovery
+     * so {@code POST /v1/apis/{apiId}/graphql} works across restarts. Scans every account
+     * (startup has no request context); apiIds are globally unique.
+     *
+     * <p>Doesn't re-validate against the sidecar: a persisted SDL already passed
+     * {@code StartSchemaCreation}'s validation once, and re-checking it here would mean every
+     * restart eagerly starts the GraphQL sidecar container even when nothing ever queries
+     * AppSync, the same "it was already good, no need to prove it again" call the old
+     * in-process registry made too (compiling that SDL again is what it *was* doing, this just
+     * no longer needs a network round trip to a sidecar to do it).
      */
     public void rehydrateSchemas() {
         int loaded = 0;
-        int skipped = 0;
         for (Map.Entry<String, String> entry : schemaStore.scanAllAccountsAsMap().entrySet()) {
             String apiId = entry.getKey();
             String sdl = entry.getValue();
             if (sdl == null || sdl.isBlank()) {
                 continue;
             }
-            try {
-                schemaRegistry.register(apiId, sdl);
-                loaded++;
-            } catch (RuntimeException e) {
-                skipped++;
-                LOG.warnv(e, "Skipping rehydrate of schema for API {0}: {1}", apiId, e.getMessage());
-            }
+            schemaRegistry.register(apiId, sdl);
+            loaded++;
         }
-        if (loaded > 0 || skipped > 0) {
-            LOG.infov("Rehydrated {0} schema(s) into registry ({1} skipped)", loaded, skipped);
+        if (loaded > 0) {
+            LOG.infov("Rehydrated {0} schema(s) into registry", loaded);
         }
     }
 }

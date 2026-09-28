@@ -34,6 +34,27 @@ public class BackupVault {
     @JsonProperty("Tags")
     private Map<String, String> tags = new HashMap<>();
 
+    // Vault Lock. These four ARE part of the DescribeBackupVault response in AWS, unlike
+    // the access policy and the notification configuration, which have their own Get
+    // operations and are stored separately.
+    //
+    // `locked` is a primitive, so it serialises as `false` on an unlocked vault rather
+    // than being dropped by @JsonInclude(NON_NULL). That matches AWS, which always
+    // reports Locked, and it matters: a client that has to distinguish "not locked" from
+    // "this emulator does not model locking" can only do so if the member is present.
+    // The other three stay boxed, because AWS omits them until a lock exists.
+    @JsonProperty("Locked")
+    private boolean locked;
+
+    @JsonProperty("LockDate")
+    private Long lockDate;
+
+    @JsonProperty("MinRetentionDays")
+    private Long minRetentionDays;
+
+    @JsonProperty("MaxRetentionDays")
+    private Long maxRetentionDays;
+
     public BackupVault() {}
 
     public String getBackupVaultName() { return backupVaultName; }
@@ -56,4 +77,16 @@ public class BackupVault {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags != null ? tags : new HashMap<>(); }
+
+    public boolean isLocked() { return locked; }
+    public void setLocked(boolean locked) { this.locked = locked; }
+
+    public Long getLockDate() { return lockDate; }
+    public void setLockDate(Long lockDate) { this.lockDate = lockDate; }
+
+    public Long getMinRetentionDays() { return minRetentionDays; }
+    public void setMinRetentionDays(Long minRetentionDays) { this.minRetentionDays = minRetentionDays; }
+
+    public Long getMaxRetentionDays() { return maxRetentionDays; }
+    public void setMaxRetentionDays(Long maxRetentionDays) { this.maxRetentionDays = maxRetentionDays; }
 }

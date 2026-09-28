@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.testing.S3EnforceAuthProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -32,7 +33,7 @@ import static org.hamcrest.Matchers.not;
  * query fallback, and that a tag parameter added after signing is rejected.
  */
 @QuarkusTest
-@TestProfile(S3AuthEnforcementIntegrationTest.S3AuthProfile.class)
+@TestProfile(S3EnforceAuthProfile.class)
 class S3PresignedTaggingSigV4EnforcementIntegrationTest {
 
     private static final String BUCKET = "presigned-tagging-sigv4-bucket";

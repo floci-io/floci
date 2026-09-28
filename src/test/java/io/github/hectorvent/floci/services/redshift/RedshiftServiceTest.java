@@ -1,36 +1,52 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbApiStreamReader;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.CheckpointLifetime;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
-import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
+import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
@@ -43,11 +59,15 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<String> snapshotDumpBackend;
     private AccountAwareStorageBackend<ClusterParameterGroup> parameterGroupBackend;
     private AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroupBackend;
+    private AccountAwareStorageBackend<SnapshotCopyGrant> snapshotCopyGrantBackend;
+    private AccountAwareStorageBackend<Integration> integrationBackend;
     private RedshiftContainerManager cm;
     private RegionResolver regionResolver;
     private RedshiftProxyManager proxyManager;
     private DockerHostResolver dockerHostResolver;
     private RedshiftCredentialBroker credentialBroker;
+    private SecretsManagerService secretsManagerService;
+    private final Set<String> existingStreams = new HashSet<>();
     private RedshiftService service;
 
     @BeforeEach
@@ -59,6 +79,8 @@ class RedshiftServiceTest {
         snapshotDumpBackend = mock(AccountAwareStorageBackend.class);
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         subnetGroupBackend = mock(AccountAwareStorageBackend.class);
+        snapshotCopyGrantBackend = mock(AccountAwareStorageBackend.class);
+        integrationBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
         proxyManager = mock(RedshiftProxyManager.class);
         dockerHostResolver = mock(DockerHostResolver.class);
@@ -83,14 +105,133 @@ class RedshiftServiceTest {
         when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshots.json"), any())).thenReturn(snapshotBackend);
         when(sf.<ClusterParameterGroup>create(eq("redshift"), eq("redshift-parameter-groups.json"), any())).thenReturn(parameterGroupBackend);
         when(sf.<ClusterSubnetGroup>create(eq("redshift"), eq("redshift-subnet-groups.json"), any())).thenReturn(subnetGroupBackend);
+        when(sf.<SnapshotCopyGrant>create(eq("redshift"), eq("redshift-snapshot-copy-grants.json"), any())).thenReturn(snapshotCopyGrantBackend);
+        when(sf.<Integration>create(eq("redshift"), eq("redshift-integrations.json"), any())).thenReturn(integrationBackend);
         when(clusterBackend.accountId()).thenReturn("111111111111");
 
         regionResolver = new RegionResolver("us-east-1", "111111111111");
 
         credentialBroker = new RedshiftCredentialBroker();
+        secretsManagerService = mock(SecretsManagerService.class);
+        ObjectMapper mapper = new ObjectMapper();
+        // Answers DescribeStream the way the native handler does: it throws for an unknown stream.
+        DynamoDbOperations streams = call -> {
+            String streamArn = call.body().path("StreamArn").asText();
+            if (!existingStreams.contains(streamArn)) {
+                throw new AwsException("ResourceNotFoundException", "Stream not found: " + streamArn, 400);
+            }
+            return new DynamoDbOperations.Reply(200, mapper.readTree("{\"StreamDescription\":{\"Shards\":[]}}"),
+                    Map.of());
+        };
 
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
-                credentialBroker);
+                credentialBroker, secretsManagerService, mapper,
+                new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS));
+    }
+
+    @Test
+    void createDynamoDbZeroEtlIntegrationRequiresExistingProvisionedResources() {
+        String streamArn = "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000";
+        String targetArn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
+        existingStreams.add(streamArn);
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("warehouse");
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        Integration integration = service.createIntegration("orders-to-warehouse", streamArn, targetArn,
+                null, null, Map.of(), Map.of(), "us-east-1");
+
+        assertEquals(streamArn, integration.getSourceStreamArn());
+        assertEquals("warehouse", integration.getTargetClusterIdentifier());
+        assertNotNull(integration.getLandingTableName());
+        assertEquals("syncing", integration.getStatus());
+        assertFalse(integration.isBackfillCompleted());
+    }
+
+    @Test
+    void createDynamoDbZeroEtlIntegrationRejectsAMissingStreamWithResourceNotFound() {
+        String streamArn = "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000";
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createIntegration(
+                "orders-to-warehouse", streamArn, "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse",
+                null, null, Map.of(), Map.of(), "us-east-1"));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals("Stream not found: " + streamArn, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        verify(integrationBackend, never()).put(any(), any());
+    }
+
+    @Test
+    void updateIntegrationRuntimeStoresACopyOfShardProgressOnlyOnSuccess() {
+        String integrationArn = "arn:aws:redshift:us-east-1:111111111111:integration:one";
+        Integration integration = new Integration();
+        integration.setIntegrationArn(integrationArn);
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of("one"));
+        when(integrationBackend.getForAccount("111111111111", "one")).thenReturn(Optional.of(integration));
+        Map<String, String> progress = new HashMap<>(Map.of("shard-1", "s1"));
+
+        service.updateIntegrationRuntime("111111111111", integrationArn, progress, true, null);
+        progress.put("shard-1", "s2");
+
+        assertEquals(Map.of("shard-1", "s1"), integration.getShardSequenceNumbers());
+        assertEquals("active", integration.getStatus());
+
+        service.updateIntegrationRuntime("111111111111", integrationArn, progress, false, "boom");
+
+        assertEquals(Map.of("shard-1", "s1"), integration.getShardSequenceNumbers());
+        assertEquals("failed", integration.getStatus());
+        assertEquals("boom", integration.getLastError());
+        verify(integrationBackend, times(2)).putForAccount("111111111111", "one", integration);
+    }
+
+    @Test
+    void updateIntegrationBackfillProgressPersistsCheckpointAndFlipsStatusOnCompletion() {
+        String streamArn = "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000";
+        String targetArn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
+        existingStreams.add(streamArn);
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("warehouse");
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        Integration integration = service.createIntegration("orders-to-warehouse", streamArn, targetArn,
+                null, null, Map.of(), Map.of(), "us-east-1");
+
+        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(integrationBackend).put(keyCaptor.capture(), eq(integration));
+        String storageKey = keyCaptor.getValue();
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of(storageKey));
+        when(integrationBackend.getForAccount("111111111111", storageKey)).thenReturn(Optional.of(integration));
+
+        service.updateIntegrationBackfillProgress("111111111111", integration.getIntegrationArn(),
+                "{\"id\":{\"S\":\"1\"}}", false);
+        assertEquals("syncing", integration.getStatus());
+        assertEquals("{\"id\":{\"S\":\"1\"}}", integration.getBackfillLastEvaluatedKey());
+        assertFalse(integration.isBackfillCompleted());
+
+        service.updateIntegrationBackfillProgress("111111111111", integration.getIntegrationArn(), null, true);
+        assertEquals("active", integration.getStatus());
+        assertNull(integration.getBackfillLastEvaluatedKey());
+        assertTrue(integration.isBackfillCompleted());
+    }
+
+    @Test
+    void updateIntegrationBackfillProgressOnUnknownIntegrationThrows() {
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of());
+
+        assertThrows(AwsException.class, () -> service.updateIntegrationBackfillProgress(
+                "111111111111", "arn:aws:redshift:us-east-1:111111111111:integration:missing", null, true));
+    }
+
+    @Test
+    void createDynamoDbZeroEtlIntegrationRejectsServerlessTarget() {
+        assertThrows(AwsException.class, () -> service.createIntegration(
+                "orders-to-serverless",
+                "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000",
+                "arn:aws:redshift-serverless:us-east-1:111111111111:workgroup/analytics",
+                null, null, Map.of(), Map.of(), "us-east-1"));
     }
 
     /** Absolute dump path as {@code createSnapshot} now stores it: under {@code <persistentPath>/redshift-dumps/<accountId>}. */
@@ -100,7 +241,46 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testOnStartRecreatesContainersAcrossAccounts() {
+    void managedMasterPasswordCreatesOwnedSecretAndExposesItsMetadata() {
+        when(cm.start(eq("111111111111"), eq("managed-cluster"), eq("admin"), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "managed-cluster", "localhost", 5432));
+
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-managed");
+        secret.setCurrentVersionId("version-1");
+        when(secretsManagerService.createSecret(eq("redshift/managed-cluster"), anyString(), isNull(),
+                anyString(), eq("arn:aws:kms:us-east-1:111111111111:key/key-1"), anyList(),
+                eq("redshift"), eq("us-east-1"))).thenReturn(secret);
+
+        Cluster cluster = service.createClusterWithManagedMasterPassword("managed-cluster", "dc2.large",
+                "admin", null, List.of(), List.of(),
+                "arn:aws:kms:us-east-1:111111111111:key/key-1", "us-east-1");
+
+        assertEquals(secret.getArn(), cluster.getMasterPasswordSecretArn());
+        assertEquals("arn:aws:kms:us-east-1:111111111111:key/key-1", cluster.getMasterPasswordSecretKmsKeyId());
+        verify(secretsManagerService).createSecret(eq("redshift/managed-cluster"),
+                contains("\"username\":\"admin\""), isNull(), anyString(),
+                eq("arn:aws:kms:us-east-1:111111111111:key/key-1"), anyList(), eq("redshift"), eq("us-east-1"));
+    }
+
+    @Test
+    void managedMasterPasswordRollsBackClusterWhenSecretCreationFails() {
+        when(cm.start(eq("111111111111"), eq("failed-managed-cluster"), eq("admin"), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "failed-managed-cluster", "localhost", 5432));
+        when(secretsManagerService.createSecret(eq("redshift/failed-managed-cluster"), anyString(), isNull(),
+                anyString(), isNull(), anyList(), eq("redshift"), eq("us-east-1")))
+                .thenThrow(new AwsException("InternalFailure", "secret store unavailable", 500));
+
+        assertThrows(AwsException.class, () -> service.createClusterWithManagedMasterPassword(
+                "failed-managed-cluster", "dc2.large", "admin", null, List.of(), List.of(), null, "us-east-1"));
+
+        verify(cm).stop("111111111111", "failed-managed-cluster");
+        verify(clusterBackend).delete("failed-managed-cluster");
+        assertThrows(AwsException.class, () -> service.describeClusters("failed-managed-cluster"));
+    }
+
+    @Test
+    void onStartRecreatesContainersAcrossAccounts() {
         Cluster clusterA = new Cluster();
         clusterA.setClusterIdentifier("cluster-a");
         clusterA.setMasterUsername("admin");
@@ -133,7 +313,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testOnStartSkipsClusterWithRunningContainer() {
+    void onStartSkipsClusterWithRunningContainer() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("cluster-a");
         cluster.setClusterStatus("available");
@@ -149,7 +329,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testOnStartMarksClusterUnavailableOnStartFailure() {
+    void onStartMarksClusterUnavailableOnStartFailure() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("cluster-a");
         cluster.setMasterUsername("admin");
@@ -177,7 +357,7 @@ class RedshiftServiceTest {
         persisted.setClusterStatus("available");
         persisted.setProxyPort(7108);
 
-        var entry = mock(AccountAwareStorageBackend.AccountEntry.class);
+        AccountAwareStorageBackend.AccountEntry<Cluster> entry = mock(AccountAwareStorageBackend.AccountEntry.class);
         when(entry.value()).thenReturn(persisted);
         when(entry.accountId()).thenReturn("111111111111");
         when(entry.key()).thenReturn("c1");
@@ -192,11 +372,11 @@ class RedshiftServiceTest {
 
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7108),
                 eq("172.17.0.12"), eq(32830), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
-    void testCreateCluster() {
+    void createCluster() {
         when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
         when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
 
@@ -209,7 +389,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateClusterWithVpcMetadata() {
+    void createClusterWithVpcMetadata() {
         when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
         when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
 
@@ -240,11 +420,11 @@ class RedshiftServiceTest {
 
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(cluster.getProxyPort()),
                 eq("172.17.0.9"), eq(32800), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
-    void testCreateClusterAlreadyExists() {
+    void createClusterAlreadyExists() {
         when(clusterBackend.get("existing-cluster")).thenReturn(Optional.of(new Cluster()));
 
         assertThrows(AwsException.class, () ->
@@ -337,7 +517,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeClusters() {
+    void describeClusters() {
         Cluster c = new Cluster();
         c.setClusterIdentifier("test-c");
         when(clusterBackend.get("test-c")).thenReturn(Optional.of(c));
@@ -348,7 +528,20 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteCluster() {
+    void describeClustersForAccountUsesTheRequestedAccount() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-c");
+        when(clusterBackend.getForAccount("222222222222", "test-c")).thenReturn(Optional.of(cluster));
+
+        List<Cluster> list = service.describeClustersForAccount("222222222222", "test-c");
+
+        assertEquals(List.of(cluster), list);
+        verify(clusterBackend).getForAccount("222222222222", "test-c");
+        verify(clusterBackend, never()).get("test-c");
+    }
+
+    @Test
+    void deleteCluster() {
         Cluster c = new Cluster();
         c.setClusterIdentifier("test-c");
         when(clusterBackend.get("test-c")).thenReturn(Optional.of(c));
@@ -407,7 +600,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRebootClusterDumpsAndRestoresData() throws Exception {
+    void rebootClusterDumpsAndRestoresData() throws Exception {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setMasterUsername("admin");
@@ -456,11 +649,11 @@ class RedshiftServiceTest {
         verify(proxyManager).stopProxy("111111111111:c1");
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107),
                 eq("172.17.0.11"), eq(32820), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
-    void testRebootClusterNotFound() {
+    void rebootClusterNotFound() {
         when(clusterBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.rebootCluster("missing"));
@@ -484,10 +677,10 @@ class RedshiftServiceTest {
         assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
 
         // The proxy started during the reboot must be stopped again on failure, and the
-        // replacement container must be stopped too — once before the restart, once in
-        // rollback — so it is not left running behind a "failed" cluster.
+        // replacement container must be stopped too, once before the restart, once in
+        // rollback, so it is not left running behind a "failed" cluster.
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107), any(), anyInt(),
-                any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any());
         verify(proxyManager, times(2)).stopProxy("111111111111:c1");
         verify(cm, times(2)).stop("111111111111", "c1");
     }
@@ -525,7 +718,7 @@ class RedshiftServiceTest {
         assertThrows(AwsException.class, () -> service.rebootCluster("c1"));
 
         // start() can create the container before throwing (readiness check); the
-        // original is already gone, so rollback removes anything under the name —
+        // original is already gone, so rollback removes anything under the name:
         // once for the original teardown, once for the possible orphan.
         verify(cm, times(2)).stop("111111111111", "c1");
 
@@ -555,7 +748,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshot() {
+    void createSnapshot() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setMasterUsername("admin");
@@ -575,6 +768,9 @@ class RedshiftServiceTest {
         // Password captured at snapshot time so restore can recover it after the source cluster is gone
         assertEquals("secret-pw", snapshot.getMasterPassword());
         assertEquals(5439, snapshot.getPort());
+        assertEquals("arn:aws:redshift:us-east-1:111111111111:snapshot:my-cluster/my-snapshot",
+                snapshot.getSnapshotArn());
+        assertNotNull(snapshot.getSnapshotCreateTime());
         // sqlDump is now an absolute path scoped by account to avoid collisions across accounts
         assertTrue(snapshot.getSqlDump().contains("111111111111"));
         assertTrue(snapshot.getSqlDump().endsWith("my-snapshot.sql"));
@@ -584,7 +780,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshotClusterNotFound() {
+    void createSnapshotClusterNotFound() {
         when(clusterBackend.get("missing-cluster")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
@@ -592,7 +788,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshotAlreadyExists() {
+    void createSnapshotAlreadyExists() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
@@ -603,7 +799,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshotRejectsTraversalOrMalformedIdentifier() {
+    void createSnapshotRejectsTraversalOrMalformedIdentifier() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setMasterUsername("admin");
@@ -625,7 +821,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterUpdatesMetadataAndPassword() {
+    void modifyClusterUpdatesMetadataAndPassword() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setNodeType("dc2.large");
@@ -643,7 +839,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterUpdatesVpcSecurityGroups() {
+    void modifyClusterUpdatesVpcSecurityGroups() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setMasterUsername("admin");
@@ -657,7 +853,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterNotFound() {
+    void modifyClusterNotFound() {
         when(clusterBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
@@ -665,7 +861,234 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeSnapshots() {
+    void modifyClusterIamRolesAddsAndRemovesRolesAndUpdatesTheProxy() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setIamRoleArns(List.of("arn:aws:iam::111111111111:role/old", "arn:aws:iam::111111111111:role/keep"));
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(clusterBackend.accountId()).thenReturn("111111111111");
+
+        Cluster updated = service.modifyClusterIamRoles("c1",
+                List.of("arn:aws:iam::111111111111:role/new", "arn:aws:iam::111111111111:role/keep"),
+                List.of("arn:aws:iam::111111111111:role/old"));
+
+        assertEquals(List.of("arn:aws:iam::111111111111:role/keep", "arn:aws:iam::111111111111:role/new"),
+                updated.getIamRoleArns());
+        verify(proxyManager).updateIamRoles("111111111111:c1", updated.getIamRoleArns());
+        verify(clusterBackend).put(eq("c1"), any(Cluster.class));
+        verify(clusterBackend).flush();
+    }
+
+    @Test
+    void describeLoggingStatusDefaultsToDisabled() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.describeLoggingStatus("my-cluster");
+
+        assertFalse(result.isLoggingEnabled());
+        assertNull(result.getLoggingBucketName());
+    }
+
+    @Test
+    void describeLoggingStatusNotFound() {
+        when(clusterBackend.get("missing")).thenReturn(Optional.empty());
+
+        assertThrows(AwsException.class, () -> service.describeLoggingStatus("missing"));
+    }
+
+    @Test
+    void enableLogging() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.enableLogging("my-cluster", "my-bucket", "logs/", null, null);
+
+        assertTrue(result.isLoggingEnabled());
+        assertEquals("my-bucket", result.getLoggingBucketName());
+        assertEquals("logs/", result.getLoggingS3KeyPrefix());
+        verify(clusterBackend).put(eq("my-cluster"), any(Cluster.class));
+        verify(clusterBackend).flush();
+    }
+
+    @Test
+    void modifyClusterIamRolesRejectsMalformedRoleArnWithoutChangingTheCluster() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setIamRoleArns(List.of("arn:aws:iam::111111111111:role/keep"));
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterIamRoles("c1", List.of("not-an-arn"), List.of()));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(List.of("arn:aws:iam::111111111111:role/keep"), cluster.getIamRoleArns());
+        verify(proxyManager, never()).updateIamRoles(any(), any());
+    }
+
+    @Test
+    void modifyClusterIamRolesRejectsNonRoleArn() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterIamRoles("c1", List.of("arn:aws:iam::111111111111:user/bob"), List.of()));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void modifyClusterIamRolesNotFound() {
+        when(clusterBackend.get("missing")).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterIamRoles("missing", List.of(), List.of()));
+
+        assertEquals("ClusterNotFound", ex.getErrorCode());
+    }
+
+    @Test
+    void enableLoggingRequiresBucketName() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        assertThrows(AwsException.class, () -> service.enableLogging("my-cluster", null, null, null, null));
+    }
+
+    @Test
+    void enableLoggingCloudWatchDoesNotRequireBucketName() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.enableLogging("my-cluster", null, null, "cloudwatch", List.of("connectionlog"));
+        assertTrue(result.isLoggingEnabled());
+        assertEquals("cloudwatch", result.getLoggingDestinationType());
+        assertEquals(List.of("connectionlog"), result.getLoggingExports());
+    }
+
+    @Test
+    void enableLoggingS3TableDoesNotRequireBucketName() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.enableLogging("my-cluster", null, null, "s3table", null, "my-kms-key", "account");
+        assertTrue(result.isLoggingEnabled());
+        assertEquals("s3table", result.getLoggingDestinationType());
+        assertNull(result.getLoggingBucketName());
+        assertEquals("my-kms-key", result.getLoggingS3TableKmsKeyId());
+        assertEquals("account", result.getLoggingS3TableGranularity());
+    }
+
+    @Test
+    void enableLoggingRejectsInvalidS3TableGranularity() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.enableLogging("my-cluster", null, null, "s3table", null, null, "daily"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertFalse(cluster.isLoggingEnabled());
+    }
+
+    @Test
+    void enableLoggingRejectsS3TableSettingsForOtherDestinations() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.enableLogging("my-cluster", null, null, "s3", null, null, "cluster"));
+
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertFalse(cluster.isLoggingEnabled());
+    }
+
+    @Test
+    void disableLoggingClearsS3TableFields() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingDestinationType("s3table");
+        cluster.setLoggingS3TableKmsKeyId("my-kms-key");
+        cluster.setLoggingS3TableGranularity("account");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.disableLogging("my-cluster");
+        assertFalse(result.isLoggingEnabled());
+        assertNull(result.getLoggingDestinationType());
+        assertNull(result.getLoggingS3TableKmsKeyId());
+        assertNull(result.getLoggingS3TableGranularity());
+    }
+
+    @Test
+    void createClusterAssignsDefaultParameterGroup() {
+        when(clusterBackend.get(anyString())).thenReturn(Optional.empty());
+        when(cm.start(any(), any(), any(), any())).thenReturn(new RedshiftContainerHandle("c1", "my-cluster", "localhost", 5432));
+
+        Cluster cluster = service.createCluster("my-cluster", "dc2.large", "admin", "password123");
+        assertEquals("default.redshift-1.0", cluster.getClusterParameterGroupName());
+    }
+
+    @Test
+    void modifyClusterStoresMultiAZ() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        assertTrue(service.modifyCluster("my-cluster", null, null, null, null, null, true).isMultiAZ());
+    }
+
+    @Test
+    void describeDefaultParameterGroupIsSynthesized() {
+        when(parameterGroupBackend.get("default.redshift-1.0")).thenReturn(Optional.empty());
+
+        List<ClusterParameterGroup> groups = service.describeClusterParameterGroups("default.redshift-1.0");
+        assertEquals(1, groups.size());
+        assertEquals("default.redshift-1.0", groups.get(0).getParameterGroupName());
+    }
+
+    @Test
+    void enableLoggingNotFound() {
+        when(clusterBackend.get("missing")).thenReturn(Optional.empty());
+
+        assertThrows(AwsException.class, () -> service.enableLogging("missing", "my-bucket", null, null, null));
+    }
+
+    @Test
+    void disableLoggingClearsConfig() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingBucketName("my-bucket");
+        cluster.setLoggingS3KeyPrefix("logs/");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.disableLogging("my-cluster");
+
+        assertFalse(result.isLoggingEnabled());
+        assertNull(result.getLoggingBucketName());
+        assertNull(result.getLoggingS3KeyPrefix());
+        verify(clusterBackend).put(eq("my-cluster"), any(Cluster.class));
+        verify(clusterBackend).flush();
+    }
+
+    @Test
+    void disableLoggingNotFound() {
+        when(clusterBackend.get("missing")).thenReturn(Optional.empty());
+
+        assertThrows(AwsException.class, () -> service.disableLogging("missing"));
+    }
+
+    @Test
+    void describeSnapshots() {
         Snapshot s = new Snapshot("snap-1", "my-cluster", "available", 5439, "admin");
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(s));
 
@@ -675,14 +1098,14 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeSnapshotsNotFound() {
+    void describeSnapshotsNotFound() {
         when(snapshotBackend.get("missing-snap")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.describeSnapshots("missing-snap"));
     }
 
     @Test
-    void testDeleteSnapshot() {
+    void deleteSnapshot() {
         Snapshot s = new Snapshot("snap-1", "my-cluster", "available", 5439, "admin");
         s.setSqlDump(dumpPath("snap-1"));
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(s));
@@ -695,14 +1118,14 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteSnapshotNotFound() {
+    void deleteSnapshotNotFound() {
         when(snapshotBackend.get("missing-snap")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.deleteSnapshot("missing-snap"));
     }
 
     @Test
-    void testRestoreFromClusterSnapshot() {
+    void restoreFromClusterSnapshot() {
         Cluster sourceCluster = new Cluster();
         sourceCluster.setClusterIdentifier("source-cluster");
         sourceCluster.setMasterPassword("password123");
@@ -733,7 +1156,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotUsesStoredPasswordAfterSourceClusterDeleted() {
+    void restoreFromClusterSnapshotUsesStoredPasswordAfterSourceClusterDeleted() {
         Snapshot snapshot = new Snapshot("my-snapshot", "deleted-source", "available", 5439, "admin");
         snapshot.setMasterPassword("original-secret");
         snapshot.setSqlDump(dumpPath("my-snapshot"));
@@ -751,7 +1174,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotFallsBackToAdminWhenSourceClusterGone() {
+    void restoreFromClusterSnapshotFallsBackToAdminWhenSourceClusterGone() {
         Snapshot snapshot = new Snapshot("my-snapshot", "deleted-source", "available", 5439, "admin");
         snapshot.setSqlDump(dumpPath("my-snapshot"));
         when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
@@ -767,7 +1190,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotAlreadyExists() {
+    void restoreFromClusterSnapshotAlreadyExists() {
         when(clusterBackend.get("existing-cluster")).thenReturn(Optional.of(new Cluster()));
 
         assertThrows(AwsException.class, () ->
@@ -775,7 +1198,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotNotFound() {
+    void restoreFromClusterSnapshotNotFound() {
         when(clusterBackend.get("new-cluster")).thenReturn(Optional.empty());
         when(snapshotBackend.get("missing-snapshot")).thenReturn(Optional.empty());
 
@@ -784,7 +1207,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotFailure() {
+    void restoreFromClusterSnapshotFailure() {
         Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin", dumpPath("my-snapshot"));
         when(clusterBackend.get("failed-cluster")).thenReturn(Optional.empty());
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
@@ -795,9 +1218,9 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testRestoreFromClusterSnapshotRejectsUntrustedDumpPathBeforeProvisioning() {
+    void restoreFromClusterSnapshotRejectsUntrustedDumpPathBeforeProvisioning() {
         // A dump path persisted outside the account dir (e.g. by pre-validation code) must be
-        // rejected up front — no cluster record, no container.
+        // rejected up front: no cluster record, no container.
         Snapshot snapshot = new Snapshot("my-snapshot", "source-cluster", "available", 5439, "admin", "/etc/shadow");
         when(clusterBackend.get("restored-cluster")).thenReturn(Optional.empty());
         when(snapshotBackend.get("my-snapshot")).thenReturn(Optional.of(snapshot));
@@ -860,11 +1283,11 @@ class RedshiftServiceTest {
         assertEquals(restored.getEndpoint().getPort(), restored.getProxyPort());
         verify(proxyManager).startProxy(eq("111111111111:restored"), anyInt(),
                 eq("172.17.0.10"), eq(32810), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
-    void testCreateClusterParameterGroup() {
+    void createClusterParameterGroup() {
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.empty());
 
         ClusterParameterGroup pg = service.createClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
@@ -877,7 +1300,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateClusterParameterGroupAlreadyExists() {
+    void createClusterParameterGroupAlreadyExists() {
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(new ClusterParameterGroup()));
 
         assertThrows(AwsException.class, () ->
@@ -885,7 +1308,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeClusterParameterGroups() {
+    void describeClusterParameterGroups() {
         ClusterParameterGroup pg = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(pg));
 
@@ -895,7 +1318,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeClusterParameterGroupsNotFound() {
+    void describeClusterParameterGroupsNotFound() {
         when(parameterGroupBackend.get("missing-pg")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
@@ -903,7 +1326,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteClusterParameterGroup() {
+    void deleteClusterParameterGroup() {
         ClusterParameterGroup pg = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(pg));
 
@@ -915,7 +1338,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteClusterParameterGroupNotFound() {
+    void deleteClusterParameterGroupNotFound() {
         when(parameterGroupBackend.get("missing-pg")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
@@ -923,7 +1346,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterParameterGroup() {
+    void modifyClusterParameterGroup() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
 
@@ -938,7 +1361,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterParameterGroupAppendsUnknownParameter() {
+    void modifyClusterParameterGroupAppendsUnknownParameter() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
 
@@ -950,7 +1373,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterParameterGroupNotFound() {
+    void modifyClusterParameterGroupNotFound() {
         when(parameterGroupBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
@@ -958,7 +1381,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeClusterParametersReturnsStoredValues() {
+    void describeClusterParametersReturnsStoredValues() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         group.setParameters(new ArrayList<>(List.of(new Parameter("statement_timeout", "5000"))));
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
@@ -971,7 +1394,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterParameterGroupPreservesMetadata() {
+    void modifyClusterParameterGroupPreservesMetadata() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
 
@@ -988,7 +1411,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateAndListTagsForCluster() {
+    void createAndListTagsForCluster() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
@@ -1001,7 +1424,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteTagsForCluster() {
+    void deleteTagsForCluster() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setTags(new LinkedHashMap<>(Map.of("env", "test", "team", "data")));
@@ -1013,19 +1436,19 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateTagsRejectsNonArnResourceName() {
+    void createTagsRejectsNonArnResourceName() {
         assertThrows(AwsException.class, () ->
                 service.createTags("my-cluster", Map.of("env", "test")));
     }
 
     @Test
-    void testCreateTagsRejectsUnknownResourceType() {
+    void createTagsRejectsUnknownResourceType() {
         assertThrows(AwsException.class, () ->
                 service.createTags("arn:aws:redshift:us-east-1:111111111111:reservednode:foo", Map.of("env", "test")));
     }
 
     @Test
-    void testDescribeTagsForSpecificResource() {
+    void describeTagsForSpecificResource() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setTags(new LinkedHashMap<>(Map.of("env", "test")));
@@ -1041,7 +1464,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeTagsScansAllResourcesOfType() {
+    void describeTagsScansAllResourcesOfType() {
         Cluster a = new Cluster();
         a.setClusterIdentifier("cluster-a");
         a.setTags(new LinkedHashMap<>(Map.of("env", "prod")));
@@ -1060,7 +1483,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateClusterSubnetGroup() {
+    void createClusterSubnetGroup() {
         when(subnetGroupBackend.get("my-subnet-group")).thenReturn(Optional.empty());
 
         ClusterSubnetGroup group = service.createClusterSubnetGroup(
@@ -1073,7 +1496,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateClusterSubnetGroupAlreadyExists() {
+    void createClusterSubnetGroupAlreadyExists() {
         when(subnetGroupBackend.get("existing")).thenReturn(Optional.of(new ClusterSubnetGroup()));
 
         assertThrows(AwsException.class, () ->
@@ -1081,7 +1504,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeClusterSubnetGroups() {
+    void describeClusterSubnetGroups() {
         ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "d", "vpc-1", List.of("subnet-1"));
         when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
 
@@ -1092,7 +1515,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testModifyClusterSubnetGroup() {
+    void modifyClusterSubnetGroup() {
         ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "old", "vpc-1", List.of("subnet-1"));
         when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
 
@@ -1103,7 +1526,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteClusterSubnetGroup() {
+    void deleteClusterSubnetGroup() {
         ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "d", "vpc-1", List.of("subnet-1"));
         when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
 
@@ -1115,10 +1538,235 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteClusterSubnetGroupNotFound() {
+    void deleteClusterSubnetGroupNotFound() {
         when(subnetGroupBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.deleteClusterSubnetGroup("missing"));
+    }
+
+    @Test
+    void createsSnapshotCopyGrant() {
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
+
+        SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", "key-abc", Map.of());
+
+        assertEquals("my-grant", grant.getSnapshotCopyGrantName());
+        assertEquals("key-abc", grant.getKmsKeyId());
+        verify(snapshotCopyGrantBackend).put(eq("my-grant"), any(SnapshotCopyGrant.class));
+        verify(snapshotCopyGrantBackend).flush();
+    }
+
+    @Test
+    void createSnapshotCopyGrantDefaultsKmsKeyId() {
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
+
+        SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", null, Map.of());
+
+        assertEquals("arn:aws:kms:us-east-1:111111111111:alias/aws/redshift", grant.getKmsKeyId());
+    }
+
+    @Test
+    void createSnapshotCopyGrantStoresTags() {
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
+
+        SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", "key-abc", Map.of("env", "prod"));
+
+        assertEquals(Map.of("env", "prod"), grant.getTags());
+    }
+
+    @Test
+    void createSnapshotCopyGrantRejectsDuplicateName() {
+        when(snapshotCopyGrantBackend.get("existing")).thenReturn(Optional.of(new SnapshotCopyGrant()));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createSnapshotCopyGrant("existing", "key-abc", Map.of()));
+        assertEquals("SnapshotCopyGrantAlreadyExistsFault", ex.getErrorCode());
+        verify(snapshotCopyGrantBackend, never()).put(any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "1grant",                                                          // must start with a letter
+            "Grant",                                                           // no uppercase
+            "grant--copy",                                                     // no consecutive hyphens
+            "grant-",                                                          // no trailing hyphen
+            "g123456789012345678901234567890123456789012345678901234567890123" // 64 characters
+    })
+    void createSnapshotCopyGrantRejectsNamesRedshiftRejects(String name) {
+        when(snapshotCopyGrantBackend.get(name)).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createSnapshotCopyGrant(name, "key-abc", Map.of()));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        verify(snapshotCopyGrantBackend, never()).put(any(), any());
+        verify(snapshotCopyGrantBackend, never()).flush();
+    }
+
+    @Test
+    void createSnapshotCopyGrantAcceptsMaximumLengthName() {
+        String name = "g12345678901234567890123456789012345678901234567890123456789012";
+        assertEquals(63, name.length());
+        when(snapshotCopyGrantBackend.get(name)).thenReturn(Optional.empty());
+
+        SnapshotCopyGrant grant = service.createSnapshotCopyGrant(name, "key-abc", Map.of());
+
+        assertEquals(name, grant.getSnapshotCopyGrantName());
+        verify(snapshotCopyGrantBackend).put(eq(name), any(SnapshotCopyGrant.class));
+        verify(snapshotCopyGrantBackend).flush();
+    }
+
+    @Test
+    void describeSnapshotCopyGrantsByName() {
+        SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+
+        List<SnapshotCopyGrant> list = service.describeSnapshotCopyGrants("my-grant", null, null).items();
+
+        assertEquals(1, list.size());
+        assertEquals("my-grant", list.get(0).getSnapshotCopyGrantName());
+        verify(snapshotCopyGrantBackend, never()).scan(any());
+    }
+
+    @Test
+    void describeSnapshotCopyGrantsReturnsAllWhenNameOmitted() {
+        when(snapshotCopyGrantBackend.scan(any())).thenReturn(List.of(
+                new SnapshotCopyGrant("grant-a", "key-a"),
+                new SnapshotCopyGrant("grant-b", "key-b")));
+
+        PaginatedResult<SnapshotCopyGrant> page = service.describeSnapshotCopyGrants(null, null, null);
+
+        assertEquals(2, page.items().size());
+        assertNull(page.nextToken());
+    }
+
+    @Test
+    void describeSnapshotCopyGrantsRejectsMissingGrant() {
+        when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.describeSnapshotCopyGrants("missing", null, null));
+        assertEquals("SnapshotCopyGrantNotFoundFault", ex.getErrorCode());
+        // DescribeSnapshotCopyGrants documents this fault as 400, not 404.
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void describeSnapshotCopyGrantsPagesInNameOrder() {
+        // 25 grants created out of order: paging must follow name order, not insertion order.
+        List<SnapshotCopyGrant> stored = new ArrayList<>();
+        for (int i = 25; i >= 1; i--) {
+            stored.add(new SnapshotCopyGrant(String.format("grant-%02d", i), "key-" + i));
+        }
+        when(snapshotCopyGrantBackend.scan(any())).thenReturn(stored);
+
+        PaginatedResult<SnapshotCopyGrant> first = service.describeSnapshotCopyGrants(null, 20, null);
+
+        assertEquals(20, first.items().size());
+        assertEquals("grant-01", first.items().get(0).getSnapshotCopyGrantName());
+        assertEquals("grant-20", first.items().get(19).getSnapshotCopyGrantName());
+        assertNotNull(first.nextToken());
+
+        PaginatedResult<SnapshotCopyGrant> second =
+                service.describeSnapshotCopyGrants(null, 20, first.nextToken());
+
+        assertEquals(5, second.items().size());
+        assertEquals("grant-21", second.items().get(0).getSnapshotCopyGrantName());
+        assertEquals("grant-25", second.items().get(4).getSnapshotCopyGrantName());
+        assertNull(second.nextToken(), "last page must not carry a marker");
+    }
+
+    @Test
+    void describeSnapshotCopyGrantsOmitsMarkerWhenPageExactlyFits() {
+        List<SnapshotCopyGrant> stored = new ArrayList<>();
+        for (int i = 1; i <= 20; i++) {
+            stored.add(new SnapshotCopyGrant(String.format("grant-%02d", i), "key-" + i));
+        }
+        when(snapshotCopyGrantBackend.scan(any())).thenReturn(stored);
+
+        PaginatedResult<SnapshotCopyGrant> page = service.describeSnapshotCopyGrants(null, 20, null);
+
+        assertEquals(20, page.items().size());
+        assertNull(page.nextToken());
+    }
+
+    @Test
+    void describeSnapshotCopyGrantsRejectsMaxRecordsBelowMinimum() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.describeSnapshotCopyGrants(null, 19, null));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        verify(snapshotCopyGrantBackend, never()).scan(any());
+    }
+
+    @Test
+    void describeSnapshotCopyGrantsRejectsMaxRecordsAboveMaximum() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.describeSnapshotCopyGrants(null, 101, null));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void describeSnapshotCopyGrantsAcceptsMarkerAlongsideName() {
+        // AWS documents the two as mutually exclusive but models no error, so Floci filters
+        // by name and then paginates rather than rejecting the pair.
+        SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+
+        PaginatedResult<SnapshotCopyGrant> page =
+                service.describeSnapshotCopyGrants("my-grant", null, null);
+
+        assertEquals(1, page.items().size());
+        assertNull(page.nextToken());
+    }
+
+    @Test
+    void deletesSnapshotCopyGrant() {
+        SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+
+        SnapshotCopyGrant deleted = service.deleteSnapshotCopyGrant("my-grant");
+
+        assertEquals("my-grant", deleted.getSnapshotCopyGrantName());
+        verify(snapshotCopyGrantBackend).delete("my-grant");
+        verify(snapshotCopyGrantBackend).flush();
+    }
+
+    @Test
+    void deleteSnapshotCopyGrantRejectsMissingGrant() {
+        when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.deleteSnapshotCopyGrant("missing"));
+        assertEquals("SnapshotCopyGrantNotFoundFault", ex.getErrorCode());
+        // DeleteSnapshotCopyGrant documents this fault as 400, not 404.
+        assertEquals(400, ex.getHttpStatus());
+        verify(snapshotCopyGrantBackend, never()).delete(any());
+    }
+
+    @Test
+    void createTagsOnSnapshotCopyGrant() {
+        SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+
+        service.createTags("arn:aws:redshift:us-east-1:111111111111:snapshotcopygrant:my-grant",
+                Map.of("env", "prod"));
+
+        assertEquals(Map.of("env", "prod"),
+                service.listTagsForResource("arn:aws:redshift:us-east-1:111111111111:snapshotcopygrant:my-grant"));
+    }
+
+    @Test
+    void createTagsOnMissingSnapshotCopyGrantIsNotFound() {
+        when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createTags("arn:aws:redshift:us-east-1:111111111111:snapshotcopygrant:missing",
+                        Map.of("env", "prod")));
+        // ResourceNotFoundFault, not the grant-specific fault: CreateTags/DeleteTags/
+        // DescribeTags list ResourceNotFoundFault (404) for a missing resource and never
+        // list SnapshotCopyGrantNotFoundFault, which the model pins at 400.
+        assertEquals("ResourceNotFoundFault", ex.getErrorCode());
+        assertEquals(404, ex.getHttpStatus());
     }
 
     private static String extractResourceId(String arn) {

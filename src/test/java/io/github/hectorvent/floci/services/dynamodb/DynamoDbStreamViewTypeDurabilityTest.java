@@ -42,11 +42,11 @@ class DynamoDbStreamViewTypeDurabilityTest {
         return store;
     }
 
-    private DynamoDbJsonHandler handlerFor(StorageBackend<String, TableDefinition> store,
+    private NativeDynamoDbJsonHandler handlerFor(StorageBackend<String, TableDefinition> store,
                                            DynamoDbStreamService streams) {
         DynamoDbService service = new DynamoDbService(
                 store, null, new RegionResolver(REGION, "000000000000"), streams, null);
-        return new DynamoDbJsonHandler(service, streams, null, mapper);
+        return new NativeDynamoDbJsonHandler(service, streams, null, mapper);
     }
 
     private ObjectNode createTableRequest(String viewType) {
@@ -92,7 +92,7 @@ class DynamoDbStreamViewTypeDurabilityTest {
         Path file = tmp.resolve("tables.json");
         StorageBackend<String, TableDefinition> store = diskStore(file);
         DynamoDbStreamService streams = new DynamoDbStreamService(mapper, store);
-        DynamoDbJsonHandler handler = handlerFor(store, streams);
+        NativeDynamoDbJsonHandler handler = handlerFor(store, streams);
 
         handler.handle("CreateTable", createTableRequest("NEW_AND_OLD_IMAGES"), REGION);
         handler.handle("UpdateTable", updateViewTypeRequest("KEYS_ONLY"), REGION);
@@ -103,7 +103,7 @@ class DynamoDbStreamViewTypeDurabilityTest {
         // The restart itself: a fresh stream service rebuilds streams from the persisted table.
         StorageBackend<String, TableDefinition> reopened = diskStore(file);
         DynamoDbStreamService afterRestart = new DynamoDbStreamService(mapper, reopened);
-        StreamDescription sd = afterRestart.listStreams(TABLE, REGION).get(0);
+        StreamDescription sd = afterRestart.listStreams(TABLE, "000000000000", REGION).get(0);
         assertEquals("KEYS_ONLY", sd.getStreamViewType(),
                 "a restarted stream must not resume the old image shape");
     }

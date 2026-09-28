@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -115,7 +116,7 @@ class MapIterationSchedulerTest {
     void preservesInputOrderWhenItemsCompleteOutOfOrder() throws Exception {
         CountDownLatch laterItemsCompleted = new CountDownLatch(2);
 
-        List<Integer> results = org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
+        List<Integer> results = Assertions.assertTimeoutPreemptively(
                 Duration.ofSeconds(2),
                 () -> MapIterationScheduler.execute(3, 3, index -> () -> {
                     if (index == 0) {

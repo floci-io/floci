@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.services.ses;
 
-import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
@@ -23,19 +23,20 @@ import java.util.List;
 @Produces(MediaType.APPLICATION_JSON)
 public class SesInspectionController {
 
-    private final SesService sesService;
+    private final SesSentEmailService sentEmailService;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public SesInspectionController(SesService sesService, ObjectMapper objectMapper) {
-        this.sesService = sesService;
+    public SesInspectionController(SesSentEmailService sentEmailService,
+                                   ObjectMapper objectMapper) {
+        this.sentEmailService = sentEmailService;
         this.objectMapper = objectMapper;
     }
 
     @GET
     public Response getEmails(@QueryParam("id") String messageId,
                               @QueryParam("email") String recipient) {
-        List<SentEmail> emails = sesService.getEmails();
+        List<SentEmail> emails = sentEmailService.listAll();
 
         ArrayNode messages = objectMapper.createArrayNode();
         for (SentEmail email : emails) {
@@ -54,28 +55,23 @@ public class SesInspectionController {
                 node.putNull("Region");
             }
             node.put("Source", email.getSource());
+            if (email.getRejectReason() != null) {
+                node.put("RejectReason", email.getRejectReason());
+            }
             if (email.getReturnPath() != null) {
                 node.put("ReturnPath", email.getReturnPath());
             }
 
-            if (email.isRaw()) {
+            if (email.getRejectReason() != null) {
+                // A record the content scan rejected holds nothing the scan looked at, so neither
+                // the raw nor the Simple content shape applies: only the envelope is shown.
+                putDestination(node, email);
+            } else if (email.isRaw()) {
                 // LocalStack returns RawData for raw emails, without
                 // Destination / Subject / Body fields.
                 node.put("RawData", email.getRawData());
             } else {
-                ObjectNode destination = node.putObject("Destination");
-                if (email.getToAddresses() != null && !email.getToAddresses().isEmpty()) {
-                    ArrayNode toArr = destination.putArray("ToAddresses");
-                    email.getToAddresses().forEach(toArr::add);
-                }
-                if (email.getCcAddresses() != null && !email.getCcAddresses().isEmpty()) {
-                    ArrayNode ccArr = destination.putArray("CcAddresses");
-                    email.getCcAddresses().forEach(ccArr::add);
-                }
-                if (email.getBccAddresses() != null && !email.getBccAddresses().isEmpty()) {
-                    ArrayNode bccArr = destination.putArray("BccAddresses");
-                    email.getBccAddresses().forEach(bccArr::add);
-                }
+                putDestination(node, email);
 
                 if (email.getReplyToAddresses() != null && !email.getReplyToAddresses().isEmpty()) {
                     ArrayNode replyTo = node.putArray("ReplyToAddresses");
@@ -118,9 +114,25 @@ public class SesInspectionController {
         return Response.ok(result).build();
     }
 
+    private static void putDestination(ObjectNode node, SentEmail email) {
+        ObjectNode destination = node.putObject("Destination");
+        if (email.getToAddresses() != null && !email.getToAddresses().isEmpty()) {
+            ArrayNode toArr = destination.putArray("ToAddresses");
+            email.getToAddresses().forEach(toArr::add);
+        }
+        if (email.getCcAddresses() != null && !email.getCcAddresses().isEmpty()) {
+            ArrayNode ccArr = destination.putArray("CcAddresses");
+            email.getCcAddresses().forEach(ccArr::add);
+        }
+        if (email.getBccAddresses() != null && !email.getBccAddresses().isEmpty()) {
+            ArrayNode bccArr = destination.putArray("BccAddresses");
+            email.getBccAddresses().forEach(bccArr::add);
+        }
+    }
+
     @DELETE
     public Response clearEmails() {
-        sesService.clearEmails();
+        sentEmailService.clear();
         return Response.ok().build();
     }
 }

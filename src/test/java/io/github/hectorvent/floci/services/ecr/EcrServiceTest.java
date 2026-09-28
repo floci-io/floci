@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecr;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -9,6 +10,7 @@ import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
 import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
 import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
+import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
@@ -22,7 +24,9 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.time.Instant;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -46,6 +50,7 @@ class EcrServiceTest {
 
     private EcrService service;
     private EcrRegistryManager registryManager;
+    private InMemoryStorage<String, PullThroughCacheRule> pullThroughCacheRuleStore;
 
     @BeforeEach
     void setUp() {
@@ -62,13 +67,185 @@ class EcrServiceTest {
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
+        pullThroughCacheRuleStore = new InMemoryStorage<>();
 
         service = new EcrService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                pullThroughCacheRuleStore,
                 registryManager,
                 config,
                 regionResolver);
+    }
+
+    // ------------------------------------------------------------
+    // Pull through cache rules
+    // ------------------------------------------------------------
+
+    @Test
+    void createPullThroughCacheRule_roundTripsDefaults() {
+        PullThroughCacheRule rule = service.createPullThroughCacheRule(
+                "docker-hub/", "registry-1.docker.io", null, null,
+                null, null, null, REGION);
+
+        assertEquals("docker-hub", rule.getEcrRepositoryPrefix());
+        assertEquals("registry-1.docker.io", rule.getUpstreamRegistryUrl());
+        assertEquals("docker-hub", rule.getUpstreamRegistry());
+        assertEquals("ROOT", rule.getUpstreamRepositoryPrefix());
+        assertEquals(ACCOUNT, rule.getRegistryId());
+        assertNotNull(rule.getCreatedAt());
+        assertEquals(rule.getCreatedAt(), rule.getUpdatedAt());
+    }
+
+    @Test
+    void createPullThroughCacheRule_duplicate_throwsAlreadyExists() {
+        service.createPullThroughCacheRule("docker-hub", "registry-1.docker.io", null,
+                null, null, null, null, REGION);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> service.createPullThroughCacheRule("docker-hub/", "registry-1.docker.io", null,
+                        null, null, null, null, REGION));
+
+        assertEquals("PullThroughCacheRuleAlreadyExistsException", exception.getErrorCode());
+    }
+
+    @Test
+    void describePullThroughCacheRules_filtersAndPaginates() {
+        service.createPullThroughCacheRule("cache/alpha", "registry-1.docker.io", null,
+                "docker-hub", null, null, "library", REGION);
+        service.createPullThroughCacheRule("cache/beta", "quay.io", null,
+                null, null, null, null, REGION);
+        service.createPullThroughCacheRule("cache/gamma", "registry.k8s.io", null,
+                null, null, null, null, REGION);
+
+        PaginatedResult<PullThroughCacheRule> first = service.describePullThroughCacheRules(
+                null, null, 1, null, REGION);
+        PaginatedResult<PullThroughCacheRule> second = service.describePullThroughCacheRules(
+                null, null, 1, first.nextToken(), REGION);
+        PaginatedResult<PullThroughCacheRule> filtered = service.describePullThroughCacheRules(
+                null, List.of("cache/gamma/"), null, null, REGION);
+
+        assertEquals("cache/alpha", first.items().getFirst().getEcrRepositoryPrefix());
+        assertNotNull(first.nextToken());
+        assertEquals("cache/beta", second.items().getFirst().getEcrRepositoryPrefix());
+        assertEquals("cache/gamma", filtered.items().getFirst().getEcrRepositoryPrefix());
+    }
+
+    @Test
+    void pullThroughCacheRules_areIsolatedByAccountAndRegion() {
+        String otherAccount = "111111111111";
+        service.createPullThroughCacheRule("shared/cache", "quay.io", null,
+                null, null, null, null, REGION);
+        service.createPullThroughCacheRule("shared/cache", "registry.k8s.io", otherAccount,
+                null, null, null, null, REGION);
+        service.createPullThroughCacheRule("shared/cache", "ghcr.io", null,
+                null, null, null, null, "eu-west-1");
+
+        assertEquals("quay.io", service.describePullThroughCacheRules(
+                null, null, null, null, REGION).items().getFirst().getUpstreamRegistryUrl());
+        assertEquals("registry.k8s.io", service.describePullThroughCacheRules(
+                otherAccount, null, null, null, REGION).items().getFirst().getUpstreamRegistryUrl());
+        assertEquals("ghcr.io", service.describePullThroughCacheRules(
+                null, null, null, null, "eu-west-1").items().getFirst().getUpstreamRegistryUrl());
+    }
+
+    @Test
+    void pullThroughCacheRule_persistsAcrossServiceInstances() {
+        service.createPullThroughCacheRule("persisted/cache", "quay.io", null,
+                null, null, null, null, REGION);
+        EcrService restored = new EcrService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                pullThroughCacheRuleStore,
+                registryManager,
+                Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, ACCOUNT));
+
+        PullThroughCacheRule rule = restored.describePullThroughCacheRules(
+                null, List.of("persisted/cache"), null, null, REGION).items().getFirst();
+
+        assertEquals("quay.io", rule.getUpstreamRegistryUrl());
+    }
+
+    @Test
+    void deletePullThroughCacheRule_removesRuleAndMissingFails() {
+        service.createPullThroughCacheRule("delete/cache", "quay.io", null,
+                null, null, null, null, REGION);
+
+        PullThroughCacheRule deleted = service.deletePullThroughCacheRule("delete/cache/", null, REGION);
+
+        assertEquals("delete/cache", deleted.getEcrRepositoryPrefix());
+        AwsException exception = assertThrows(AwsException.class,
+                () -> service.deletePullThroughCacheRule("delete/cache", null, REGION));
+        assertEquals("PullThroughCacheRuleNotFoundException", exception.getErrorCode());
+    }
+
+    @Test
+    void updatePullThroughCacheRule_updatesProvidedFieldsAndPreservesTheRest() {
+        String originalCredential =
+                "arn:aws:secretsmanager:us-east-1:000000000000:secret:ecr-pullthroughcache/original";
+        String updatedCredential =
+                "arn:aws:secretsmanager:us-east-1:000000000000:secret:ecr-pullthroughcache/updated";
+        PullThroughCacheRule created = service.createPullThroughCacheRule(
+                "update/cache", "registry-1.docker.io", null, null,
+                originalCredential, null, "library", REGION);
+        Instant createdAt = created.getCreatedAt();
+
+        PullThroughCacheRule updated = service.updatePullThroughCacheRule(
+                "update/cache/", null, updatedCredential,
+                "arn:aws:iam::000000000000:role/EcrPullThroughCache", REGION);
+
+        assertEquals(updatedCredential, updated.getCredentialArn());
+        assertEquals("arn:aws:iam::000000000000:role/EcrPullThroughCache", updated.getCustomRoleArn());
+        assertEquals("registry-1.docker.io", updated.getUpstreamRegistryUrl());
+        assertEquals("library", updated.getUpstreamRepositoryPrefix());
+        assertEquals(createdAt, updated.getCreatedAt());
+        assertFalse(updated.getUpdatedAt().isBefore(createdAt));
+
+        PullThroughCacheRule roleOnlyUpdate = service.updatePullThroughCacheRule(
+                "update/cache", null, null,
+                "arn:aws:iam::000000000000:role/ReplacedRole", REGION);
+        assertEquals(updatedCredential, roleOnlyUpdate.getCredentialArn());
+        assertEquals("arn:aws:iam::000000000000:role/ReplacedRole", roleOnlyUpdate.getCustomRoleArn());
+    }
+
+    @Test
+    void validatePullThroughCacheRule_returnsStoredRuleAndMissingRulesFail() {
+        PullThroughCacheRule created = service.createPullThroughCacheRule(
+                "validate/cache", "quay.io", null, null,
+                null, null, null, REGION);
+
+        PullThroughCacheRule validated = service.validatePullThroughCacheRule(
+                "validate/cache/", null, REGION);
+
+        assertSame(created, validated);
+        assertEquals("quay.io", validated.getUpstreamRegistryUrl());
+        assertEquals("PullThroughCacheRuleNotFoundException", assertThrows(AwsException.class,
+                () -> service.validatePullThroughCacheRule("missing/cache", null, REGION)).getErrorCode());
+        assertEquals("PullThroughCacheRuleNotFoundException", assertThrows(AwsException.class,
+                () -> service.updatePullThroughCacheRule(
+                        "missing/cache", null, null, null, REGION)).getErrorCode());
+    }
+
+    @Test
+    void pullThroughCacheRule_rejectsInvalidInputs() {
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                () -> service.createPullThroughCacheRule("A", "quay.io", null,
+                        null, null, null, null, REGION)).getErrorCode());
+        assertEquals("UnsupportedUpstreamRegistryException", assertThrows(AwsException.class,
+                () -> service.createPullThroughCacheRule("invalid/upstream", "example.com", null,
+                        null, null, null, null, REGION)).getErrorCode());
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                () -> service.createPullThroughCacheRule("ROOT", "quay.io", null,
+                        null, null, null, "team", REGION)).getErrorCode());
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                () -> service.describePullThroughCacheRules(
+                        null, List.of(), null, null, REGION)).getErrorCode());
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                () -> service.describePullThroughCacheRules(
+                        null, Collections.nCopies(101, "cache"), null, null, REGION)).getErrorCode());
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                () -> service.describePullThroughCacheRules(null, null, 0, null, REGION)).getErrorCode());
     }
 
     // ------------------------------------------------------------
@@ -165,7 +342,7 @@ class EcrServiceTest {
         when(registryManager.tryEnsureStarted()).thenReturn(false);
 
         Repository repo = service.createRepository(REPO, null, "IMMUTABLE", true, null, null,
-                Map.of("Project", "choudoufu"), REGION);
+                Map.of("Project", "platform"), REGION);
 
         assertEquals(REPO, repo.getRepositoryName());
         assertEquals(ACCOUNT, repo.getRegistryId());
@@ -173,7 +350,7 @@ class EcrServiceTest {
                 repo.getRepositoryArn());
         assertTrue(repo.getRepositoryUri().endsWith("/" + REPO), repo.getRepositoryUri());
         assertEquals("IMMUTABLE", repo.getImageTagMutability());
-        assertEquals("choudoufu", repo.getTags().get("Project"));
+        assertEquals("platform", repo.getTags().get("Project"));
     }
 
     @Test
@@ -226,6 +403,40 @@ class EcrServiceTest {
         List<Repository> repos = service.describeRepositories(List.of(REPO), null, REGION);
         assertEquals(1, repos.size());
         assertEquals(REPO, repos.get(0).getRepositoryName());
+    }
+
+    @Test
+    void describeRepositoriesRefreshesStoredUrisForTheCurrentConfiguration() {
+        String namedRepository = REPO + "-named";
+        String listedRepository = REPO + "-listed";
+        service.createRepository(namedRepository, null, null, null, null, null, null, REGION);
+        service.createRepository(listedRepository, null, null, null, null, null, null, REGION);
+        when(registryManager.getRepositoryUri(anyString(), anyString(), anyString()))
+                .thenAnswer(invocation -> invocation.getArgument(0) + ".dkr.ecr." + invocation.getArgument(1)
+                        + ".localhost.floci.io:4566/" + invocation.getArgument(2));
+
+        Repository named = service.describeRepositories(List.of(namedRepository), null, REGION).getFirst();
+        assertEquals(ACCOUNT + ".dkr.ecr." + REGION + ".localhost.floci.io:4566/" + namedRepository,
+                named.getRepositoryUri());
+        List<Repository> listed = service.describeRepositories(null, null, REGION);
+        assertEquals(2, listed.size());
+        assertTrue(listed.stream().allMatch(repository -> repository.getRepositoryUri()
+                .equals(ACCOUNT + ".dkr.ecr." + REGION + ".localhost.floci.io:4566/"
+                        + repository.getRepositoryName())));
+    }
+
+    @Test
+    void deleteRepositoryRefreshesItsResponseWithoutRecreatingMetadata() {
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+        String tlsUri = ACCOUNT + ".dkr.ecr." + REGION + ".localhost.floci.io:4566/" + REPO;
+        when(registryManager.getRepositoryUri(ACCOUNT, REGION, REPO)).thenReturn(tlsUri);
+        when(registryManager.tryEnsureStarted()).thenReturn(false);
+
+        Repository deleted = service.deleteRepository(REPO, null, false, REGION);
+
+        assertEquals(tlsUri, deleted.getRepositoryUri());
+        assertThrows(AwsException.class, () -> service.describeRepositories(List.of(REPO), null, REGION));
+        assertTrue(service.describeRepositories(null, null, REGION).isEmpty());
     }
 
     @Test
@@ -331,6 +542,7 @@ class EcrServiceTest {
         AccountAwareStorageBackend<Repository> repositories = AccountAwareStorageBackend.inMemory(ACCOUNT);
         EcrService accountAwareService = new EcrService(
                 repositories,
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 registryManager,
                 Mockito.mock(EmulatorConfig.class),

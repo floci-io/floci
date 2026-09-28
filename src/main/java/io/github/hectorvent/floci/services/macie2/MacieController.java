@@ -63,8 +63,8 @@ public class MacieController {
         macieService.requireSession(region(headers));
         ObjectNode response = objectMapper.createObjectNode();
         response.put("status", "ENABLED");
-        response.put("serviceRole", "arn:aws:iam::" + regionResolver.getAccountId()
-                + ":role/aws-service-role/macie.amazonaws.com/AWSServiceRoleForAmazonMacie");
+        response.put("serviceRole", regionResolver.buildGlobalArn("iam",
+                "role/aws-service-role/macie.amazonaws.com/AWSServiceRoleForAmazonMacie"));
         return Response.ok(response).build();
     }
 

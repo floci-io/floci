@@ -504,7 +504,7 @@ class WebSocketAwsHttpIntegrationTest {
 
     @Test
     @Order(999)
-    void cleanup() {
+    void cleanup() throws Exception {
         if (awsApiId != null) {
             given().when().delete("/v2/apis/" + awsApiId);
         }
@@ -518,10 +518,8 @@ class WebSocketAwsHttpIntegrationTest {
             given().when().delete("/v2/apis/" + stageVarHttpApiId);
         }
 
-        for (String fn : new String[]{awsFnName, awsConnectFnName, httpProxyConnectFnName,
-                httpConnectFnName, stageVarHttpFnName}) {
-            given().when().delete("/2015-03-31/functions/" + fn);
-        }
+        WebSocketTestSupport.deleteFunctions(awsFnName, awsConnectFnName, httpProxyConnectFnName,
+                httpConnectFnName, stageVarHttpFnName);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────

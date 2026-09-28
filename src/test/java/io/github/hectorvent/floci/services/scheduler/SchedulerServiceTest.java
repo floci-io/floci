@@ -331,6 +331,104 @@ class SchedulerServiceTest {
         assertEquals("ValidationException", e.getErrorCode());
     }
 
+    // Target.Input in the Scheduler API reference: templated Lambda, Step Functions and EventBridge
+    // targets require well-formed JSON; other target types accept any text, and universal
+    // (aws-sdk) target input is only checked when the schedule is invoked.
+
+    @Test
+    void createScheduleRejectsNonJsonInputForLambdaTarget() {
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.createSchedule(
+                        newRequest("s", null, "rate(1 hour)",
+                                new FlexibleTimeWindow("OFF", null),
+                                new Target("arn:aws:lambda:us-east-1:000000000000:function:my-func",
+                                        "arn:aws:iam::000000000000:role/my-role", "not json", null)),
+                        REGION));
+        assertEquals("ValidationException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
+    void createScheduleRejectsNonJsonInputForEventBridgeTarget() {
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.createSchedule(
+                        newRequest("s", null, "rate(1 hour)",
+                                new FlexibleTimeWindow("OFF", null),
+                                new Target("arn:aws:events:us-east-1:000000000000:event-bus/my-bus",
+                                        "arn:aws:iam::000000000000:role/my-role", "{\"unterminated\":", null)),
+                        REGION));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void updateScheduleRejectsNonJsonInputForStepFunctionsTarget() {
+        String stateMachineArn = "arn:aws:states:us-east-1:000000000000:stateMachine:my-workflow";
+        service.createSchedule(
+                newRequest("sfn-upd", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target(stateMachineArn, "arn:aws:iam::000000000000:role/my-role", "{}", null)),
+                REGION);
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.updateSchedule(
+                        newRequest("sfn-upd", null, "rate(1 hour)",
+                                new FlexibleTimeWindow("OFF", null),
+                                new Target(stateMachineArn, "arn:aws:iam::000000000000:role/my-role", "not json", null)),
+                        REGION));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void createScheduleRejectsInputWithTrailingTokensForLambdaTarget() {
+        // Without FAIL_ON_TRAILING_TOKENS, "{} garbage" parses as the leading object and the
+        // rest is silently dropped.
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.createSchedule(
+                        newRequest("s", null, "rate(1 hour)",
+                                new FlexibleTimeWindow("OFF", null),
+                                new Target("arn:aws:lambda:us-east-1:000000000000:function:my-func",
+                                        "arn:aws:iam::000000000000:role/my-role", "{} garbage", null)),
+                        REGION));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void createScheduleRejectsBlankInputForStepFunctionsTarget() {
+        // Target.Input has a minimum length of 1, and readTree returns a missing node for a
+        // blank value rather than failing.
+        for (String blank : List.of("", " ")) {
+            AwsException e = assertThrows(AwsException.class, () ->
+                    service.createSchedule(
+                            newRequest("s", null, "rate(1 hour)",
+                                    new FlexibleTimeWindow("OFF", null),
+                                    new Target("arn:aws:states:us-east-1:000000000000:stateMachine:my-workflow",
+                                            "arn:aws:iam::000000000000:role/my-role", blank, null)),
+                            REGION));
+            assertEquals("ValidationException", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void createScheduleAcceptsTextInputForSqsTarget() {
+        Schedule s = service.createSchedule(
+                newRequest("sqs-text", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:aws:sqs:us-east-1:000000000000:my-queue",
+                                "arn:aws:iam::000000000000:role/my-role", "plain text", null)),
+                REGION);
+        assertEquals("plain text", s.getTarget().getInput());
+    }
+
+    @Test
+    void createScheduleAcceptsAnyInputForUniversalTarget() {
+        Schedule s = service.createSchedule(
+                newRequest("universal", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:aws:scheduler:::aws-sdk:lambda:invoke",
+                                "arn:aws:iam::000000000000:role/my-role", "not json", null)),
+                REGION);
+        assertEquals("not json", s.getTarget().getInput());
+    }
+
     @Test
     void updateScheduleMissingRequiredFieldsThrows() {
         service.createSchedule(
@@ -412,6 +510,27 @@ class SchedulerServiceTest {
         assertEquals("updated desc", updated.getDescription());
         assertNotNull(updated.getCreationDate());
         assertTrue(updated.getLastModificationDate().compareTo(updated.getCreationDate()) >= 0);
+    }
+
+    @Test
+    void createAndUpdatePreserveRecurringExpressionAndTimezone() {
+        Target target = new Target("arn:t", "arn:r", null, null);
+        FlexibleTimeWindow window = new FlexibleTimeWindow("OFF", null);
+        Schedule created = service.createSchedule(
+                newRequest("recurring", null, "rate(1 day)", window, target), REGION);
+        assertEquals("rate(1 day)", created.getScheduleExpression());
+        assertNull(created.getScheduleExpressionTimezone());
+
+        ScheduleRequest update = newRequest("recurring", null, "cron(30 8 * * ? *)", window, target);
+        update.setScheduleExpressionTimezone("America/Los_Angeles");
+        Schedule updated = service.updateSchedule(update, REGION);
+        Schedule fetched = service.getSchedule("recurring", null, REGION);
+        assertEquals("cron(30 8 * * ? *)", updated.getScheduleExpression());
+        assertEquals("America/Los_Angeles", fetched.getScheduleExpressionTimezone());
+        assertEquals(Instant.parse("2026-04-21T15:30:00Z"),
+                SchedulerExpressionParser.nextCronFire(fetched.getScheduleExpression(),
+                        Instant.parse("2026-04-21T00:00:00Z"),
+                        fetched.getScheduleExpressionTimezone()));
     }
 
     @Test

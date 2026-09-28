@@ -8,7 +8,10 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbItemAccess;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
@@ -42,12 +45,14 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -68,9 +73,10 @@ class IotServiceTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final SqsService sqs = mock(SqsService.class);
     private final LambdaService lambda = mock(LambdaService.class);
-    private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
+    private final DynamoDbItemAccess dynamoDb = mock(DynamoDbItemAccess.class);
     private final FirehoseService firehose = mock(FirehoseService.class);
     private final CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
+    private final IotPublishEventRecorder recorder = new IotPublishEventRecorder();
     private IotService service;
 
     @BeforeEach
@@ -95,13 +101,13 @@ class IotServiceTest {
                 config,
                 new RegionResolver(REGION, ACCOUNT),
                 mapper,
-                new IotPublishEventRecorder(),
+                recorder,
                 mock(IotMqttBrokerService.class),
                 sqs,
                 mock(SnsService.class),
                 mock(S3Service.class),
                 mock(KinesisService.class),
-                dynamoDb,
+                new DynamoDbFacade(dynamoDb, mock(DynamoDbTableAccess.class), new RegionResolver(REGION, ACCOUNT)),
                 lambda,
                 firehose,
                 logs,
@@ -138,13 +144,42 @@ class IotServiceTest {
     }
 
     private void publish(String payload) {
-        service.handlePublish(TOPIC, payload.getBytes(StandardCharsets.UTF_8), true, REGION, null);
+        service.handlePublish(TOPIC, payload.getBytes(StandardCharsets.UTF_8), true, REGION, null, Runnable::run);
     }
 
     private JsonNode capturedInvocationPayload(String functionArn) throws Exception {
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
         verify(lambda).invoke(eq(REGION), eq(functionArn), payload.capture(), eq(InvocationType.Event));
         return mapper.readTree(payload.getValue());
+    }
+
+    @Test
+    void publishRecordsAndStoresTheRetainedMessageAtOnceButRunsTheRulesOnlyOnTheRuleRunner() throws Exception {
+        createRule("metricsRule", sqsThenLambdaRule(null));
+        List<Runnable> deferred = new ArrayList<>();
+        byte[] payload = "{\"v\":1}".getBytes(StandardCharsets.UTF_8);
+
+        service.publish(TOPIC, payload, true, 1, null, "sensor-1", deferred::add);
+
+        assertEquals(TOPIC, recorder.recentEvents().get(0).topic());
+        assertEquals(Base64.getEncoder().encodeToString(payload), service.getRetainedMessage(TOPIC).getPayload());
+        verifyNoInteractions(sqs, lambda);
+        assertEquals(1, deferred.size());
+
+        deferred.get(0).run();
+
+        verify(sqs).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), eq(0), eq(REGION));
+        verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
+    }
+
+    @Test
+    void publishWithoutARuleRunnerRunsTheRuleActionsBeforeItReturns() throws Exception {
+        createRule("metricsRule", sqsThenLambdaRule(null));
+
+        service.publish(TOPIC, "{\"v\":1}".getBytes(StandardCharsets.UTF_8), false, 0, null, null);
+
+        verify(sqs).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), eq(0), eq(REGION));
+        verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
     }
 
     @Test
@@ -452,7 +487,8 @@ class IotServiceTest {
 
     private JsonNode capturedDynamoDbItem(String tableName) {
         ArgumentCaptor<ObjectNode> item = ArgumentCaptor.forClass(ObjectNode.class);
-        verify(dynamoDb).putItem(eq(tableName), item.capture(), eq(REGION));
+        verify(dynamoDb).putItem(eq(new Scope(ACCOUNT, REGION)), eq(tableName), item.capture(),
+                isNull(), isNull(), isNull());
         return item.getValue();
     }
 

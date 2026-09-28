@@ -15,15 +15,23 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Security;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Integration test verifying TLS works with user-provided certificate and key files.
@@ -66,22 +74,22 @@ class TlsUserCertIntegrationTest {
                 .get("/_floci/ca.pem")
             .then()
                 .statusCode(200)
-                .contentType(org.hamcrest.Matchers.startsWith("text/plain"))
+                .contentType(startsWith("text/plain"))
                 .extract().asString();
 
-        org.junit.jupiter.api.Assertions.assertFalse(pem.contains("PRIVATE KEY"),
+        assertFalse(pem.contains("PRIVATE KEY"),
                 "the key stored next to the certificate must never be served");
-        var bundle = java.security.cert.CertificateFactory.getInstance("X.509")
-                .generateCertificates(new java.io.ByteArrayInputStream(pem.getBytes(java.nio.charset.StandardCharsets.US_ASCII)))
-                .stream().map(java.security.cert.X509Certificate.class::cast).toList();
-        org.junit.jupiter.api.Assertions.assertEquals(2, bundle.size(), "user certificate plus the local CA");
-        org.junit.jupiter.api.Assertions.assertEquals(
+        List<X509Certificate> bundle = CertificateFactory.getInstance("X.509")
+                .generateCertificates(new ByteArrayInputStream(pem.getBytes(StandardCharsets.US_ASCII)))
+                .stream().map(X509Certificate.class::cast).toList();
+        assertEquals(2, bundle.size(), "user certificate plus the local CA");
+        assertEquals(
                 new CertificateGenerator().parseCertificate(Files.readString(UserCertProfile.CERT_FILE)), bundle.get(0),
                 "the user certificate, which signs the HTTPS endpoint, comes first");
-        java.security.cert.X509Certificate localCa = bundle.get(1);
-        org.junit.jupiter.api.Assertions.assertTrue(localCa.getBasicConstraints() >= 0, "the local CA is a CA");
-        org.junit.jupiter.api.Assertions.assertEquals("CN=Floci Local CA", localCa.getSubjectX500Principal().getName());
-        org.junit.jupiter.api.Assertions.assertTrue(pem.endsWith(Files.readString(
+        X509Certificate localCa = bundle.get(1);
+        assertTrue(localCa.getBasicConstraints() >= 0, "the local CA is a CA");
+        assertEquals("CN=Floci Local CA", localCa.getSubjectX500Principal().getName());
+        assertTrue(pem.endsWith(Files.readString(
                 Path.of("/tmp/floci-tls-usercert-test-data/tls/floci-root-ca.crt"))),
                 "the local CA served is the one on disk");
     }

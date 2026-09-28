@@ -5,22 +5,42 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
+import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 class SnsServiceTest {
 
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";
     private static final String BASE_URL = "http://localhost:4566";
+    private static final String FIREHOSE_ROLE_ARN = "arn:aws:iam::000000000000:role/firehose-role";
 
     private SnsService snsService;
 
@@ -64,6 +84,55 @@ class SnsServiceTest {
     void createTopic_requiresName() {
         assertThrows(AwsException.class, () -> snsService.createTopic(null, null, null, REGION));
         assertThrows(AwsException.class, () -> snsService.createTopic("", null, null, REGION));
+    }
+
+    @Test
+    void publish_retriesTransientSqsSubscriptionDeliveryFailure() {
+        SqsService sqs = mock(SqsService.class);
+        SnsService service = new SnsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), sqs, null);
+        Topic topic = service.createTopic("retry-topic", null, null, REGION);
+        String queueArn = "arn:aws:sqs:us-east-1:000000000000:retry-queue";
+        String queueUrl = BASE_URL + "/" + ACCOUNT + "/retry-queue";
+        service.subscribe(topic.getTopicArn(), "sqs", queueArn, REGION, Map.of());
+        doThrow(new AwsException("ServiceUnavailable", "temporarily unavailable", 503))
+                .doReturn(new Message("delivered"))
+                .when(sqs).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+
+        String messageId = service.publish(topic.getTopicArn(), null, "payload", null, REGION);
+
+        assertNotNull(messageId);
+        verify(sqs, times(2)).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+    }
+
+    @Test
+    void publish_sendsExhaustedSqsSubscriptionDeliveryToConfiguredDlq() throws Exception {
+        SqsService sqs = mock(SqsService.class);
+        SnsService service = new SnsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), sqs, null);
+        Topic topic = service.createTopic("dlq-topic", null, null, REGION);
+        String queueArn = "arn:aws:sqs:us-east-1:000000000000:unavailable-queue";
+        String queueUrl = BASE_URL + "/" + ACCOUNT + "/unavailable-queue";
+        String dlqArn = "arn:aws:sqs:us-east-1:000000000000:subscription-dlq";
+        String dlqUrl = BASE_URL + "/" + ACCOUNT + "/subscription-dlq";
+        service.subscribe(topic.getTopicArn(), "sqs", queueArn, REGION,
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + dlqArn + "\"}"));
+        doThrow(new AwsException("AWS.SimpleQueueService.NonExistentQueue", "unavailable", 400))
+                .when(sqs).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+
+        String messageId = service.publish(topic.getTopicArn(), null,
+                "payload", "subject", REGION);
+
+        assertNotNull(messageId, "SNS Publish acceptance is independent of downstream SQS delivery");
+        verify(sqs, times(3)).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+        ArgumentCaptor<String> deadLetterBody = ArgumentCaptor.forClass(String.class);
+        verify(sqs).sendMessage(eq(dlqUrl), deadLetterBody.capture(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+        JsonNode envelope = new ObjectMapper().readTree(deadLetterBody.getValue());
+        assertEquals("Notification", envelope.path("Type").asText());
+        assertEquals(topic.getTopicArn(), envelope.path("TopicArn").asText());
+        assertEquals("payload", envelope.path("Message").asText());
+        assertEquals("subject", envelope.path("Subject").asText());
+        assertTrue(envelope.hasNonNull("MessageId"));
     }
 
     @Test
@@ -119,6 +188,111 @@ class SnsServiceTest {
         assertEquals("sqs", sub.getProtocol());
         assertEquals(ACCOUNT, sub.getOwner());
         assertEquals(Map.of("attr1", "value1", "attr2", "value2"), sub.getAttributes());
+    }
+
+    @Test
+    void subscribe_firehoseRequiresValidRoleArn() {
+        Topic topic = snsService.createTopic("firehose-topic", null, null, REGION);
+        String streamArn = "arn:aws:firehose:us-east-1:000000000000:deliverystream/test-stream";
+        for (Map<String, String> attributes : List.of(
+                Map.<String, String>of(),
+                Map.of("SubscriptionRoleArn", ""),
+                Map.of("SubscriptionRoleArn", "arn:aws:iam::000000000000:user/not-a-role"))) {
+            AwsException ex = assertThrows(AwsException.class, () -> snsService.subscribe(
+                    topic.getTopicArn(), "firehose", streamArn, REGION, attributes));
+            assertEquals("InvalidParameter", ex.getErrorCode());
+            assertTrue(ex.getMessage().contains("SubscriptionRoleArn"));
+        }
+        assertTrue(snsService.listSubscriptions(REGION).isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "http://169.254.169.254/latest/meta-data/",
+            "http://169.254.170.2/v2/credentials",
+            "https://[fe80::1]/",
+            "http://[fd00:ec2::254]/latest/meta-data/"
+    })
+    void subscribe_rejectsAnEndpointOnALinkLocalOrMetadataAddress(String endpoint) {
+        Topic topic = snsService.createTopic("ssrf-topic", null, null, REGION);
+        String protocol = endpoint.startsWith("https://") ? "https" : "http";
+
+        AwsException ex = assertThrows(AwsException.class, () -> snsService.subscribe(
+                topic.getTopicArn(), protocol, endpoint, REGION, Map.of()), endpoint);
+
+        assertEquals("InvalidParameter", ex.getErrorCode());
+        assertTrue(snsService.listSubscriptions(REGION).isEmpty(), endpoint);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "http://127.0.0.1:8080/hook",
+            "http://172.17.0.2:9000/hook",
+            "http://10.0.0.5/hook",
+            "https://example.test/hook"
+    })
+    void subscribe_stillAcceptsLoopbackPrivateAndOrdinaryEndpoints(String endpoint) {
+        Topic topic = snsService.createTopic("ok-topic", null, null, REGION);
+        String protocol = endpoint.startsWith("https://") ? "https" : "http";
+
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), protocol, endpoint, REGION, Map.of());
+
+        assertEquals(endpoint, sub.getEndpoint());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[fd00:ec2::254]/",
+            "http://169.254.170.2/v2/credentials"
+    })
+    void delivery_refusesAnEndpointThatNamesTheAddressOutright(String endpoint) {
+        // Reaches a subscription stored before Subscribe began refusing these, and costs no lookup.
+        assertFalse(SnsService.deliverable(endpoint), endpoint);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"http://127.0.0.1:8080/hook", "http://10.0.0.5/hook", "https://example.test/x"})
+    void delivery_stillAllowsLoopbackPrivateAndOrdinaryEndpoints(String endpoint) {
+        assertTrue(SnsService.deliverable(endpoint), endpoint);
+    }
+
+    @Test
+    void delivery_doesNotResolveANameAndSoAllowsOne() {
+        // Names are screened at Subscribe. Resolving again here could not decide anything, because
+        // HttpClient resolves once more when it connects, so this deliberately does not try.
+        assertTrue(SnsService.deliverable("http://sns-endpoint-that-does-not-resolve.invalid/hook"));
+    }
+
+    @Test
+    void subscribe_rejectsAnEndpointWithNoHost() {
+        Topic topic = snsService.createTopic("nohost-topic", null, null, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () -> snsService.subscribe(
+                topic.getTopicArn(), "http", "http:///no-host", REGION, Map.of()));
+
+        assertEquals("InvalidParameter", ex.getErrorCode());
+    }
+
+    @Test
+    void subscribe_firehoseRoleArnIsReturnedAndCanBeUpdated() {
+        Topic topic = snsService.createTopic("firehose-topic", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "firehose",
+                "arn:aws:firehose:us-east-1:000000000000:deliverystream/test-stream", REGION,
+                Map.of("SubscriptionRoleArn", FIREHOSE_ROLE_ARN));
+        assertEquals(FIREHOSE_ROLE_ARN,
+                snsService.getSubscriptionAttributes(sub.getSubscriptionArn(), REGION).get("SubscriptionRoleArn"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> snsService.setSubscriptionAttribute(
+                sub.getSubscriptionArn(), "SubscriptionRoleArn", "not-an-arn", REGION));
+        assertEquals("InvalidParameter", ex.getErrorCode());
+        assertEquals(FIREHOSE_ROLE_ARN,
+                snsService.getSubscriptionAttributes(sub.getSubscriptionArn(), REGION).get("SubscriptionRoleArn"));
+
+        String updated = "arn:aws:iam::000000000000:role/updated-role";
+        snsService.setSubscriptionAttribute(sub.getSubscriptionArn(), "SubscriptionRoleArn", updated, REGION);
+        assertEquals(updated,
+                snsService.getSubscriptionAttributes(sub.getSubscriptionArn(), REGION).get("SubscriptionRoleArn"));
     }
 
     @Test
@@ -207,6 +381,12 @@ class SnsServiceTest {
     }
 
     @Test
+    void publish_smsWithInvalidSubject_throwsInvalidParameter() {
+        assertThrows(AwsException.class, () ->
+                snsService.publish(null, null, "+819012345678", "Hello phone!", "x".repeat(150), null, REGION));
+    }
+
+    @Test
     void publish_requiresTopicArn() {
         assertThrows(AwsException.class,
             () -> snsService.publish(null, null, "msg", null, REGION));
@@ -224,6 +404,48 @@ class SnsServiceTest {
         Topic topic = snsService.createTopic("my-topic", null, null, REGION);
         String messageId = snsService.publish(topic.getTopicArn(), null, "Hello!", null, REGION);
         assertNotNull(messageId);
+    }
+
+    @Test
+    void publish_subjectWithinLimits_succeeds() {
+        Topic topic = snsService.createTopic("my-topic", null, null, REGION);
+        String messageId = snsService.publish(topic.getTopicArn(), null, "Hello!", "a".repeat(100), REGION);
+        assertNotNull(messageId);
+    }
+
+    @Test
+    void publish_subjectTooLong_throwsInvalidParameter() {
+        Topic topic = snsService.createTopic("my-topic", null, null, REGION);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                snsService.publish(topic.getTopicArn(), null, "Hello!", "a".repeat(101), REGION));
+        assertEquals("InvalidParameter", ex.getErrorCode());
+    }
+
+    @Test
+    void publish_subjectWithLineBreak_throwsInvalidParameter() {
+        Topic topic = snsService.createTopic("my-topic", null, null, REGION);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                snsService.publish(topic.getTopicArn(), null, "Hello!", "line one\nline two", REGION));
+        assertEquals("InvalidParameter", ex.getErrorCode());
+    }
+
+    @Test
+    void publish_subjectStartingWithSpace_succeeds() {
+        Topic topic = snsService.createTopic("my-topic", null, null, REGION);
+        String messageId = snsService.publish(topic.getTopicArn(), null, "Hello!", " leading space", REGION);
+        assertNotNull(messageId);
+    }
+
+    @Test
+    void publishBatch_subjectTooLong_marksEntryFailed() {
+        Topic topic = snsService.createTopic("my-topic", null, null, REGION);
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Id", "1", "Message", "Hello!", "Subject", "b".repeat(150)));
+        SnsService.BatchPublishResult result =
+                snsService.publishBatch(topic.getTopicArn(), entries, REGION);
+        assertTrue(result.successful().isEmpty());
+        assertEquals(1, result.failed().size());
+        assertEquals("InvalidParameter", result.failed().get(0)[1]);
     }
 
     @Test
@@ -375,6 +597,33 @@ class SnsServiceTest {
     }
 
     @Test
+    void filterPolicy_messageBody_nestedObjectsInsideArray() {
+        Subscription sub = subscriptionWithPolicy(
+                "{\"Records\":{\"s3\":{\"bucket\":{\"name\":[\"mybucket\"]}}}}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(sub, body("""
+                {"Records":[{"s3":{"bucket":{"name":"other"}}},
+                            {"s3":{"bucket":{"name":"mybucket"}}}]}
+                """), null));
+        assertFalse(snsService.matchesFilterPolicy(sub, body("""
+                {"Records":[{"s3":{"bucket":{"name":"other"}}}]}
+                """), null));
+        assertFalse(snsService.matchesFilterPolicy(sub, body("{\"Records\":[]}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_nestedArrayRequiresOneElementToMatchWholePolicy() {
+        Subscription sub = subscriptionWithPolicy(
+                "{\"Records\":{\"name\":[\"mybucket\"],\"region\":[\"us-east-1\"]}}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(sub, body("""
+                {"Records":[{"name":"mybucket","region":"us-west-2"},
+                            {"name":"other","region":"us-east-1"}]}
+                """), null));
+        assertTrue(snsService.matchesFilterPolicy(sub, body("""
+                {"Records":[{"name":"mybucket","region":"us-east-1"}]}
+                """), null));
+    }
+
+    @Test
     void filterPolicy_messageBody_numericRule() {
         Subscription sub = subscriptionWithPolicy(
                 "{\"price\":[{\"numeric\":[\">=\",100,\"<\",200]}]}", "MessageBody");
@@ -490,37 +739,6 @@ class SnsServiceTest {
         assertFalse(snsService.topicExists(topic.getTopicArn(), "eu-west-1"));
         assertFalse(snsService.topicExists(
                 "arn:aws:sns:us-east-1:000000000000:ghost-topic", REGION));
-    }
-
-
-    /**
-     * A Lambda subscription endpoint may be a qualified ARN. Taking the segment after the last
-     * colon read the alias as the function name, so a subscription to
-     * {@code ...:function:order-processor:PROD} invoked a function called {@code PROD}: the
-     * message was accepted, reported as published, and delivered nowhere.
-     */
-    @Test
-    void extractFunctionNameIgnoresTheQualifier() {
-        String base = "arn:aws:lambda:us-east-1:000000000000:function:order-processor";
-
-        assertEquals("order-processor", SnsService.extractFunctionName(base));
-        assertEquals("order-processor", SnsService.extractFunctionName(base + ":PROD"));
-        assertEquals("order-processor", SnsService.extractFunctionName(base + ":42"));
-        assertEquals("order-processor", SnsService.extractFunctionName(base + ":$LATEST"));
-    }
-
-    /** Other partitions carry the same resource grammar. */
-    @Test
-    void extractFunctionNameWorksInAnyPartition() {
-        assertEquals("order-processor", SnsService.extractFunctionName(
-                "arn:aws-us-gov:lambda:us-gov-west-1:000000000000:function:order-processor:PROD"));
-    }
-
-    /** A bare function name is a legal endpoint too and passes through unchanged. */
-    @Test
-    void extractFunctionNameLeavesABareNameAlone() {
-        assertEquals("order-processor", SnsService.extractFunctionName("order-processor"));
-        assertNull(SnsService.extractFunctionName(null));
     }
 
     private static Map<String, MessageAttributeValue> attr(String name, String value, String dataType) {
@@ -720,5 +938,140 @@ class SnsServiceTest {
                 "{\"detail\":{\"$or\":[{\"a\":[\"1\"]},{\"b\":[\"2\"]}]}}", "MessageBody");
         assertTrue(snsService.matchesFilterPolicy(nested, body("{\"detail\":{\"b\":\"2\"}}"), null));
         assertFalse(snsService.matchesFilterPolicy(nested, body("{\"detail\":{\"b\":\"3\"}}"), null));
+    }
+
+    @Test
+    void publish_invokesTheQualifiedLambdaSubscriptionEndpoint() {
+        LambdaService lambdaService = mock(LambdaService.class);
+        SnsService service = new SnsService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT),
+                null,
+                lambdaService
+        );
+        Topic topic = service.createTopic("lambda-topic", null, null, REGION);
+        String aliasArn = "arn:aws:lambda:us-east-1:000000000000:function:order-processor:PROD";
+        service.subscribe(topic.getTopicArn(), "lambda", aliasArn, REGION, Map.of());
+
+        service.publish(topic.getTopicArn(), null, "hello", null, REGION);
+
+        verify(lambdaService).invoke(eq(REGION), eq(aliasArn), any(byte[].class), eq(InvocationType.Event));
+    }
+
+    @Test
+    void publish_deliversToFirehoseSubscription_withJsonEnvelope() throws Exception {
+        FirehoseService firehoseService = mock(FirehoseService.class);
+        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
+        SnsService service = new SnsService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                regionResolver,
+                null,
+                null,
+                firehoseService
+        );
+
+        Topic topic = service.createTopic("firehose-topic", null, null, REGION);
+        String streamArn = "arn:aws:firehose:us-east-1:000000000000:deliverystream/test-stream";
+        service.subscribe(topic.getTopicArn(), "firehose", streamArn, REGION,
+                Map.of("SubscriptionRoleArn", FIREHOSE_ROLE_ARN));
+
+        String messageId = service.publish(topic.getTopicArn(), null, "Hello Firehose", "Test Subject", REGION);
+        assertNotNull(messageId);
+
+        ArgumentCaptor<Record> recordCaptor = ArgumentCaptor.forClass(Record.class);
+        verify(firehoseService).putRecord(eq(ACCOUNT), eq(REGION), eq("test-stream"), recordCaptor.capture());
+
+        Record captured = recordCaptor.getValue();
+        assertNotNull(captured);
+        assertNotNull(captured.getData());
+        String payload = new String(captured.getData(), StandardCharsets.UTF_8);
+
+        JsonNode json = new ObjectMapper().readTree(payload);
+        assertEquals("Notification", json.get("Type").asText());
+        assertEquals(messageId, json.get("MessageId").asText());
+        assertEquals(topic.getTopicArn(), json.get("TopicArn").asText());
+        assertEquals("Test Subject", json.get("Subject").asText());
+        assertEquals("Hello Firehose", json.get("Message").asText());
+    }
+
+    @Test
+    void publish_deliversToFirehoseSubscription_rawMessageDelivery() {
+        FirehoseService firehoseService = mock(FirehoseService.class);
+        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
+        SnsService service = new SnsService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                regionResolver,
+                null,
+                null,
+                firehoseService
+        );
+
+        Topic topic = service.createTopic("firehose-topic-raw", null, null, REGION);
+        String streamArn = "arn:aws:firehose:us-east-1:000000000000:deliverystream/test-stream-raw";
+        service.subscribe(topic.getTopicArn(), "firehose", streamArn, REGION,
+                Map.of("RawMessageDelivery", "true", "SubscriptionRoleArn", FIREHOSE_ROLE_ARN));
+
+        String message = "{\"raw\":\"payload\"}";
+        String messageId = service.publish(topic.getTopicArn(), null, message, null, REGION);
+        assertNotNull(messageId);
+
+        ArgumentCaptor<Record> recordCaptor = ArgumentCaptor.forClass(Record.class);
+        verify(firehoseService).putRecord(eq(ACCOUNT), eq(REGION), eq("test-stream-raw"), recordCaptor.capture());
+
+        Record captured = recordCaptor.getValue();
+        assertEquals(message, new String(captured.getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void publish_deliversToFirehoseSubscription_bareStreamNameEndpoint() {
+        FirehoseService firehoseService = mock(FirehoseService.class);
+        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
+        SnsService service = new SnsService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                regionResolver,
+                null,
+                null,
+                firehoseService
+        );
+
+        Topic topic = service.createTopic("firehose-bare-topic", null, null, REGION);
+        service.subscribe(topic.getTopicArn(), "firehose", "bare-stream", REGION,
+                Map.of("RawMessageDelivery", "true", "SubscriptionRoleArn", FIREHOSE_ROLE_ARN));
+
+        service.publish(topic.getTopicArn(), null, "bare-msg", null, REGION);
+
+        ArgumentCaptor<Record> recordCaptor = ArgumentCaptor.forClass(Record.class);
+        verify(firehoseService).putRecord(eq(ACCOUNT), eq(REGION), eq("bare-stream"), recordCaptor.capture());
+        assertEquals("bare-msg", new String(recordCaptor.getValue().getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void publish_firehoseDeliveryFailure_doesNotFailPublisher() {
+        FirehoseService firehoseService = mock(FirehoseService.class);
+        doThrow(new RuntimeException("stream not found"))
+                .when(firehoseService).putRecord(any(), any(), any(), any());
+
+        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
+        SnsService service = new SnsService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                regionResolver,
+                null,
+                null,
+                firehoseService
+        );
+
+        Topic topic = service.createTopic("firehose-fail-topic", null, null, REGION);
+        service.subscribe(topic.getTopicArn(), "firehose",
+                "arn:aws:firehose:us-east-1:000000000000:deliverystream/failing-stream", REGION,
+                Map.of("SubscriptionRoleArn", FIREHOSE_ROLE_ARN));
+
+        // Delivery error is logged and tolerated; publisher receives message ID
+        String messageId = service.publish(topic.getTopicArn(), null, "msg", null, REGION);
+        assertNotNull(messageId);
     }
 }

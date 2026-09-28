@@ -63,6 +63,16 @@ public class LaunchedContainerAwsEnv {
     }
 
     /**
+     * The Floci base URL this env points a launched container at, i.e. the value of the
+     * {@code AWS_ENDPOINT_URL} entry above. Callers that configure something other than an
+     * AWS SDK (a Fluent Bit output in a FireLens router, say) reuse it so both agree on how
+     * the container reaches Floci.
+     */
+    public String flociEndpoint() {
+        return reachableEndpoint.baseUrl();
+    }
+
+    /**
      * Variant for launchers whose workloads reach Floci at an address other than the
      * Docker-reachable one (e.g. Kubernetes pods reaching Floci's pod IP).
      */

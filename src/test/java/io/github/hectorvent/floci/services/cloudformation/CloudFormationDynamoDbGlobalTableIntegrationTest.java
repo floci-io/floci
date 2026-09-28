@@ -8,15 +8,14 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * {@code AWS::DynamoDB::GlobalTable} through the per-service provisioner: {@code Ref} is the table
@@ -58,7 +57,7 @@ class CloudFormationDynamoDbGlobalTableIntegrationTest {
                         "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
                         "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
                         "BillingMode": "PAY_PER_REQUEST",
-                        "Replicas": [{"Region": "us-east-1"}]
+                        "Replicas": [{"Region": "us-east-1"}, {"Region": "us-west-2"}]
                       }
                     },
                     "RefParam": {
@@ -88,12 +87,21 @@ class CloudFormationDynamoDbGlobalTableIntegrationTest {
         assertTrue(tableArn != null && tableArn.startsWith("arn:aws:dynamodb:"), "TableArn: " + tableArn);
         assertFalse(tableId == null || tableId.isBlank(), "DescribeTable reported no TableId");
 
+        // The Replicas property is applied: the declared non-local region is tracked, and the
+        // deployment region is reported as a replica too, so DescribeTable lists both, as AWS does for
+        // a global table.
+        List<String> replicaRegions = described.getList("Table.Replicas.RegionName");
+        assertTrue(replicaRegions != null && replicaRegions.contains("us-west-2"),
+                "DescribeTable Replicas did not report us-west-2: " + replicaRegions);
+        assertTrue(replicaRegions.contains("us-east-1"),
+                "DescribeTable Replicas did not report the deployment region us-east-1: " + replicaRegions);
+
         assertEquals(tableName, parameterValue("/gt-v2/" + suffix + "/ref"));
         assertEquals(tableArn, parameterValue("/gt-v2/" + suffix + "/arn"));
         assertEquals(tableId, parameterValue("/gt-v2/" + suffix + "/table-id"));
 
         deleteStack(stackName);
-        awaitStackGone(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
 
         given()
             .contentType("application/x-amz-json-1.0")
@@ -152,23 +160,5 @@ class CloudFormationDynamoDbGlobalTableIntegrationTest {
             .body("{\"Name\":\"" + name + "\"}")
         .when().post("/").then().statusCode(200)
             .extract().jsonPath().getString("Parameter.Value");
-    }
-
-    private void awaitStackGone(String stackName) {
-        await()
-            .atMost(STACK_DELETE_TIMEOUT)
-            .pollInterval(STACK_DELETE_POLL_INTERVAL)
-            .untilAsserted(() -> {
-                String body = given()
-                    .contentType("application/x-www-form-urlencoded")
-                    .header("Authorization", CFN_AUTH)
-                    .formParam("Action", "DescribeStacks")
-                    .formParam("StackName", stackName)
-                .when().post("/").then().extract().asString();
-                if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                    fail("stack delete failed: " + body);
-                }
-                assertTrue(body.contains("does not exist"), "stack still exists: " + body);
-            });
     }
 }

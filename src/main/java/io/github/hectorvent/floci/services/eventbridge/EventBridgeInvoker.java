@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.MissingNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
@@ -20,6 +21,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -47,6 +49,7 @@ public class EventBridgeInvoker {
     private final EventBridgeService eventBridgeService;
     private final EcsService ecsService;
     private final EcsJsonHandler ecsJsonHandler;
+    private final StepFunctionsService stepFunctionsService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
@@ -60,6 +63,7 @@ public class EventBridgeInvoker {
                               EventBridgeService eventBridgeService,
                               EcsService ecsService,
                               EcsJsonHandler ecsJsonHandler,
+                              StepFunctionsService stepFunctionsService,
                               RegionResolver regionResolver,
                               ObjectMapper objectMapper,
                               EmulatorConfig config) {
@@ -71,6 +75,7 @@ public class EventBridgeInvoker {
         this.eventBridgeService = eventBridgeService;
         this.ecsService = ecsService;
         this.ecsJsonHandler = ecsJsonHandler;
+        this.stepFunctionsService = stepFunctionsService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
@@ -83,7 +88,7 @@ public class EventBridgeInvoker {
                        EmulatorConfig config) {
         this(lambdaService, sqsService, snsService,
                 null /* batch */, null /* firehose */, null /* eventBridge */, null /* ecs */,
-                null /* ecsJsonHandler */, null /* regionResolver */, objectMapper, config);
+                null /* ecsJsonHandler */, null /* stepFunctions */, null /* regionResolver */, objectMapper, config);
     }
 
     public void invokeTarget(Target target, String eventJson, String region) {
@@ -156,6 +161,12 @@ public class EventBridgeInvoker {
                     firehoseService.putRecord(streamArn.accountId(), streamArn.region(), streamName, record);
                 }
                 LOG.debugv("EventBridge delivered to Firehose: {0}", arn);
+            } else if (isStateMachineArn(arn)) {
+                String targetRegion = extractRegionFromArn(arn, region);
+                String targetAccount = AwsArnUtils.parse(arn).accountId();
+                RequestScopes.runAs(targetAccount,
+                        () -> stepFunctionsService.startExecution(arn, null, payload, targetRegion));
+                LOG.debugv("EventBridge started Step Functions execution: {0}", arn);
             } else if (arn.contains(":events:") && arn.contains(":event-bus/")) {
                 if (eventBridgeService == null) {
                     LOG.warnv("EventBridge event-bus target missing EventBridge service: {0}", arn);
@@ -423,5 +434,14 @@ public class EventBridgeInvoker {
 
     private static String extractRegionFromArn(String arn, String defaultRegion) {
         return AwsArnUtils.regionOrDefault(arn, defaultRegion);
+    }
+
+    private static boolean isStateMachineArn(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "states")) {
+            return false;
+        }
+        String resource = AwsArnUtils.parse(arn).resource();
+        String prefix = "stateMachine:";
+        return resource.startsWith(prefix) && resource.indexOf(':', prefix.length()) < 0;
     }
 }

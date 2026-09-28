@@ -72,8 +72,12 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private static final String TASK_DIR = "/var/task";
     private static final String RUNTIME_DIR = "/var/runtime";
 
-    /** Default base prefix for the containers and code volumes Lambda spawns. */
-    static final String DEFAULT_NAME_PREFIX = "floci";
+    /**
+     * Default base prefix for the containers and code volumes Lambda spawns: the prefix this
+     * emulator owns, so it cannot collide with a sibling Floci emulator on the same daemon.
+     * A user-configured prefix still replaces it wholesale.
+     */
+    static final String DEFAULT_NAME_PREFIX = ContainerStorageHelper.NAME_PREFIX;
     /** A prefix must be a legal Docker name on its own: names must start alphanumeric. */
     private static final java.util.regex.Pattern SAFE_NAME_PREFIX =
             java.util.regex.Pattern.compile("^[A-Za-z0-9][A-Za-z0-9_.-]*$");
@@ -81,7 +85,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     /**
      * The base name prefix for Lambda containers and code volumes:
      * {@code floci.services.lambda.container-name-prefix} when set and Docker-safe,
-     * otherwise the default {@code floci}.
+     * otherwise {@link #DEFAULT_NAME_PREFIX}.
      */
     static String resolveContainerNamePrefix(EmulatorConfig config) {
         String configured = config.services().lambda().containerNamePrefix()
@@ -270,6 +274,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "lambda", fn.getFunctionName(), lambdaAccountId, lambdaRegion));
 
+        LambdaDockerFlags dockerFlags = configuredDockerFlags();
+        applyDockerFlags(specBuilder, dockerFlags);
+
         specBuilder.withEmbeddedDns();
 
         // Inject extra hosts entries into the container if present. Split on the FIRST
@@ -289,7 +296,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // and the create->start copy block agree.
         boolean useCodeVolume = false;
         if (fn.isHotReload()) {
-            specBuilder.withBind(fn.getHotReloadHostPath(), TASK_DIR);
+            specBuilder.withReadOnlyBind(fn.getHotReloadHostPath(), TASK_DIR);
         } else if (fn.getCodeLocalPath() != null) {
             useCodeVolume = shouldUseCodeVolume(Path.of(fn.getCodeLocalPath()));
             if (useCodeVolume) {
@@ -353,7 +360,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
         // Create container without starting — provided.* runtimes exec
         // /var/runtime/bootstrap on start, so code must be copied first.
-        containerId = createContainer(spec, fn);
+        containerId = createContainer(spec, fn, dockerFlags);
         LOG.infov("Created container {0} for function {1}", containerId, fn.getFunctionName());
         // Docker now holds the real container-to-volume reference, which removeVolume's own in-use
         // check protects from here on - release the in-flight marker that stood in for it before
@@ -412,8 +419,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // Extensions can log as soon as they start, which is before the container's own log stream
         // is attached below. Create the group/stream up front so those early lines are not dropped
         // by CloudWatch; the call is idempotent, so attach() repeating it is harmless.
-        LogDestination logDestination = new LogDestination(cwLogGroup, cwLogStream, lambdaRegion);
-        logStreamer.ensureLogGroupAndStream(cwLogGroup, cwLogStream, lambdaRegion);
+        LogDestination logDestination = new LogDestination(
+                lambdaAccountId, cwLogGroup, cwLogStream, lambdaRegion);
+        logStreamer.ensureLogGroupAndStreamForAccount(
+                lambdaAccountId, cwLogGroup, cwLogStream, lambdaRegion);
 
         // Real AWS's runtime interface client discovers and launches every binary under
         // /opt/extensions/ as a sibling process to the main entrypoint before the runtime is
@@ -438,8 +447,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 LambdaExecutionRoleCredentials.sessionAccountId(fn));
 
         // Attach log streaming
-        Closeable logHandle = logStreamer.attach(
-                containerId, cwLogGroup, cwLogStream, lambdaRegion, "lambda:" + fn.getFunctionName());
+        Closeable logHandle = logStreamer.attachForAccount(
+                lambdaAccountId, containerId, cwLogGroup, cwLogStream,
+                lambdaRegion, "lambda:" + fn.getFunctionName());
         handle.setLogStream(logHandle);
 
         return handle;
@@ -503,7 +513,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         };
     }
 
-    private String createContainer(ContainerSpec spec, LambdaFunction fn) {
+    private String createContainer(ContainerSpec spec, LambdaFunction fn, LambdaDockerFlags dockerFlags) {
+        if (dockerFlags.platform() != null) {
+            return lifecycleManager.create(spec, dockerFlags.platform());
+        }
         if (!config.services().lambda().honourArchitectures()) {
             return lifecycleManager.create(spec);
         }
@@ -513,6 +526,68 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     + fn.getArchitectures() + " for function '" + fn.getFunctionName() + "'");
         }
         return lifecycleManager.create(spec, platform.get());
+    }
+
+    private LambdaDockerFlags configuredDockerFlags() {
+        Optional<String> configured = Optional.ofNullable(config.services().lambda().dockerFlags())
+                .orElse(Optional.empty());
+        return configured.filter(value -> !value.isBlank())
+                .map(LambdaDockerFlags::parse)
+                .orElseGet(() -> LambdaDockerFlags.parse(null));
+    }
+
+    private static void applyDockerFlags(ContainerBuilder.Builder builder, LambdaDockerFlags flags) {
+        builder.withEnv(flags.environment());
+        for (String volume : flags.volumes()) {
+            String[] parts = volume.split(":", -1);
+            if (parts.length < 2 || parts.length > 3 || parts[0].isBlank() || parts[1].isBlank()) {
+                throw new IllegalArgumentException("Invalid Lambda Docker volume: " + volume);
+            }
+            if (parts.length == 3 && "ro".equals(parts[2])) {
+                builder.withReadOnlyBind(parts[0], parts[1]);
+            } else if (parts.length == 2 || "rw".equals(parts[2])) {
+                builder.withBind(parts[0], parts[1]);
+            } else {
+                throw new IllegalArgumentException("Invalid Lambda Docker volume mode: " + volume);
+            }
+        }
+        for (String publishedPort : flags.publishedPorts()) {
+            String[] parts = publishedPort.split(":", -1);
+            String hostIp = parts.length == 3 ? parts[0] : null;
+            String hostPort = parts.length == 2 ? parts[0] : parts.length == 3 ? parts[1] : "";
+            String containerPort = parts.length == 2 ? parts[1] : parts.length == 3 ? parts[2] : "";
+            if (hostPort.isBlank() || containerPort.isBlank()) {
+                throw new IllegalArgumentException("Invalid Lambda Docker published port: " + publishedPort);
+            }
+            int parsedHostPort = Integer.parseInt(hostPort);
+            int parsedContainerPort = Integer.parseInt(containerPort);
+            if (hostIp == null) {
+                builder.withPortBinding(parsedContainerPort, parsedHostPort);
+            } else if ("127.0.0.1".equals(hostIp)) {
+                builder.withLoopbackPortBinding(parsedContainerPort, parsedHostPort);
+            } else {
+                throw new IllegalArgumentException("Lambda Docker published ports only support "
+                        + "127.0.0.1 as an explicit host address: " + publishedPort);
+            }
+        }
+        for (String extraHost : flags.extraHosts()) {
+            int separator = extraHost.indexOf(':');
+            if (separator <= 0 || separator == extraHost.length() - 1) {
+                throw new IllegalArgumentException("Invalid Lambda Docker extra host: " + extraHost);
+            }
+            builder.withExtraHost(extraHost.substring(0, separator), extraHost.substring(separator + 1));
+        }
+        for (String dnsServer : flags.dnsServers()) {
+            builder.withDnsServer(dnsServer);
+        }
+        builder.withLabels(flags.labels());
+        if (flags.network() != null) {
+            builder.withNetworkMode(flags.network());
+        }
+        if (flags.user() != null) {
+            builder.withUser(flags.user());
+        }
+        builder.withPrivileged(flags.privileged());
     }
 
     public void stop(ContainerHandle handle) {
@@ -888,7 +963,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         acquirePopulatePermit(fn.getFunctionName());
         String helperId = null;
         try {
-            helperId = createContainer(helperSpec, fn);
+            helperId = createContainer(helperSpec, fn, LambdaDockerFlags.parse(null));
             lifecycleManager.startCreated(helperId, helperSpec);
             copyDirToContainerStrict(lifecycleManager.getDockerClient(), helperId,
                     Path.of(fn.getCodeLocalPath()), TASK_DIR, fn.getFunctionName());
@@ -1063,13 +1138,33 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         return namePrefix + "-code-" + fname + "-" + h;
     }
 
-    static String efsVolumeName(String accessPointArn) {
+    /**
+     * The unprefixed name token for an access point's volume. Includes a hash of the whole ARN so
+     * two access points sharing a resource id in different accounts or Regions stay distinct.
+     */
+    static String efsVolumeToken(String accessPointArn) {
         int separator = Math.max(accessPointArn.lastIndexOf('/'), accessPointArn.lastIndexOf(':'));
         String resourceId = separator >= 0 ? accessPointArn.substring(separator + 1) : accessPointArn;
         if (resourceId.isBlank()) {
             throw new IllegalArgumentException("File system access point ARN must include a resource id");
         }
-        return "floci-efs-" + resourceId + "-" + sha256Hex(accessPointArn);
+        return "efs-" + resourceId + "-" + sha256Hex(accessPointArn);
+    }
+
+    /**
+     * The Docker volume backing an access point. EFS volumes hold user data but carry no
+     * persisted-name record, so probe: one created before the {@code floci-aws-} migration keeps
+     * its legacy name, and its data, forever. Only when no legacy volume exists is the current
+     * name used. The probe stays indefinitely; it is what makes upgrades across several versions
+     * safe.
+     */
+    private String efsVolumeName(String accessPointArn) {
+        String token = efsVolumeToken(accessPointArn);
+        String legacyName = ContainerStorageHelper.legacyDockerName(config, token);
+        if (lifecycleManager.volumeExists(legacyName)) {
+            return legacyName;
+        }
+        return ContainerStorageHelper.dockerName(config, token);
     }
 
     private static String sha256Hex(String value) {
@@ -1229,7 +1324,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * (or other extensions) from running.
      */
     /** Where a container's output is sent: the CloudWatch log group/stream and its region. */
-    private record LogDestination(String logGroup, String logStream, String region) { }
+    private record LogDestination(String accountId, String logGroup, String logStream, String region) { }
 
     /**
      * Arms an async watch (via Docker's own wait-for-exit API, not polling) that notices when
@@ -1285,8 +1380,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 // the container log and an observability extension's output would vanish entirely.
                 // Draining is also required in its own right — an unread exec pipe fills up and
                 // stalls the extension process.
-                dockerClient.execStartCmd(execId).exec(logStreamer.execLogCallback(
-                        logDestination.logGroup(), logDestination.logStream(), logDestination.region(),
+                dockerClient.execStartCmd(execId).exec(logStreamer.execLogCallbackForAccount(
+                        logDestination.accountId(), logDestination.logGroup(), logDestination.logStream(),
+                        logDestination.region(),
                         "lambda:" + functionName + ":" + name));
                 LOG.infov("Launched extension {0} for function {1} (container {2})",
                         name, functionName, containerId);

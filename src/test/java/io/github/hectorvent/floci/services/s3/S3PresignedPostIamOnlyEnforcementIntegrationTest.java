@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 
@@ -9,7 +9,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -27,7 +26,7 @@ import static org.hamcrest.Matchers.equalTo;
  * {@code S3PresignedPostAuthEnforcementIntegrationTest} cannot exercise.
  */
 @QuarkusTest
-@TestProfile(S3PresignedPostIamOnlyEnforcementIntegrationTest.IamOnlyProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class S3PresignedPostIamOnlyEnforcementIntegrationTest {
 
     private static final String REGION = "us-east-1";
@@ -143,6 +142,61 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
                 .statusCode(204);
     }
 
+    /**
+     * Regression for {@code IamEnforcementFilter#authorizeAdditionalResource} resolving the
+     * bucket policy without the global condition keys ({@code aws:PrincipalAccount} in
+     * particular) that {@code filter()} always supplies for the header-signed and presigned-URL
+     * paths. A bucket-policy {@code Deny} conditioned on the account key being absent must not
+     * fire for a genuine signed principal, whose account this filter always knows. Exercised in
+     * this IAM-only profile (rather than {@code S3PresignedPostAuthEnforcementIntegrationTest})
+     * so only {@code authorizeAdditionalResource} gates the request: with
+     * {@code s3.enforce-auth} on, {@code S3Service#authorizeSignedBucketPolicy} independently
+     * re-evaluates the same bucket policy through its own, narrower condition context.
+     */
+    @Test
+    void presignedPostSucceedsWhenBucketPolicyDeniesOnlyForMissingPrincipalAccount() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "presigned-post-null-condition-" + suffix;
+        String userName = "presigned-post-null-condition-user-" + suffix;
+
+        createBucketAsRoot(bucket);
+        String accessKeyId = createUser(userName);
+        putUserPolicy(userName, "AllowPutObject", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}
+                ]}""");
+        putBucketPolicy(bucket, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Deny",
+                   "Principal":{"AWS":"arn:aws:iam::000000000000:user/%1$s"},
+                   "Action":"s3:PutObject",
+                   "Resource":"arn:aws:s3:::%2$s/*",
+                   "Condition":{"Null":{"aws:PrincipalAccount":"true"}}}
+                ]}""".formatted(userName, bucket));
+
+        given()
+                .multiPart("key", "principal-account-present.txt")
+                .multiPart("x-amz-credential", presignedCredential(accessKeyId))
+                .multiPart("file", "principal-account-present.txt",
+                        "uploaded with aws:PrincipalAccount populated".getBytes(StandardCharsets.UTF_8),
+                        "text/plain")
+        .when()
+                .post("/" + bucket)
+        .then()
+                .statusCode(204);
+    }
+
+    private static void putBucketPolicy(String bucket, String policyDocument) {
+        given()
+                .header("Authorization", auth("test", "s3"))
+                .contentType("application/json")
+                .body(policyDocument)
+        .when()
+                .put("/" + bucket + "?policy")
+        .then()
+                .statusCode(200);
+    }
+
     private static String presignedCredential(String accessKeyId) {
         String amzDate = AMZ_DATE_FMT.format(Instant.now());
         String dateStamp = amzDate.substring(0, 8);
@@ -208,14 +262,5 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
         String amzDate = AMZ_DATE_FMT.format(Instant.now()).substring(0, 8);
         return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/" + amzDate + "/" + REGION + "/" + service
                 + "/aws4_request, SignedHeaders=host, Signature=abc";
-    }
-
-    public static final class IamOnlyProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.iam.enforcement-enabled", "true",
-                    "floci.services.s3.enforce-auth", "false");
-        }
     }
 }

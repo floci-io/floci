@@ -87,6 +87,73 @@ class StepFunctionsPutEventsIntegrationTest {
 
     @Test
     @Order(2)
+    void jsonataObjectDetailPreservesNestedJsonAndEscapedStrings() throws Exception {
+        String smArn = createStateMachine("put-events-jsonata-object-detail", """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Publish",
+                  "States": {
+                    "Publish": {
+                      "Type": "Task",
+                      "Resource": "RESOURCE_ARN",
+                      "Arguments": {
+                        "Entries": [{
+                          "Source": "SOURCE_NAME",
+                          "DetailType": "jsonata object",
+                          "Detail": {
+                            "payment": {"amount": 1200, "currency": "USD"},
+                            "message": "line one\\nline two"
+                          }
+                        }]
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.replace("RESOURCE_ARN", RESOURCE).replace("SOURCE_NAME", SOURCE));
+
+        JsonNode result = mapper.readTree(succeedingOutputOf(smArn));
+        assertEquals(0, result.path("FailedEntryCount").asInt());
+
+        JsonNode delivered = mapper.readTree(receiveSingleMessage(sinkQueueUrl).path("Body").asText());
+        assertEquals(1200, delivered.path("detail").path("payment").path("amount").asInt());
+        assertEquals("USD", delivered.path("detail").path("payment").path("currency").asText());
+        assertEquals("line one\nline two", delivered.path("detail").path("message").asText());
+    }
+
+    @Test
+    @Order(3)
+    void jsonPathObjectDetailPreservesNestedJson() throws Exception {
+        String smArn = createStateMachine("put-events-jsonpath-object-detail", """
+                {
+                  "StartAt": "Publish",
+                  "States": {
+                    "Publish": {
+                      "Type": "Task",
+                      "Resource": "RESOURCE_ARN",
+                      "Parameters": {
+                        "Entries": [{
+                          "Source": "SOURCE_NAME",
+                          "DetailType": "jsonpath object",
+                          "Detail": {"order": {"id": "order-42", "items": 3}}
+                        }]
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.replace("RESOURCE_ARN", RESOURCE).replace("SOURCE_NAME", SOURCE));
+
+        JsonNode result = mapper.readTree(succeedingOutputOf(smArn));
+        assertEquals(0, result.path("FailedEntryCount").asInt());
+
+        JsonNode delivered = mapper.readTree(receiveSingleMessage(sinkQueueUrl).path("Body").asText());
+        assertEquals("order-42", delivered.path("detail").path("order").path("id").asText());
+        assertEquals(3, delivered.path("detail").path("order").path("items").asInt());
+    }
+
+    @Test
+    @Order(4)
     void taskResultCarriesTheSameFieldsThePutEventsApiReturns() throws Exception {
         var smArn = createStateMachine("put-events-same-envelope", """
                 {
@@ -123,7 +190,7 @@ class StepFunctionsPutEventsIntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(5)
     void oneRejectedEntryFailsTheTaskWithFailedEntryAndTheWholeResponseAsCause() throws Exception {
         var smArn = createStateMachine("put-events-failed-entry", """
                 {
@@ -158,7 +225,7 @@ class StepFunctionsPutEventsIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(6)
     void aFailedEntryIsCatchableByItsErrorName() throws Exception {
         var smArn = createStateMachine("put-events-catch", """
                 {

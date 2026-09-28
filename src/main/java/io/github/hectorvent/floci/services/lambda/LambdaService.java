@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -39,6 +40,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -70,11 +72,13 @@ public class LambdaService implements ResourceProvider {
     private static final String QUALIFIER_PATTERN = "\\$(LATEST(\\.PUBLISHED)?)|[a-zA-Z0-9-_$]+";
     private static final Pattern QUALIFIER = Pattern.compile(QUALIFIER_PATTERN);
     private static final Pattern EFS_ACCESS_POINT_ARN = Pattern.compile(
-            "^arn:aws[a-zA-Z-]*:elasticfilesystem:(?:eusc-)?[a-z]{2}"
+            "^arn:" + AwsArnUtils.PARTITION_REGEX + ":elasticfilesystem:(?:eusc-)?[a-z]{2}"
                     + "(?:(?:-gov)|(?:-iso(?:b)?))?-[a-z]+-\\d:"
                     + "\\d{12}:access-point/fsap-[a-f0-9]{17}$");
     private static final Pattern FILE_SYSTEM_LOCAL_MOUNT_PATH = Pattern.compile("^/mnt/[A-Za-z0-9._-]+$");
     private static final Pattern LOG_GROUP_PATTERN = Pattern.compile("[.\\-_/#A-Za-z0-9]+");
+    // The model's own Role pattern, which AWS quotes verbatim in its validation message; it
+    // already accepts every partition.
     private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
             "^arn:(aws[a-zA-Z-]*)?:iam::\\d{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+$");
     private static final Pattern HANDLER_PATTERN = Pattern.compile("^[^\\s]+$");
@@ -127,6 +131,7 @@ public class LambdaService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final EsmStore esmStore;
     private final LambdaAliasStore aliasStore;
+    private final LambdaTargetResolver targetResolver;
     private final S3Service s3Service;
     private final SqsService sqsService;
     private final SqsEventSourcePoller poller;
@@ -200,6 +205,7 @@ public class LambdaService implements ResourceProvider {
         this.regionResolver = regionResolver;
         this.esmStore = storageFactory != null ? new EsmStore(storageFactory) : null;
         this.aliasStore = storageFactory != null ? new LambdaAliasStore(storageFactory) : null;
+        this.targetResolver = new LambdaTargetResolver(functionStore, aliasStore);
         this.s3Service = null;
         this.sqsService = null;
         this.poller = null;
@@ -223,6 +229,7 @@ public class LambdaService implements ResourceProvider {
                           RegionResolver regionResolver,
                           EsmStore esmStore,
                           LambdaAliasStore aliasStore,
+                          LambdaTargetResolver targetResolver,
                           S3Service s3Service,
                           SqsService sqsService,
                           SqsEventSourcePoller poller,
@@ -244,6 +251,7 @@ public class LambdaService implements ResourceProvider {
         this.regionResolver = regionResolver;
         this.esmStore = esmStore;
         this.aliasStore = aliasStore;
+        this.targetResolver = targetResolver;
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.poller = poller;
@@ -594,9 +602,9 @@ public class LambdaService implements ResourceProvider {
         }
         if (functionName.startsWith("arn:")) {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
-            return resolveReadTargetForAccount(arn.accountId(), region, ref.name(), effective);
+            return targetResolver.resolveReadTargetForAccount(arn.accountId(), region, ref.name(), effective);
         }
-        return resolveReadTarget(region, ref.name(), effective);
+        return targetResolver.resolveReadTarget(region, ref.name(), effective);
     }
 
     /**
@@ -1072,23 +1080,42 @@ public class LambdaService implements ResourceProvider {
         LambdaFunction fn;
         if (functionName.startsWith("arn:")) {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
-            fn = resolveInvokeTargetForAccount(arn.accountId(), region, name, qualifier);
+            fn = targetResolver.resolveInvokeTargetForAccount(arn.accountId(), region, name, qualifier);
         } else {
-            fn = resolveInvokeTarget(region, name, qualifier);
+            fn = targetResolver.resolveInvokeTarget(region, name, qualifier);
         }
         reportCustomResourceLiveness(payload);
-        InvokeResult result = executorService.invoke(fn, payload, type);
+        InvokeResult result = executorService.invoke(fn, payload, type,
+                LambdaInvocationChain.currentDepth(), qualifier);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
 
-    /** Invokes a Lambda target ARN using the account encoded in that ARN. */
+    /**
+     * Invokes a Lambda target ARN using the account encoded in that ARN.
+     *
+     * <p>The chain position comes from the calling thread, so a delivery that arrives here through
+     * an EventBridge target or an SNS subscription keeps counting from where it was rather than
+     * starting a fresh chain.
+     */
     public InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type) {
+        return invokeArn(functionArn, payload, type, LambdaInvocationChain.currentDepth());
+    }
+
+    /**
+     * Invokes a Lambda destination at the position in the chain the delivery reached, so that a
+     * chain leading back into a function already in it is stopped at the bound.
+     */
+    InvokeResult invokeArnFromDestination(String functionArn, byte[] payload, int chainDepth) {
+        return invokeArn(functionArn, payload, InvocationType.Event, chainDepth);
+    }
+
+    private InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type, int chainDepth) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionArn);
-        LambdaFunction fn = resolveInvokeTargetForAccount(
+        LambdaFunction fn = targetResolver.resolveInvokeTargetForAccount(
                 arn.accountId(), arn.region(), ref.name(), ref.qualifier());
-        InvokeResult result = executorService.invoke(fn, payload, type);
+        InvokeResult result = executorService.invoke(fn, payload, type, chainDepth, ref.qualifier());
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
@@ -1106,108 +1133,6 @@ public class LambdaService implements ResourceProvider {
             return;
         }
         CustomResourceLiveness.tokenIn(payload).ifPresent(customResourceLiveness::touch);
-    }
-
-    private LambdaFunction resolveInvokeTarget(String region, String name, String qualifier) {
-        return resolveTarget(region, name, qualifier, this::pickAliasVersion);
-    }
-
-    /**
-     * Resolves a qualifier for a <em>read</em>. Identical to the invoke path except for aliases:
-     * an alias with {@code AdditionalVersionWeights} shifts traffic, so {@link #pickAliasVersion}
-     * chooses randomly among the weighted versions, which is right for running the function and
-     * wrong for describing it. Two reads of one alias must not disagree, so a read follows the
-     * alias's primary {@code FunctionVersion}, which is what AWS reports.
-     */
-    private LambdaFunction resolveReadTarget(String region, String name, String qualifier) {
-        return resolveTarget(region, name, qualifier, LambdaAlias::getFunctionVersion);
-    }
-
-    private LambdaFunction resolveTarget(String region, String name, String qualifier,
-                                         java.util.function.Function<LambdaAlias, String> aliasVersion) {
-        if (qualifier == null || qualifier.equals("$LATEST")) {
-            return functionStore.get(region, name)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Function not found: " + name, 404));
-        }
-        if (qualifier.chars().allMatch(Character::isDigit)) {
-            return functionStore.get(region, name, qualifier)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Function version not found: " + name + ":" + qualifier, 404));
-        }
-        // qualifier is an alias name
-        LambdaAlias alias = getAlias(region, name, qualifier);
-        String version = aliasVersion.apply(alias);
-        if (version == null || version.equals("$LATEST")) {
-            return functionStore.get(region, name)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Function not found: " + name, 404));
-        }
-        return functionStore.get(region, name, version)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Function version not found: " + name + ":" + version, 404));
-    }
-
-    private LambdaFunction resolveInvokeTargetForAccount(
-            String accountId, String region, String name, String qualifier) {
-        return resolveTargetForAccount(accountId, region, name, qualifier, this::pickAliasVersion);
-    }
-
-    /** The read counterpart of {@link #resolveInvokeTargetForAccount}; see {@link #resolveReadTarget}. */
-    private LambdaFunction resolveReadTargetForAccount(
-            String accountId, String region, String name, String qualifier) {
-        return resolveTargetForAccount(accountId, region, name, qualifier, LambdaAlias::getFunctionVersion);
-    }
-
-    private LambdaFunction resolveTargetForAccount(
-            String accountId, String region, String name, String qualifier,
-            java.util.function.Function<LambdaAlias, String> aliasVersion) {
-        if (qualifier == null || qualifier.equals("$LATEST")) {
-            return functionStore.getForAccount(accountId, region, name)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Function not found: " + name, 404));
-        }
-        if (qualifier.chars().allMatch(Character::isDigit)) {
-            return functionStore.getForAccount(accountId, region, name, qualifier)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Function version not found: " + name + ":" + qualifier, 404));
-        }
-        LambdaAlias alias = aliasStore != null
-                ? aliasStore.getForAccount(accountId, region, name, qualifier)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Alias not found: " + qualifier, 404))
-                : null;
-        if (alias == null) {
-            throw new AwsException("ResourceNotFoundException", "Alias not found: " + qualifier, 404);
-        }
-        String version = aliasVersion.apply(alias);
-        if (version == null || version.equals("$LATEST")) {
-            return functionStore.getForAccount(accountId, region, name)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Function not found: " + name, 404));
-        }
-        return functionStore.getForAccount(accountId, region, name, version)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Function version not found: " + name + ":" + version, 404));
-    }
-
-    private String pickAliasVersion(LambdaAlias alias) {
-        java.util.Map<String, Double> weights = alias.getRoutingConfig();
-        if (weights == null || weights.isEmpty()) {
-            return alias.getFunctionVersion();
-        }
-        double rand = java.util.concurrent.ThreadLocalRandom.current().nextDouble();
-        double additionalTotal = weights.values().stream().mapToDouble(Double::doubleValue).sum();
-        double primaryWeight = Math.max(0.0, 1.0 - additionalTotal);
-        if (rand < primaryWeight) {
-            return alias.getFunctionVersion();
-        }
-        double cumulative = primaryWeight;
-        for (java.util.Map.Entry<String, Double> entry : weights.entrySet()) {
-            cumulative += entry.getValue();
-            if (rand < cumulative) {
-                return entry.getKey();
-            }
-        }
-        return alias.getFunctionVersion();
     }
 
     // ──────────────────────────── Event Source Mapping (SQS) ────────────────────────────
@@ -1399,6 +1324,9 @@ public class LambdaService implements ResourceProvider {
         esm.setSourceAccessConfigurations(sourceAccessConfigurations);
         esm.setLastModified(System.currentTimeMillis());
 
+        if (eventSourceArn != null && eventSourceArn.contains(":dynamodb:")) {
+            dynamodbStreamsPoller.initializeStartingPosition(esm);
+        }
         esmStore.save(esm);
         if (enabled) {
             startPollingHelper(esm);
@@ -2001,6 +1929,9 @@ public class LambdaService implements ResourceProvider {
         EventSourceMapping esm = getEventSourceMapping(uuid); // throws 404 if not found
         stopPollingHelper(esm);
         esmStore.delete(uuid);
+        if (esm.getEventSourceArn() != null && esm.getEventSourceArn().contains(":dynamodb:")) {
+            dynamodbStreamsPoller.mappingDeleted(uuid);
+        }
         LOG.infov("Deleted ESM {0}", uuid);
     }
 
@@ -2916,7 +2847,7 @@ public class LambdaService implements ResourceProvider {
 
     /** Per-region bucket that mirrors AWS's Lambda code bucket naming. */
     public static String tasksBucketName(String region) {
-        String r = (region == null || region.isBlank()) ? "us-east-1" : region;
+        String r = (region == null || region.isBlank()) ? "us-east-1" : region; // partition-literal: static helper; every caller passes the function's own region
         return "awslambda-" + r + "-tasks";
     }
 
@@ -3092,19 +3023,74 @@ public class LambdaService implements ResourceProvider {
             throw new AwsException("InvalidParameterValueException",
                     "Hot-reload S3Key must be an absolute path on the Docker host, got: " + hostPath, 400);
         }
+        if (hostPath.contains(":")) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Hot-reload S3Key must not contain ':', got: " + hostPath, 400);
+        }
+        Path normalized;
+        try {
+            normalized = Path.of(hostPath).normalize();
+        } catch (InvalidPathException e) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Hot-reload S3Key is not a valid path: " + hostPath, 400);
+        }
         config.services().lambda().hotReload().allowedPaths().ifPresent(allowed -> {
-            if (allowed.stream().noneMatch(hostPath::startsWith)) {
+            if (allowed.stream().noneMatch(prefix -> isUnderHotReloadPrefix(normalized, prefix))) {
                 throw new AwsException("InvalidParameterValueException",
                         "Path '" + hostPath + "' is not under an allowed hot-reload mount prefix.", 400);
             }
         });
-        fn.setHotReloadHostPath(hostPath);
+        if (config.services().lambda().hotReload().allowedPaths().isEmpty() && reachesDockerSocketDirectory(normalized)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Path '" + hostPath + "' can expose the Docker socket. Set "
+                            + "FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS to mount it.", 400);
+        }
+        String resolvedHostPath = toDockerHostPath(normalized);
+        fn.setHotReloadHostPath(resolvedHostPath);
         fn.setCodeLocalPath(null);
         fn.setS3Bucket(null);
         fn.setS3Key(null);
         fn.setCodeSizeBytes(0);
         fn.setCodeSha256("");
-        LOG.infov("Hot-reload configured for function {0}: bind-mounting {1}", fn.getFunctionName(), hostPath);
+        LOG.infov("Hot-reload configured for function {0}: bind-mounting {1}", fn.getFunctionName(), resolvedHostPath);
+    }
+
+    /**
+     * Docker on the host expects a POSIX path, whatever separator the JVM running Floci uses.
+     * Public because the CloudFormation provisioner keys its hot-reload identity on the same form,
+     * so change detection agrees with what {@link #applyHotReload} stored.
+     */
+    public static String toDockerHostPath(Path normalized) {
+        StringBuilder path = new StringBuilder();
+        for (Path name : normalized) {
+            path.append('/').append(name);
+        }
+        return path.length() == 0 ? "/" : path.toString();
+    }
+
+    /**
+     * True for the host root, {@code /var}, and anything in {@code /run} or {@code /var/run}, where the
+     * Docker socket lives. {@code /proc} counts too: {@code /proc/1/root/var/run} is a different string
+     * for the same directory, and no code directory lives there either.
+     */
+    static boolean reachesDockerSocketDirectory(Path normalized) {
+        return normalized.getNameCount() == 0
+                || normalized.equals(Path.of("/var"))
+                || normalized.startsWith(Path.of("/run"))
+                || normalized.startsWith(Path.of("/var/run"))
+                || normalized.startsWith(Path.of("/proc"));
+    }
+
+    private static boolean isUnderHotReloadPrefix(Path normalizedPath, String prefix) {
+        if (prefix == null || prefix.isBlank()) {
+            return false;
+        }
+        try {
+            return normalizedPath.startsWith(Path.of(prefix).normalize());
+        } catch (InvalidPathException ignored) {
+            // A malformed prefix can never contain a path, so it does not allow anything.
+            return false;
+        }
     }
 
     // ──────────────────────────── Permissions (Policy) ────────────────────────────
@@ -3365,6 +3351,40 @@ public class LambdaService implements ResourceProvider {
             }
         }
         return result;
+    }
+
+    public Optional<FunctionEventInvokeConfig> findEventInvokeConfig(LambdaFunction fn) {
+        return findEventInvokeConfig(fn, null);
+    }
+
+    /**
+     * Finds the asynchronous settings for the qualifier the caller invoked, falling back to the
+     * resolved version when an alias has no configuration of its own. The read runs in the
+     * function owner's account because destination delivery happens on a background thread.
+     */
+    public Optional<FunctionEventInvokeConfig> findEventInvokeConfig(LambdaFunction fn,
+                                                                      String invokedQualifier) {
+        if (fn == null || fn.getFunctionArn() == null) {
+            return Optional.empty();
+        }
+        String version = fn.getVersion() != null ? fn.getVersion() : "$LATEST";
+        String functionArn = fn.getFunctionArn();
+        if (functionArn.endsWith(":" + version)) {
+            functionArn = functionArn.substring(0, functionArn.length() - version.length() - 1);
+        }
+        String region = AwsArnUtils.regionOrDefault(functionArn, null);
+        String baseArn = functionArn;
+        String owner = fn.getAccountId() != null
+                ? fn.getAccountId()
+                : AwsArnUtils.accountOrDefault(functionArn, null);
+        return RequestScopes.callAs(owner, () -> {
+            FunctionEventInvokeConfig config = invokedQualifier != null && !invokedQualifier.isBlank()
+                    ? eventInvokeConfigs.get(eventInvokeKey(region, baseArn, invokedQualifier)) : null;
+            if (config == null) {
+                config = eventInvokeConfigs.get(eventInvokeKey(region, baseArn, version));
+            }
+            return Optional.ofNullable(config);
+        });
     }
 
     private String eventInvokeKey(String region, String functionArn, String qualifier) {

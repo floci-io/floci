@@ -317,10 +317,6 @@ public class MwaaEnvironmentManager {
 
     /** Stops and removes both containers and all three named volumes for the given environment. */
     public void stopEnvironment(Environment environment) {
-        if (config.services().mwaa().keepRunningOnShutdown()) {
-            LOG.infov("Leaving MWAA containers for environment {0} running", environment.getName());
-            return;
-        }
         String name = environment.getName();
         if (environment.getAirflowContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getAirflowContainerId(), null);
@@ -379,14 +375,14 @@ public class MwaaEnvironmentManager {
     /** Routed through {@link ContainerStorageHelper} so multiple Floci instances sharing one Docker
      *  daemon (via {@code FLOCI_DOCKER_RESOURCE_NAMESPACE}) don't collide, same as every other
      *  Docker-backed service (EKS, RDS, ...). {@code config} may be {@code null} — the helper treats
-     *  that as "no namespace configured" and returns the base name unchanged. */
+     *  that as "no namespace configured" and applies only the {@code floci-aws-} prefix. */
     static String dbContainerName(EmulatorConfig config, Environment environment) {
-        return ContainerStorageHelper.dockerName(config, "floci-mwaa-" + environmentIdentity(environment) + "-db");
+        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(environment) + "-db");
     }
 
     static String airflowContainerName(EmulatorConfig config, Environment environment) {
         return ContainerStorageHelper.dockerName(config,
-                "floci-mwaa-" + environmentIdentity(environment) + "-airflow");
+                "mwaa-" + environmentIdentity(environment) + "-airflow");
     }
 
     private static String environmentIdentity(Environment environment) {
@@ -400,7 +396,7 @@ public class MwaaEnvironmentManager {
     }
 
     static String environmentRegion(Environment environment) {
-        return AwsArnUtils.regionOrDefault(environment.getArn(), "us-east-1");
+        return AwsArnUtils.regionOrDefault(environment.getArn(), "us-east-1"); // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
     }
 
     /**

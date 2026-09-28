@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService.Microvm;
@@ -60,8 +61,9 @@ public class LambdaMicrovmsController {
      * service rather than by the caller. The account segment is the literal
      * {@code aws} because the connector is AWS-owned, not the caller's.
      */
-    private static final String MANAGED_EGRESS_CONNECTOR_FORMAT =
-            "arn:aws:lambda:%s:aws:network-connector:aws-network-connector:INTERNET_EGRESS";
+    private static String managedEgressConnector(String region) {
+        return AwsArnUtils.Arn.of("lambda", region, "aws", "network-connector:aws-network-connector:INTERNET_EGRESS").toString();
+    }
 
     private final LambdaMicrovmsService service;
     private final RegionResolver regionResolver;
@@ -379,7 +381,7 @@ public class LambdaMicrovmsController {
             // CloudFormation resource type. The service fills them in.
             node.putArray("resources").addObject().put("minimumMemoryInMiB", DEFAULT_MEMORY_MIB);
             node.putArray("egressNetworkConnectors")
-                    .add(String.format(MANAGED_EGRESS_CONNECTOR_FORMAT, regionOf(image.imageArn)));
+                    .add(managedEgressConnector(regionOf(image.imageArn)));
         }
 
         // Create sends tags as null, Get sends an object, Update omits the
@@ -418,7 +420,7 @@ public class LambdaMicrovmsController {
         node.putNull("tags");
         node.putArray("resources").addObject().put("minimumMemoryInMiB", DEFAULT_MEMORY_MIB);
         node.putArray("egressNetworkConnectors")
-                .add(String.format(MANAGED_EGRESS_CONNECTOR_FORMAT, regionOf(image.imageArn)));
+                .add(managedEgressConnector(regionOf(image.imageArn)));
         return node;
     }
 
@@ -491,9 +493,9 @@ public class LambdaMicrovmsController {
         node.put("maximumDurationInSeconds", 28800);
         String region = regionOf(vm.imageArn);
         node.putArray("egressNetworkConnectors")
-                .add("arn:aws:lambda:" + region + ":aws:network-connector:aws-network-connector:INTERNET_EGRESS");
+                .add(AwsArnUtils.Arn.of("lambda", region, "aws", "network-connector:aws-network-connector:INTERNET_EGRESS").toString());
         node.putArray("ingressNetworkConnectors")
-                .add("arn:aws:lambda:" + region + ":aws:network-connector:aws-network-connector:HTTP_INGRESS");
+                .add(AwsArnUtils.Arn.of("lambda", region, "aws", "network-connector:aws-network-connector:HTTP_INGRESS").toString());
         node.putNull("executionRoleArn");
         node.putNull("idlePolicy");
         node.putNull("terminationReasonCode");

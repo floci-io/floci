@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.testing.ConfiguredHostnameProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.AfterAll;
@@ -15,14 +15,13 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
-@TestProfile(ApiGatewayExecuteApiHostIntegrationTest.ConfiguredHostnameProfile.class)
+@TestProfile(ConfiguredHostnameProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayExecuteApiHostIntegrationTest {
 
@@ -328,12 +327,5 @@ class ApiGatewayExecuteApiHostIntegrationTest {
                 .when().post("/v2/apis/" + apiId + "/stages")
                 .then()
                 .statusCode(201);
-    }
-
-    public static class ConfiguredHostnameProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.hostname", "floci");
-        }
     }
 }

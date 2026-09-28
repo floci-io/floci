@@ -474,7 +474,7 @@ class DynamoDbKinesisStreamingIntegrationTest {
 
     @Test
     @Order(40)
-    void enableAutoEnablesStreamsIfDisabled() {
+    void enableLeavesDynamoDbStreamsDisabled() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -511,6 +511,177 @@ class DynamoDbKinesisStreamingIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Table.StreamSpecification.StreamEnabled", equalTo(true));
+            .body("Table.StreamSpecification.StreamEnabled", not(equalTo(true)))
+            .body("Table.LatestStreamArn", nullValue());
+    }
+
+    @Test
+    @Order(50)
+    void enableWithInvalidPrecisionFails() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.EnableKinesisStreamingDestination")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\": \"StreamingTable\", \"StreamArn\": \"" + kinesisStreamArn + "\","
+                    + " \"EnableKinesisStreamingConfiguration\": {\"ApproximateCreationDateTimePrecision\": \"NANOSECOND\"}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(51)
+    void microsecondPrecisionIsStoredReportedAndApplied() throws Exception {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "ddb-streaming-micro", "ShardCount": 1}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        String microStreamArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "ddb-streaming-micro"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("StreamDescriptionSummary.StreamARN");
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "MicroTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.EnableKinesisStreamingDestination")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\": \"MicroTable\", \"StreamArn\": \"" + microStreamArn + "\","
+                    + " \"EnableKinesisStreamingConfiguration\": {\"ApproximateCreationDateTimePrecision\": \"MICROSECOND\"}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DestinationStatus", equalTo("ACTIVE"))
+            .body("EnableKinesisStreamingConfiguration.ApproximateCreationDateTimePrecision", equalTo("MICROSECOND"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeKinesisStreamingDestination")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "MicroTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("KinesisDataStreamDestinations[0].ApproximateCreationDateTimePrecision", equalTo("MICROSECOND"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "MicroTable", "Item": {"pk": {"S": "m1"}}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        awaitCdcDelivery();
+        String shardIterator = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "ddb-streaming-micro", "ShardId": "shardId-000000000000", "ShardIteratorType": "TRIM_HORIZON"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+        Response recordsResponse = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + shardIterator + "\", \"Limit\": 10}")
+        .when()
+            .post("/");
+        recordsResponse.then().statusCode(200);
+
+        String decoded = new String(Base64.getDecoder().decode(recordsResponse.jsonPath().getString("Records[0].Data")));
+        JsonNode dynamodb = new ObjectMapper().readTree(decoded).get("dynamodb");
+        assertEquals("MICROSECOND", dynamodb.get("ApproximateCreationDateTimePrecision").asText());
+        long timestamp = dynamodb.get("ApproximateCreationDateTime").asLong();
+        long nowMicros = System.currentTimeMillis() * 1_000L;
+        assertTrue(timestamp > nowMicros - 60_000_000L && timestamp <= nowMicros + 5_000_000L,
+                "ApproximateCreationDateTime should be in microseconds (recent), got: " + timestamp);
+    }
+
+    @Test
+    @Order(52)
+    void reEnableReplacesTheStoredPrecision() {
+        String microStreamArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "ddb-streaming-micro"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("StreamDescriptionSummary.StreamARN");
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DisableKinesisStreamingDestination")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\": \"MicroTable\", \"StreamArn\": \"" + microStreamArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // No configuration on re-enable means the AWS default, not the previously stored MICROSECOND.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.EnableKinesisStreamingDestination")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\": \"MicroTable\", \"StreamArn\": \"" + microStreamArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("EnableKinesisStreamingConfiguration.ApproximateCreationDateTimePrecision", equalTo("MILLISECOND"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeKinesisStreamingDestination")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "MicroTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("KinesisDataStreamDestinations.size()", equalTo(1))
+            .body("KinesisDataStreamDestinations[0].DestinationStatus", equalTo("ACTIVE"))
+            .body("KinesisDataStreamDestinations[0].ApproximateCreationDateTimePrecision", equalTo("MILLISECOND"));
     }
 }

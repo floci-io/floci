@@ -1,0 +1,19 @@
+# Overlay for running the locally packaged native image (make native-image) instead of the
+# JVM build docker-compose.yml describes:
+#
+#   docker compose -f docker-compose.yml -f docker/compose.native.yml up -d
+#
+# or `make native-up`. The environment block adds what .github/workflows/compatibility.yml
+# passes to the native container beyond docker-compose.yml's own settings, so a local run
+# exercises CI's configuration: the SSO device page accepts only the configured principal
+# (the Java portal test signs in as this id), and the RDS and Redshift endpoint hosts are
+# what the JDBC suites dial.
+services:
+  floci:
+    image: floci:local-native
+    environment:
+      FLOCI_SERVICES_IOT_MQTT_ENABLED: "true"
+      FLOCI_SERVICES_EC2_MOCK: "true"
+      FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST: floci
+      FLOCI_SERVICES_RDS_ENDPOINT_HOST: floci
+      FLOCI_SERVICES_SSOOIDC_LOCAL_PRINCIPAL_ID: 11111111-2222-3333-4444-555555555555

@@ -12,6 +12,8 @@ import software.amazon.awssdk.services.cloudformation.model.DescribeStacksReques
 import software.amazon.awssdk.services.cloudformation.model.Output;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.iam.IamClient;
+import software.amazon.awssdk.services.iam.model.CreateLoginProfileRequest;
+import software.amazon.awssdk.services.iam.model.DeleteLoginProfileRequest;
 import software.amazon.awssdk.services.iam.model.DeleteUserRequest;
 import software.amazon.awssdk.services.iam.model.GetUserRequest;
 import software.amazon.awssdk.services.iam.model.GetUserResponse;
@@ -108,6 +110,45 @@ class CloudFormationIamUserTest {
 
         assertThatThrownBy(() -> iam.getUser(GetUserRequest.builder().userName(userName).build()))
                 .isInstanceOf(NoSuchEntityException.class);
+    }
+
+    @Test
+    @DisplayName("Deleting a stack removes a user whose login profile was created through the IAM API")
+    void deleteStackRemovesUserWithLoginProfile() throws InterruptedException {
+        String profileStackName = TestFixtures.uniqueName("compat-cfn-iam-profile");
+        String profileUserName = TestFixtures.uniqueName("compat-profile-user");
+        try {
+            cloudFormation.createStack(CreateStackRequest.builder()
+                    .stackName(profileStackName)
+                    .templateBody(template(profileUserName, "/"))
+                    .build());
+            assertThat(waitForTerminal(profileStackName, 30)).isEqualTo("CREATE_COMPLETE");
+
+            iam.createLoginProfile(CreateLoginProfileRequest.builder()
+                    .userName(profileUserName).password("Sdk-Test-P4ssword!").build());
+
+            cloudFormation.deleteStack(DeleteStackRequest.builder().stackName(profileStackName).build());
+            waitForDeleted(profileStackName, 30);
+
+            assertThatThrownBy(() -> iam.getUser(GetUserRequest.builder().userName(profileUserName).build()))
+                    .isInstanceOf(NoSuchEntityException.class);
+        } finally {
+            try {
+                cloudFormation.deleteStack(DeleteStackRequest.builder().stackName(profileStackName).build());
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Failed to delete CloudFormation stack during cleanup: " + profileStackName, e);
+            }
+            try {
+                iam.deleteLoginProfile(DeleteLoginProfileRequest.builder().userName(profileUserName).build());
+            } catch (Exception ignored) {
+                // The stack delete normally removes the profile with the user, so this is only a fallback.
+            }
+            try {
+                iam.deleteUser(DeleteUserRequest.builder().userName(profileUserName).build());
+            } catch (Exception ignored) {
+                // The stack delete normally removes the user, so this is only a fallback.
+            }
+        }
     }
 
     private static String template(String name, String path) {

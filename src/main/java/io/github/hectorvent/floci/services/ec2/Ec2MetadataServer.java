@@ -17,10 +17,12 @@ import org.jboss.logging.Logger;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -41,14 +43,17 @@ public class Ec2MetadataServer {
     private static final Logger LOG = Logger.getLogger(Ec2MetadataServer.class);
     private static final DateTimeFormatter ISO = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
             .withZone(ZoneOffset.UTC);
+    /** IMDSv2 tokens live from one second up to six hours. */
+    private static final int MAX_TOKEN_TTL_SECONDS = 21_600;
     private static final String INSTANCE_TAGS_PREFIX = "/latest/meta-data/tags/instance/";
 
     private final Vertx vertx;
     private final EmulatorConfig config;
     private final Ec2InstanceCredentials credentials;
+    private final Clock clock;
 
     /** IMDSv2: token value → Instance */
-    private final Map<String, Instance> tokenToInstance = new ConcurrentHashMap<>();
+    private final Map<String, SessionToken> tokens = new ConcurrentHashMap<>();
     /** IMDSv1 fallback: container bridge IP → Instance */
     private final Map<String, Instance> containerIpToInstance = new ConcurrentHashMap<>();
 
@@ -56,9 +61,14 @@ public class Ec2MetadataServer {
 
     @Inject
     public Ec2MetadataServer(Vertx vertx, EmulatorConfig config, IamService iamService) {
+        this(vertx, config, iamService, Clock.systemUTC());
+    }
+
+    Ec2MetadataServer(Vertx vertx, EmulatorConfig config, IamService iamService, Clock clock) {
         this.vertx = vertx;
         this.config = config;
         this.credentials = new Ec2InstanceCredentials(iamService);
+        this.clock = clock;
     }
 
     /** Called by Ec2ContainerManager after a container starts to register its IP. */
@@ -89,7 +99,7 @@ public class Ec2MetadataServer {
     public void unregisterInstance(Instance instance) {
         if (instance != null) {
             credentials.unregister(instance);
-            tokenToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
+            tokens.values().removeIf(token -> token.instance() == instance);
             containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
         }
     }
@@ -123,7 +133,9 @@ public class Ec2MetadataServer {
         router.get("/latest/meta-data/mac").handler(ctx -> handleMac(ctx));
         router.get("/latest/meta-data/security-groups").handler(ctx -> handleSecurityGroups(ctx));
         router.get("/latest/meta-data/placement/availability-zone").handler(ctx -> handleText(ctx, inst ->
-                inst.getPlacement() != null ? inst.getPlacement().getAvailabilityZone() : "us-east-1a"));
+                inst.getPlacement() != null
+                        ? inst.getPlacement().getAvailabilityZone()
+                        : config.defaultAvailabilityZone()));
         router.get("/latest/meta-data/placement/region").handler(ctx -> handleText(ctx, inst -> inst.getRegion()));
         router.get("/latest/meta-data/iam/info").handler(ctx -> handleIamInfo(ctx));
         router.get("/latest/meta-data/iam/security-credentials/").handler(ctx -> handleCredentialsList(ctx));
@@ -149,7 +161,7 @@ public class Ec2MetadataServer {
 
     public synchronized void stop() {
         credentials.clear();
-        tokenToInstance.clear();
+        tokens.clear();
         containerIpToInstance.clear();
         if (httpServer != null) {
             httpServer.close();
@@ -161,15 +173,19 @@ public class Ec2MetadataServer {
 
     private void handleToken(RoutingContext ctx) {
         String ttlHeader = ctx.request().getHeader("x-aws-ec2-metadata-token-ttl-seconds");
-        if (ttlHeader == null) {
-            ctx.response().setStatusCode(400).end("Missing x-aws-ec2-metadata-token-ttl-seconds");
+        Integer ttlSeconds = parseTokenTtl(ttlHeader);
+        if (ttlSeconds == null) {
+            ctx.response().setStatusCode(400).end(
+                    "x-aws-ec2-metadata-token-ttl-seconds must be an integer from 1 to " + MAX_TOKEN_TTL_SECONDS);
             return;
         }
 
         Instance inst = resolveInstanceByIp(ctx);
         String token = UUID.randomUUID().toString().replace("-", "");
         if (inst != null) {
-            tokenToInstance.put(token, inst);
+            Instant now = clock.instant();
+            tokens.values().removeIf(existing -> existing.isExpiredAt(now));
+            tokens.put(token, new SessionToken(inst, now.plusSeconds(ttlSeconds)));
         }
         else {
             LOG.debugv("IMDS: token requested from {0}, which is not a registered EC2 container; "
@@ -180,6 +196,25 @@ public class Ec2MetadataServer {
                 .setStatusCode(200)
                 .putHeader("x-aws-ec2-metadata-token-ttl-seconds", ttlHeader)
                 .end(token);
+    }
+
+    /** Returns the TTL in seconds, or null when the header is missing or outside 1..21600. */
+    private static Integer parseTokenTtl(String ttlHeader) {
+        if (ttlHeader == null) {
+            return null;
+        }
+        try {
+            int ttl = Integer.parseInt(ttlHeader.trim());
+            return ttl >= 1 && ttl <= MAX_TOKEN_TTL_SECONDS ? ttl : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private record SessionToken(Instance instance, Instant expiresAt) {
+        boolean isExpiredAt(Instant now) {
+            return !now.isBefore(expiresAt);
+        }
     }
 
     // ── Metadata helpers ──────────────────────────────────────────────────────
@@ -344,7 +379,7 @@ public class Ec2MetadataServer {
     }
 
     static String instanceIdentityDocument(Instance inst, String accountId) {
-        String az = inst.getPlacement() != null ? inst.getPlacement().getAvailabilityZone() : "us-east-1a";
+        String az = inst.getPlacement() != null ? inst.getPlacement().getAvailabilityZone() : "us-east-1a"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
         String architecture = inst.getArchitecture() == null || inst.getArchitecture().isBlank()
                 ? "x86_64"
                 : inst.getArchitecture();
@@ -368,18 +403,32 @@ public class Ec2MetadataServer {
     }
 
     private Instance resolveInstance(RoutingContext ctx) {
-        // Try IMDSv2 token first
+        String remoteIp = ctx.request().remoteAddress().host();
+        Instance inst = containerIpToInstance.get(remoteIp);
+
+        // IMDSv2: a presented token must be valid; an invalid or expired one gets 401 so the
+        // caller fetches a new token. A token is not valid on another instance, so a caller whose
+        // IP maps to a different instance also gets 401; an unregistered IP defers to the token.
+        // Requests without a token fall back to IMDSv1.
         String token = ctx.request().getHeader("x-aws-ec2-metadata-token");
         if (token != null && !token.isBlank()) {
-            Instance inst = tokenToInstance.get(token);
+            SessionToken session = tokens.get(token);
+            if (session != null && !session.isExpiredAt(clock.instant())) {
+                if (inst != null && !Objects.equals(inst.getInstanceId(), session.instance().getInstanceId())) {
+                    ctx.response().setStatusCode(401).end();
+                    return null;
+                }
+                return session.instance();
+            }
+            if (session != null) {
+                tokens.remove(token, session);
+            }
             if (inst != null) {
-                return inst;
+                ctx.response().setStatusCode(401).end();
+                return null;
             }
         }
 
-        // Fall back to source IP (IMDSv1)
-        String remoteIp = ctx.request().remoteAddress().host();
-        Instance inst = containerIpToInstance.get(remoteIp);
         if (inst == null) {
             String message = unregisteredContainerMessage(remoteIp);
             LOG.warnv("IMDS: {0}", message);

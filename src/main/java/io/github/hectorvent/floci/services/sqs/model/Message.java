@@ -4,8 +4,16 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -133,20 +141,20 @@ public class Message {
             return;
         }
         try {
-            var md = java.security.MessageDigest.getInstance("MD5");
-            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
-            java.io.DataOutputStream dos = new java.io.DataOutputStream(bos);
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            DataOutputStream dos = new DataOutputStream(bos);
 
-            java.util.List<String> keys = new java.util.ArrayList<>(messageAttributes.keySet());
-            java.util.Collections.sort(keys);
+            List<String> keys = new ArrayList<>(messageAttributes.keySet());
+            Collections.sort(keys);
 
             for (String key : keys) {
                 MessageAttributeValue val = messageAttributes.get(key);
-                byte[] nameBytes = key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                byte[] nameBytes = key.getBytes(StandardCharsets.UTF_8);
                 dos.writeInt(nameBytes.length);
                 dos.write(nameBytes);
 
-                byte[] typeBytes = val.getDataType().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                byte[] typeBytes = val.getDataType().getBytes(StandardCharsets.UTF_8);
                 dos.writeInt(typeBytes.length);
                 dos.write(typeBytes);
 
@@ -156,33 +164,35 @@ public class Message {
                     dos.write(val.getBinaryValue());
                 } else {
                     dos.write(1); // String or Number
-                    byte[] valBytes = val.getStringValue().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    byte[] valBytes = val.getStringValue().getBytes(StandardCharsets.UTF_8);
                     dos.writeInt(valBytes.length);
                     dos.write(valBytes);
                 }
             }
 
             byte[] digest = md.digest(bos.toByteArray());
-            var sb = new StringBuilder();
+            StringBuilder sb = new StringBuilder();
             for (byte b : digest) {
                 sb.append(String.format("%02x", b));
             }
             this.md5OfMessageAttributes = sb.toString();
-        } catch (Exception e) {
+        } catch (Exception ignored) {
+            // Attribute serialization failure falls back to null MD5
             this.md5OfMessageAttributes = null;
         }
     }
 
     private static String computeMd5(String input) {
         try {
-            var md = java.security.MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            var sb = new StringBuilder();
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
             for (byte b : digest) {
                 sb.append(String.format("%02x", b));
             }
             return sb.toString();
-        } catch (java.security.NoSuchAlgorithmException e) {
+        } catch (NoSuchAlgorithmException ignored) {
+            // MD5 is always available in the standard JDK runtime
             return "";
         }
     }

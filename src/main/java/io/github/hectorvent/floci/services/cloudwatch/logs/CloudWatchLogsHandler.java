@@ -28,14 +28,17 @@ public class CloudWatchLogsHandler {
 
     private final CloudWatchLogsService logsService;
     private final CloudWatchLogsCrossAccountService crossAccountService;
+    private final CloudWatchLogsMetricFilterHandler metricFilterHandler;
     private final ObjectMapper objectMapper;
 
     @Inject
     public CloudWatchLogsHandler(CloudWatchLogsService logsService,
                                  CloudWatchLogsCrossAccountService crossAccountService,
+                                 CloudWatchLogsMetricFilterService metricFilterService,
                                  ObjectMapper objectMapper) {
         this.logsService = logsService;
         this.crossAccountService = crossAccountService;
+        this.metricFilterHandler = new CloudWatchLogsMetricFilterHandler(metricFilterService, objectMapper);
         this.objectMapper = objectMapper;
     }
 
@@ -62,6 +65,8 @@ public class CloudWatchLogsHandler {
             case "PutSubscriptionFilter" -> handlePutSubscriptionFilter(request, region);
             case "DescribeSubscriptionFilters" -> handleDescribeSubscriptionFilters(request, region);
             case "DeleteSubscriptionFilter" -> handleDeleteSubscriptionFilter(request, region);
+            case "PutMetricFilter", "DescribeMetricFilters", "DeleteMetricFilter", "TestMetricFilter" ->
+                    metricFilterHandler.handle(action, request, region);
             case "AssociateKmsKey" -> handleAssociateKmsKey(request, region);
             case "DisassociateKmsKey" -> handleDisassociateKmsKey(request, region);
             case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
@@ -120,8 +125,10 @@ public class CloudWatchLogsHandler {
         for (LogGroup g : groups) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("logGroupName", g.getLogGroupName());
-            node.put("createdTime", g.getCreatedTime());
-            node.put("arn", logsService.buildArn(g.getLogGroupName(), region));
+            node.put("creationTime", g.getCreatedTime());
+            String logGroupArn = logsService.buildArn(g.getLogGroupName(), region);
+            node.put("arn", logGroupArn + ":*");
+            node.put("logGroupArn", logGroupArn);
             if (g.getRetentionInDays() != null) {
                 node.put("retentionInDays", g.getRetentionInDays());
             }
@@ -129,8 +136,8 @@ public class CloudWatchLogsHandler {
             if (g.getKmsKeyId() != null) {
                 node.put("kmsKeyId", g.getKmsKeyId());
             }
-            node.put("storedBytes", 0);
-            node.put("metricFilterCount", 0);
+            node.put("storedBytes", logsService.getStoredBytesForLogGroup(g.getLogGroupName(), region));
+            node.put("metricFilterCount", metricFilterHandler.metricFilterCount(g.getLogGroupName(), region));
             groupsArray.add(node);
         }
         response.set("logGroups", groupsArray);
@@ -269,7 +276,7 @@ public class CloudWatchLogsHandler {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("logStreamName", s.getLogStreamName());
             node.put("arn", logGroupArn + ":log-stream:" + s.getLogStreamName());
-            node.put("createdTime", s.getCreatedTime());
+            node.put("creationTime", s.getCreatedTime());
             node.put("lastIngestionTime", s.getLastIngestionTime());
             node.put("uploadSequenceToken", s.getUploadSequenceToken());
             node.put("storedBytes", s.getStoredBytes());

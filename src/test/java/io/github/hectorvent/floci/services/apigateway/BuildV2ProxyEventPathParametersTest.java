@@ -39,7 +39,7 @@ class BuildV2ProxyEventPathParametersTest {
         when(uriInfo.getRequestUri()).thenReturn(new URI("http://localhost:4566/api/stage/trpc/health"));
 
         controller = new ApiGatewayExecuteController(
-                null, null, null,
+                null, null, null, null,
                 regionResolver, new ObjectMapper(), null,
                 null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null
         );

@@ -21,6 +21,7 @@ public class Volume {
     private Integer throughput;        // MiB/s; only meaningful for gp3 (null otherwise)
     private String snapshotId;
     private Instant createTime;
+    private Boolean multiAttachEnabled;
     private String region;
     private List<Tag> tags = new ArrayList<>();
     private List<VolumeAttachment> attachments = new ArrayList<>();
@@ -56,6 +57,9 @@ public class Volume {
 
     public Instant getCreateTime() { return createTime; }
     public void setCreateTime(Instant createTime) { this.createTime = createTime; }
+
+    public Boolean getMultiAttachEnabled() { return multiAttachEnabled; }
+    public void setMultiAttachEnabled(Boolean multiAttachEnabled) { this.multiAttachEnabled = multiAttachEnabled; }
 
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }

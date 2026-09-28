@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.RdsService;
@@ -66,7 +67,7 @@ class RdsCfnProvisionerTest {
     private RdsService rdsService;
     private SecretsManagerService secretsManagerService;
     private SsmService ssmService;
-    private CloudFormationResourceProvisioner provisioner;
+    private CfnResourceDispatcher provisioner;
     private Function<String, String> importResolver;
     private Map<String, Boolean> conditions;
 
@@ -122,7 +123,7 @@ class RdsCfnProvisionerTest {
      */
     private StackResource provisionUpdate(String logicalId, String type, String json, String existingPhysicalId) {
         return provisioner.provision(logicalId, type, props(json), engine(),
-                "us-east-1", "000000000000", "my-stack", existingPhysicalId);
+                "us-east-1", "000000000000", "my-stack", existingPhysicalId, Map.of());
     }
 
     @Test
@@ -876,6 +877,7 @@ class RdsCfnProvisionerTest {
     void provisionsDbSubnetGroupWithResolvedSubnetIds() {
         DbSubnetGroup group = mock(DbSubnetGroup.class);
         when(group.getDbSubnetGroupName()).thenReturn("my-subnet-group");
+        when(group.getDbSubnetGroupArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:subgrp:my-subnet-group");
         when(rdsService.createDbSubnetGroup(any(), any(), anyList(), any())).thenReturn(group);
 
         StackResource r = provision("Sg", "AWS::RDS::DBSubnetGroup", """
@@ -885,6 +887,8 @@ class RdsCfnProvisionerTest {
 
         assertEquals("my-subnet-group", r.getPhysicalId());
         assertEquals("my-subnet-group", r.getAttributes().get("DBSubnetGroupName"));
+        assertEquals("arn:aws:rds:us-east-1:000000000000:subgrp:my-subnet-group",
+                r.getAttributes().get("DBSubnetGroupArn"));
         verify(rdsService).createDbSubnetGroup("my-subnet-group", "db subnets",
                 List.of("subnet-a", "subnet-b"), "us-east-1");
     }
@@ -989,6 +993,7 @@ class RdsCfnProvisionerTest {
     void provisionsDbParameterGroup() {
         DbParameterGroup group = mock(DbParameterGroup.class);
         when(group.getDbParameterGroupName()).thenReturn("my-pg");
+        when(group.getDbParameterGroupArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:pg:my-pg");
         when(rdsService.createDbParameterGroup(any(), any(), any(), any())).thenReturn(group);
 
         StackResource r = provision("Pg", "AWS::RDS::DBParameterGroup", """
@@ -997,6 +1002,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("my-pg", r.getPhysicalId());
         assertEquals("my-pg", r.getAttributes().get("DBParameterGroupName"));
+        assertEquals("arn:aws:rds:us-east-1:000000000000:pg:my-pg", r.getAttributes().get("DBParameterGroupArn"));
         verify(rdsService).createDbParameterGroup(
                 "my-pg", "postgres16", "params", "us-east-1");
     }

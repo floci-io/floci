@@ -24,8 +24,13 @@ import java.util.UUID;
  *
  * <p>The name is the physical id and createOnly, so an unnamed vault keeps its generated name across
  * updates instead of getting a second vault, and a rename is refused as a replacement. EncryptionKeyArn
- * is createOnly too. BackupVaultTags update in place. AccessPolicy, Notifications and
- * LockConfiguration have no counterpart in the emulated vault and are accepted without effect.
+ * is createOnly too. BackupVaultTags update in place.
+ *
+ * <p>AccessPolicy, Notifications and LockConfiguration are still accepted without effect here,
+ * but they are no longer without a counterpart: the API now implements all three, so a template
+ * declaring one reports CREATE_COMPLETE with nothing attached, and a later Get of that
+ * sub-resource answers as though it was never configured. Wiring them through is tracked
+ * separately; until then this is a gap in the provisioner, not in the service.
  */
 @ApplicationScoped
 public class BackupVaultCfnProvisioner implements CfnResourceProvisioner {

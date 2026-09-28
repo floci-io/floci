@@ -227,5 +227,6 @@ class CloudFormationRollbackCompleteUpdateIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStackDeleted(stackName);
     }
 }

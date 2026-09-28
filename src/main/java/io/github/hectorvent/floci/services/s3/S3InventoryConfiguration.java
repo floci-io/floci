@@ -48,11 +48,11 @@ record S3InventoryConfiguration(String id, String innerXml) {
         // The configuration is one each of Id, IsEnabled, IncludedObjectVersions, Schedule and
         // Destination, with Filter and OptionalFields at most once, so anything else under the
         // root is a body AWS would not have accepted.
-        long filters = count(root, "Filter");
-        long optionalFields = count(root, "OptionalFields");
-        if (count(root, "Id") != 1 || count(root, "IsEnabled") != 1
-                || count(root, "IncludedObjectVersions") != 1 || count(root, "Schedule") != 1
-                || count(root, "Destination") != 1 || filters > 1 || optionalFields > 1
+        long filters = root.count("Filter");
+        long optionalFields = root.count("OptionalFields");
+        if (root.count("Id") != 1 || root.count("IsEnabled") != 1
+                || root.count("IncludedObjectVersions") != 1 || root.count("Schedule") != 1
+                || root.count("Destination") != 1 || filters > 1 || optionalFields > 1
                 || root.children().size() != 5 + filters + optionalFields) {
             throw malformed();
         }
@@ -168,9 +168,5 @@ record S3InventoryConfiguration(String id, String innerXml) {
             out.elem("Field", field.text());
         }
         return out.build();
-    }
-
-    private static long count(XmlElement parent, String childName) {
-        return parent.children().stream().filter(child -> childName.equals(child.name())).count();
     }
 }

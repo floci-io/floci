@@ -131,13 +131,23 @@ type.
 
 | Action | Description |
 |--------|-------------|
-| CreateInstanceProfile | Creates an IAM instance profile. |
+| CreateInstanceProfile | Creates an IAM instance profile, applying any `Tags` given at creation. |
 | GetInstanceProfile | Returns an instance profile and its roles. |
 | DeleteInstanceProfile | Deletes an instance profile from the local IAM store. |
 | ListInstanceProfiles | Lists IAM instance profiles. |
 | AddRoleToInstanceProfile | Adds a role to an instance profile. |
 | RemoveRoleFromInstanceProfile | Removes a role from an instance profile. |
 | ListInstanceProfilesForRole | Lists instance profiles associated with a role. |
+| TagInstanceProfile | Adds tags to an instance profile. |
+| UntagInstanceProfile | Removes tags from an instance profile. |
+| ListInstanceProfileTags | Lists tags stored for an instance profile. |
+
+`CreateInstanceProfile`, `GetInstanceProfile` and `ListInstanceProfilesForRole` include an instance
+profile's own tags inline. `ListInstanceProfiles` omits them: like `ListRoles`, its own operation
+documentation says "this operation does not return tags, even though they are an attribute of the
+returned object", even though the `InstanceProfile` shape itself carries no such exclusion note.
+Tags on a role embedded in `InstanceProfileList` are always omitted, matching `GetInstanceProfile`'s
+own documented role subset.
 
 ### Access Keys
 
@@ -235,25 +245,218 @@ was never added, both succeed and change nothing, as they do on AWS.
 Thumbprints are stored and echoed back but never validated against the remote endpoint, since
 nothing here performs the TLS handshake they describe.
 
+### SAML Identity Providers
+
+| Action | Description |
+|--------|-------------|
+| CreateSAMLProvider | Creates a SAML identity provider from a metadata document, with optional tags echoed back in the response. |
+| GetSAMLProvider | Returns a provider's creation date, tags, and a metadata document rebuilt from its stored entity ID and signing certificate. |
+| ListSAMLProviders | Lists the stored SAML providers of the calling account. |
+| UpdateSAMLProvider | Replaces a provider's metadata document. |
+| DeleteSAMLProvider | Deletes a SAML identity provider. |
+| TagSAMLProvider | Adds tags to a SAML identity provider. |
+| UntagSAMLProvider | Removes tags from a SAML identity provider. |
+| ListSAMLProviderTags | Lists tags stored for a SAML identity provider. |
+
+A provider is identified by name, giving an ARN of the form `arn:aws:iam::<account>:saml-provider/<name>`.
+The name must match `[A-Za-z0-9+=,.@_-]{1,128}`, and creating the same name twice returns
+`EntityAlreadyExists`. An empty or unparseable metadata document returns `InvalidInput`. `Tags` on the
+create request are validated before anything is stored, so a request carrying more than 50 of them
+fails without leaving a provider behind, as AWS documents.
+
+Floci stores only the entity ID and signing certificate parsed from the metadata, so `GetSAMLProvider`
+returns a minimal rebuilt document rather than the one that was uploaded. `UpdateSAMLProvider` re-parses
+a new `SAMLMetadataDocument` the same way and replaces the stored entity ID and certificate; omitting it
+leaves the provider unchanged, since it is optional on the request. AWS's current `UpdateSAMLProvider`
+and `GetSAMLProvider` also manage an `AssertionEncryptionMode` and a private-key list for decrypting
+encrypted assertions; Floci's assertion verifier only checks signatures against a single certificate and
+does not model encrypted assertions at all, so neither of those is modeled here either.
+`DeleteSAMLProvider` does not check or update any role whose trust policy still references the provider's
+ARN, matching AWS's own documented behavior: the delete succeeds regardless, and it is a later
+`AssumeRoleWithSAML` against the now-dangling ARN that fails, not this call. `CreateSAMLProvider` and
+`GetSAMLProvider` return their tags sorted by key, which is what AWS documents for those two responses;
+`ListSAMLProviderTags` is sorted the same way here for consistency, though AWS does not document an
+order for it. Providers created here are used by `AssumeRoleWithSAML` for trust-policy and assertion
+validation.
+
 ### Login Profiles
 
 | Action | Description |
 |--------|-------------|
-| CreateLoginProfile | Creates a password login profile for a user. |
+| CreateLoginProfile | Creates a console password login profile for a user. |
+| GetLoginProfile | Returns a user's login profile. |
+| UpdateLoginProfile | Updates a user's login profile password and/or reset-required flag. |
 | DeleteLoginProfile | Deletes a user's login profile. |
-| UpdateLoginProfile | Updates a user's login profile password settings. |
+
+`UserName` is optional on `CreateLoginProfile`, `GetLoginProfile` and `DeleteLoginProfile`: it
+defaults to the user resolved from the signing access key, the same fallback `GetUser` uses. It is
+required on `UpdateLoginProfile`, matching the AWS API.
+
+A user holds at most one login profile: `CreateLoginProfile` on a user that already has one
+returns `EntityAlreadyExists`; `Get`/`Update`/`DeleteLoginProfile` on a user with none return
+`NoSuchEntity`. `Password` is required on `CreateLoginProfile` and optional on
+`UpdateLoginProfile`; an omitted field on `UpdateLoginProfile` (`Password` or
+`PasswordResetRequired`) leaves that field unchanged, unlike `UpdateAccountPasswordPolicy`'s
+wholesale replace. A password must be 1–128 characters from AWS's documented password character
+class, and when the account has an [account password policy](#account-password-policy) set, it is
+also checked against that policy's length and character-class requirements, with
+`PasswordPolicyViolation` returned on either action if it doesn't comply. The password itself is never
+echoed back by any of these actions, matching AWS.
+
+`DeleteUser` returns `DeleteConflict`, as on AWS, while the user still has a login profile, access
+keys, inline policies, attached managed policies, or group memberships: remove those first. Floci
+has no actions that create signing certificates, SSH public keys, Git credentials, or MFA devices,
+so there is nothing of those kinds to block on. Renaming a user with `UpdateUser` carries its login
+profile, access keys, and group membership to the new name. Unlike AWS, Floci does not rewrite
+policy documents that name the user's ARN, so a resource or trust policy that referred to the old
+name still refers to it after a rename.
 
 ### Policy Simulation
 
 | Action | Description |
 |--------|-------------|
 | SimulatePrincipalPolicy | Evaluates requested actions and resources against the resolved principal's policies. |
+| SimulateCustomPolicy | Evaluates requested actions and resources against a standalone set of policy documents, with an optional permissions boundary. |
+| GetContextKeysForCustomPolicy | Lists the context keys referenced across a set of policy documents. |
+| GetContextKeysForPrincipalPolicy | Lists the context keys referenced across a resolved principal's policies, plus any additional documents supplied. |
+
+`GetContextKeysForCustomPolicy` and `GetContextKeysForPrincipalPolicy` return every Condition
+operator's key, and every `${...}` policy variable found in a Resource pattern or a Condition
+value, in the order statements are found. A variable's default value (`${key, 'default'}`) is
+stripped, and the three single-character escapes (`${*}`, `${?}`, `${$}`) are excluded, since
+they substitute a literal character rather than naming a context key. The list is neither sorted
+nor de-duplicated, matching AWS's own documented
+example response, which repeats a key referenced by more than one statement.
+
+`PolicySourceArn` on `SimulatePrincipalPolicy` and `GetContextKeysForPrincipalPolicy` resolves an IAM
+user or role only, not a group. `SimulateCustomPolicy` accepts only one
+`PermissionsBoundaryPolicyInputList` document, matching AWS's own documented limit; extra documents
+beyond the first are ignored. Neither simulation action evaluates a resource-based policy
+(`ResourcePolicy`) or `OrderedOrganizationPolicyInputList`, and neither returns
+`MatchedStatements`, `ResourceSpecificResults`, or a `PermissionsBoundaryDecisionDetail`: only the
+top-level `EvalDecision` is populated. `ContextEntries.member.N.ContextKeyType` is accepted but not
+read; the comparison is driven entirely by the policy's own condition operator (`Bool`,
+`NumericEquals`, `DateEquals`, and so on), not by the declared type.
+
+### Last-Accessed Reporting
+
+| Action | Description |
+|--------|-------------|
+| GenerateServiceLastAccessedDetails | Starts an Access Advisor job for a user, group, role or managed policy and returns its job ID. |
+| GetServiceLastAccessedDetails | Returns the job's status and its service-access report. |
+| GetServiceLastAccessedDetailsWithEntities | Returns the job's status and the entities that used a given service. |
+| ListPoliciesGrantingServiceAccess | Lists the policies that let an IAM identity access each requested service. |
+
+Floci does not record service access. Nothing populates a principal's usage history, and
+`GetAccessKeyLastUsed` already answers with AWS's documented "never used" shape rather than
+inventing one. That shape is what these actions reproduce: AWS lists every service an entity could
+reach through its permissions policies, and for a service with no access attempt it leaves
+`LastAuthenticated` and `TotalAuthenticatedEntities` null rather than dropping the service. So
+`GetServiceLastAccessedDetails` returns a real, policy-derived `ServicesLastAccessed` list in which
+every entry is that "no attempt" shape. The missing piece is the usage timestamps, not the list.
+
+Only the namespaces a policy names literally can be enumerated. An `Action` of `*`, a globbed
+prefix such as `s3*`, and any `NotAction` all denote a set no policy document spells out, and Floci
+has no catalog of every AWS service namespace to expand them against, so services reachable only
+through one of those are absent from the list. `ServiceName` is a required member that AWS fills
+with a display name (`Amazon S3`); Floci has no such mapping and repeats the namespace instead.
+
+`GetServiceLastAccessedDetailsWithEntities` is policy-derived in the same way. AWS reports the
+entities that *could have used* the reported permissions to reach a service, so a group report
+lists the group's users, a policy report lists the users and roles the policy is attached to plus
+the users of any group it is attached to, and a user or role report lists that entity. A user
+reachable by more than one of those paths is listed once. Entities are omitted when the reported permissions do not
+grant the requested service at all. `LastAuthenticated` is absent on every entry, since that is
+the part Floci does not record.
+
+`GenerateServiceLastAccessedDetails` resolves the ARN first and returns `NoSuchEntity` for one that
+names nothing, rather than handing out a job ID that could never be meaningful. That resolution
+checks the whole ARN: an ARN whose account is not the caller's, or whose path is not the resolved
+entity's own, names no entity and is rejected rather than falling back to a same-named local one. A
+job belongs to the account that created it, an unknown `JobId` is `NoSuchEntity`, and `Granularity`
+is validated against `SERVICE_LEVEL`/`ACTION_LEVEL` and echoed back as `JobType`.
+
+The report is produced when the job is created and stored with it, matching AWS, where
+`GenerateServiceLastAccessedDetails` produces a report and the `Get*` operations retrieve that one.
+So a completed job keeps answering what it answered first: editing the policies afterwards does not
+change it, and deleting the entity it covers does not stop a valid `JobId` from resolving. There is
+nothing left to compute asynchronously, so a job is complete when created and its creation and
+completion timestamps are the same instant. Jobs are kept for the life of the store: AWS documents
+no expiry for a `JobId`, so ageing them out would mean inventing a retention window and failing a
+caller holding an ID that AWS would still answer.
+
+Both readers honour `MaxItems` and `Marker` and report `IsTruncated` truthfully, returning a
+`Marker` only when a page remains. This differs from the rest of this page, where pagination inputs
+are accepted and ignored; these actions apply them rather than inherit that gap.
+
+`ListPoliciesGrantingServiceAccess` is not an Access Advisor job and needs no usage history: AWS
+defines it purely over permissions-policy logic, so it is answered from real policy content. It
+follows AWS's documented scoping, where a user contributes its own managed and inline policies
+plus those of every group it belongs to, while a group or role contributes only its own. Managed
+policies are reported with their ARN and their current default version is the one read; inline
+policies have no ARN and are identified by the entity holding them. Only `Allow` grants, so a
+Deny-only policy is not listed, and an `Allow` with `NotAction` grants every service the list does
+not carve out. Permissions boundaries are excluded, as the operation's documentation requires, and
+resource-based policies, ACLs, Organizations policies and trust policies are not consulted.
+Resources and conditions are not evaluated either: the question is which policies could grant the
+service at all, not whether one specific call would be authorized.
 
 ### Account
 
 | Action | Description |
 |--------|-------------|
-| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles) and IAM quota values. Resources Floci does not track (MFA devices, SAML/OIDC providers, server certificates) are reported as zero rather than omitted. |
+| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles) and IAM quota values. `Providers` counts OIDC providers only; SAML providers are not included. Resources Floci does not track (MFA devices, server certificates) are reported as zero rather than omitted. |
+| GetAccountAuthorizationDetails | Returns every user, group and role in the account, and the policies relevant to them: every local (customer-managed) policy, and every AWS-managed policy actually attached to or used as a permissions boundary by something in the account. |
+| GenerateCredentialReport | Generates (or, within 4 hours of the last one, reuses) the account's credential report. |
+| GetCredentialReport | Returns the most recently generated credential report as Base64-encoded CSV. |
+
+`Filter`, `MaxItems` and `Marker` are not honored: the response always includes everything, with
+`IsTruncated` always `false`. `AttachmentCount` and `PermissionsBoundaryUsageCount` are computed by
+scanning the account's own users, groups and roles rather than read off a stored counter, so they
+are correctly scoped to the calling account even for an AWS-managed policy (see the note on
+`IamService.getAccountAuthorizationDetails` for why that distinction matters). Policy documents are
+returned as plain JSON, not URL-encoded as AWS documents them; this matches every other IAM action
+that returns a policy document (`GetPolicyVersion`, `GetRolePolicy`, and so on), none of which
+URL-encode either.
+
+The credential report holds the 23 columns AWS documents, always led by a `<root_account>` row.
+Floci does not model root account credentials at all (`GetAccountSummary`'s
+`AccountPasswordPresent`/`AccountAccessKeysPresent` are always zero for the same reason), so that
+row is placeholder values throughout. MFA devices and X.509 signing certificates are not modeled
+for IAM users either, so `mfa_active` and every `cert_*` column are always `FALSE`/`N/A`; access
+key last-used tracking (date, region, service) is not modeled, so those three columns are always
+`N/A` too. `password_last_used` is likewise not tracked, so it is always `no_information`.
+`password_last_changed` reflects an `UpdateLoginProfile` password change, not just
+`CreateLoginProfile`. `additional_credentials_info` is Floci's own wording, since AWS does not
+document the exact text; in practice it is unreachable, since `CreateAccessKey` already enforces
+the real 2-key-per-user quota. Generating a report is effectively instant, so `GenerateCredentialReport` never actually
+returns `INPROGRESS`, and a `GetCredentialReport` call right after it always finds the report
+ready. `GenerateCredentialReport`'s `State`/`Description` for the no-report-exists case match AWS's
+own documented example response (`STARTED` / "No report exists. Starting a new report generation
+task"); the wording for the report-expired case is Floci's own, since AWS does not document it.
+
+### Organizations Root Access
+
+| Action | Description |
+|--------|-------------|
+| ListOrganizationsFeatures | Lists the centralized root access features that are currently enabled. |
+| EnableOrganizationsRootCredentialsManagement | Enables the `RootCredentialsManagement` feature. |
+| DisableOrganizationsRootCredentialsManagement | Disables the `RootCredentialsManagement` feature. |
+| EnableOrganizationsRootSessions | Enables the `RootSessions` feature. |
+| DisableOrganizationsRootSessions | Disables the `RootSessions` feature. |
+
+Only the set of enabled features is stored, and enabling a feature twice is idempotent. Floci does not
+model root credentials or root sessions themselves, so the flags change what `ListOrganizationsFeatures`
+returns and nothing else.
+
+### Unmodeled Lists
+
+| Action | Description |
+|--------|-------------|
+| ListMFADevices | Always returns an empty list. It does not check that the user exists, where AWS returns `NoSuchEntity` for an unknown user. |
+| ListServerCertificates | Always returns an empty list. |
+
+MFA devices and server certificates are not stored, and no action creates them.
 
 ## AWS Managed Policies
 
@@ -310,7 +513,9 @@ Requests signed with the seeded access key return the deployer user ARN from `st
 
 By default Floci accepts any credentials without enforcing IAM policies — all requests are allowed through regardless of what policies are attached to the calling identity. This preserves backward compatibility and keeps the default setup frictionless.
 
-Setting `enforcement-enabled: true` activates the policy evaluator as a JAX-RS request filter. Every inbound request is then evaluated against the identity-based policies of the calling IAM user or assumed role before it reaches the service handler.
+Setting `enforcement-enabled: true` activates the policy evaluator as a JAX-RS request filter. Every inbound request is then evaluated against the identity-based policies of the calling IAM user or assumed role before it reaches the service handler. This includes IAM's own management actions (`iam:CreateUser`, `iam:CreateGroup`, `iam:AttachUserPolicy`, `iam:DeleteUser`, ...): a user whose policies only grant, say, `s3:*` receives `AccessDenied` when calling them.
+
+The startup banner reports the effective state (`IAM: policy enforcement enabled` / `disabled`). If requests you expect to be denied keep succeeding, check that line first: the flag is only read under the name below, and any other spelling (for example `FLOCI_IAM_STRICT_VALIDATION`, which does not exist) is silently ignored, leaving the permissive default in place.
 
 ### Enable enforcement
 
@@ -365,8 +570,7 @@ floci:
 
 SCP semantics match AWS: SCPs never grant permissions — they cap what identity policies
 may allow; the organization's **management account is exempt**; and an account outside
-any organization is unaffected. The `test` credential and unknown access keys are never
-SCP-denied.
+any organization is unaffected. The `test` credential is never SCP-denied.
 
 **The account-root principal is subject to SCPs.** floci's account root is a bare
 12-digit account-id access key (the LocalStack multi-account convention). It carries no
@@ -378,8 +582,8 @@ allow-everything root identity and evaluates the request against the SCP chain. 
 case **SCPs apply and nothing else does** — no identity policies, permission boundary, or
 session policy attaches to the bare account key. If the account has no effective SCP
 ceiling (the management account, an account outside any organization, or the SCP type
-disabled), the bare key still bypasses enforcement entirely, and unknown `AKIA…` keys
-always bypass unconditionally.
+disabled), the bare key still bypasses enforcement entirely. An `AKIA…` key that exists
+nowhere is rejected rather than bypassed.
 
 ### Bypass rules
 
@@ -388,7 +592,8 @@ These identities always bypass enforcement (backward-compatible defaults):
 | Identity | Behaviour |
 |---|---|
 | Access key `test` (the default dev credential) | Always allowed — no policy lookup |
-| Unknown access key (not in IAM store) | Always allowed — backward-compatible with pre-existing keys |
+| Access key that exists nowhere | **Rejected** with `403`: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services |
+| Credential the filter cannot map to policies, such as a session carrying no role ARN | Allowed: it is a real credential, so rejecting it would refuse an authenticated caller |
 | No `Authorization` header | Allowed — unauthenticated path (e.g. health checks) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
 
@@ -442,6 +647,21 @@ floci populates:
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucketTagging`
   and `s3:DeleteBucket` (the bucket). A request naming several EC2 resources is evaluated
   once per resource and denied when any of them fails the condition, as on AWS.
+- `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
+  `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
+  `s3:DeleteObjectTagging` and `s3:PutObjectTagging`. A `versionId` in the request selects the
+  version whose tags are read. **`s3:DeleteObject` and `s3:PutObject` do not receive this key**, as measured on AWS.
+  An allow conditioned on it denies the delete of a correctly tagged object, and a create cannot
+  be gated on tags an object does not have yet.
+- `s3:RequestObjectTag/<key>`: a tag the request asks to attach. `s3:PutObject` reads these
+  from the `x-amz-tagging` header and `s3:PutObjectTagging` from the `<Tagging>` body. Any pair
+  that does not decode is dropped, so a policy conditioned on the key denies such a request. Where
+  enforcement lets it through, the handler still answers a malformed header with
+  `400 InvalidTag`. `s3:RequestObjectTagKeys` is **not** populated, so a condition on it never
+  matches.
+- A `PutObject` carrying `If-Match` is authorized as `s3:GetObject` as well, and that second
+  check is made without the object's tags in the context, as measured on AWS. `If-None-Match`
+  needs no such permission.
 - `aws:PrincipalArn`: the caller's ARN, resolved from the signing access key. It is the
   IAM-user ARN for a user access key, the assumed-role ARN for an STS session, and
   `arn:aws:iam::<account>:root` for the bare account-id key (floci's account-root principal),
@@ -545,6 +765,28 @@ request itself still passes through the filter). Both are deliberate non-goals �
 would require IAM to resolve the caller's organization directly, which is the dependency the
 lazily-resolved `ScpProvider` exists to avoid.
 
+## Unsigned requests
+
+With enforcement on, a request carrying no `Authorization` header is refused with
+`403 MissingAuthenticationToken` when its wire shape names a management operation: a JSON, CBOR or
+Query request, identified by `X-Amz-Target`, an rpcv2 path or an `Action` parameter.
+
+Two carve-outs, both deliberate.
+
+**Operations AWS serves without credentials are still allowed.** Signing up or signing in to a
+Cognito user pool, and `AssumeRoleWithWebIdentity`, happen before the caller has any AWS
+credentials, so AWS marks them as needing none and Floci does the same. The list is taken from the
+`authtype: none` trait in AWS's own service models and covers the Cognito user-pool and identity
+flows and the two web-identity and SAML `AssumeRole` calls. A Cognito `Admin*` operation is not in that set and does require a signature.
+
+The refusal arrives in the encoding the request used: XML for Query, CBOR for a CBOR request, JSON
+otherwise.
+
+**REST requests are not checked.** The same filter sees the API Gateway execute path, Lambda
+function URLs, CloudFront serving, the Cognito OIDC endpoints and Floci's own health endpoint, all
+of which are unsigned by design, and a REST request does not say which service will serve it. An
+unsigned REST call therefore still reaches the service, including an unsigned S3 call.
+
 ## Bypass rules
 
 Enforcement is deliberately permissive in a few cases, so that enabling it does not break workloads
@@ -553,8 +795,11 @@ the emulator cannot reason about:
 | Case | Behaviour |
 | --- | --- |
 | Unresolvable action | Allowed. An action the registry cannot resolve is not evaluated. |
+| No `Authorization` header, RPC protocol | **Rejected** with `403 MissingAuthenticationToken`, unless the operation is one AWS itself serves without credentials. |
+| No `Authorization` header, REST protocol | Allowed. This filter also sees the API Gateway execute path, Lambda function URLs, CloudFront serving and the Cognito OIDC endpoints, which are unsigned by design. |
 | `sts:GetCallerIdentity` | Always allowed — AWS returns caller identity even when a policy denies it. |
-| Unknown access key | Allowed. A key that resolves to no IAM identity bypasses enforcement. |
+| Access key that exists nowhere | **Rejected** with `403`, in each protocol's own vocabulary: `InvalidAccessKeyId` for S3, `InvalidClientTokenId` for Query services, `UnrecognizedClientException` for JSON services. Allowing it would let any string authorize the request. |
+| Known credential with no mappable caller context | Allowed. A stored session carrying no role ARN is a real credential, so it is not treated as unauthenticated. |
 | Bare account-id key with no SCP ceiling | Allowed. With no organization or SCP enforcement off, the account root keeps the historical bypass. |
 | Bare account-id key **with** an SCP ceiling | Enforced as the account root, bounded by the SCP chain. |
 

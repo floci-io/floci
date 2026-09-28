@@ -1,12 +1,11 @@
 package io.github.hectorvent.floci.services.docdb;
 
+import io.github.hectorvent.floci.testing.RdsAndDocDbMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
@@ -21,22 +20,14 @@ import static org.hamcrest.Matchers.not;
  * CLIs sign with the {@code rds} scope, and Floci accepts {@code docdb} as well.
  */
 @QuarkusTest
-@TestProfile(RdsFamilyListingIntegrationTest.NoContainersProfile.class)
+@TestProfile(RdsAndDocDbMockProfile.class)
 class RdsFamilyListingIntegrationTest {
-
-    public static class NoContainersProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.rds.mock", "true",
-                          "floci.services.docdb.mock", "true");
-        }
-    }
 
     private static final String AURORA = "family-aurora";
     private static final String DOCS = "family-docs";
     private static final String DOCS_INSTANCE = "family-docs-1";
 
-    private static io.restassured.specification.RequestSpecification query(String scope, String region, String action) {
+    private static RequestSpecification query(String scope, String region, String action) {
         return given().header("Authorization",
                         "AWS4-HMAC-SHA256 Credential=test/20260615/" + region + "/" + scope + "/aws4_request, "
                         + "SignedHeaders=content-type;host, Signature=test")

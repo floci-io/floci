@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.storage;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
@@ -14,6 +15,15 @@ import java.util.function.Predicate;
 public interface StorageBackend<K, V> {
 
     void put(K key, V value);
+
+    /**
+     * Store several entries as one logical write. Backends that can persist a batch more
+     * efficiently should override this method; the default preserves compatibility for
+     * lightweight and service-specific implementations.
+     */
+    default void putAll(Map<K, V> entries) {
+        entries.forEach(this::put);
+    }
 
     Optional<V> get(K key);
 

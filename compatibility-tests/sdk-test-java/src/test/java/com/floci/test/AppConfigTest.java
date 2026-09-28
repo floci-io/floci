@@ -9,6 +9,7 @@ import software.amazon.awssdk.services.appconfigdata.model.BadRequestException;
 import software.amazon.awssdk.services.appconfigdata.model.GetLatestConfigurationRequest;
 import software.amazon.awssdk.services.appconfigdata.model.GetLatestConfigurationResponse;
 import software.amazon.awssdk.services.appconfigdata.model.StartConfigurationSessionRequest;
+import software.amazon.awssdk.services.appconfigdata.model.StartConfigurationSessionResponse;
 
 import java.nio.charset.StandardCharsets;
 
@@ -472,5 +473,74 @@ class AppConfigTest {
         assertThat(appConfig.getDeploymentStrategy(GetDeploymentStrategyRequest.builder()
                 .deploymentStrategyId("AppConfig.AllAtOnce").build()).id())
                 .isEqualTo("AppConfig.AllAtOnce");
+    }
+
+    @Test
+    @Order(55)
+    @DisplayName("GetLatestConfiguration resolves basic Feature Flags to retrieval-time format")
+    void getLatestConfigurationReturnsFeatureFlagsRetrievalFormat() {
+        String featureFlagsAppId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name(TestFixtures.uniqueName("feature-flags-app"))
+                .build()).id();
+        String featureFlagsEnvId = appConfig.createEnvironment(CreateEnvironmentRequest.builder()
+                .applicationId(featureFlagsAppId)
+                .name("test")
+                .build()).id();
+        String featureFlagsProfileId = appConfig.createConfigurationProfile(
+                CreateConfigurationProfileRequest.builder()
+                        .applicationId(featureFlagsAppId)
+                        .name("flags")
+                        .locationUri("hosted")
+                        .type("AWS.AppConfig.FeatureFlags")
+                        .build()).id();
+        String deploymentContent = "{\"flags\":{\"enabled\":{\"name\":\"enabled\"},"
+                + "\"disabled\":{\"name\":\"disabled\"}},\"values\":{"
+                + "\"enabled\":{\"enabled\":true,\"number\":0,\"beta\":false,"
+                + "\"_createdAt\":\"created\",\"_updatedAt\":\"updated\"},"
+                + "\"disabled\":{\"enabled\":false,\"secret\":\"must-not-leak\"}},"
+                + "\"version\":\"1\"}";
+
+        CreateHostedConfigurationVersionResponse version = appConfig.createHostedConfigurationVersion(
+                CreateHostedConfigurationVersionRequest.builder()
+                        .applicationId(featureFlagsAppId)
+                        .configurationProfileId(featureFlagsProfileId)
+                        .content(SdkBytes.fromString(deploymentContent, StandardCharsets.UTF_8))
+                        .contentType("application/json")
+                        .build());
+        assertThat(version.versionNumber()).isEqualTo(1);
+
+        GetHostedConfigurationVersionResponse stored = appConfig.getHostedConfigurationVersion(
+                GetHostedConfigurationVersionRequest.builder()
+                        .applicationId(featureFlagsAppId)
+                        .configurationProfileId(featureFlagsProfileId)
+                        .versionNumber(1)
+                        .build());
+        assertThat(stored.content().asString(StandardCharsets.UTF_8)).isEqualTo(deploymentContent);
+
+        appConfig.startDeployment(StartDeploymentRequest.builder()
+                .applicationId(featureFlagsAppId)
+                .environmentId(featureFlagsEnvId)
+                .configurationProfileId(featureFlagsProfileId)
+                .configurationVersion("1")
+                .deploymentStrategyId("AppConfig.AllAtOnce")
+                .build());
+
+        StartConfigurationSessionResponse session = appConfigData.startConfigurationSession(
+                StartConfigurationSessionRequest.builder()
+                        .applicationIdentifier(featureFlagsAppId)
+                        .environmentIdentifier(featureFlagsEnvId)
+                        .configurationProfileIdentifier(featureFlagsProfileId)
+                        .build());
+        GetLatestConfigurationResponse response = appConfigData.getLatestConfiguration(
+                GetLatestConfigurationRequest.builder()
+                        .configurationToken(session.initialConfigurationToken())
+                        .build());
+
+        assertThat(response.configuration().asString(StandardCharsets.UTF_8))
+                .isEqualTo("{\"enabled\":{\"enabled\":true,\"number\":0,\"beta\":false},"
+                        + "\"disabled\":{\"enabled\":false}}");
+        assertThat(response.contentType()).startsWith("application/json");
+        assertThat(response.versionLabel()).isEqualTo("1");
+        assertThat(response.nextPollConfigurationToken()).isNotBlank();
     }
 }

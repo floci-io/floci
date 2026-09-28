@@ -36,7 +36,7 @@ final class ProjectionEvaluator {
         if (item == null || projectionExpression == null || projectionExpression.isBlank()) {
             return (ObjectNode) item;
         }
-        validateExpression(projectionExpression);
+        validateExpression(projectionExpression, exprAttrNames);
         PathTrie root = new PathTrie();
         for (String rawPath : splitProjectionPaths(projectionExpression)) {
             List<PathSegment> segments = resolvePath(rawPath.trim(), exprAttrNames);
@@ -88,9 +88,57 @@ final class ProjectionEvaluator {
                 "Invalid " + expressionType + ": Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
     }
 
-    static void validateExpression(String expression) {
+    static void validateExpression(String expression, JsonNode exprAttrNames) {
         validateSyntax(expression, "ProjectionExpression");
         DynamoDbReservedWords.check(expression, "ProjectionExpression");
+        validatePaths(expression, exprAttrNames);
+    }
+
+    /**
+     * Rejects an undefined #alias, and any two paths where one covers the other.
+     * DynamoDB applies both before the read, so a request that matches nothing still fails.
+     */
+    static void validatePaths(String expression, JsonNode exprAttrNames) {
+        if (expression == null || expression.isBlank()) {
+            return;
+        }
+        List<List<PathSegment>> paths = new ArrayList<>();
+        for (String rawPath : splitProjectionPaths(expression)) {
+            List<PathSegment> segments = resolvePath(rawPath.trim(), exprAttrNames, true);
+            if (!segments.isEmpty()) {
+                paths.add(segments);
+            }
+        }
+        for (int i = 0; i < paths.size(); i++) {
+            List<PathSegment> first = paths.get(i);
+            for (int j = i + 1; j < paths.size(); j++) {
+                List<PathSegment> second = paths.get(j);
+                if (covers(first, second) || covers(second, first)) {
+                    throw new AwsException("ValidationException",
+                            "Invalid ProjectionExpression: Two document paths overlap with each other; "
+                            + "must remove or rewrite one of these paths; path one: " + render(first)
+                            + ", path two: " + render(second), 400);
+                }
+            }
+        }
+    }
+
+    private static boolean covers(List<PathSegment> outer, List<PathSegment> inner) {
+        return outer.size() <= inner.size() && inner.subList(0, outer.size()).equals(outer);
+    }
+
+    // DynamoDB prints a document path as its elements inside brackets, with a list
+    // index carrying brackets of its own: a.b is [a, b] and l[0] is [l, [0]].
+    private static String render(List<PathSegment> segments) {
+        StringBuilder rendered = new StringBuilder("[");
+        for (int i = 0; i < segments.size(); i++) {
+            if (i > 0) {
+                rendered.append(", ");
+            }
+            PathSegment segment = segments.get(i);
+            rendered.append(segment.isIndex() ? "[" + segment.index() + "]" : segment.name());
+        }
+        return rendered.append(']').toString();
     }
 
     // ── Path splitting ──
@@ -133,6 +181,11 @@ final class ProjectionEvaluator {
     }
 
     private static List<PathSegment> resolvePath(String path, JsonNode exprAttrNames) {
+        return resolvePath(path, exprAttrNames, false);
+    }
+
+    private static List<PathSegment> resolvePath(String path, JsonNode exprAttrNames,
+                                                 boolean requireDefinedNames) {
         List<PathSegment> segments = new ArrayList<>();
         // Tokenize on dots, preserving [n] bracket indices
         String[] parts = path.split("\\.");
@@ -142,7 +195,7 @@ final class ProjectionEvaluator {
             if (bracketIdx >= 0) {
                 String name = part.substring(0, bracketIdx);
                 if (!name.isEmpty()) {
-                    segments.add(PathSegment.name(resolveSegment(name, exprAttrNames)));
+                    segments.add(PathSegment.name(resolveSegment(name, exprAttrNames, requireDefinedNames)));
                 }
                 // Parse each [n] suffix
                 String rest = part.substring(bracketIdx);
@@ -156,7 +209,7 @@ final class ProjectionEvaluator {
                     i = close + 1;
                 }
             } else {
-                segments.add(PathSegment.name(resolveSegment(part, exprAttrNames)));
+                segments.add(PathSegment.name(resolveSegment(part, exprAttrNames, requireDefinedNames)));
             }
         }
         return segments;
@@ -189,10 +242,18 @@ final class ProjectionEvaluator {
         }
     }
 
-    private static String resolveSegment(String seg, JsonNode exprAttrNames) {
-        if (seg.startsWith("#") && exprAttrNames != null) {
-            JsonNode resolved = exprAttrNames.get(seg);
-            return resolved != null ? resolved.asText() : seg;
+    private static String resolveSegment(String seg, JsonNode exprAttrNames, boolean requireDefinedNames) {
+        if (!seg.startsWith("#")) {
+            return seg;
+        }
+        JsonNode resolved = exprAttrNames != null ? exprAttrNames.get(seg) : null;
+        if (resolved != null) {
+            return resolved.asText();
+        }
+        if (requireDefinedNames) {
+            throw new AwsException("ValidationException",
+                    "Invalid ProjectionExpression: An expression attribute name used in the document path "
+                    + "is not defined; attribute name: " + seg, 400);
         }
         return seg;
     }

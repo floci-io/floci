@@ -3,16 +3,45 @@ package io.github.hectorvent.floci.services.s3;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import org.jboss.logging.Logger;
 
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
 
 final class S3PublicAccessEvaluator {
 
     private static final Logger LOG = Logger.getLogger(S3PublicAccessEvaluator.class);
+
+    /**
+     * The condition keys that, pinned to a fixed value, keep a statement with a wildcard
+     * principal out of Block Public Access's definition of public.
+     */
+    private static final Set<String> NON_PUBLIC_CONDITION_KEYS = Set.of(
+            "aws:principalarn",
+            "aws:principalaccount",
+            "aws:principalorgid",
+            "aws:principalorgpaths",
+            "aws:sourcearn",
+            "aws:sourcevpc",
+            "aws:sourcevpce",
+            "aws:sourceowner",
+            "aws:sourceaccount",
+            "aws:userid",
+            "s3:dataaccesspointarn",
+            "s3:dataaccesspointaccount");
+
+    /** Recognised like the keys above, but the value additionally has to be a narrow range. */
+    private static final String SOURCE_IP_CONDITION_KEY = "aws:sourceip";
+    private static final String DATA_ACCESS_POINT_ARN_CONDITION_KEY = "s3:dataaccesspointarn";
+    private static final Pattern BUCKET_POLICY_ACCESS_POINT_ARN = Pattern.compile(
+            "arn:[a-z0-9-]+:s3:[a-z0-9-]+:[0-9]{12}:accesspoint/[a-zA-Z0-9*?._-]+");
 
     enum PublicAccessDecision {
         ALLOW,
@@ -121,12 +150,176 @@ final class S3PublicAccessEvaluator {
         }
     }
 
-    static String bucketArn(String bucketName) {
-        return "arn:aws:s3:::" + bucketName;
+    /**
+     * Whether Block Public Access considers this bucket policy public. AWS begins by assuming a
+     * policy is public and then looks for a reason it is not: a statement that grants to everyone
+     * is non-public only when it pins one of the recognised condition keys to a fixed value, one
+     * containing neither a wildcard nor an IAM policy variable. A single public statement makes
+     * the whole policy public, which is what {@code RestrictPublicBuckets} keys off.
+     *
+     * <p>Bucket policies can use a wildcard in the access point name when the account is fixed.
+     * Floci does not model access points, so the different access-point-policy rule does not apply.
+     */
+    static boolean policyIsPublic(ObjectMapper objectMapper, String policy) {
+        if (policy == null || policy.isBlank()) {
+            return false;
+        }
+        try {
+            JsonNode statements = objectMapper.readTree(policy).path("Statement");
+            Iterable<JsonNode> iterable = statements.isArray() ? statements : List.of(statements);
+            for (JsonNode statement : iterable) {
+                if (statementIsPublic(statement)) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (JsonProcessingException e) {
+            LOG.debugv("Failed to evaluate S3 bucket policy status: {0}", e.getMessage());
+            return false;
+        }
     }
 
-    static String objectArn(String bucketName, String key) {
-        return bucketArn(bucketName) + "/" + key;
+    private static boolean statementIsPublic(JsonNode statement) {
+        if (statement == null || !statement.isObject()) {
+            return false;
+        }
+        if (!"Allow".equalsIgnoreCase(statement.path("Effect").asText(""))) {
+            return false;
+        }
+        if (!grantsToEveryone(statement)) {
+            return false;
+        }
+        return !conditionPinsToFixedValues(statement.path("Condition"));
+    }
+
+    private static boolean grantsToEveryone(JsonNode statement) {
+        if (statement.hasNonNull("Principal")) {
+            return hasPublicPrincipal(statement.path("Principal"));
+        }
+        // An Allow on NotPrincipal grants to everyone the statement does not name.
+        return statement.hasNonNull("NotPrincipal");
+    }
+
+    private static boolean conditionPinsToFixedValues(JsonNode conditions) {
+        if (conditions == null || !conditions.isObject()) {
+            return false;
+        }
+        Iterator<Map.Entry<String, JsonNode>> operators = conditions.fields();
+        while (operators.hasNext()) {
+            Map.Entry<String, JsonNode> operator = operators.next();
+            String operatorName = operator.getKey();
+            if (operatorName.regionMatches(true, 0, "ForAnyValue:", 0, "ForAnyValue:".length())) {
+                operatorName = operatorName.substring("ForAnyValue:".length());
+            }
+            if (!operator.getValue().isObject() || !operatorNarrowsAccess(operatorName)) {
+                continue;
+            }
+            Iterator<Map.Entry<String, JsonNode>> entries = operator.getValue().fields();
+            while (entries.hasNext()) {
+                Map.Entry<String, JsonNode> entry = entries.next();
+                String key = entry.getKey().toLowerCase(Locale.ROOT);
+                if (DATA_ACCESS_POINT_ARN_CONDITION_KEY.equals(key)
+                        && allValuesFixed(entry.getValue(), S3PublicAccessEvaluator::isFixedAccountAccessPointArn)) {
+                    return true;
+                }
+                if (NON_PUBLIC_CONDITION_KEYS.contains(key)
+                        && !operatorName.equalsIgnoreCase("IpAddress")
+                        && allValuesFixed(entry.getValue(), S3PublicAccessEvaluator::isFixedValue)) {
+                    return true;
+                }
+                if (SOURCE_IP_CONDITION_KEY.equals(key)
+                        && operatorName.equalsIgnoreCase("IpAddress")
+                        && allSourceIpRangesNarrow(entry.getValue())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean operatorNarrowsAccess(String operator) {
+        return switch (operator.toLowerCase(Locale.ROOT)) {
+            case "stringequals", "stringlike", "arnequals", "arnlike", "ipaddress" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean allValuesFixed(JsonNode value, Predicate<String> isFixed) {
+        if (value == null || value.isNull()) {
+            return false;
+        }
+        if (value.isTextual()) {
+            return isFixed.test(value.asText());
+        }
+        if (value.isArray() && !value.isEmpty()) {
+            for (JsonNode item : value) {
+                if (!item.isTextual() || !isFixed.test(item.asText())) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isFixedValue(String value) {
+        return !value.isEmpty()
+                && value.indexOf('*') < 0
+                && value.indexOf('?') < 0
+                && !value.contains("${");
+    }
+
+    private static boolean isFixedAccountAccessPointArn(String value) {
+        return BUCKET_POLICY_ACCESS_POINT_ARN.matcher(value).matches();
+    }
+
+    private static boolean allSourceIpRangesNarrow(JsonNode value) {
+        if (value == null || value.isNull()) {
+            return false;
+        }
+        if (value.isTextual()) {
+            return isNarrowCidr(value.asText());
+        }
+        if (value.isArray() && !value.isEmpty()) {
+            for (JsonNode item : value) {
+                if (!item.isTextual() || !isNarrowCidr(item.asText())) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * AWS still calls a policy public when it is conditioned on an {@code aws:SourceIp} range
+     * broader than /8 for IPv4 or /32 for IPv6, so only a prefix at least that long makes the
+     * statement non-public. A bare address carries no prefix and is as narrow as a range gets.
+     */
+    private static boolean isNarrowCidr(String cidr) {
+        int slash = cidr.indexOf('/');
+        if (slash < 0) {
+            return isFixedValue(cidr);
+        }
+        String address = cidr.substring(0, slash);
+        if (!isFixedValue(address)) {
+            return false;
+        }
+        try {
+            int prefixLength = Integer.parseInt(cidr.substring(slash + 1).trim());
+            return address.indexOf(':') >= 0 ? prefixLength >= 32 : prefixLength >= 8;
+        } catch (NumberFormatException e) {
+            LOG.debugv("Treating aws:SourceIp value with an unparseable prefix as public: {0}", cidr);
+            return false;
+        }
+    }
+
+    static String bucketArn(String partition, String bucketName) {
+        return AwsArnUtils.Arn.global(partition, "s3", "", bucketName).toString();
+    }
+
+    static String objectArn(String partition, String bucketName, String key) {
+        return bucketArn(partition, bucketName) + "/" + key;
     }
 
     private static boolean statementMatchesPublicPrincipalActionResource(JsonNode statement, String action, String resourceArn) {

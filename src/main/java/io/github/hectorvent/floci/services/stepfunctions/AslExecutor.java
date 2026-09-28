@@ -4,12 +4,19 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbItemAccess;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
@@ -27,9 +34,11 @@ import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
+import io.github.hectorvent.floci.services.lambda.LambdaTargetResolver;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.rdsdata.RdsDataService;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
@@ -40,6 +49,7 @@ import io.github.hectorvent.floci.services.stepfunctions.model.MockedResponseSte
 import io.github.hectorvent.floci.services.stepfunctions.model.MockedTestCase;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -61,15 +71,13 @@ import io.vertx.mutiny.core.Vertx;
 import io.vertx.mutiny.ext.web.client.HttpRequest;
 import io.vertx.mutiny.ext.web.client.HttpResponse;
 import io.vertx.mutiny.ext.web.client.WebClient;
-import io.quarkus.arc.Arc;
-import io.quarkus.arc.ArcContainer;
-import io.quarkus.arc.ManagedContext;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -78,9 +86,12 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -114,6 +125,7 @@ public class AslExecutor {
 
     /** AWS starts no child execution with an input over 256 KiB, batched or not. */
     private static final int MAX_BATCH_INPUT_BYTES = 256 * 1024;
+    private static final int ITEM_READER_MAX_ITEMS = 100_000_000;
 
     private enum MapItemsSource {
         DEFAULT,
@@ -141,7 +153,6 @@ public class AslExecutor {
     }
 
     private static final Logger LOG = Logger.getLogger(AslExecutor.class);
-    private static final int MAX_WAIT_SECONDS = 30;
     // How long a Task waits for its token when the state declares no TimeoutSeconds. AWS lets it
     // run for a year; the emulator would rather free the worker thread.
     private static final int DEFAULT_TASK_TOKEN_TIMEOUT_SECONDS = 300;
@@ -177,8 +188,6 @@ public class AslExecutor {
             Set.of("MD5", "SHA-1", "SHA-256", "SHA-384", "SHA-512");
 
     private static final String QUERY_LANGUAGE_JSONATA = "JSONata";
-    private static final String AWS_SDK_SFN_PREFIX = "arn:aws:states:::aws-sdk:sfn:";
-    private static final String AWS_SDK_SCHEDULER_PREFIX = "arn:aws:states:::aws-sdk:scheduler:";
 
     /**
      * A timestamp inside an {@code aws-sdk:} Task result is the SDK's ISO-8601 rendering of an
@@ -225,8 +234,8 @@ public class AslExecutor {
             "warning");
 
     private final LambdaExecutorService lambdaExecutor;
-    private final LambdaFunctionStore functionStore;
-    private final DynamoDbService dynamoDbService;
+    private final LambdaTargetResolver targetResolver;
+    private final DynamoDbFacade dynamoDb;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
     private final SqsJsonHandler sqsJsonHandler;
     private final SnsJsonHandler snsJsonHandler;
@@ -238,6 +247,7 @@ public class AslExecutor {
     private final EventBridgeHandler eventBridgeHandler;
     private final SchedulerService schedulerService;
     private final SchedulerController schedulerController;
+    private final RdsDataService rdsDataService;
     private final ObjectMapper objectMapper;
     private final Configuration jsonPathConfiguration;
     private final JsonataEvaluator jsonataEvaluator;
@@ -245,6 +255,10 @@ public class AslExecutor {
     private final WebClient webClient;
     private final EmulatorConfig config;
     private final CustomResourceLiveness customResourceLiveness;
+    private final Clock clock;
+    private final Sleeper sleeper;
+    // Null in production, where the ceiling comes from the Step Functions config. Tests pin it.
+    private final Integer maxWaitSecondsOverride;
     private final Map<String, ActiveMockExecution> activeMocks = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "sfn-executor");
@@ -253,21 +267,41 @@ public class AslExecutor {
     });
 
     @Inject
-    public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
-                       DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+    public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
+                       DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
                        SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                        CloudFormationQueryHandler cloudFormationHandler,
                        Ec2Service ec2Service, S3Service s3Service,
                        EcsService ecsService, EcsJsonHandler ecsJsonHandler,
                        EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
-                       SchedulerController schedulerController,
+                       SchedulerController schedulerController, RdsDataService rdsDataService,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                        CustomResourceLiveness customResourceLiveness) {
+        this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
+                sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
+                ec2Service, s3Service, ecsService, ecsJsonHandler,
+                eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
+                objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null);
+    }
+
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
+                SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                CloudFormationQueryHandler cloudFormationHandler,
+                Ec2Service ec2Service, S3Service s3Service,
+                EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                SchedulerController schedulerController, RdsDataService rdsDataService,
+                ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
+                Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
+                CustomResourceLiveness customResourceLiveness,
+                Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
         this.customResourceLiveness = customResourceLiveness;
         this.lambdaExecutor = lambdaExecutor;
-        this.functionStore = functionStore;
-        this.dynamoDbService = dynamoDbService;
+        this.targetResolver = targetResolver;
+        this.dynamoDb = dynamoDb;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
         this.sqsJsonHandler = sqsJsonHandler;
         this.snsJsonHandler = snsJsonHandler;
@@ -279,6 +313,7 @@ public class AslExecutor {
         this.eventBridgeHandler = eventBridgeHandler;
         this.schedulerService = schedulerService;
         this.schedulerController = schedulerController;
+        this.rdsDataService = rdsDataService;
         this.objectMapper = objectMapper;
         this.jsonPathConfiguration = objectMapper == null
                 ? null
@@ -289,6 +324,9 @@ public class AslExecutor {
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
         this.config = config;
+        this.clock = clock;
+        this.sleeper = sleeper;
+        this.maxWaitSecondsOverride = maxWaitSecondsOverride;
         if (vertx != null) {
             // This can be optimized further
             // TODO Set WebclientOptions useragent to Amazon|StepFunctions|HttpInvoke|{{{{region}}}}
@@ -296,6 +334,49 @@ public class AslExecutor {
         } else {
             webClient = null;
         }
+    }
+
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
+                SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                CloudFormationQueryHandler cloudFormationHandler,
+                Ec2Service ec2Service, S3Service s3Service,
+                EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                SchedulerController schedulerController,
+                ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
+                Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
+                CustomResourceLiveness customResourceLiveness,
+                Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
+        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDb, dynamoDbJsonHandler,
+                sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
+                ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
+                schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
+                vertx, customResourceLiveness, clock, sleeper, maxWaitSecondsOverride);
+    }
+
+    /** Test seam: lets Wait states be exercised without real time passing. */
+    @FunctionalInterface
+    interface Sleeper {
+        void sleep(long nanos) throws InterruptedException;
+    }
+
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
+                DynamoDbFacade dynamoDb, DynamoDbJsonHandler dynamoDbJsonHandler,
+                SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                CloudFormationQueryHandler cloudFormationHandler,
+                Ec2Service ec2Service, S3Service s3Service,
+                EcsService ecsService, EcsJsonHandler ecsJsonHandler,
+                EventBridgeHandler eventBridgeHandler, SchedulerService schedulerService,
+                SchedulerController schedulerController,
+                ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
+                Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
+                CustomResourceLiveness customResourceLiveness) {
+        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDb, dynamoDbJsonHandler,
+                sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
+                ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
+                schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
+                vertx, customResourceLiveness);
     }
 
     @PreDestroy
@@ -394,33 +475,12 @@ public class AslExecutor {
      * pool would otherwise run with no active scope and resolve its Task integrations against the
      * default account instead of the execution's. Each branch thread therefore activates its own
      * scope here, mirroring how {@link #executeAsync}/{@link #executeSync} wrap {@code doExecute}.
+     * Delegates to {@link RequestScopes#callAsChecked}, which restores a previously active scope's
+     * account so a reused thread does not keep the execution's account.
      */
     private <T> T callUnderExecutionAccount(StateMachine sm, Callable<T> body) throws Exception {
         String accountId = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
-        ArcContainer container = Arc.container();
-        if (accountId == null || accountId.isBlank() || container == null || !container.isRunning()) {
-            return body.call();
-        }
-        ManagedContext requestContext = container.requestContext();
-        boolean alreadyActive = requestContext.isActive();
-        if (!alreadyActive) {
-            requestContext.activate();
-        }
-        // Execution runs on a background worker that normally has no active scope. If it did run
-        // inside an already-active scope, restore its previous account afterwards so we don't leave
-        // the execution's account behind on a reused thread.
-        RequestContext ctx = container.instance(RequestContext.class).get();
-        String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
-        try {
-            ctx.setAccountId(accountId);
-            return body.call();
-        } finally {
-            if (!alreadyActive) {
-                requestContext.terminate();
-            } else {
-                ctx.setAccountId(previousAccountId);
-            }
-        }
+        return RequestScopes.callAsChecked(accountId == null || accountId.isBlank() ? null : accountId, body);
     }
 
     private void doExecute(StateMachine sm, Execution exec, List<HistoryEvent> history,
@@ -623,7 +683,8 @@ public class AslExecutor {
      */
     private void sleepBeforeRetry(JsonNode retrier, int attemptsUsed, long executionDeadlineNanos)
             throws InterruptedException {
-        var delaySeconds = retryDelaySeconds(retrier, attemptsUsed, ThreadLocalRandom.current().nextDouble());
+        double delaySeconds = retryDelaySeconds(retrier, attemptsUsed, ThreadLocalRandom.current().nextDouble(),
+                maxWaitSeconds());
         sleepOrTimeOutExecution((long) (delaySeconds * 1_000_000_000L), executionDeadlineNanos);
     }
 
@@ -632,13 +693,13 @@ public class AslExecutor {
      * the retrier declares {@code JitterStrategy: FULL}, which draws the delay uniformly between
      * zero and the computed delay. Jitter applies after the caps, matching AWS.
      */
-    static double retryDelaySeconds(JsonNode retrier, int attemptsUsed, double random) {
+    static double retryDelaySeconds(JsonNode retrier, int attemptsUsed, double random, int maxWaitSeconds) {
         var interval = retrier.path("IntervalSeconds").asDouble(1.0);
         var backoffRate = retrier.path("BackoffRate").asDouble(2.0);
         var delaySeconds = interval * Math.pow(backoffRate, attemptsUsed - 1.0);
-        var maxDelay = retrier.path("MaxDelaySeconds").asDouble(MAX_WAIT_SECONDS);
-        // Like the Wait state, cap the delay at MAX_WAIT_SECONDS to keep emulated runs fast.
-        delaySeconds = Math.min(delaySeconds, Math.min(maxDelay, MAX_WAIT_SECONDS));
+        double maxDelay = retrier.path("MaxDelaySeconds").asDouble(maxWaitSeconds);
+        // Like the Wait state, cap the delay at the configured ceiling to keep emulated runs fast.
+        delaySeconds = Math.min(delaySeconds, Math.min(maxDelay, maxWaitSeconds));
         if ("FULL".equals(retrier.path("JitterStrategy").asText(null))) {
             delaySeconds *= random;
         }
@@ -679,7 +740,7 @@ public class AslExecutor {
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
 
-        JsonNode effectiveInput = applyInputPath(stateDef, input);
+        JsonNode effectiveInput = applyInputPath(stateDef, input, context);
 
         // Pass states transform their input through Parameters (with intrinsics), then a static
         // Result overrides if present.
@@ -692,7 +753,7 @@ public class AslExecutor {
         }
 
         JsonNode output = mergeResult(stateDef, input, result);
-        output = applyOutputPath(stateDef, input, output);
+        output = applyOutputPath(stateDef, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -726,7 +787,7 @@ public class AslExecutor {
                         stateDef.get("Arguments"), "Arguments", statesVar, variables);
             }
         } else {
-            effectiveInput = applyInputPath(stateDef, input);
+            effectiveInput = applyInputPath(stateDef, input, context);
             if (stateDef.has("Parameters")) {
                 effectiveInput = resolveParameters(stateDef.get("Parameters"), effectiveInput, context);
             }
@@ -788,7 +849,7 @@ public class AslExecutor {
                 taskResult = resolveParameters(stateDef.get("ResultSelector"), taskResult, context);
             }
             JsonNode output = mergeResult(stateDef, input, taskResult);
-            output = applyOutputPath(stateDef, input, output);
+            output = applyOutputPath(stateDef, output, context);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
     }
@@ -898,7 +959,7 @@ public class AslExecutor {
      * Extracts the Lambda function name from a reference that may be a bare name, a name with a
      * version/alias qualifier (e.g. "name:$LATEST"), or a full/partial function ARN
      * (e.g. "arn:aws:lambda:region:acct:function:name[:qualifier]"). The qualifier is dropped
-     * because the function store is keyed by name. Taking the last ':'-segment is wrong for a
+     * here and read by {@link #extractLambdaQualifier}. Taking the last ':'-segment is wrong for a
      * qualified ARN — it yields the qualifier (e.g. "$LATEST") instead of the function name.
      */
     static String extractLambdaFunctionName(String ref) {
@@ -916,6 +977,27 @@ public class AslExecutor {
             fn = fn.substring(0, colon);
         }
         return fn;
+    }
+
+    static String extractLambdaQualifier(String ref) {
+        if (ref == null) {
+            return null;
+        }
+        int fi = ref.indexOf(":function:");
+        String fn = fi >= 0 ? ref.substring(fi + ":function:".length()) : ref;
+        int colon = fn.indexOf(':');
+        return colon >= 0 ? fn.substring(colon + 1) : null;
+    }
+
+    private LambdaFunction resolveLambdaFunction(String region, String name, String qualifier) {
+        try {
+            return targetResolver.resolveInvokeTarget(region, name, qualifier);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
     }
 
     /**
@@ -962,17 +1044,21 @@ public class AslExecutor {
                                     long executionDeadlineNanos, JsonNode rawParameters) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
+        String functionRef = null;
         JsonNode lambdaPayload = input;
         boolean optimizedLambdaInvoke = false;
+        StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
 
         if (resource.contains(":lambda:") && resource.contains(":function:")) {
-            // Direct Lambda ARN: arn:aws:lambda:region:account:function:name[:qualifier]
+            // Direct Lambda ARN: arn:<partition>:lambda:region:account:function:name[:qualifier]
+            functionRef = resource;
             functionName = extractLambdaFunctionName(resource);
-        } else if (resource.equals("arn:aws:states:::lambda:invoke")) {
+        } else if (integration != null && integration.is("lambda", "invoke")) {
             // Optimized Lambda integration — function name and payload come from resolved input
             optimizedLambdaInvoke = true;
             String fnRef = input.path("FunctionName").asText(null);
             if (fnRef != null) {
+                functionRef = fnRef;
                 functionName = extractLambdaFunctionName(fnRef);
             }
             JsonNode payload = input.path("Payload");
@@ -982,9 +1068,9 @@ public class AslExecutor {
         }
 
         if (functionName != null) {
-            // Extract region from the state machine ARN: arn:aws:states:REGION:...
+            // Extract region from the state machine ARN: arn:<partition>:states:REGION:...
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            LambdaFunction fn = functionStore.get(region, functionName).orElse(null);
+            LambdaFunction fn = resolveLambdaFunction(region, functionName, extractLambdaQualifier(functionRef));
             if (fn == null) {
                 // A missing function is a task failure on AWS, so it must stay reachable for
                 // Retry and Catch instead of surfacing as States.Runtime.
@@ -1017,9 +1103,13 @@ public class AslExecutor {
             return invokeResponse;
         }
 
+        if (integration == null) {
+            return invokeNonIntegrationResource(resource, input, taskToken);
+        }
+
         // DynamoDB optimized integrations (4 actions)
-        if (resource.startsWith("arn:aws:states:::dynamodb:")) {
-            String operation = resource.substring("arn:aws:states:::dynamodb:".length());
+        if (integration.isOptimizedService("dynamodb")) {
+            String operation = integration.api();
             String region = extractRegionFromArn(sm.getStateMachineArn());
             try {
                 return invokeDynamoDb(operation, input, region);
@@ -1029,103 +1119,114 @@ public class AslExecutor {
         }
 
         // AWS SDK service integrations: DynamoDB
-        if (resource.startsWith("arn:aws:states:::aws-sdk:dynamodb:")) {
-            String camelCaseAction = resource.substring("arn:aws:states:::aws-sdk:dynamodb:".length());
+        if (integration.isSdkService("dynamodb")) {
+            String camelCaseAction = integration.api();
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeAwsSdkDynamoDb(camelCaseAction, input, region);
         }
 
+        // AWS SDK service integration: RDS Data API ExecuteStatement
+        if (integration.isSdkService("rdsdata")) {
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeAwsSdkRdsData(integration, input, region);
+        }
+
         // SQS optimized integration
-        if (resource.equals("arn:aws:states:::sqs:sendMessage")) {
+        if (integration.is("sqs", "sendMessage")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeOptimizedSqsSendMessage(input, region);
         }
 
         // HTTP optimized integration
-        if (resource.equals("arn:aws:states:::http:invoke")) {
+        if (integration.is("http", "invoke")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeHttp(input, region);
         }
 
         // AWS SDK service integration: SQS SendMessage
-        if (resource.equals("arn:aws:states:::aws-sdk:sqs:sendMessage")) {
+        if (integration.isSdk("sqs", "sendMessage")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeAwsSdkSqsSendMessage(input, region);
         }
 
         // SNS optimized integration
-        if (resource.equals("arn:aws:states:::sns:publish")) {
+        if (integration.is("sns", "publish")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeSnsPublish(input, region, "SNS.");
         }
 
         // AWS SDK service integration: SNS Publish
-        if (resource.equals("arn:aws:states:::aws-sdk:sns:publish")) {
+        if (integration.isSdk("sns", "publish")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeSnsPublish(input, region, "Sns.");
         }
 
         // AWS SDK service integration: CloudFormation (query protocol → JSON)
-        if (resource.startsWith("arn:aws:states:::aws-sdk:cloudformation:")) {
-            String action = resource.substring("arn:aws:states:::aws-sdk:cloudformation:".length());
+        if (integration.isSdkService("cloudformation")) {
+            String action = integration.api();
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeAwsSdkCloudFormation(action, input, region);
         }
 
         // AWS SDK service integration: EC2 DescribeRegions
-        if (resource.equals("arn:aws:states:::aws-sdk:ec2:describeRegions")) {
+        if (integration.isSdk("ec2", "describeRegions")) {
             return invokeAwsSdkEc2DescribeRegions();
         }
 
         // S3 PutObject — optimized and aws-sdk integrations
-        if (resource.equals("arn:aws:states:::s3:putObject")
-                || resource.equals("arn:aws:states:::aws-sdk:s3:putObject")) {
+        if (integration.is("s3", "putObject") || integration.isSdk("s3", "putObject")) {
             return invokeS3PutObject(input);
         }
 
-        // ECS optimized integration: arn:aws:states:::ecs:runTask (request-response, .sync, .waitForTaskToken).
+        // ECS optimized integration: arn:<partition>:states:::ecs:runTask (request-response, .sync, .waitForTaskToken).
         // The .waitForTaskToken suffix is already stripped by executeTaskState, so a waitForTaskToken
         // variant arrives here as the bare runTask resource and simply launches the task while the token
         // future blocks for SendTaskSuccess.
-        if (resource.startsWith("arn:aws:states:::ecs:runTask")) {
+        if (integration.isAnySuffix("ecs", "runTask")) {
             // A non-null taskToken means the original resource ended with .waitForTaskToken (stripped
             // upstream). Its failure semantics match .sync — a task placement failure fails the state —
             // whereas request-response returns the {Tasks,Failures} envelope without failing the state.
             String mode = taskToken != null
                     ? ".waitForTaskToken"
-                    : resource.substring("arn:aws:states:::ecs:runTask".length());
+                    : integration.suffix();
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeEcsRunTask(mode, input, region, executionDeadlineNanos);
         }
 
         // AWS SDK service integrations: Step Functions
-        if (resource.startsWith(AWS_SDK_SFN_PREFIX)) {
-            String action = resource.substring(AWS_SDK_SFN_PREFIX.length());
+        if (integration.isSdkService("sfn")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeAwsSdkSfn(action, input, region);
+            return invokeAwsSdkSfn(integration, input, region);
         }
 
         // AWS SDK service integrations: EventBridge Scheduler
-        if (resource.startsWith(AWS_SDK_SCHEDULER_PREFIX)) {
-            String action = resource.substring(AWS_SDK_SCHEDULER_PREFIX.length());
+        if (integration.isSdkService("scheduler")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeAwsSdkScheduler(action, input, region);
+            return invokeAwsSdkScheduler(integration, input, region);
         }
 
         // EventBridge optimized integration
-        if (resource.equals("arn:aws:states:::events:putEvents")) {
+        if (integration.is("events", "putEvents")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeOptimizedPutEvents(input, region);
         }
 
         // Nested state machine integration
-        if (resource.startsWith("arn:aws:states:::states:startExecution")) {
-            String mode = resource.substring("arn:aws:states:::states:startExecution".length());
+        if (integration.isAnySuffix("states", "startExecution")) {
+            String mode = integration.suffix();
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeNestedStateMachine(mode, input, region, executionDeadlineNanos, rawParameters);
         }
 
-        // Activity resource: arn:aws:states:{region}:{account}:activity:{name}
+        throw new FailStateException("States.TaskFailed", "Unsupported resource: " + resource);
+    }
+
+    /**
+     * A Task resource that is not a service-integration id: an activity ARN, or something this
+     * emulator does not implement.
+     */
+    private JsonNode invokeNonIntegrationResource(String resource, JsonNode input, String taskToken) throws Exception {
+        // Activity resource: arn:<partition>:states:{region}:{account}:activity:{name}
         if (isActivityArn(resource)) {
             if (taskToken == null) {
                 throw new FailStateException("States.TaskFailed",
@@ -1150,7 +1251,7 @@ public class AslExecutor {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         flattenQueryParams(input, "", params);
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = cloudFormationHandler.handle(pascalAction, params, region);
         } catch (AwsException e) {
@@ -1177,10 +1278,12 @@ public class AslExecutor {
     private JsonNode invokeAwsSdkEc2DescribeRegions() {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode regions = objectMapper.createArrayNode();
-        for (String name : ec2Service.describeRegions()) {
+        AwsPartition partition = AwsPartitions.byId(
+                RegionResolver.effectivePartition(config.defaultRegion(), config.partitions().id()));
+        for (AwsPartition.Region name : ec2Service.describeRegions(partition, false)) {
             ObjectNode region = objectMapper.createObjectNode();
-            region.put("RegionName", name);
-            region.put("Endpoint", "ec2." + name + ".amazonaws.com");
+            region.put("RegionName", name.id());
+            region.put("Endpoint", partition.regionalHostname("ec2", name.id()));
             region.put("OptInStatus", "opt-in-not-required");
             regions.add(region);
         }
@@ -1248,15 +1351,15 @@ public class AslExecutor {
      * {@code aws-sdk:sfn:startExecution} from the optimized {@code states:startExecution}
      * handled by {@link #invokeNestedStateMachine}.
      */
-    private JsonNode invokeAwsSdkSfn(String action, JsonNode input, String region) throws Exception {
-        return switch (action) {
+    private JsonNode invokeAwsSdkSfn(StatesIntegration integration, JsonNode input, String region) throws Exception {
+        return switch (integration.api()) {
             case "startExecution" -> invokeAwsSdkSfnStartExecution(input, region);
             case "startSyncExecution" -> invokeAwsSdkSfnStartSyncExecution(input, region);
             case "sendTaskSuccess" -> invokeAwsSdkSfnSendTaskSuccess(input);
             case "sendTaskFailure" -> invokeAwsSdkSfnSendTaskFailure(input);
             case "describeMapRun" -> invokeAwsSdkSfnDescribeMapRun(input);
             default -> throw new FailStateException("States.TaskFailed",
-                    "Unsupported resource: " + AWS_SDK_SFN_PREFIX + action);
+                    "Unsupported resource: " + integration.withoutSuffix());
         };
     }
 
@@ -1371,21 +1474,27 @@ public class AslExecutor {
     }
 
     /**
-     * AWS SDK integrations for {@code scheduler:createSchedule} and {@code scheduler:updateSchedule}.
-     * The Task {@code Arguments} are the CreateSchedule body with {@code Name} folded in, so they go
-     * through the controller's parse, and both actions answer with the schedule ARN alone. The parse
-     * rejects a malformed {@code Target} with the same {@code AwsException} the service raises, so it
-     * belongs inside the translation that makes those failures reachable for {@code Retry} and
-     * {@code Catch}.
+     * AWS SDK integrations for Scheduler. Create and update parse the full schedule request and
+     * return its ARN. Delete accepts only the schedule identity and returns the empty SDK response.
+     * Service and parsing failures stay inside the translation that makes them reachable for
+     * {@code Retry} and {@code Catch}.
      */
-    private JsonNode invokeAwsSdkScheduler(String action, JsonNode input, String region) {
+    private JsonNode invokeAwsSdkScheduler(StatesIntegration integration, JsonNode input, String region) {
+        String action = integration.api();
+        boolean deleting = "deleteSchedule".equals(action);
         boolean creating = "createSchedule".equals(action);
-        if (!creating && !"updateSchedule".equals(action)) {
+        if (!creating && !deleting && !"updateSchedule".equals(action)) {
             throw new FailStateException("States.TaskFailed",
-                    "Unsupported resource: " + AWS_SDK_SCHEDULER_PREFIX + action);
+                    "Unsupported resource: " + integration.withoutSuffix());
         }
         try {
-            ScheduleRequest request = schedulerController.parseScheduleRequest(input);
+            if (deleting) {
+                schedulerService.deleteSchedule(input.path("Name").asText(null),
+                        input.path("GroupName").asText(null), region);
+                return objectMapper.createObjectNode();
+            }
+            ScheduleRequest request = schedulerController.parseScheduleRequest(
+                    normalizeAwsSdkSchedulerInput(input));
             request.setName(input.path("Name").asText(null));
             Schedule schedule = creating
                     ? schedulerService.createSchedule(request, region)
@@ -1398,6 +1507,50 @@ public class AslExecutor {
         }
     }
 
+    /** Converts SDK task values to the representations used by the Scheduler wire parser. */
+    private JsonNode normalizeAwsSdkSchedulerInput(JsonNode input) {
+        JsonNode normalized = input.deepCopy();
+        if (normalized instanceof ObjectNode object) {
+            normalizeAwsSdkSchedulerTimestamp(object, "StartDate");
+            normalizeAwsSdkSchedulerTimestamp(object, "EndDate");
+            normalizeAwsSdkSchedulerTargetInput(object);
+        }
+        return normalized;
+    }
+
+    private void normalizeAwsSdkSchedulerTargetInput(ObjectNode input) {
+        JsonNode target = input.get("Target");
+        if (!(target instanceof ObjectNode targetObject)) {
+            return;
+        }
+        JsonNode value = targetObject.get("Input");
+        if (value == null || value.isNull() || value.isTextual()) {
+            return;
+        }
+        targetObject.put("Input", value.toString());
+    }
+
+    private void normalizeAwsSdkSchedulerTimestamp(ObjectNode input, String field) {
+        JsonNode value = input.get(field);
+        if (value == null || value.isNull() || value.isNumber()) {
+            return;
+        }
+        if (!value.isTextual()) {
+            throw malformedAwsSdkSchedulerTimestamp(field);
+        }
+        try {
+            Instant instant = Instant.parse(value.textValue());
+            input.put(field, instant.getEpochSecond() + instant.getNano() / 1_000_000_000d);
+        } catch (DateTimeParseException ignored) {
+            // AWS exposes SDK timestamp deserialization failures as SerializationException.
+            throw malformedAwsSdkSchedulerTimestamp(field);
+        }
+    }
+
+    private static AwsException malformedAwsSdkSchedulerTimestamp(String field) {
+        return new AwsException("SerializationException", field + " must be an RFC 3339 timestamp.", 400);
+    }
+
     /**
      * Optimized EventBridge integration for {@code events:putEvents}. The task result is the
      * PutEvents response itself, and one failed entry fails the whole task with
@@ -1405,9 +1558,9 @@ public class AslExecutor {
      * which entry it was.
      */
     private JsonNode invokeOptimizedPutEvents(JsonNode input, String region) throws Exception {
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
-            response = eventBridgeHandler.handle("PutEvents", input, region);
+            response = eventBridgeHandler.handle("PutEvents", normalizeOptimizedPutEventsInput(input), region);
         } catch (AwsException e) {
             throw new FailStateException(sdkExceptionName("EventBridge", e.getErrorCode()), e.getMessage());
         }
@@ -1418,6 +1571,20 @@ public class AslExecutor {
             throw new FailStateException("EventBridge.FailedEntry", objectMapper.writeValueAsString(result));
         }
         return result;
+    }
+
+    private JsonNode normalizeOptimizedPutEventsInput(JsonNode input) throws JsonProcessingException {
+        JsonNode normalized = input.deepCopy();
+        JsonNode entries = normalized.path("Entries");
+        if (entries.isArray()) {
+            for (JsonNode entry : entries) {
+                JsonNode detail = entry.get("Detail");
+                if (entry.isObject() && detail != null && detail.isObject()) {
+                    ((ObjectNode) entry).put("Detail", objectMapper.writeValueAsString(detail));
+                }
+            }
+        }
+        return normalized;
     }
 
     /**
@@ -1787,6 +1954,7 @@ public class AslExecutor {
 
     private JsonNode invokeDynamoDb(String operation, JsonNode input, String region) {
         String tableName = input.path("TableName").asText();
+        Scope scope = dynamoDb.scope(region);
         switch (operation) {
             case "putItem" -> {
                 JsonNode item = input.path("Item");
@@ -1796,12 +1964,12 @@ public class AslExecutor {
                         ? input.get("ExpressionAttributeNames") : null;
                 JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
                         ? input.get("ExpressionAttributeValues") : null;
-                dynamoDbService.putItem(tableName, item, conditionExpr, exprAttrNames, exprAttrValues, region, "NONE");
+                dynamoDb.items().putItem(scope, tableName, item, conditionExpr, exprAttrNames, exprAttrValues);
                 return objectMapper.createObjectNode();
             }
             case "getItem" -> {
                 JsonNode key = input.path("Key");
-                JsonNode item = dynamoDbService.getItem(tableName, key, region);
+                JsonNode item = dynamoDb.items().getItem(scope, tableName, key);
                 ObjectNode result = objectMapper.createObjectNode();
                 if (item != null) {
                     result.set("Item", item);
@@ -1816,7 +1984,7 @@ public class AslExecutor {
                         ? input.get("ExpressionAttributeNames") : null;
                 JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
                         ? input.get("ExpressionAttributeValues") : null;
-                dynamoDbService.deleteItem(tableName, key, conditionExpr, exprAttrNames, exprAttrValues, region, "NONE");
+                dynamoDb.items().deleteItem(scope, tableName, key, conditionExpr, exprAttrNames, exprAttrValues);
                 return objectMapper.createObjectNode();
             }
             case "scan" -> {
@@ -1828,10 +1996,10 @@ public class AslExecutor {
                         ? input.get("ExpressionAttributeValues") : null;
                 Integer limit = input.has("Limit") ? input.get("Limit").asInt() : null;
                 JsonNode scanFilter = input.has("ScanFilter") ? input.get("ScanFilter") : null;
-                DynamoDbService.ScanResult scanResult = dynamoDbService.scan(
-                        tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null, null, region);
+                DynamoDbItemAccess.ScanPage scanResult = dynamoDb.items().scan(
+                        scope, tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null);
                 ObjectNode response = objectMapper.createObjectNode();
-                com.fasterxml.jackson.databind.node.ArrayNode items = objectMapper.createArrayNode();
+                ArrayNode items = objectMapper.createArrayNode();
                 scanResult.items().forEach(items::add);
                 response.set("Items", items);
                 response.put("Count", scanResult.items().size());
@@ -1852,16 +2020,13 @@ public class AslExecutor {
                         ? input.get("ConditionExpression").asText() : null;
                 String returnValues = input.path("ReturnValues").asText("NONE");
 
-                DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
-                        tableName, key, attributeUpdates, updateExpression,
-                        exprAttrNames, exprAttrValues, returnValues,
-                        conditionExpression, region, "NONE");
+                JsonNode attributes = dynamoDb.items().updateItem(
+                        scope, tableName, key, attributeUpdates, updateExpression,
+                        exprAttrNames, exprAttrValues, returnValues, conditionExpression);
 
                 ObjectNode response = objectMapper.createObjectNode();
-                if ("ALL_NEW".equals(returnValues) && result.newItem() != null) {
-                    response.set("Attributes", result.newItem());
-                } else if ("ALL_OLD".equals(returnValues) && result.oldItem() != null) {
-                    response.set("Attributes", result.oldItem());
+                if (attributes != null) {
+                    response.set("Attributes", attributes);
                 }
                 return response;
             }
@@ -1874,7 +2039,7 @@ public class AslExecutor {
         // Convert camelCase to PascalCase (e.g., putItem → PutItem)
         String pascalAction = Character.toUpperCase(camelCaseAction.charAt(0)) + camelCaseAction.substring(1);
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = dynamoDbJsonHandler.handle(pascalAction, input, region);
         } catch (AwsException e) {
@@ -1888,9 +2053,6 @@ public class AslExecutor {
         int status = response.getStatus();
 
         if (status >= 400) {
-            if (entity instanceof AwsErrorResponse err) {
-                throw new FailStateException("DynamoDb." + err.type(), err.message());
-            }
             if (entity instanceof JsonNode errorNode) {
                 String errorName = errorNode.path("__type").asText("UnknownError");
                 String errorMessage = errorNode.path("message").asText(
@@ -1904,6 +2066,20 @@ public class AslExecutor {
             return jsonNode;
         }
         return objectMapper.createObjectNode();
+    }
+
+    private JsonNode invokeAwsSdkRdsData(StatesIntegration integration, JsonNode input, String region) {
+        if (!"executeStatement".equals(integration.api())) {
+            throw new FailStateException("States.TaskFailed",
+                    "Unsupported resource: " + integration.withoutSuffix());
+        }
+        try {
+            JsonNode request = recaseKeys(objectMapper, input, false);
+            JsonNode response = rdsDataService.executeStatement(request, region);
+            return recaseKeys(objectMapper, response, true);
+        } catch (AwsException e) {
+            throw new FailStateException(sdkExceptionName("RdsData", e.getErrorCode()), e.getMessage());
+        }
     }
 
     private JsonNode invokeOptimizedSqsSendMessage(JsonNode input, String region) {
@@ -1932,7 +2108,7 @@ public class AslExecutor {
     }
 
     private JsonNode invokeSqsAction(String action, JsonNode input, String region, String errorPrefix, boolean awsSdkStyleErrors) {
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = sqsJsonHandler.handle(action, input, region);
         } catch (AwsException e) {
@@ -1980,7 +2156,7 @@ public class AslExecutor {
             request.put("Message", message.toString());
         }
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = snsJsonHandler.handle("Publish", request, region);
         } catch (AwsException e) {
@@ -2065,18 +2241,18 @@ public class AslExecutor {
             throw new FailStateException("States.Runtime", NO_NEXT_STATE_CAUSE);
         }
 
-        JsonNode effectiveInput = applyInputPath(stateDef, input);
+        JsonNode effectiveInput = applyInputPath(stateDef, input, context);
         JsonNode choices = stateDef.path("Choices");
         for (JsonNode choice : choices) {
             if (evaluateCondition(choice, effectiveInput, context)) {
-                JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+                JsonNode output = applyOutputPath(stateDef, effectiveInput, context);
                 return new StateResult(output, choice.path("Next").asText());
             }
         }
         // Default branch
         String defaultState = stateDef.path("Default").asText(null);
         if (defaultState != null) {
-            JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+            JsonNode output = applyOutputPath(stateDef, effectiveInput, context);
             return new StateResult(output, defaultState);
         }
         throw new FailStateException("States.Runtime", NO_NEXT_STATE_CAUSE);
@@ -2097,7 +2273,7 @@ public class AslExecutor {
     private StateResult executeWaitState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
                                          ObjectNode variables, long executionDeadlineNanos)
             throws InterruptedException {
-        int seconds = 0;
+        long waitNanos = 0;
         JsonNode effectiveInput = input;
         if (jsonata) {
             if (stateDef.has("Seconds")) {
@@ -2106,30 +2282,77 @@ public class AslExecutor {
                     JsonNode statesVar = buildStatesVar(input, null, context);
                     JsonNode result = jsonataEvaluator.evaluateField(
                             secondsNode.asText(), "Seconds", statesVar, variables);
-                    seconds = Math.min(result.asInt(), MAX_WAIT_SECONDS);
+                    waitNanos = secondsToNanos(result.asLong());
                 } else {
-                    seconds = Math.min(secondsNode.asInt(), MAX_WAIT_SECONDS);
+                    waitNanos = secondsToNanos(secondsNode.asLong());
+                }
+            } else if (stateDef.has("Timestamp")) {
+                JsonNode timestampNode = stateDef.get("Timestamp");
+                if (timestampNode.isTextual() && JsonataEvaluator.isExpression(timestampNode.asText())) {
+                    JsonNode statesVar = buildStatesVar(input, null, context);
+                    JsonNode result = jsonataEvaluator.evaluateField(
+                            timestampNode.asText(), "Timestamp", statesVar, variables);
+                    waitNanos = nanosUntil(result.asText());
+                } else {
+                    waitNanos = nanosUntil(timestampNode.asText());
                 }
             }
         } else {
-            effectiveInput = applyInputPath(stateDef, input);
+            effectiveInput = applyInputPath(stateDef, input, context);
             if (stateDef.has("Seconds")) {
-                seconds = Math.min(stateDef.get("Seconds").asInt(), MAX_WAIT_SECONDS);
+                waitNanos = secondsToNanos(stateDef.get("Seconds").asLong());
             } else if (stateDef.has("SecondsPath")) {
-                JsonNode val = resolvePath(stateDef.get("SecondsPath").asText(), effectiveInput);
-                seconds = Math.min(val.asInt(), MAX_WAIT_SECONDS);
+                JsonNode val = resolvePath(stateDef.get("SecondsPath").asText(), effectiveInput, context);
+                waitNanos = secondsToNanos(val.asLong());
+            } else if (stateDef.has("Timestamp")) {
+                waitNanos = nanosUntil(stateDef.get("Timestamp").asText());
+            } else if (stateDef.has("TimestampPath")) {
+                JsonNode val = resolvePath(stateDef.get("TimestampPath").asText(), effectiveInput, context);
+                waitNanos = nanosUntil(val.asText());
             }
         }
-        // Timestamp and TimestampPath: wait until that time or now, whichever is sooner
-        if (seconds > 0) {
-            sleepOrTimeOutExecution(TimeUnit.SECONDS.toNanos(seconds), executionDeadlineNanos);
+        if (waitNanos > 0) {
+            sleepOrTimeOutExecution(waitNanos, executionDeadlineNanos);
         }
         if (jsonata) {
             JsonNode output = applyJsonataOutput(stateDef, input, null, context, variables);
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
-        JsonNode output = applyOutputPath(stateDef, input, effectiveInput);
+        JsonNode output = applyOutputPath(stateDef, effectiveInput, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
+    }
+
+    private int maxWaitSeconds() {
+        return maxWaitSecondsOverride != null
+                ? maxWaitSecondsOverride
+                : config.services().stepfunctions().maxWaitSeconds();
+    }
+
+    private long secondsToNanos(long seconds) {
+        if (seconds <= 0) {
+            return 0;
+        }
+        return TimeUnit.SECONDS.toNanos(Math.min(seconds, maxWaitSeconds()));
+    }
+
+    /**
+     * Remaining pause for an absolute ASL {@code Timestamp}, floored at zero. The standard says to
+     * sleep until that instant; the emulator caps the pause at the configured wait ceiling so a
+     * future date cannot hold a worker for days. Tests raise that cap or inject a {@link Sleeper} to
+     * exercise longer waits without real time passing.
+     */
+    private long nanosUntil(String timestamp) {
+        Instant target;
+        try {
+            target = Instant.parse(timestamp);
+        } catch (DateTimeParseException e) {
+            throw new FailStateException("States.Runtime", "Invalid Timestamp: " + timestamp);
+        }
+        long remainingNanos = Duration.between(clock.instant(), target).toNanos();
+        if (remainingNanos <= 0) {
+            return 0;
+        }
+        return Math.min(remainingNanos, TimeUnit.SECONDS.toNanos(maxWaitSeconds()));
     }
 
     /**
@@ -2142,10 +2365,10 @@ public class AslExecutor {
             throws InterruptedException {
         long remainingNanos = executionDeadlineNanos - System.nanoTime();
         if (pauseNanos < remainingNanos) {
-            TimeUnit.NANOSECONDS.sleep(pauseNanos);
+            sleeper.sleep(pauseNanos);
             return;
         }
-        TimeUnit.NANOSECONDS.sleep(Math.max(remainingNanos, 0));
+        sleeper.sleep(Math.max(remainingNanos, 0));
         throw new ExecutionTimedOutException();
     }
 
@@ -2155,8 +2378,8 @@ public class AslExecutor {
             JsonNode output = applyJsonataOutput(stateDef, input, input, context, variables);
             return new StateResult(output, null);
         }
-        JsonNode effectiveInput = applyInputPath(stateDef, input);
-        return new StateResult(applyOutputPath(stateDef, input, effectiveInput), null);
+        JsonNode effectiveInput = applyInputPath(stateDef, input, context);
+        return new StateResult(applyOutputPath(stateDef, effectiveInput, context), null);
     }
 
     private StateResult executeFail(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
@@ -2205,7 +2428,7 @@ public class AslExecutor {
                                               String topLevelQueryLanguage, JsonNode context,
                                               ObjectNode variables, long executionDeadlineNanos)
             throws Exception {
-        JsonNode effectiveInput = jsonata ? input : applyInputPath(stateDef, input);
+        JsonNode effectiveInput = jsonata ? input : applyInputPath(stateDef, input, context);
         JsonNode branches = stateDef.path("Branches");
         chain.publish("ParallelStateStarted", null);
         var branchChains = new ArrayList<HistoryChain>();
@@ -2296,7 +2519,7 @@ public class AslExecutor {
                 ? resolveParameters(stateDef.get("ResultSelector"), results, context)
                 : results;
         JsonNode output = mergeResult(stateDef, input, selected);
-        output = applyOutputPath(stateDef, input, output);
+        output = applyOutputPath(stateDef, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -2336,7 +2559,7 @@ public class AslExecutor {
 
         // Map input-processing fields, including ItemsPath and MaxConcurrencyPath, resolve against
         // the effective state input after InputPath has been applied.
-        JsonNode mapInput = applyInputPath(stateDef, input);
+        JsonNode mapInput = applyInputPath(stateDef, input, context);
         ResolvedMapItems resolvedItems = resolveMapItems(stateDef, mapInput, jsonata, context, variables);
         JsonNode items = resolvedItems.items();
 
@@ -2544,7 +2767,7 @@ public class AslExecutor {
                 ? resolveParameters(stateDef.get("ResultSelector"), mapResult, context)
                 : mapResult;
         JsonNode output = mergeResult(stateDef, input, selected);
-        output = applyOutputPath(stateDef, input, output);
+        output = applyOutputPath(stateDef, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
@@ -2552,14 +2775,16 @@ public class AslExecutor {
      * Resolves an integer Map field from its literal, {@code <field>Path} or JSONata expression form,
      * as MaxConcurrency and the ItemBatcher limits all take. An absent field is 0. {@code minimum} is
      * the smallest accepted value, which is what separates MaxConcurrency, where 0 means the service
-     * ceiling, from a batch limit, where it is meaningless.
+     * ceiling, from a batch limit, where it is meaningless. The {@code <field>Path} form is a
+     * Reference Path, so it reads the Context Object as readily as the state input and the resolver
+     * is given both.
      */
     private int resolveMapIntegerField(JsonNode container, String field, int minimum, JsonNode mapInput,
                                        boolean jsonata, JsonNode context, ObjectNode variables) {
         JsonNode value;
         boolean jsonataExpression = false;
         if (container.has(field + "Path")) {
-            value = resolvePath(container.get(field + "Path").asText(), mapInput);
+            value = resolvePath(container.get(field + "Path").asText(), mapInput, context);
         } else if (container.has(field)) {
             value = container.get(field);
             if (jsonata && value.isTextual() && JsonataEvaluator.isExpression(value.asText())) {
@@ -2814,8 +3039,8 @@ public class AslExecutor {
             label = UUID.randomUUID().toString();
         }
         var id = UUID.randomUUID().toString();
-        return new MapRunIdentity(label, id, "arn:aws:states:" + region + ":" + account + ":mapRun:"
-                + smName + "/" + label + ":" + id);
+        return new MapRunIdentity(label, id, AwsArnUtils.Arn.of("states", region, account,
+                "mapRun:" + smName + "/" + label + ":" + id).toString());
     }
 
     private JsonNode applyResultWriter(String mapStateName, JsonNode stateDef, JsonNode input,
@@ -2966,15 +3191,15 @@ public class AslExecutor {
         }
         // NONE: emit an execution record per child, mirroring the AWS export format. The child
         // executions run under a derived state machine "<parentName>/<mapRunLabel>".
-        String childSmArn = "arn:aws:states:" + region + ":" + account + ":stateMachine:"
-                + smName + "/" + mapRunLabel;
+        String childSmArn = AwsArnUtils.Arn.of("states", region, account,
+                "stateMachine:" + smName + "/" + mapRunLabel).toString();
         for (int i = 0; i < results.size(); i++) {
             String childId = UUID.randomUUID().toString();
             long start = childTimings != null && i < childTimings.size() ? childTimings.get(i)[0] : 0L;
             long stop = childTimings != null && i < childTimings.size() ? childTimings.get(i)[1] : 0L;
             ObjectNode record = out.addObject();
-            record.put("ExecutionArn", "arn:aws:states:" + region + ":" + account + ":execution:"
-                    + smName + "/" + mapRunLabel + ":" + childId);
+            record.put("ExecutionArn", AwsArnUtils.Arn.of("states", region, account,
+                    "execution:" + smName + "/" + mapRunLabel + ":" + childId).toString());
             record.put("Input", stringifyResult(childInputs != null && i < childInputs.size()
                     ? childInputs.get(i) : NullNode.getInstance()));
             record.putObject("InputDetails").put("Included", true);
@@ -3000,13 +3225,13 @@ public class AslExecutor {
     private ArrayNode formatFailedChildren(List<FailedChild> failedChildren, String region, String account,
                                            String smName, String mapRunLabel) {
         ArrayNode out = objectMapper.createArrayNode();
-        String childSmArn = "arn:aws:states:" + region + ":" + account + ":stateMachine:"
-                + smName + "/" + mapRunLabel;
+        String childSmArn = AwsArnUtils.Arn.of("states", region, account,
+                "stateMachine:" + smName + "/" + mapRunLabel).toString();
         for (FailedChild child : failedChildren) {
             String childId = UUID.randomUUID().toString();
             ObjectNode record = out.addObject();
-            record.put("ExecutionArn", "arn:aws:states:" + region + ":" + account + ":execution:"
-                    + smName + "/" + mapRunLabel + ":" + childId);
+            record.put("ExecutionArn", AwsArnUtils.Arn.of("states", region, account,
+                    "execution:" + smName + "/" + mapRunLabel + ":" + childId).toString());
             record.put("Input", stringifyResult(child.input()));
             record.putObject("InputDetails").put("Included", true);
             record.put("Name", childId);
@@ -3069,15 +3294,20 @@ public class AslExecutor {
                                                     JsonNode context, boolean jsonata,
                                                     ObjectNode variables) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
-        if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
-            return resolveListObjectsItems(itemReader, input, context, jsonata, variables);
-        }
-        if (!"arn:aws:states:::s3:getObject".equals(resource)) {
+        StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
+        boolean listObjects = integration != null && integration.is("s3", "listObjectsV2");
+        boolean getObject = integration != null && integration.is("s3", "getObject");
+        if (!listObjects && !getObject) {
             throw new FailStateException("States.Runtime", "Unsupported ItemReader resource: " + resource);
         }
 
+        int maxItems = resolveItemReaderMaxItems(itemReader, input, jsonata, context, variables);
+        if (listObjects) {
+            return resolveListObjectsItems(itemReader, input, context, jsonata, variables, maxItems);
+        }
+
         String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
-        if (!"JSON".equals(inputType) && !"JSONL".equals(inputType)) {
+        if (!"JSON".equals(inputType) && !"JSONL".equals(inputType) && !"CSV".equals(inputType)) {
             throw new FailStateException("States.ItemReaderFailed",
                     "ItemReader InputType " + inputType + " is not yet implemented by the emulator");
         }
@@ -3092,20 +3322,24 @@ public class AslExecutor {
         try {
             S3Object object = s3Service.getObject(bucket, key);
             if ("JSONL".equals(inputType)) {
-                return new ResolvedMapItems(applyMaxItems(itemReader, readJsonLines(object.getData())),
+                return new ResolvedMapItems(applyMaxItems(maxItems, readJsonLines(object.getData())),
+                        MapItemsSource.ITEM_READER_ARRAY);
+            }
+            if ("CSV".equals(inputType)) {
+                return new ResolvedMapItems(applyMaxItems(maxItems, readCsvRows(itemReader, object.getData())),
                         MapItemsSource.ITEM_READER_ARRAY);
             }
             JsonNode items = objectMapper.readTree(object.getData());
             items = applyItemsPointer(itemReader, items);
             if (items.isObject()) {
-                return new ResolvedMapItems(applyMaxItems(itemReader, normalizeObjectItems(items)),
+                return new ResolvedMapItems(applyMaxItems(maxItems, normalizeObjectItems(items)),
                         MapItemsSource.ITEM_READER_OBJECT);
             }
             if (!items.isArray()) {
                 throw new FailStateException("States.ItemReaderFailed",
                         "Attempting to map over non-iterable node.");
             }
-            return new ResolvedMapItems(applyMaxItems(itemReader, items), MapItemsSource.ITEM_READER_ARRAY);
+            return new ResolvedMapItems(applyMaxItems(maxItems, items), MapItemsSource.ITEM_READER_ARRAY);
         } catch (AwsException e) {
             throw new FailStateException("States.ItemReaderFailed", e.getMessage());
         } catch (FailStateException e) {
@@ -3130,6 +3364,104 @@ public class AslExecutor {
         return items;
     }
 
+    /**
+     * Each data row becomes an object keyed by the headers. A row shorter than the headers pads
+     * with empty strings and a longer one drops the surplus, as on AWS. Every value is a string.
+     */
+    private ArrayNode readCsvRows(JsonNode itemReader, byte[] data) {
+        JsonNode readerConfig = itemReader.path("ReaderConfig");
+        String headerLocation = readerConfig.path("CSVHeaderLocation").asText("FIRST_ROW");
+        List<List<String>> rows = CsvParser.parseAll(new String(data, StandardCharsets.UTF_8),
+                csvDelimiter(readerConfig.path("CSVDelimiter").asText("COMMA")));
+
+        List<String> headers;
+        int firstDataRow;
+        if ("GIVEN".equals(headerLocation)) {
+            headers = new ArrayList<>();
+            for (JsonNode header : readerConfig.path("CSVHeaders")) {
+                headers.add(header.asText());
+            }
+            firstDataRow = 0;
+        } else if ("FIRST_ROW".equals(headerLocation)) {
+            headers = rows.isEmpty() ? List.of() : rows.get(0);
+            firstDataRow = 1;
+        } else {
+            throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader CSVHeaderLocation " + headerLocation + " is not supported");
+        }
+
+        ArrayNode items = objectMapper.createArrayNode();
+        for (int row = firstDataRow; row < rows.size(); row++) {
+            List<String> values = rows.get(row);
+            ObjectNode item = objectMapper.createObjectNode();
+            for (int column = 0; column < headers.size(); column++) {
+                item.put(headers.get(column), column < values.size() ? values.get(column) : "");
+            }
+            items.add(item);
+        }
+        return items;
+    }
+
+    private char csvDelimiter(String delimiter) {
+        return switch (delimiter) {
+            case "COMMA" -> ',';
+            case "PIPE" -> '|';
+            case "SEMICOLON" -> ';';
+            case "SPACE" -> ' ';
+            case "TAB" -> '\t';
+            default -> throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader CSVDelimiter " + delimiter + " is not supported");
+        };
+    }
+
+    private int resolveItemReaderMaxItems(JsonNode itemReader, JsonNode mapInput, boolean jsonata,
+                                          JsonNode context, ObjectNode variables) {
+        JsonNode readerConfig = itemReader.path("ReaderConfig");
+        boolean hasMaxItems = readerConfig.has("MaxItems");
+        boolean hasMaxItemsPath = readerConfig.has("MaxItemsPath");
+        if (hasMaxItems && hasMaxItemsPath) {
+            throw new FailStateException("States.Runtime",
+                    "ReaderConfig cannot specify both MaxItems and MaxItemsPath", "MaxItems");
+        }
+        if (jsonata && hasMaxItemsPath) {
+            throw new FailStateException("States.Runtime",
+                    "ReaderConfig.MaxItemsPath is not supported by JSONata state machines", "MaxItemsPath");
+        }
+
+        boolean jsonataExpression = hasMaxItems
+                && jsonata
+                && readerConfig.get("MaxItems").isTextual()
+                && JsonataEvaluator.isExpression(readerConfig.get("MaxItems").asText());
+        if (hasMaxItemsPath) {
+            JsonNode value = resolvePath(readerConfig.get("MaxItemsPath").asText(), mapInput, context);
+            long maxItems;
+            try {
+                maxItems = Long.parseLong(value.asText());
+            } catch (NumberFormatException e) {
+                throw new FailStateException("States.Runtime",
+                        "MaxItems must resolve to an integer of 0 or more", "MaxItems");
+            }
+            if (maxItems < 0) {
+                throw new FailStateException(
+                        "States.ItemReaderFailed", "field MaxItems must be positive", true);
+            }
+            return (int) Math.min(maxItems, ITEM_READER_MAX_ITEMS);
+        }
+
+        int maxItems = resolveMapIntegerField(
+                readerConfig, "MaxItems", 0, mapInput, jsonata, context, variables);
+        if (maxItems > ITEM_READER_MAX_ITEMS) {
+            if (jsonataExpression) {
+                return ITEM_READER_MAX_ITEMS;
+            }
+            throw new FailStateException(
+                    "States.Runtime",
+                    "MaxItems must resolve to an integer of " + ITEM_READER_MAX_ITEMS + " or less",
+                    "MaxItems");
+        }
+        return maxItems;
+    }
+
     private JsonNode resolveItemReaderParameters(JsonNode itemReader, JsonNode input, JsonNode context,
                                                  boolean jsonata, ObjectNode variables) throws Exception {
         if (jsonata && itemReader.has("Arguments")) {
@@ -3141,7 +3473,8 @@ public class AslExecutor {
     }
 
     private ResolvedMapItems resolveListObjectsItems(JsonNode itemReader, JsonNode input, JsonNode context,
-                                                     boolean jsonata, ObjectNode variables) throws Exception {
+                                                     boolean jsonata, ObjectNode variables,
+                                                     int maxItems) throws Exception {
         JsonNode parameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = parameters.path("Bucket").asText(null);
         if (bucket == null) {
@@ -3150,7 +3483,6 @@ public class AslExecutor {
         String prefix = parameters.path("Prefix").asText(null);
 
         ArrayNode items = objectMapper.createArrayNode();
-        int maxItems = maxItems(itemReader);
         try {
             // MaxItems keeps the first keys in order, so the listing itself is capped.
             for (S3Object object : s3Service.listObjects(bucket, prefix, null,
@@ -3205,12 +3537,7 @@ public class AslExecutor {
         return pointedItems;
     }
 
-    private int maxItems(JsonNode itemReader) {
-        return itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
-    }
-
-    private JsonNode applyMaxItems(JsonNode itemReader, JsonNode items) {
-        int maxItems = maxItems(itemReader);
+    private JsonNode applyMaxItems(int maxItems, JsonNode items) {
         if (maxItems <= 0 || !items.isArray() || items.size() <= maxItems) {
             return items;
         }
@@ -3385,7 +3712,12 @@ public class AslExecutor {
 
     // ──────────────────────────── Path resolution ────────────────────────────
 
-    private JsonNode applyInputPath(JsonNode stateDef, JsonNode input) {
+    /**
+     * {@code InputPath} is a Reference Path, so it may be rooted at the Context Object as well as
+     * at the state input; {@code context} is what makes a {@code $$} path resolve instead of
+     * narrowing the input to null.
+     */
+    private JsonNode applyInputPath(JsonNode stateDef, JsonNode input, JsonNode context) {
         if (!stateDef.has("InputPath")) {
             return input;
         }
@@ -3393,7 +3725,7 @@ public class AslExecutor {
         if (path == null || path.equals("null")) {
             return objectMapper.createObjectNode();
         }
-        return resolvePath(path, input);
+        return resolvePath(path, input, context);
     }
 
     private JsonNode mergeResult(JsonNode stateDef, JsonNode input, JsonNode result) throws Exception {
@@ -3410,7 +3742,8 @@ public class AslExecutor {
         }
     }
 
-    private JsonNode applyOutputPath(JsonNode stateDef, JsonNode input, JsonNode output) {
+    /** {@code OutputPath} is a Reference Path, so it reads the Context Object as InputPath does. */
+    private JsonNode applyOutputPath(JsonNode stateDef, JsonNode output, JsonNode context) {
         if (!stateDef.has("OutputPath")) {
             return output;
         }
@@ -3418,7 +3751,7 @@ public class AslExecutor {
         if (path == null || path.equals("null")) {
             return objectMapper.createObjectNode();
         }
-        return resolvePath(path, output);
+        return resolvePath(path, output, context);
     }
 
     JsonNode resolveParameters(JsonNode parameters, JsonNode input, JsonNode context) throws Exception {
@@ -4879,9 +5212,9 @@ public class AslExecutor {
         if (resource.contains(":lambda:") && resource.contains(":function:")) {
             return new TaskEventProfile("LambdaFunction", null, resource);
         }
-        if (resource.startsWith("arn:aws:states:::")) {
-            var tail = resource.substring("arn:aws:states:::".length());
-            var idx = tail.lastIndexOf(':');
+        String tail = StatesIntegration.tail(resource).orElse(null);
+        if (tail != null) {
+            int idx = tail.lastIndexOf(':');
             if (idx < 0) {
                 return new TaskEventProfile("Task", tail, tail);
             }
@@ -5140,11 +5473,11 @@ public class AslExecutor {
     }
 
     private String extractRegionFromArn(String arn) {
-        return AwsArnUtils.regionOrDefault(arn, "us-east-1");
+        return AwsArnUtils.regionOrDefault(arn, config.defaultRegion());
     }
 
-    private static String normalizeS3Region(String region) {
-        return region == null || region.isBlank() ? "us-east-1" : region;
+    private String normalizeS3Region(String region) {
+        return region == null || region.isBlank() ? config.defaultRegion() : region;
     }
 
     record StateResult(JsonNode output, String nextState) {}

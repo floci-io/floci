@@ -67,6 +67,12 @@ class S3VirtualHostFilterTest {
             "my-bucket.s3.amazonaws.com:443,            localhost, my-bucket",
             "my-bucket.s3.us-east-1.amazonaws.com,      localhost, my-bucket",
             "my-bucket.s3.eu-west-1.amazonaws.com:443,  localhost, my-bucket",
+            // The same in every other partition: the longest published suffix wins, so .cn survives
+            "my-bucket.s3.cn-north-1.amazonaws.com.cn,  localhost, my-bucket",
+            "my-bucket.s3.amazonaws.com.cn,             localhost, my-bucket",
+            "my-bucket.s3.us-gov-west-1.amazonaws.com,  localhost, my-bucket",
+            "my-bucket.s3.us-iso-east-1.c2s.ic.gov,     localhost, my-bucket",
+            "my-bucket.s3.eusc-de-east-1.amazonaws.eu,  localhost, my-bucket",
             // LocalStack-compatible domains (*.localhost.localstack.cloud resolves to 127.0.0.1 via public DNS)
             "my-bucket.s3.localhost.localstack.cloud,           localhost, my-bucket",
             "my-bucket.s3.localhost.localstack.cloud:4566,      localhost, my-bucket",
@@ -256,25 +262,6 @@ class S3VirtualHostFilterTest {
     }
 
     // --- Host resolution: HTTP/1.1 Host header vs HTTP/2 :authority fallback ---
-
-    @Test
-    void resolveHostPrefersHostHeaderOverUriAuthority() {
-        URI uri = URI.create("https://my-bucket.s3.us-east-1.localhost:4566/key.txt");
-        assertEquals("my-bucket.localhost:4566", S3VirtualHostFilter.resolveHost("my-bucket.localhost:4566", uri));
-    }
-
-    @Test
-    void resolveHostFallsBackToUriAuthorityWhenHostHeaderAbsent() {
-        // HTTP/2 request: no Host header, authority carried by the URI (:authority).
-        URI uri = URI.create("https://my-bucket.s3.us-east-1.localhost:4566/key.txt");
-        assertEquals("my-bucket.s3.us-east-1.localhost:4566", S3VirtualHostFilter.resolveHost(null, uri));
-    }
-
-    @Test
-    void resolveHostReturnsNullWhenNeitherAvailable() {
-        assertNull(S3VirtualHostFilter.resolveHost(null, null));
-        assertNull(S3VirtualHostFilter.resolveHost(null, URI.create("/relative/path")));
-    }
 
     @Test
     void http2VirtualHostedRequestResolvesBucketWithoutHostHeader() {

@@ -106,7 +106,7 @@ class CfnCustomDomainEnsureHostIntegrationTest {
         verifyNoMoreInteractions(certificateManager);
 
         cloudFormation("DeleteStack", Map.of());
-        awaitStackDeleted();
+        CfnStackWaits.awaitStackDeleted(STACK);
 
         verifyNoMoreInteractions(certificateManager);
     }
@@ -152,19 +152,5 @@ class CfnCustomDomainEnsureHostIntegrationTest {
             Thread.sleep(50);
         }
         fail("stack did not reach " + expected + " within the timeout: " + body);
-    }
-
-    private static void awaitStackDeleted() throws InterruptedException {
-        for (int i = 0; i < 200; i++) {
-            String body = describeStack();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + STACK + " was not deleted within the timeout");
     }
 }

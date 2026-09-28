@@ -92,6 +92,12 @@ public final class S3RequestSigner implements Filter {
                 signatureOverride, contentSha256, signHost);
     }
 
+    /** Signs with {@code region} in the credential scope instead of {@code us-east-1}. */
+    public S3RequestSigner inRegion(String region) {
+        return new S3RequestSigner(accessKeyId, secretKey, sessionToken, region, signedAt,
+                signatureOverride, contentSha256Override, signHost);
+    }
+
     /** Leaves {@code host} out of {@code SignedHeaders}; no real signer does this. */
     public S3RequestSigner withoutSignedHost() {
         return new S3RequestSigner(accessKeyId, secretKey, sessionToken, region, signedAt,

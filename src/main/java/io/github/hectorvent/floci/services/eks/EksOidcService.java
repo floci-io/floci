@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -67,7 +68,7 @@ public class EksOidcService implements OidcIssuerKeyLookup {
      */
     public String newIssuerUrl(String region) {
         String id = UUID.randomUUID().toString().replace("-", "").toUpperCase();
-        return "https://oidc.eks." + region + ".amazonaws.com/id/" + id;
+        return "https://" + AwsEndpoints.host("oidc.eks", region) + "/id/" + id;
     }
 
     /**
@@ -261,5 +262,37 @@ public class EksOidcService implements OidcIssuerKeyLookup {
 
     private static String base64Url(byte[] data) {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(data);
+    }
+
+    /**
+     * Exports the cluster's RSA signing key in PKCS#8 PEM format for the k3s API server's
+     * {@code --service-account-signing-key-file} argument.
+     */
+    public String exportSigningKeyPem(ClusterOidcKey key) {
+        if (key == null || key.getPrivateKey() == null) {
+            throw new IllegalArgumentException("ClusterOidcKey and its private key must not be null");
+        }
+        return toPem("PRIVATE KEY", key.getPrivateKey());
+    }
+
+    /**
+     * Exports the cluster's RSA public key in X.509 PEM format for the k3s API server's
+     * {@code --service-account-key-file} argument.
+     */
+    public String exportPublicKeyPem(ClusterOidcKey key) {
+        if (key == null || key.getPublicKey() == null) {
+            throw new IllegalArgumentException("ClusterOidcKey and its public key must not be null");
+        }
+        return toPem("PUBLIC KEY", key.getPublicKey());
+    }
+
+    private static String toPem(String type, String base64) {
+        StringBuilder pem = new StringBuilder();
+        pem.append("-----BEGIN ").append(type).append("-----\n");
+        for (int i = 0; i < base64.length(); i += 64) {
+            pem.append(base64, i, Math.min(i + 64, base64.length())).append("\n");
+        }
+        pem.append("-----END ").append(type).append("-----\n");
+        return pem.toString();
     }
 }

@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.concurrent.CountDownLatch;
 
 /**
  * Transparent TCP proxy for a single Neptune DB cluster's Gremlin endpoint.
@@ -18,6 +19,7 @@ import java.net.Socket;
  * <p>Uses Java virtual threads for non-blocking I/O.
  */
 public class NeptuneGremlinProxy {
+    private static final long RELAY_JOIN_TIMEOUT_MILLIS = 1_000;
 
     private static final Logger LOG = Logger.getLogger(NeptuneGremlinProxy.class);
 
@@ -84,13 +86,27 @@ public class NeptuneGremlinProxy {
      * for I/O-bound work can stall WebSocket frame delivery under high concurrency.
      */
     private void bridge(Socket client, Socket backend) {
+        CountDownLatch firstRelayDone = new CountDownLatch(1);
         Thread t1 = Thread.ofPlatform().daemon(true).name("neptune-relay-c2b-" + clusterId)
-                .start(() -> pipe(client, backend));
+                .start(() -> {
+                    try {
+                        pipe(client, backend);
+                    } finally {
+                        firstRelayDone.countDown();
+                    }
+                });
         Thread t2 = Thread.ofPlatform().daemon(true).name("neptune-relay-b2c-" + clusterId)
-                .start(() -> pipe(backend, client));
+                .start(() -> {
+                    try {
+                        pipe(backend, client);
+                    } finally {
+                        firstRelayDone.countDown();
+                    }
+                });
         try {
-            t1.join();
-            t2.join();
+            firstRelayDone.await();
+            t1.join(RELAY_JOIN_TIMEOUT_MILLIS);
+            t2.join(RELAY_JOIN_TIMEOUT_MILLIS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
@@ -111,10 +127,24 @@ public class NeptuneGremlinProxy {
             }
         } catch (IOException ignored) {
             // Normal when either side closes the connection
+        } finally {
+            shutdownOutput(to);
+        }
+    }
+
+    private static void shutdownOutput(Socket s) {
+        try {
+            s.shutdownOutput();
+        } catch (IOException ignored) {
+            // The bridge closes both sockets after both relay directions finish.
         }
     }
 
     private static void closeQuietly(Socket s) {
-        try { s.close(); } catch (IOException ignored) {}
+        try {
+            s.close();
+        } catch (IOException ignored) {
+            // The peer may already have closed the socket.
+        }
     }
 }

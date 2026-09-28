@@ -13,6 +13,8 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * Tests for idempotency token functionality with 1-hour TTL.
@@ -68,8 +70,8 @@ class AcmIdempotencyTest {
             .body("CertificateArn", equalTo(firstArn))
             .extract().jsonPath().getString("CertificateArn");
 
-        // ARNs should match
-        org.junit.jupiter.api.Assertions.assertEquals(firstArn, secondArn);
+        // Both should return the same certificate ARN
+        assertEquals(firstArn, secondArn);
     }
 
     @Test
@@ -110,7 +112,7 @@ class AcmIdempotencyTest {
             .extract().jsonPath().getString("CertificateArn");
 
         // ARNs should be different
-        org.junit.jupiter.api.Assertions.assertNotEquals(firstArn, secondArn);
+        assertNotEquals(firstArn, secondArn);
     }
 
     @Test
@@ -225,7 +227,7 @@ class AcmIdempotencyTest {
             .statusCode(200)
             .extract().jsonPath().getString("CertificateArn");
 
-        org.junit.jupiter.api.Assertions.assertNotEquals(firstArn, secondArn);
+        assertNotEquals(firstArn, secondArn);
     }
 
     @Test
@@ -268,6 +270,6 @@ class AcmIdempotencyTest {
             .statusCode(200)
             .extract().jsonPath().getString("CertificateArn");
 
-        org.junit.jupiter.api.Assertions.assertEquals(firstArn, secondArn);
+        assertEquals(firstArn, secondArn);
     }
 }

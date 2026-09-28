@@ -23,8 +23,7 @@ import java.util.Set;
  * <p>Description, Enabled and Tags update in place. Name, Value and GenerateDistinctId are
  * createOnly in the registry schema: AWS replaces the key for a change to any of them, and this
  * provisioner has no replacement path, so such a change is reported rather than applied to a key
- * whose value callers already hold. CustomerId and the deprecated StageKeys have no counterpart in
- * {@link ApiKey} and are accepted without effect.
+ * whose value callers already hold. The deprecated StageKeys property is accepted without effect.
  */
 @ApplicationScoped
 public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
@@ -69,6 +68,10 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
         Map<String, Object> request = new HashMap<>();
         request.put("name", name);
         request.put("description", ctx.resolveOptional(props, "Description"));
+        String customerId = ctx.resolveOptional(props, "CustomerId");
+        if (customerId != null && !customerId.isBlank()) {
+            request.put("customerId", customerId);
+        }
         Boolean enabled = resolveBoolean(props, "Enabled", ctx);
         if (enabled != null) {
             request.put("enabled", enabled);
@@ -97,15 +100,19 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
         if (value != null && !value.isBlank()) {
             rejectIfChanged("Value", existing.getValue(), value);
         }
-        // createApiKey gives a key with GenerateDistinctId=false its value as its id, so whether the
-        // two differ records which mode the key was created in.
-        boolean requestedDistinct = Boolean.TRUE.equals(resolveBoolean(props, "GenerateDistinctId", ctx));
-        boolean existingDistinct = !Objects.equals(existing.getId(), existing.getValue());
-        if (requestedDistinct != existingDistinct) {
-            throw replacementNotSupported("GenerateDistinctId");
+        Boolean requestedDistinct = resolveBoolean(props, "GenerateDistinctId", ctx);
+        if (requestedDistinct != null) {
+            boolean existingDistinct = !Objects.equals(existing.getId(), existing.getValue());
+            if (requestedDistinct != existingDistinct) {
+                throw replacementNotSupported("GenerateDistinctId");
+            }
         }
 
         List<Map<String, String>> patches = new ArrayList<>();
+        String customerId = ctx.resolveOptional(props, "CustomerId");
+        if (!Objects.equals(blankToNull(customerId), blankToNull(existing.getCustomerId()))) {
+            patches.add(patch("/customerId", customerId));
+        }
         String description = ctx.resolveOptional(props, "Description");
         if (!Objects.equals(blankToNull(description), blankToNull(existing.getDescription()))) {
             patches.add(patch("/description", description));

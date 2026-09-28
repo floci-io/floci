@@ -3,24 +3,21 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
-import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
-import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
-import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
 import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
@@ -39,8 +36,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -48,6 +43,33 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+/**
+ * What is left of the original single SES service after the store-based domain split and the
+ * per-domain controller split that followed it: the flows that no one domain service can own. A
+ * method belongs here only if it touches two or more domains or the send path, which is the
+ * survival rule the store split established. Everything else lives in the domain service that
+ * owns its store, and this class owns no store of its own.
+ *
+ * <p>What that leaves, by category:
+ * <ul>
+ *   <li>the send path, which assembles a message, applies the account, tenant and
+ *       configuration-set gates, filters suppressed recipients, relays and records it, then
+ *       publishes the send events;</li>
+ *   <li>delete guards, where a tenant association or a policy cascade has to run around another
+ *       domain's delete;</li>
+ *   <li>configuration-set option validation, which probes the identity and dedicated-IP domains
+ *       through injected callbacks;</li>
+ *   <li>the tenant to resource associations and the tenant delete cascade;</li>
+ *   <li>the ARN dispatch behind the tag operations, which routes one ARN to one of seven
+ *       domains;</li>
+ *   <li>the tenant-scoped suppression routing, which picks the tenant store or the account-wide
+ *       one from a {@code TenantName}.</li>
+ * </ul>
+ *
+ * <p>The name is historical. This is not the service for SES as a whole: SES is served by the
+ * domain services in this package, with this class above them and
+ * {@link SesSendController} and {@link SesQueryHandler} in front.
+ */
 @ApplicationScoped
 public class SesService {
 
@@ -55,20 +77,22 @@ public class SesService {
 
     private static final int MAX_BULK_DESTINATIONS = 50;
     private static final int MAX_RECIPIENTS_PER_DESTINATION = 50;
-    // Identities extracted to SesIdentityService (CRUD, verification, MAIL FROM, notifications,
-    // tags, and the DKIM state machine with its Route53 lookup). The facade keeps the cross-domain
-    // flows and send-path reads, reaching the store through its find/save.
+    // Identities live in SesIdentityService (CRUD, verification, MAIL FROM, notifications, tags,
+    // and the DKIM state machine with its Route53 lookup), which the v2 controller and the v1
+    // handler call directly. The facade keeps the cross-domain flows (create's configuration-set
+    // check, the tenant-guarded delete with its policy cascade, the default configuration set) and
+    // the send-path reads, reaching the store through its find/save.
     private final SesIdentityService identityService;
-    // Sent-email records extracted to SesSentEmailService. The send path records finished emails via
-    // it; the account and v1 statistics reads go to the service directly, inspection still reads
-    // back through the facade.
+    // Sent-email records extracted to SesSentEmailService. The send path records finished emails
+    // via it; every read goes to the service directly.
     private final SesSentEmailService sentEmailService;
     // Email templates extracted to SesTemplateService. The facade delegates; the templated-send path
     // reads via it, and ARN-dispatched tagging reads/writes via its find/save.
     private final SesTemplateService templateService;
-    // Configuration sets extracted to SesConfigurationSetService. The facade delegates; the
-    // cross-domain option validation (tracking's verified domain, delivery's dedicated pool), the
-    // send-path reads, and the ARN-dispatched tagging go through its get/find/save.
+    // Configuration sets live in SesConfigurationSetService, which the v2 controller and the v1
+    // handler call directly; the facade keeps the cross-domain option validation (tracking's
+    // verified domain, delivery's dedicated pool), the tenant-guarded delete, the send-path reads,
+    // and the ARN-dispatched tagging.
     private final SesConfigurationSetService configSetService;
     // Account suppression attributes + the per-address suppression list (two stores) extracted to
     // SesSuppressionService. The facade delegates; its send filters read via it.
@@ -81,8 +105,9 @@ public class SesService {
     // and the unsubscribe endpoint call directly; the facade only reaches it from the send-path
     // list-management orchestration and the ARN-dispatched tagging.
     private final SesContactService contactService;
-    // Identity (sending authorization) policy storage, extracted to SesPolicyService.
-    // The facade keeps the identity-existence check and delegates the rest.
+    // Identity (sending authorization) policy storage lives in SesPolicyService, which the v1
+    // handler calls directly; the facade keeps the v2 operations, which check the identity exists
+    // first, and the delete cascade.
     private final SesPolicyService policyService;
     // Custom verification email templates: storage extracted to SesCvetService, which the v2
     // controller and the v1 handler call directly for get/list/delete. The facade keeps create and
@@ -156,10 +181,6 @@ public class SesService {
         this.regionResolver = null;
     }
 
-    public Identity verifyEmailIdentity(String emailAddress, String region) {
-        return identityService.verifyEmailIdentity(emailAddress, region);
-    }
-
     /**
      * v2 CreateEmailIdentity. The identity domain builds and persists the complete record in one
      * write; only the configuration-set existence check is cross-domain, so it is passed in as the
@@ -168,13 +189,9 @@ public class SesService {
     public Identity createEmailIdentity(String emailIdentity, String configurationSetName,
                                         List<Tag> tags, String region) {
         Runnable configurationSetExistsCheck = configurationSetName == null ? null
-                : () -> getConfigurationSet(configurationSetName, region);
+                : () -> configSetService.get(configurationSetName, region);
         return identityService.createEmailIdentity(emailIdentity, configurationSetName, tags, region,
                 configurationSetExistsCheck);
-    }
-
-    public Identity verifyDomainIdentity(String domain, String region) {
-        return identityService.verifyDomainIdentity(domain, region);
     }
 
     public void deleteIdentity(String identityValue, String region) {
@@ -195,20 +212,12 @@ public class SesService {
         LOG.infov("Deleted identity: {0}", identityValue);
     }
 
-    public List<Identity> listIdentities(String identityType, String region) {
-        return identityService.listIdentities(identityType, region);
-    }
-
-    public Identity getIdentityVerificationAttributes(String identityValue, String region) {
-        return identityService.getIdentityVerificationAttributes(identityValue, region);
-    }
-
     public String sendEmail(String source, List<String> toAddresses, List<String> ccAddresses,
                             List<String> bccAddresses, List<String> replyToAddresses, String returnPath,
                             String subject, String bodyText, String bodyHtml,
                             String configurationSetName, List<MessageTag> emailTags,
                             List<MessageHeader> additionalHeaders, ListManagementOptions listManagement,
-                            String region) {
+                            String tenantName, String region) {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
@@ -227,7 +236,7 @@ public class SesService {
         Map<String, String> suppressedReasons = new LinkedHashMap<>(
                 collectSuppressedReasons(envelope, effectiveConfigSet, region));
         // putIfAbsent so a suppression-list reason already set for an address (e.g. COMPLAINT) wins
-        // over the list-management BOUNCE and keeps its synthetic event type.
+        // over the list-management opt-out and keeps its synthetic event type.
         contactService.collectListManagementOptOuts(envelope, listManagement, region,
                 SesService::extractEmailAddress).forEach(suppressedReasons::putIfAbsent);
 
@@ -251,18 +260,30 @@ public class SesService {
 
         String messageId = UUID.randomUUID().toString();
         String effectiveReturnPath = firstNonBlank(returnPath, source);
+        // SES accepts the message and then rejects it as a whole when the content scan trips, so
+        // the send still succeeds and a REJECT event is published in place of any delivery.
+        boolean rejected = SesContentScan.containsTestVirus(subject, bodyText, bodyHtml)
+                || SesContentScan.containsTestVirus(headerText(additionalHeaders));
         SentEmail email = new SentEmail(messageId, region, source, toAddresses, ccAddresses,
                 bccAddresses, replyToAddresses, subject, bodyText, bodyHtml);
         email.setReturnPath(effectiveReturnPath);
+        email.setConfigurationSetName(firstNonBlank(effectiveConfigSet));
+        email.setTenantName(firstNonBlank(tenantName));
         if (additionalHeaders != null && !additionalHeaders.isEmpty()) {
             email.setHeaders(additionalHeaders);
+        }
+        email.setEmailTags(emailTags);
+        email.setInsights(SesMessageInsights.build(envelope,
+                SesRecipientEvents.classify(envelope, suppressedReasons, rejected), email.getSentAt()));
+        if (rejected) {
+            email.discardContent(SesRecipientEvents.CONTENT_REJECT_REASON);
         }
         sentEmailService.record(region, messageId, email);
 
         List<String> relayedTo = filterUnsuppressed(toAddresses, suppressedReasons);
         List<String> relayedCc = filterUnsuppressed(ccAddresses, suppressedReasons);
         List<String> relayedBcc = filterUnsuppressed(bccAddresses, suppressedReasons);
-        if (sizeOf(relayedTo) + sizeOf(relayedCc) + sizeOf(relayedBcc) > 0) {
+        if (!rejected && sizeOf(relayedTo) + sizeOf(relayedCc) + sizeOf(relayedBcc) > 0) {
             smtpRelay.relay(SmtpRelay.RelayMessage.builder(source)
                     .returnPath(effectiveReturnPath)
                     .to(relayedTo)
@@ -276,21 +297,23 @@ public class SesService {
                     .messageId(messageId)
                     .build());
         } else {
-            LOG.infov("SES email accepted but not relayed (all recipients suppressed): messageId={0}",
-                    messageId);
+            LOG.infov("SES email accepted but not relayed ({0}): messageId={1}",
+                    rejected ? "content rejected" : "all recipients suppressed", messageId);
         }
 
-        LOG.infov("SES email sent: from={0}, to={1}, subject={2}, messageId={3}",
-                source, toAddresses, subject, messageId);
+        if (!rejected) {
+            LOG.infov("SES email sent: from={0}, to={1}, subject={2}, messageId={3}",
+                    source, toAddresses, subject, messageId);
+        }
         publishSendEvents(effectiveConfigSet, messageId, source, subject,
                 toAddresses, ccAddresses, bccAddresses, envelope,
-                suppressedReasons, emailTags, additionalHeaders, region);
+                suppressedReasons, rejected, emailTags, additionalHeaders, region);
         return messageId;
     }
 
     public String sendRawEmail(String source, List<String> destinations, String rawMessage,
                                String returnPath, String configurationSetName, List<MessageTag> emailTags,
-                               ListManagementOptions listManagement, String region) {
+                               ListManagementOptions listManagement, String tenantName, String region) {
         if (rawMessage == null || rawMessage.isBlank()) {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
@@ -299,7 +322,8 @@ public class SesService {
         // The MIME headers are always parsed: X-SES-CONFIGURATION-SET can name the configuration
         // set that decides whether events are published at all, so the configuration set cannot be
         // resolved before the message has been read.
-        SmtpRelay.RawMessageHeaders headers = SmtpRelay.parseRawHeaders(rawMessage);
+        SmtpRelay.ParsedRawMessage parsed = SmtpRelay.parseRawMessage(rawMessage);
+        SmtpRelay.RawMessageHeaders headers = parsed.headers();
         // AWS accepts the configuration set either as a request field or as the
         // X-SES-CONFIGURATION-SET header on the message itself; the request field wins.
         String requestedConfigSet = firstNonBlank(configurationSetName, headers.configurationSet());
@@ -341,33 +365,66 @@ public class SesService {
         Map<String, String> suppressedReasons = new LinkedHashMap<>(
                 collectSuppressedReasons(effectiveDestinations, effectiveConfigSet, region));
         // putIfAbsent so a suppression-list reason already set for an address (e.g. COMPLAINT) wins
-        // over the list-management BOUNCE and keeps its synthetic event type.
+        // over the list-management opt-out and keeps its synthetic event type.
         contactService.collectListManagementOptOuts(effectiveDestinations, listManagement, region,
                         SesService::extractEmailAddress)
                 .forEach(suppressedReasons::putIfAbsent);
 
         String messageId = UUID.randomUUID().toString();
+        // The scan walks the decoded MIME, so a base64 attachment does not hide the content, and a
+        // message the parser cannot read is refused outright rather than stored and relayed unseen.
+        SesContentScan.Result scan = SesContentScan.scan(parsed.bytes(), parsed.message());
+        if (scan == SesContentScan.Result.UNREADABLE) {
+            throw new AwsException("InvalidParameterValue", "Raw message could not be parsed.", 400);
+        }
+        boolean rejected = scan == SesContentScan.Result.REJECTED;
         // AWS routes bounces to the Return-Path carried by the message, falling back to the
-        // request's return path and then the sender.
-        String effectiveReturnPath = firstNonBlank(headers.returnPath(), returnPath, effectiveSource);
+        // request's return path and then the sender. A rejected message keeps nothing read off its
+        // own headers, and that header's value reaches here unparsed, so it is dropped; an envelope
+        // read off the headers is a list of parsed addresses and carries no message text.
+        String effectiveReturnPath = rejected
+                ? firstNonBlank(returnPath, effectiveSource)
+                : firstNonBlank(headers.returnPath(), returnPath, effectiveSource);
         SentEmail email = new SentEmail(messageId, region, effectiveSource, effectiveDestinations, rawMessage);
         email.setReturnPath(effectiveReturnPath);
+        email.setConfigurationSetName(firstNonBlank(effectiveConfigSet));
+        email.setTenantName(firstNonBlank(tenantName));
+        // The MIME subject is already parsed for the published events; store it too so
+        // GetMessageInsights reports it for a raw send as it does for a simple one. The parser
+        // yields "" for a missing header, and an absent subject must stay absent.
+        email.setSubject(firstNonBlank(headers.subject()));
+        // A rejected message publishes only the tags that came with the request, so the stored
+        // record keeps the same set: tags read off its headers must not resurface through insights.
+        email.setEmailTags(rejected ? requestTags(emailTags) : effectiveTags);
+        email.setInsights(SesMessageInsights.build(effectiveDestinations,
+                SesRecipientEvents.classify(effectiveDestinations, suppressedReasons, rejected),
+                email.getSentAt()));
+        if (rejected) {
+            email.discardContent(SesRecipientEvents.CONTENT_REJECT_REASON);
+        }
         sentEmailService.record(region, messageId, email);
 
         List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
-        if (!relayedDestinations.isEmpty()) {
+        if (!rejected && !relayedDestinations.isEmpty()) {
             smtpRelay.relayRaw(new SmtpRelay.RawRelayMessage(effectiveSource, effectiveReturnPath,
                     relayedDestinations, rawMessage, messageId));
         } else {
-            LOG.infov("SES raw email accepted but not relayed (all recipients suppressed): messageId={0}",
-                    messageId);
+            LOG.infov("SES raw email accepted but not relayed ({0}): messageId={1}",
+                    rejected ? "content rejected" : "all recipients suppressed", messageId);
         }
 
-        LOG.infov("SES raw email sent: from={0}, messageId={1}", effectiveSource, messageId);
+        if (!rejected) {
+            LOG.infov("SES raw email sent: from={0}, messageId={1}", effectiveSource, messageId);
+        }
+        // The recipient lists are read off the message, so a rejected one publishes none of them
+        // either; mail.destination still carries the envelope.
+        List<String> publishedTo = rejected ? List.of() : headers.to();
+        List<String> publishedCc = rejected ? List.of() : headers.cc();
+        List<String> publishedBcc = rejected ? List.of() : headers.bcc();
         publishSendEvents(effectiveConfigSet, messageId, effectiveSource,
-                headers.subject(), headers.to(), headers.cc(), headers.bcc(),
+                headers.subject(), publishedTo, publishedCc, publishedBcc,
                 effectiveDestinations,
-                suppressedReasons, effectiveTags, List.of(), region);
+                suppressedReasons, rejected, rejected ? requestTags(emailTags) : effectiveTags, List.of(), region);
         return messageId;
     }
 
@@ -389,7 +446,7 @@ public class SesService {
                                    String subject, List<String> toAddresses,
                                    List<String> ccAddresses, List<String> bccAddresses,
                                    List<String> envelopeDestinations,
-                                   Map<String, String> suppressedReasons,
+                                   Map<String, String> suppressedReasons, boolean contentRejected,
                                    List<MessageTag> emailTags,
                                    List<MessageHeader> additionalHeaders, String region) {
         if (eventPublisher == null || messageId == null) {
@@ -422,30 +479,26 @@ public class SesService {
                 : AwsArnUtils.Arn.of("ses", region, sendingAccountId,
                         "identity/" + extractEmailAddress(source)).toString();
 
-        List<String> suppressionBounceRecipients = new ArrayList<>();
-        List<String> suppressionComplaintRecipients = new ArrayList<>();
-        for (Map.Entry<String, String> e : suppressedReasons.entrySet()) {
-            if ("BOUNCE".equals(e.getValue())) {
-                suppressionBounceRecipients.add(e.getKey());
-            } else if ("COMPLAINT".equals(e.getValue())) {
-                suppressionComplaintRecipients.add(e.getKey());
-            }
-        }
-
-        for (String eventType : determineSendEventTypes(envelope,
-                suppressionBounceRecipients, suppressionComplaintRecipients)) {
+        // One event per (type, cause): a message that bounces both at the simulator and on the
+        // suppression list publishes two BOUNCE events, each naming only its own recipients.
+        // A rejected message publishes none of the scanned content: its Send and Reject events
+        // carry the envelope but no subject and no headers, where SES would include them, so the
+        // string reaches no event destination either.
+        String publishedSubject = contentRejected ? null : subject;
+        List<MessageHeader> publishedHeaders = contentRejected ? List.of() : additionalHeaders;
+        for (SesRecipientEvent event : SesRecipientEvents.classify(envelope, suppressedReasons,
+                contentRejected)) {
             if (configSetActive) {
-                eventPublisher.publish(cs, eventType, messageId, source, sourceArn, sendingAccountId,
-                        subject, toAddresses, ccAddresses, bccAddresses, envelope,
-                        suppressionBounceRecipients, suppressionComplaintRecipients,
-                        emailTags, additionalHeaders, timestamp, region);
+                eventPublisher.publish(cs, event, messageId, source, sourceArn, sendingAccountId,
+                        publishedSubject, toAddresses, ccAddresses, bccAddresses, envelope,
+                        emailTags, publishedHeaders, timestamp, region);
             }
-            IdentityNotificationTarget target = identityTargets.get(eventType);
+            IdentityNotificationTarget target = identityTargets.get(event.eventType());
             if (target != null) {
                 eventPublisher.publishIdentityNotification(target.topicArn(), target.includeHeaders(),
-                        eventType, messageId, source, sourceArn, sendingAccountId, subject,
-                        toAddresses, ccAddresses, bccAddresses, envelope, suppressionBounceRecipients,
-                        suppressionComplaintRecipients, additionalHeaders, timestamp, region);
+                        event, messageId, source, sourceArn, sendingAccountId, publishedSubject,
+                        toAddresses, ccAddresses, bccAddresses, envelope, publishedHeaders,
+                        timestamp, region);
             }
         }
     }
@@ -456,7 +509,7 @@ public class SesService {
      * domain identity's topic, per notification type; the headers-in-notifications flag is read from
      * whichever identity supplied the topic. Returns a map keyed by the {@code SEND}-style event name
      * ({@code BOUNCE}/{@code COMPLAINT}/{@code DELIVERY}) so it can be looked up directly against
-     * {@link #determineSendEventTypes}.
+     * the event types {@link SesRecipientEvents#classify} produces.
      */
     private Map<String, IdentityNotificationTarget> resolveIdentityNotificationTargets(String source,
                                                                                        String region) {
@@ -502,73 +555,15 @@ public class SesService {
 
     private record IdentityNotificationTarget(String topicArn, boolean includeHeaders) {}
 
-    private static String extractEmailAddress(String source) {
+    // Package-private: the metric aggregation normalizes a stored Source the same way the
+    // send path does, so "Name <addr>" still matches an EMAIL_IDENTITY dimension.
+    static String extractEmailAddress(String source) {
         int open = source.indexOf('<');
         int close = source.indexOf('>', open + 1);
         if (open >= 0 && close > open) {
             return source.substring(open + 1, close).trim();
         }
         return source.trim();
-    }
-
-    private static List<String> determineSendEventTypes(List<String> destinations,
-                                                        List<String> suppressionBounceRecipients,
-                                                        List<String> suppressionComplaintRecipients) {
-        List<String> events = new ArrayList<>();
-        events.add("SEND");
-        for (String d : destinations) {
-            if (SimulatorAddresses.isSuccess(d) && !events.contains("DELIVERY")) {
-                events.add("DELIVERY");
-            }
-            if (SimulatorAddresses.isBounce(d) && !events.contains("BOUNCE")) {
-                events.add("BOUNCE");
-            }
-            if (SimulatorAddresses.isComplaint(d) && !events.contains("COMPLAINT")) {
-                events.add("COMPLAINT");
-            }
-            if (SimulatorAddresses.isSuppressionList(d) && !events.contains("REJECT")) {
-                events.add("REJECT");
-            }
-        }
-        if (!suppressionBounceRecipients.isEmpty() && !events.contains("BOUNCE")) {
-            events.add("BOUNCE");
-        }
-        if (!suppressionComplaintRecipients.isEmpty() && !events.contains("COMPLAINT")) {
-            events.add("COMPLAINT");
-        }
-        return events;
-    }
-
-    public void setIdentityNotificationTopic(String identityValue, String notificationType,
-                                              String snsTopic, String region) {
-        identityService.setIdentityNotificationTopic(identityValue, notificationType, snsTopic, region);
-    }
-
-    public Identity getIdentityNotificationAttributes(String identityValue, String region) {
-        return identityService.getIdentityNotificationAttributes(identityValue, region);
-    }
-
-    public void setDkimAttributes(String identityValue, boolean signingEnabled, String region) {
-        identityService.setDkimAttributes(identityValue, signingEnabled, region);
-    }
-
-    public List<String> verifyDomainDkim(String domain, String region) {
-        return identityService.verifyDomainDkim(domain, region);
-    }
-
-    public SesIdentityService.DkimSigningResult putDkimSigningAttributes(String identityValue, String origin,
-                                                                         String signingSelector, String nextKeyLength,
-                                                                         String region) {
-        return identityService.putDkimSigningAttributes(identityValue, origin, signingSelector,
-                nextKeyLength, region);
-    }
-
-    public Identity effectiveDkimSource(Identity identity, String region) {
-        return identityService.effectiveDkimSource(identity, region);
-    }
-
-    public void setFeedbackForwardingEnabled(String identityValue, boolean enabled, String region) {
-        identityService.setFeedbackForwardingEnabled(identityValue, enabled, region);
     }
 
     public void setEmailIdentityConfigurationSet(String identityValue, String configurationSetName,
@@ -578,7 +573,7 @@ public class SesService {
                         "Identity <" + identityValue + "> does not exist.", 404));
         boolean clearing = configurationSetName == null || configurationSetName.isEmpty();
         if (!clearing) {
-            getConfigurationSet(configurationSetName, region);
+            configSetService.get(configurationSetName, region);
         }
         identity.setConfigurationSetName(clearing ? null : configurationSetName);
         identityService.save(identity, region);
@@ -635,36 +630,6 @@ public class SesService {
                     "Configuration set <" + cs + "> does not exist.", 400);
         }
         return cs;
-    }
-
-    public void setMailFromDomain(String identityValue, String mailFromDomain,
-                                   String behaviorOnMxFailure, String region) {
-        identityService.setMailFromDomain(identityValue, mailFromDomain, behaviorOnMxFailure, region);
-    }
-
-    public Identity getMailFromAttributes(String identityValue, String region) {
-        return identityService.getMailFromAttributes(identityValue, region);
-    }
-
-    public void setHeadersInNotificationsEnabled(String identityValue, String notificationType,
-                                                   boolean enabled, String region) {
-        identityService.setHeadersInNotificationsEnabled(identityValue, notificationType, enabled, region);
-    }
-
-    public List<String> getVerifiedEmailAddresses(String region) {
-        return identityService.getVerifiedEmailAddresses(region);
-    }
-
-    public List<SentEmail> getEmails() {
-        return sentEmailService.listAll();
-    }
-
-    public void clearEmails() {
-        sentEmailService.clear();
-    }
-
-    public void setConfigurationSetSendingEnabled(String configSetName, boolean enabled, String region) {
-        configSetService.setSendingEnabled(configSetName, enabled, region);
     }
 
     // ──────────────────────────── Templates ────────────────────────────
@@ -734,9 +699,11 @@ public class SesService {
                     "Email address is not verified. The following identities failed the check in region "
                             + region.toUpperCase(Locale.ROOT) + ": " + template.getFromEmailAddress(), 400);
         }
-        if (configurationSetName != null && !configurationSetName.isBlank()) {
-            getConfigurationSet(configurationSetName, region);
-        }
+        String effectiveConfigSet = resolveDefaultConfigurationSet(configurationSetName,
+                template.getFromEmailAddress(), region);
+        configSetService.validateForSending(effectiveConfigSet, region);
+        Map<String, String> suppressedReasons =
+                collectSuppressedReasons(List.of(emailAddress), effectiveConfigSet, region);
 
         // AWS registers the recipient as a pending-verification identity as part of sending the
         // verification email, so ListIdentities / GetIdentityVerificationAttributes surface it.
@@ -750,24 +717,43 @@ public class SesService {
         String renderedHtml = body + "<p>" + CUSTOM_VERIFICATION_DISCLAIMER + "</p>";
 
         String messageId = UUID.randomUUID().toString();
+        // The template content is account-supplied, so it goes through the same content scan as
+        // any other send; a rejected verification email is recorded without its body and not relayed.
+        boolean rejected = SesContentScan.containsTestVirus(template.getTemplateSubject(), renderedHtml);
         SentEmail email = new SentEmail(messageId, region, template.getFromEmailAddress(),
                 List.of(emailAddress), List.of(), List.of(), List.of(),
                 template.getTemplateSubject(), null, renderedHtml);
         email.setReturnPath(template.getFromEmailAddress());
+        email.setConfigurationSetName(firstNonBlank(effectiveConfigSet));
+        email.setInsights(SesMessageInsights.build(List.of(emailAddress),
+                SesRecipientEvents.classify(List.of(emailAddress), suppressedReasons, rejected),
+                email.getSentAt()));
+        if (rejected) {
+            email.discardContent(SesRecipientEvents.CONTENT_REJECT_REASON);
+        }
         sentEmailService.record(region, messageId, email);
-        smtpRelay.relay(SmtpRelay.RelayMessage.builder(template.getFromEmailAddress())
-                .returnPath(template.getFromEmailAddress())
-                .to(List.of(emailAddress))
-                .cc(List.of())
-                .bcc(List.of())
-                .replyTo(List.of())
-                .subject(template.getTemplateSubject())
-                .bodyHtml(renderedHtml)
-                .headers(List.of())
-                .messageId(messageId)
-                .build());
-        LOG.infov("SES custom verification email sent: to={0}, template={1}, messageId={2}",
-                emailAddress, templateName, messageId);
+        if (!rejected && suppressedReasons.isEmpty()) {
+            smtpRelay.relay(SmtpRelay.RelayMessage.builder(template.getFromEmailAddress())
+                    .returnPath(template.getFromEmailAddress())
+                    .to(List.of(emailAddress))
+                    .cc(List.of())
+                    .bcc(List.of())
+                    .replyTo(List.of())
+                    .subject(template.getTemplateSubject())
+                    .bodyHtml(renderedHtml)
+                    .headers(List.of())
+                    .messageId(messageId)
+                    .build());
+            LOG.infov("SES custom verification email sent: to={0}, template={1}, messageId={2}",
+                    emailAddress, templateName, messageId);
+        } else {
+            LOG.infov("SES custom verification email not relayed ({0}): to={1}, template={2}, messageId={3}",
+                    rejected ? "content rejected" : "recipient suppressed", emailAddress, templateName,
+                    messageId);
+        }
+        publishSendEvents(effectiveConfigSet, messageId, template.getFromEmailAddress(),
+                template.getTemplateSubject(), List.of(emailAddress), List.of(), List.of(),
+                List.of(emailAddress), suppressedReasons, rejected, List.of(), List.of(), region);
         return messageId;
     }
 
@@ -856,12 +842,8 @@ public class SesService {
                 pool -> dedicatedIpService.dedicatedIpPoolExists(pool, region));
     }
 
-    public void setConfigurationSetReputationOptions(String configSetName, boolean metricsEnabled, String region) {
-        configSetService.setReputationMetricsEnabled(configSetName, metricsEnabled, region);
-    }
-
     private boolean isVerifiedDomainIdentity(String domain, String region) {
-        Identity identity = getIdentityVerificationAttributes(domain, region);
+        Identity identity = identityService.getIdentityVerificationAttributes(domain, region);
         return identity != null && "Success".equals(identity.getVerificationStatus())
                 && "Domain".equals(identity.getIdentityType());
     }
@@ -876,26 +858,6 @@ public class SesService {
                                                       String region) {
         configSetService.updateTrackingOptions(configSetName, customRedirectDomain, region,
                 domain -> isVerifiedDomainIdentity(domain, region));
-    }
-
-    public void deleteConfigurationSetTrackingOptions(String configSetName, String region) {
-        configSetService.deleteTrackingOptions(configSetName, region);
-    }
-
-    public void setConfigurationSetArchivingOptions(String configSetName, ArchivingOptions options, String region) {
-        configSetService.setArchivingOptions(configSetName, options, region);
-    }
-
-    public void setConfigurationSetVdmOptions(String configSetName, VdmOptions options, String region) {
-        configSetService.setVdmOptions(configSetName, options, region);
-    }
-
-    public ConfigurationSet getConfigurationSet(String name, String region) {
-        return configSetService.get(name, region);
-    }
-
-    public List<ConfigurationSet> listConfigurationSets(String region) {
-        return configSetService.list(region);
     }
 
     public void deleteConfigurationSet(String name, String region) {
@@ -976,7 +938,7 @@ public class SesService {
             return;
         }
         Tenant tenant = tenantService.tenantForSending(tenantName, region, accountId);
-        String arnPrefix = "arn:aws:ses:" + region + ":" + accountId + ":";
+        String arnPrefix = "arn:" + AwsRegions.partitionFor(region) + ":ses:" + region + ":" + accountId + ":";
         List<SesTenantService.AssociationResource> used = new ArrayList<>();
         if (fromEmailAddress != null && !fromEmailAddress.isBlank()) {
             String identityName = sendIdentityName(fromEmailAddress, region);
@@ -1080,10 +1042,6 @@ public class SesService {
     // Policy storage lives in SesPolicyService; this facade forwards, and for the v2 mutators it runs
     // the identity-existence check (an Identity-domain read) first, before delegating.
 
-    public void putIdentityPolicy(String identity, String policyName, String policy, String region) {
-        policyService.putIdentityPolicy(identity, policyName, policy, region);
-    }
-
     public void createEmailIdentityPolicy(String identity, String policyName, String policy, String region) {
         requireIdentityExists(identity, region);
         policyService.createEmailIdentityPolicy(identity, policyName, policy, region);
@@ -1099,21 +1057,9 @@ public class SesService {
         return policyService.listAllPolicies(identity, region);
     }
 
-    public Map<String, String> getIdentityPolicies(String identity, List<String> policyNames, String region) {
-        return policyService.getIdentityPolicies(identity, policyNames, region);
-    }
-
-    public List<String> listIdentityPolicyNames(String identity, String region) {
-        return policyService.listIdentityPolicyNames(identity, region);
-    }
-
     public void deleteEmailIdentityPolicy(String identity, String policyName, String region) {
         requireIdentityExists(identity, region);
         policyService.deleteEmailIdentityPolicy(identity, policyName, region);
-    }
-
-    public void deleteIdentityPolicy(String identity, String policyName, String region) {
-        policyService.deleteIdentityPolicy(identity, policyName, region);
     }
 
     private void requireIdentityExists(String identity, String region) {
@@ -1121,30 +1067,6 @@ public class SesService {
             throw new AwsException("NotFoundException",
                     "Email identity <" + identity + "> does not exist.", 404);
         }
-    }
-
-    public void createConfigurationSetEventDestination(String configSetName, String eventDestinationName,
-                                                       EventDestination dest, String region) {
-        configSetService.createEventDestination(configSetName, eventDestinationName, dest, region);
-    }
-
-    public List<EventDestination> getConfigurationSetEventDestinations(String configSetName, String region) {
-        return configSetService.getEventDestinations(configSetName, region);
-    }
-
-    public void updateConfigurationSetEventDestination(String configSetName, String eventDestinationName,
-                                                       EventDestination dest, String region) {
-        configSetService.updateEventDestination(configSetName, eventDestinationName, dest, region);
-    }
-
-    public void deleteConfigurationSetEventDestination(String configSetName, String eventDestinationName,
-                                                       String region) {
-        configSetService.deleteEventDestination(configSetName, eventDestinationName, region);
-    }
-
-    public void putConfigurationSetSuppressionOptions(String configSetName,
-                                                      List<String> reasons, String region) {
-        configSetService.putSuppressionOptions(configSetName, reasons, region);
     }
 
     /**
@@ -1159,7 +1081,7 @@ public class SesService {
      */
     public List<String> getEffectiveSuppressedReasons(String configurationSetName, String region) {
         if (configurationSetName != null && !configurationSetName.isBlank()) {
-            ConfigurationSet cs = getConfigurationSet(configurationSetName, region);
+            ConfigurationSet cs = configSetService.get(configurationSetName, region);
             SuppressionOptions options = cs.getSuppressionOptions();
             if (options != null) {
                 return List.copyOf(options.getSuppressedReasons());
@@ -1168,7 +1090,6 @@ public class SesService {
         return List.copyOf(
                 suppressionService.getAccountSuppressionAttributes(region).getSuppressedReasons());
     }
-
 
     public List<Tag> listResourceTags(String arn, String region) {
         ResourceRef ref = parseSesArn(arn);
@@ -1288,31 +1209,13 @@ public class SesService {
                 resource.substring(0, slash), resource.substring(slash + 1));
     }
 
-    // ──────────────────── Suppression (account attributes + list) ────────────────────
-    // Storage lives in SesSuppressionService; the account attributes are read and written by the v2
-    // controller directly, the list operations below keep the tenant routing here, and the send
-    // filters (collectSuppressedReasons / resolveSuppressionReason) read entries back through it.
-
-    // A TenantName routes each suppression-list operation to that tenant's own list (fully separate
-    // from the account list on AWS); the reason/address validation still runs first, matching the
-    // probed precedence where request validation precedes tenant existence.
-
-    public void putSuppressedDestination(String region, String emailAddress, String reason) {
-        putSuppressedDestination(region, emailAddress, reason, null);
-    }
-
-    public SuppressedDestination getSuppressedDestination(String region, String emailAddress) {
-        return getSuppressedDestination(region, emailAddress, null);
-    }
-
-    public void deleteSuppressedDestination(String region, String emailAddress) {
-        deleteSuppressedDestination(region, emailAddress, null);
-    }
-
-    public List<SuppressedDestination> listSuppressedDestinations(String region,
-                                                                  List<String> reasonFilters) {
-        return listSuppressedDestinations(region, reasonFilters, null);
-    }
+    // ──────────────────────────── Suppression list ────────────────────────────
+    // Storage lives in SesSuppressionService, and the account-level attributes are read and
+    // written by the v2 controller through it directly. What stays here is the tenant routing: a
+    // TenantName sends the operation to that tenant's own list, which is fully separate from the
+    // account list on AWS, and the reason and address validation still runs first, matching the
+    // probed precedence where request validation precedes tenant existence. The send filters
+    // (collectSuppressedReasons, resolveSuppressionReason) read entries back through the service.
 
     public void putSuppressedDestination(String region, String emailAddress, String reason,
                                          String tenantName) {
@@ -1468,7 +1371,6 @@ public class SesService {
         return out;
     }
 
-
     /**
      * Filter out recipients whose effective suppression reason is non-null. Returns a new
      * list containing only the addresses that should reach the SMTP relay, mirroring AWS
@@ -1527,19 +1429,18 @@ public class SesService {
         return effective.contains(entry.getReason()) ? entry.getReason() : null;
     }
 
-
-
     public String sendTemplatedEmail(String source, List<String> toAddresses, List<String> ccAddresses,
                                      List<String> bccAddresses, List<String> replyToAddresses,
                                      String returnPath, String templateName, JsonNode templateData,
                                      String configurationSetName, List<MessageTag> emailTags,
                                      List<MessageHeader> additionalHeaders,
-                                     ListManagementOptions listManagement, String region) {
+                                     ListManagementOptions listManagement, String tenantName, String region) {
         EmailTemplate template = templateService.getTemplate(templateName, region);
         return sendInlineTemplatedEmail(source, toAddresses, ccAddresses, bccAddresses,
                 replyToAddresses, returnPath, template.getSubject(), template.getTextPart(),
                 template.getHtmlPart(), templateData,
-                configurationSetName, emailTags, additionalHeaders, listManagement, region);
+                configurationSetName, emailTags, additionalHeaders, listManagement,
+                tenantName, region);
     }
 
     /**
@@ -1564,13 +1465,14 @@ public class SesService {
                                             JsonNode templateData,
                                             String configurationSetName, List<MessageTag> emailTags,
                                             List<MessageHeader> additionalHeaders,
-                                            ListManagementOptions listManagement, String region) {
+                                            ListManagementOptions listManagement, String tenantName, String region) {
         requireInlineTemplateContent(subject, textPart, htmlPart);
         return sendEmail(source, toAddresses, ccAddresses, bccAddresses, replyToAddresses, returnPath,
                 SesTemplateService.applyTemplateData(subject, templateData),
                 SesTemplateService.applyTemplateData(textPart, templateData),
                 SesTemplateService.applyTemplateData(htmlPart, templateData),
-                configurationSetName, emailTags, additionalHeaders, listManagement, region);
+                configurationSetName, emailTags, additionalHeaders, listManagement,
+                tenantName, region);
     }
 
     public List<BulkEmailEntryResult> sendBulkTemplatedEmail(String source,
@@ -1582,7 +1484,7 @@ public class SesService {
                                                               String configurationSetName,
                                                               List<MessageTag> defaultEmailTags,
                                                               List<MessageHeader> defaultHeaders,
-                                                              String region) {
+                                                              String tenantName, String region) {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
@@ -1622,7 +1524,7 @@ public class SesService {
                         SesTemplateService.applyTemplateData(subject, merged),
                         SesTemplateService.applyTemplateData(textPart, merged),
                         SesTemplateService.applyTemplateData(htmlPart, merged),
-                        configurationSetName, mergedTags, mergedHeaders, null, region);
+                        configurationSetName, mergedTags, mergedHeaders, null, tenantName, region);
                 results.add(BulkEmailEntryResult.success(messageId));
             } catch (AwsException e) {
                 results.add(BulkEmailEntryResult.failure(
@@ -1632,6 +1534,24 @@ public class SesService {
             }
         }
         return results;
+    }
+
+    private static List<String> headerText(List<MessageHeader> headers) {
+        if (headers == null) {
+            return List.of();
+        }
+        List<String> texts = new ArrayList<>(headers.size() * 2);
+        for (MessageHeader header : headers) {
+            texts.add(header.name());
+            texts.add(header.value());
+        }
+        return texts;
+    }
+
+    // Tags read off the raw message's own header are scanned content; only the request's tags,
+    // which the controller validated, are published for a rejected message.
+    private static List<MessageTag> requestTags(List<MessageTag> emailTags) {
+        return emailTags == null ? List.of() : emailTags;
     }
 
     private static int sizeOf(List<?> list) {

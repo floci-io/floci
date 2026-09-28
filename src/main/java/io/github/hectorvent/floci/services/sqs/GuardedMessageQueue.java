@@ -5,7 +5,12 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -48,16 +53,22 @@ class GuardedMessageQueue {
     }
 
     void addMessage(Message message) {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
+            int mark = messages.size();
             messages.add(message);
-            persist();
+            try {
+                persist();
+            } catch (RuntimeException e) {
+                messages.remove(mark);
+                throw e;
+            }
         }
     }
 
     /** If persisting fails the in-memory add is rolled back and the exception propagates, so a
      *  caller that compensates on the source side does not leave a duplicate here. */
     void addAll(List<Message> toAdd) {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             int mark = messages.size();
             messages.addAll(toAdd);
             try {
@@ -72,7 +83,7 @@ class GuardedMessageQueue {
     ClaimResult claimVisibleMessages(int maxMessages, int effectiveTimeout,
                                      boolean fifo, int maxReceiveCount,
                                      String deadLetterTargetArn) {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             List<Message> claimed = new ArrayList<>();
             List<Message> dlqCandidates = new ArrayList<>();
 
@@ -150,7 +161,7 @@ class GuardedMessageQueue {
     }
 
     Optional<Message> removeByReceiptHandle(String receiptHandle) {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             Message removed = null;
             for (Iterator<Message> it = messages.iterator(); it.hasNext(); ) {
                 Message m = it.next();
@@ -168,7 +179,7 @@ class GuardedMessageQueue {
     }
 
     boolean changeVisibility(String receiptHandle, int visibilityTimeout) {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             for (Message msg : messages) {
                 if (receiptHandle.equals(msg.getReceiptHandle())) {
                     msg.setVisibleAt(Instant.now().plusSeconds(visibilityTimeout));
@@ -181,21 +192,21 @@ class GuardedMessageQueue {
     }
 
     void removeMessages(List<Message> toRemove) {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             messages.removeAll(toRemove);
             persist();
         }
     }
 
     void purge() {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             messages.clear();
             persist();
         }
     }
 
     List<Message> drainAll() {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             List<Message> drained = new ArrayList<>(messages);
             messages.clear();
             persist();
@@ -208,7 +219,7 @@ class GuardedMessageQueue {
      *  hold so nothing can slip in between. Used by the message-move-task worker so the source
      *  queue stays observably populated for the duration of a rate-limited move. */
     Message drainFirstIf(Predicate<Message> eligible) {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             if (messages.isEmpty() || !eligible.test(messages.getFirst())) {
                 return null;
             }
@@ -220,7 +231,7 @@ class GuardedMessageQueue {
 
     /** Put a message that could not be delivered back at the head, preserving queue order. */
     void restoreFirst(Message message) {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             messages.addFirst(message);
             persist();
         }
@@ -238,7 +249,7 @@ class GuardedMessageQueue {
      * DelaySeconds, so it counts as delayed rather than in flight.
      */
     MessageCounts messageCounts() {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             long visible = 0;
             long inFlight = 0;
             long delayed = 0;
@@ -256,13 +267,13 @@ class GuardedMessageQueue {
     }
 
     List<Message> peekAll() {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             return new ArrayList<>(messages);
         }
     }
 
     boolean isEmpty() {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             return messages.isEmpty();
         }
     }
@@ -272,7 +283,7 @@ class GuardedMessageQueue {
     }
 
     Message findByDeduplicationId(String dedupId, String messageGroupId) {
-        try (var _ = hold()) {
+        try (Guard _ = hold()) {
             return messages.stream()
                     .filter(msg -> dedupId.equals(msg.getMessageDeduplicationId()))
                     .filter(msg -> messageGroupId == null

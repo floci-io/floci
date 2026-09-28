@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.eks.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -17,6 +18,7 @@ public class ResourcesVpcConfig {
     private List<String> securityGroupIds;
 
     @JsonProperty("clusterSecurityGroupId")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     private String clusterSecurityGroupId;
 
     @JsonProperty("vpcId")

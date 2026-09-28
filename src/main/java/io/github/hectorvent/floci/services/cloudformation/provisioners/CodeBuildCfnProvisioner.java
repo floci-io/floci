@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -59,7 +60,7 @@ public class CodeBuildCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(name);
         r.getAttributes().put("Arn",
                 response.path("project").path("arn").asText(
-                        "arn:aws:codebuild:" + ctx.region() + ":" + ctx.accountId() + ":project/" + name));
+                        AwsArnUtils.Arn.of("codebuild", ctx.region(), ctx.accountId(), "project/" + name).toString()));
     }
 
     @Override

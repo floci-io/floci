@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -20,7 +21,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * Integration tests for the {@code arn:aws:states:::aws-sdk:} task integrations of Step Functions
  * itself and of EventBridge Scheduler: {@code sfn:startExecution}, {@code sfn:sendTaskSuccess},
- * {@code sfn:sendTaskFailure}, {@code scheduler:createSchedule} and {@code scheduler:updateSchedule}.
+ * {@code sfn:sendTaskFailure}, {@code scheduler:createSchedule}, {@code scheduler:updateSchedule}
+ * and {@code scheduler:deleteSchedule}.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -348,7 +350,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
 
         given().when().get("/schedules/payout-nightly")
                 .then().statusCode(200)
-                .body("ScheduleExpression", org.hamcrest.Matchers.equalTo("rate(1 day)"));
+                .body("ScheduleExpression", Matchers.equalTo("rate(1 day)"));
     }
 
     @Test
@@ -362,7 +364,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
 
         given().when().get("/schedules/payout-nightly")
                 .then().statusCode(200)
-                .body("ScheduleExpression", org.hamcrest.Matchers.equalTo("rate(2 days)"));
+                .body("ScheduleExpression", Matchers.equalTo("rate(2 days)"));
     }
 
     @Test
@@ -480,6 +482,414 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
             assertEquals("Scheduler.SerializationException", result.path("caughtError").asText(),
                     shape[0] + " must reach Catch as an SDK exception, not States.Runtime");
         }
+    }
+
+    @Test
+    @Order(16)
+    void deleteScheduleReturnsAnEmptyObjectAndRemovesTheSchedule() throws Exception {
+        JsonNode result = mapper.readTree(succeedingOutputOf(
+                createStateMachine("aws-sdk-delete-schedule", deleteScheduleTask(
+                        "payout-nightly", null)), "{}"));
+
+        assertTrue(result.isObject());
+        assertEquals(0, result.size(), "DeleteSchedule returns an empty object");
+        given().when().get("/schedules/payout-nightly").then().statusCode(404);
+    }
+
+    @Test
+    @Order(17)
+    void deleteScheduleUsesTheNamedGroup() throws Exception {
+        given()
+                .contentType("application/json")
+                .body("{}")
+                .when().post("/schedule-groups/payments")
+                .then().statusCode(200);
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "GroupName": "payments",
+                          "ScheduleExpression": "rate(1 day)",
+                          "FlexibleTimeWindow": {"Mode": "OFF"},
+                          "Target": {"Arn": "TARGET_ARN", "RoleArn": "ROLE"}
+                        }
+                        """.replace("TARGET_ARN", quickChildArn).replace("ROLE", ROLE_ARN))
+                .when().post("/schedules/grouped-payout")
+                .then().statusCode(200);
+
+        succeedingOutputOf(createStateMachine("aws-sdk-delete-grouped-schedule",
+                deleteScheduleTask("grouped-payout", "payments")), "{}");
+
+        given().queryParam("groupName", "payments")
+                .when().get("/schedules/grouped-payout")
+                .then().statusCode(404);
+    }
+
+    @Test
+    @Order(18)
+    void deleteMissingScheduleIsCatchableAsResourceNotFound() throws Exception {
+        JsonNode result = mapper.readTree(succeedingOutputOf(
+                createStateMachine("aws-sdk-delete-missing-schedule", catchingDeleteScheduleTask(
+                        "no-such-schedule", "Scheduler.ResourceNotFoundException")), "{}"));
+
+        assertEquals("Scheduler.ResourceNotFoundException", result.path("caughtError").asText());
+    }
+
+    @Test
+    @Order(19)
+    void deleteScheduleWithoutANameIsCatchableAsValidationException() throws Exception {
+        JsonNode result = mapper.readTree(succeedingOutputOf(
+                createStateMachine("aws-sdk-delete-schedule-without-name", catchingDeleteScheduleTask(
+                        null, "Scheduler.ValidationException")), "{}"));
+
+        assertEquals("Scheduler.ValidationException", result.path("caughtError").asText());
+    }
+
+    @Test
+    @Order(20)
+    void createScheduleAcceptsRfc3339DatesFromJsonata() throws Exception {
+        String stateMachineArn = createStateMachine("aws-sdk-create-schedule-dates", """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Schedule",
+                  "States": {
+                    "Schedule": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:createSchedule",
+                      "Arguments": {
+                        "Name": "payout-dated",
+                        "ScheduleExpression": "rate(1 day)",
+                        "StartDate": "2099-01-01T05:30:00.500+05:30",
+                        "EndDate": "2099-01-02T00:00:00Z",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {"Arn": "TARGET_ARN", "RoleArn": "ROLE"}
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.replace("TARGET_ARN", quickChildArn).replace("ROLE", ROLE_ARN));
+
+        succeedingOutputOf(stateMachineArn, "{}");
+
+        JsonNode schedule = mapper.readTree(given().when().get("/schedules/payout-dated")
+                .then().statusCode(200).extract().body().asString());
+        assertEquals(4070908800.5d, schedule.path("StartDate").asDouble(), 0.001d);
+        assertEquals(4070995200L, Math.round(schedule.path("EndDate").asDouble()));
+    }
+
+    @Test
+    @Order(21)
+    void updateScheduleAcceptsRfc3339DatesFromJsonPath() throws Exception {
+        String stateMachineArn = createStateMachine("aws-sdk-update-schedule-dates", """
+                {
+                  "StartAt": "Schedule",
+                  "States": {
+                    "Schedule": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:updateSchedule",
+                      "Parameters": {
+                        "Name": "payout-dated",
+                        "ScheduleExpression": "rate(2 days)",
+                        "StartDate": "2099-02-01T00:00:00Z",
+                        "EndDate": "2099-02-02T00:00:00Z",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {"Arn": "TARGET_ARN", "RoleArn": "ROLE"}
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.replace("TARGET_ARN", quickChildArn).replace("ROLE", ROLE_ARN));
+
+        succeedingOutputOf(stateMachineArn, "{}");
+
+        JsonNode schedule = mapper.readTree(given().when().get("/schedules/payout-dated")
+                .then().statusCode(200).extract().body().asString());
+        assertEquals(4073587200L, Math.round(schedule.path("StartDate").asDouble()));
+        assertEquals(4073673600L, Math.round(schedule.path("EndDate").asDouble()));
+        given().when().delete("/schedules/payout-dated").then().statusCode(200);
+    }
+
+    @Test
+    @Order(22)
+    void malformedScheduleDateIsCatchableAsSerializationException() throws Exception {
+        String stateMachineArn = createStateMachine("aws-sdk-create-schedule-bad-date", """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Schedule",
+                  "States": {
+                    "Schedule": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:createSchedule",
+                      "Arguments": {
+                        "Name": "payout-bad-date",
+                        "ScheduleExpression": "rate(1 day)",
+                        "StartDate": "tomorrow",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {"Arn": "TARGET_ARN", "RoleArn": "ROLE"}
+                      },
+                      "Catch": [{
+                        "ErrorEquals": ["Scheduler.SerializationException"],
+                        "Next": "Recovered",
+                        "Output": {"caughtError": "{% $states.errorOutput.Error %}"}
+                      }],
+                      "End": true
+                    },
+                    "Recovered": {"Type": "Pass", "End": true}
+                  }
+                }
+                """.replace("TARGET_ARN", quickChildArn).replace("ROLE", ROLE_ARN));
+
+        JsonNode result = mapper.readTree(succeedingOutputOf(stateMachineArn, "{}"));
+        assertEquals("Scheduler.SerializationException", result.path("caughtError").asText());
+    }
+
+    @Test
+    @Order(23)
+    void createScheduleSerializesStructuredTargetInputFromJsonata() throws Exception {
+        String targetStateMachineArn = createStateMachine("aws-sdk-structured-input-target", """
+                {
+                  "StartAt": "Done",
+                  "States": {"Done": {"Type": "Pass", "End": true}}
+                }
+                """);
+        String stateMachineArn = createStateMachine("aws-sdk-create-schedule-structured-input", """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Schedule",
+                  "States": {
+                    "Schedule": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:createSchedule",
+                      "Arguments": {
+                        "Name": "payout-structured-input",
+                        "ScheduleExpression": "rate(1 day)",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {
+                          "Arn": "TARGET_ARN",
+                          "RoleArn": "ROLE",
+                          "Input": {
+                            "scheduleId": "schedule-123",
+                            "nested": {
+                              "items": [1, true, "a\\\"b"]
+                            }
+                          }
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.replace("TARGET_ARN", targetStateMachineArn).replace("ROLE", ROLE_ARN));
+
+        succeedingOutputOf(stateMachineArn, "{}");
+
+        JsonNode schedule = mapper.readTree(given().when().get("/schedules/payout-structured-input")
+                .then().statusCode(200).extract().body().asString());
+        JsonNode expectedInput = mapper.readTree("""
+                {"scheduleId":"schedule-123","nested":{"items":[1,true,"a\\\"b"]}}
+                """);
+        assertEquals(expectedInput, mapper.readTree(schedule.path("Target").path("Input").asText()));
+    }
+
+    @Test
+    @Order(24)
+    void updateScheduleSerializesStructuredTargetInputFromJsonPath() throws Exception {
+        String scheduleName = "payout-structured-input-update";
+        String targetStateMachineArn = createStateMachine("aws-sdk-structured-update-target", """
+                {
+                  "StartAt": "Done",
+                  "States": {"Done": {"Type": "Pass", "End": true}}
+                }
+                """);
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "ScheduleExpression": "rate(1 day)",
+                          "FlexibleTimeWindow": {"Mode": "OFF"},
+                          "Target": {"Arn": "TARGET_ARN", "RoleArn": "ROLE", "Input": "{}"}
+                        }
+                        """.replace("TARGET_ARN", targetStateMachineArn).replace("ROLE", ROLE_ARN))
+                .when().post("/schedules/" + scheduleName)
+                .then().statusCode(200);
+        String stateMachineArn = createStateMachine("aws-sdk-update-schedule-structured-input", """
+                {
+                  "StartAt": "Schedule",
+                  "States": {
+                    "Schedule": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:updateSchedule",
+                      "Parameters": {
+                        "Name": "SCHEDULE_NAME",
+                        "ScheduleExpression": "rate(2 days)",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {
+                          "Arn": "TARGET_ARN",
+                          "RoleArn": "ROLE",
+                          "Input": {"enabled": true, "retries": 3, "tags": ["a", "b"]}
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """
+                .replace("SCHEDULE_NAME", scheduleName)
+                .replace("TARGET_ARN", targetStateMachineArn)
+                .replace("ROLE", ROLE_ARN));
+
+        succeedingOutputOf(stateMachineArn, "{}");
+
+        JsonNode schedule = mapper.readTree(given().when().get("/schedules/" + scheduleName)
+                .then().statusCode(200).extract().body().asString());
+        JsonNode expectedInput = mapper.readTree("""
+                {"enabled":true,"retries":3,"tags":["a","b"]}
+                """);
+        assertEquals(expectedInput, mapper.readTree(schedule.path("Target").path("Input").asText()));
+    }
+
+    @Test
+    @Order(25)
+    void createScheduleSerializesJsonScalarsAndPreservesTextualJson() {
+        String targetStateMachineArn = createStateMachine("aws-sdk-scalar-input-target", """
+                {
+                  "StartAt": "Done",
+                  "States": {"Done": {"Type": "Pass", "End": true}}
+                }
+                """);
+        String[][] cases = {
+                {"array", "[1,false,{\"key\":\"value\"}]", "[1,false,{\"key\":\"value\"}]"},
+                {"number", "42.5", "42.5"},
+                {"boolean", "true", "true"},
+                {"text", "\"{\\\"already\\\":true}\"", "{\"already\":true}"}
+        };
+        for (String[] inputCase : cases) {
+            String scheduleName = "payout-input-" + inputCase[0];
+            String stateMachineArn = createStateMachine("aws-sdk-create-input-" + inputCase[0], """
+                    {
+                      "QueryLanguage": "JSONata",
+                      "StartAt": "Schedule",
+                      "States": {
+                        "Schedule": {
+                          "Type": "Task",
+                          "Resource": "arn:aws:states:::aws-sdk:scheduler:createSchedule",
+                          "Arguments": {
+                            "Name": "SCHEDULE_NAME",
+                            "ScheduleExpression": "rate(1 day)",
+                            "FlexibleTimeWindow": {"Mode": "OFF"},
+                            "Target": {
+                              "Arn": "TARGET_ARN",
+                              "RoleArn": "ROLE",
+                              "Input": INPUT_VALUE
+                            }
+                          },
+                          "End": true
+                        }
+                      }
+                    }
+                    """
+                    .replace("SCHEDULE_NAME", scheduleName)
+                    .replace("TARGET_ARN", targetStateMachineArn)
+                    .replace("ROLE", ROLE_ARN)
+                    .replace("INPUT_VALUE", inputCase[1]));
+
+            succeedingOutputOf(stateMachineArn, "{}");
+
+            Response schedule = given().when().get("/schedules/" + scheduleName);
+            schedule.then().statusCode(200);
+            assertEquals(inputCase[2], schedule.jsonPath().getString("Target.Input"), inputCase[0]);
+        }
+    }
+
+    @Test
+    @Order(26)
+    void createScheduleRejectsMalformedTextualTargetInput() throws Exception {
+        String targetStateMachineArn = createStateMachine("aws-sdk-malformed-input-target", """
+                {
+                  "StartAt": "Done",
+                  "States": {"Done": {"Type": "Pass", "End": true}}
+                }
+                """);
+        String stateMachineArn = createStateMachine("aws-sdk-create-malformed-input", """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Schedule",
+                  "States": {
+                    "Schedule": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:createSchedule",
+                      "Arguments": {
+                        "Name": "payout-malformed-input",
+                        "ScheduleExpression": "rate(1 day)",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {
+                          "Arn": "TARGET_ARN",
+                          "RoleArn": "ROLE",
+                          "Input": "{not-json"
+                        }
+                      },
+                      "Catch": [{
+                        "ErrorEquals": ["Scheduler.ValidationException"],
+                        "Next": "Recovered",
+                        "Output": {"caughtError": "{% $states.errorOutput.Error %}"}
+                      }],
+                      "End": true
+                    },
+                    "Recovered": {"Type": "Pass", "End": true}
+                  }
+                }
+                """.replace("TARGET_ARN", targetStateMachineArn).replace("ROLE", ROLE_ARN));
+
+        JsonNode result = mapper.readTree(succeedingOutputOf(stateMachineArn, "{}"));
+        assertEquals("Scheduler.ValidationException", result.path("caughtError").asText());
+    }
+
+    private static String deleteScheduleTask(String scheduleName, String groupName) {
+        String groupArgument = groupName == null ? "" : ", \"GroupName\": \"" + groupName + "\"";
+        return """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Delete",
+                  "States": {
+                    "Delete": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:deleteSchedule",
+                      "Arguments": {"Name": "SCHEDULE_NAME"GROUP_ARGUMENT},
+                      "End": true
+                    }
+                  }
+                }
+                """
+                .replace("SCHEDULE_NAME", scheduleName)
+                .replace("GROUP_ARGUMENT", groupArgument);
+    }
+
+    private static String catchingDeleteScheduleTask(String scheduleName, String errorName) {
+        String nameArgument = scheduleName == null ? "" : "\"Name\": \"" + scheduleName + "\"";
+        return """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Delete",
+                  "States": {
+                    "Delete": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:deleteSchedule",
+                      "Arguments": {NAME_ARGUMENT},
+                      "Catch": [{
+                        "ErrorEquals": ["ERROR_NAME"],
+                        "Next": "Recovered",
+                        "Output": {"caughtError": "{% $states.errorOutput.Error %}"}
+                      }],
+                      "End": true
+                    },
+                    "Recovered": {"Type": "Pass", "End": true}
+                  }
+                }
+                """
+                .replace("NAME_ARGUMENT", nameArgument)
+                .replace("ERROR_NAME", errorName);
     }
 
     private static String scheduleTask(String action, String scheduleName, String expression) {

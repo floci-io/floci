@@ -42,19 +42,33 @@ public final class Ec2MetadataProxy {
     }
 
     public static String[] startCommand(String flociHost, int imdsPort) {
+        return startCommand("imds", "169.254.169.254", 80, flociHost, imdsPort,
+                "curl -fsS --max-time 1 http://169.254.169.254/latest/meta-data/instance-id >/dev/null && exit 0");
+    }
+
+    public static String[] podIdentityStartCommand(String flociHost, int flociPort) {
+        return startCommand("pod-identity", "169.254.170.23", 80, flociHost, flociPort,
+                "[ \"$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 http://169.254.170.23/v1/credentials)\" != \"000\" ] && exit 0");
+    }
+
+    public static String[] startCommand(String name, String bindIp, int bindPort,
+                                        String targetHost, int targetPort, String probeCommand) {
+        String pidFile = "/tmp/floci-" + name + "-proxy.pid";
+        String logFile = "/tmp/floci-" + name + "-proxy.log";
         return new String[]{"sh", "-c", String.join("\n",
                 "set -eu",
-                "ip addr show dev lo | grep -q '169.254.169.254/32' || ip addr add 169.254.169.254/32 dev lo",
-                "if [ -f /tmp/floci-imds-proxy.pid ] && kill -0 \"$(cat /tmp/floci-imds-proxy.pid)\" 2>/dev/null; then",
+                "ip addr show dev lo | grep -q '" + bindIp + "/32' || ip addr add " + bindIp + "/32 dev lo",
+                "if [ -f " + pidFile + " ] && kill -0 \"$(cat " + pidFile + ")\" 2>/dev/null; then",
                 "  exit 0",
                 "fi",
-                "nohup socat TCP-LISTEN:80,bind=169.254.169.254,fork,reuseaddr TCP:" + flociHost + ":" + imdsPort + " >/tmp/floci-imds-proxy.log 2>&1 &",
-                "echo $! > /tmp/floci-imds-proxy.pid",
+                "nohup socat TCP-LISTEN:" + bindPort + ",bind=" + bindIp + ",fork,reuseaddr TCP:"
+                        + targetHost + ":" + targetPort + " >" + logFile + " 2>&1 &",
+                "echo $! > " + pidFile,
                 "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do",
-                "  curl -fsS --max-time 1 http://169.254.169.254/latest/meta-data/instance-id >/dev/null && exit 0",
+                "  " + probeCommand,
                 "  sleep 1",
                 "done",
-                "cat /tmp/floci-imds-proxy.log >&2 || true",
+                "cat " + logFile + " >&2 || true",
                 "exit 1")};
     }
 

@@ -33,7 +33,7 @@ class ApiGatewayProxyMatchTest {
 
     @BeforeEach
     void setUp() {
-        ctrl = new ApiGatewayExecuteController(apiGatewayService, apiGatewayV2Service, lambdaService,
+        ctrl = new ApiGatewayExecuteController(apiGatewayService, null, apiGatewayV2Service, lambdaService,
                 new RegionResolver("us-east-1", "000000000000"),
                 new ObjectMapper(), vtlEngine, serviceRouter, webSocketConnectionManager, elbV2Service, null,
                 new ApiGatewayExecuteRouteContext(), null, null, null);

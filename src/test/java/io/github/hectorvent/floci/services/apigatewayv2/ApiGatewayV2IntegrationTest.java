@@ -10,6 +10,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -276,6 +278,92 @@ class ApiGatewayV2IntegrationTest {
         assertEquals(List.of("$request.header.Authorization"), restored.getIdentitySource());
         assertEquals("https://example.com", restored.getJwtConfiguration().issuer());
         assertEquals(List.of("api"), restored.getJwtConfiguration().audience());
+    }
+
+    @ParameterizedTest @Order(34)
+    @ValueSource(ints = {0, 3600})
+    void createAuthorizer_acceptsResultTtlAtTheBounds(int ttl) {
+        given()
+                .contentType(ContentType.JSON)
+                .body(requestAuthorizer("ttl-create-" + ttl, ttl))
+                .when().post("/v2/apis/" + apiId + "/authorizers")
+                .then()
+                .statusCode(201)
+                .body("authorizerResultTtlInSeconds", equalTo(ttl));
+    }
+
+    @ParameterizedTest @Order(35)
+    @ValueSource(ints = {-1, 3601})
+    void createAuthorizer_rejectsResultTtlOutOfRange(int ttl) {
+        String name = "ttl-create-rejected-" + ttl;
+        given()
+                .contentType(ContentType.JSON)
+                .body(requestAuthorizer(name, ttl))
+                .when().post("/v2/apis/" + apiId + "/authorizers")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", containsString("between 0 and 3600"));
+
+        given()
+                .when().get("/v2/apis/" + apiId + "/authorizers")
+                .then()
+                .statusCode(200)
+                .body("items.name", not(hasItem(name)));
+    }
+
+    @ParameterizedTest @Order(36)
+    @ValueSource(ints = {0, 3600})
+    void updateAuthorizer_acceptsResultTtlAtTheBounds(int ttl) {
+        String id = createRequestAuthorizer("ttl-update-" + ttl, 300);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"authorizerResultTtlInSeconds\":" + ttl + "}")
+                .when().patch("/v2/apis/" + apiId + "/authorizers/" + id)
+                .then()
+                .statusCode(200)
+                .body("authorizerResultTtlInSeconds", equalTo(ttl));
+    }
+
+    @ParameterizedTest @Order(37)
+    @ValueSource(ints = {-1, 3601})
+    void updateAuthorizer_rejectsResultTtlOutOfRangeWithoutApplyingThePatch(int ttl) {
+        String name = "ttl-update-rejected-" + ttl;
+        String id = createRequestAuthorizer(name, 300);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"renamed\",\"authorizerResultTtlInSeconds\":" + ttl + "}")
+                .when().patch("/v2/apis/" + apiId + "/authorizers/" + id)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", containsString("between 0 and 3600"));
+
+        // The name in the same patch must not stick either: the store returns the live authorizer.
+        given()
+                .when().get("/v2/apis/" + apiId + "/authorizers/" + id)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo(name))
+                .body("authorizerResultTtlInSeconds", equalTo(300));
+    }
+
+    private static String requestAuthorizer(String name, int ttl) {
+        return """
+                {"authorizerType":"REQUEST","name":"%s","identitySource":["$request.header.Authorization"],"authorizerUri":"arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:auth/invocations","authorizerPayloadFormatVersion":"2.0","authorizerResultTtlInSeconds":%d}
+                """.formatted(name, ttl);
+    }
+
+    private static String createRequestAuthorizer(String name, int ttl) {
+        return given()
+                .contentType(ContentType.JSON)
+                .body(requestAuthorizer(name, ttl))
+                .when().post("/v2/apis/" + apiId + "/authorizers")
+                .then()
+                .statusCode(201)
+                .extract().path("authorizerId");
     }
 
     // ──────────────────────────── Deployments ────────────────────────────

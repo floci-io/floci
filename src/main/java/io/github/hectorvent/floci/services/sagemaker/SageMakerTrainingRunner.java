@@ -7,6 +7,7 @@ import com.github.dockerjava.core.command.LogContainerResultCallback;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -42,7 +43,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 @ApplicationScoped
-public class SageMakerTrainingRunner implements ContainerTeardown {
+public class SageMakerTrainingRunner implements ContainerTeardown, Resettable {
     private static final Logger LOG = Logger.getLogger(SageMakerTrainingRunner.class);
     private static final String LOG_GROUP = "/aws/sagemaker/TrainingJobs";
 
@@ -53,7 +54,9 @@ public class SageMakerTrainingRunner implements ContainerTeardown {
     private final ContainerDetector containerDetector;
     private final S3Service s3Service;
     private final ObjectMapper mapper;
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final SageMakerGpuResolver gpuResolver;
+    // Replaced by afterReset() after a state reset, whose container teardown shuts this pool down.
+    private volatile ExecutorService executor = Executors.newCachedThreadPool();
     private final ConcurrentHashMap<String, String> containers = new ConcurrentHashMap<>();
     // Names a stop that stop() has already committed to the store as "Stopped": run()'s exit-code
     // handling checks this before persisting, since a stop races the removal of the very container
@@ -64,7 +67,8 @@ public class SageMakerTrainingRunner implements ContainerTeardown {
     @Inject
     public SageMakerTrainingRunner(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
                                    ContainerLogStreamer logStreamer, EmulatorConfig config,
-                                   ContainerDetector containerDetector, S3Service s3Service, ObjectMapper mapper) {
+                                   ContainerDetector containerDetector, S3Service s3Service, ObjectMapper mapper,
+                                   SageMakerGpuResolver gpuResolver) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -72,6 +76,7 @@ public class SageMakerTrainingRunner implements ContainerTeardown {
         this.containerDetector = containerDetector;
         this.s3Service = s3Service;
         this.mapper = mapper;
+        this.gpuResolver = gpuResolver;
     }
 
     public void runAsync(TrainingJobResource job, SageMakerService service) {
@@ -83,7 +88,7 @@ public class SageMakerTrainingRunner implements ContainerTeardown {
         Closeable logs = null;
         try {
             String image = SageMakerEndpointManager.string(job.algorithmSpecification.get("TrainingImage"));
-            String name = ContainerStorageHelper.dockerName(config, "floci-sagemaker-training-" + job.trainingJobName);
+            String name = ContainerStorageHelper.dockerName(config, "sagemaker-training-" + job.trainingJobName);
             lifecycleManager.removeIfExists(name);
             ContainerBuilder.Builder builder = containerBuilder.newContainer(image)
                     .withName(name)
@@ -93,6 +98,10 @@ public class SageMakerTrainingRunner implements ContainerTeardown {
                     .withEmbeddedDns()
                     .withLogRotation();
             SageMakerEndpointManager.applyEntrypoint(builder, job.algorithmSpecification, "train");
+            // Throws when the requested instance type asks for hardware this host cannot
+            // stand in for, so the job fails with a reason rather than quietly training
+            // on CPU and producing an artifact that looks legitimate.
+            gpuResolver.applyTo(builder, instanceType(job), instanceCount(job));
             ContainerSpec spec = builder.build();
             containerId = lifecycleManager.create(spec);
             containers.put(job.trainingJobName, containerId);
@@ -146,6 +155,10 @@ public class SageMakerTrainingRunner implements ContainerTeardown {
             job.failureReason = e.getMessage();
             job.trainingEndTime = System.currentTimeMillis();
             service.updateTrainingJob(job);
+            if (e instanceof InterruptedException) {
+                // Interrupted by a teardown's shutdownNow(): keep the flag for the pool thread.
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -158,10 +171,33 @@ public class SageMakerTrainingRunner implements ContainerTeardown {
     }
 
     @Override
-    public void stopManagedContainers() {
+    public synchronized void stopManagedContainers() {
         containers.forEach((name, id) -> lifecycleManager.stopAndRemove(id, null));
         containers.clear();
         executor.shutdownNow();
+    }
+
+    @Override
+    public synchronized void clear() {
+        stopRequested.clear();
+    }
+
+    /**
+     * Runs at the end of every state reset, never on shutdown. The teardown shut the worker
+     * pool down, so without a new one every later CreateTrainingJob would be rejected until
+     * the emulator restarted. This hook rather than {@code clear()} because the controller
+     * runs it even when the storage wipe or another service's {@code clear()} threw, and a
+     * failed reset must not leave the pool terminated for good.
+     */
+    @Override
+    public synchronized void afterReset() {
+        if (executor.isShutdown()) {
+            executor = Executors.newCachedThreadPool();
+        }
+    }
+
+    boolean acceptsWork() {
+        return !executor.isShutdown();
     }
 
     private List<String> environment(TrainingJobResource job) {
@@ -293,6 +329,16 @@ public class SageMakerTrainingRunner implements ContainerTeardown {
         } catch (NotFoundException e) {
             return 1;
         }
+    }
+
+    private static String instanceType(TrainingJobResource job) {
+        return SageMakerEndpointManager.string(job.resourceConfig.get("InstanceType"));
+    }
+
+    /** Absent or unparseable means one, matching how a single-instance job is described. */
+    private static int instanceCount(TrainingJobResource job) {
+        Object value = job.resourceConfig.get("InstanceCount");
+        return value instanceof Number n ? n.intValue() : 1;
     }
 
     private Duration timeout(TrainingJobResource job) {

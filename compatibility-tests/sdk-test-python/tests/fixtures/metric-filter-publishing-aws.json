@@ -1,0 +1,112 @@
+{
+  "verification": "Verified on Live AWS",
+  "observedDate": "2026-09-16",
+  "region": "eu-west-1",
+  "awsCliVersion": "2.36.45",
+  "description": "Normalized observations from isolated synthetic PutMetricFilter/PutLogEvents/GetMetricStatistics probes. Values are independent AWS results, not emulator-generated expectations.",
+  "period": 60,
+  "observedThrough": "2026-09-16T09:06:51Z",
+  "metricDefaults": {
+    "filterPattern": "ERROR",
+    "metricValue": "3",
+    "defaultValue": 7,
+    "cases": [
+      {
+        "name": "mixed events in one batch",
+        "batches": [["ERROR", "INFO", "ERROR"]],
+        "expected": {"Sum": 13, "SampleCount": 3, "Minimum": 3, "Maximum": 7}
+      },
+      {
+        "name": "hit then miss in separate batches",
+        "batches": [["ERROR"], ["INFO"]],
+        "expected": {"Sum": 10, "SampleCount": 2, "Minimum": 3, "Maximum": 7}
+      },
+      {
+        "name": "miss then hit in separate batches",
+        "batches": [["INFO"], ["ERROR"]],
+        "expected": {"Sum": 10, "SampleCount": 2, "Minimum": 3, "Maximum": 7}
+      }
+    ],
+    "qualification": "Each case used one isolated event-time minute. Results converged through repeated reads over approximately 107 seconds. No minute-wide suppression or default deduplication was observed."
+  },
+  "extraction": {
+    "filterPattern": "{ $.probe = \"value\" || $.value = * }",
+    "metricValue": "$.value",
+    "defaultValue": 7,
+    "cases": [
+      {
+        "name": "matching event with missing value",
+        "message": {"probe": "value", "case": "missing"},
+        "expected": {"Sum": 7, "SampleCount": 1}
+      },
+      {
+        "name": "matching event with null value",
+        "message": {"probe": "value", "value": null, "case": "null"},
+        "expected": {"Sum": 7, "SampleCount": 1}
+      },
+      {
+        "name": "matching event with nonnumeric string",
+        "message": {"probe": "value", "value": "not-a-number", "case": "nonnumeric"},
+        "expected": {"datapoints": []}
+      },
+      {
+        "name": "matching numeric control",
+        "message": {"probe": "value", "value": 3, "case": "numeric-control"},
+        "expected": {"Sum": 3, "SampleCount": 1}
+      }
+    ],
+    "qualification": "Cases occupied distinct event-time minutes. Matching did not depend on the value field being present. The numeric control succeeded; negative results remained absent through the completed observation window."
+  },
+  "ordinaryDimensions": {
+    "filterPattern": "{ $.probe = \"dimension\" || $.a = * || $.b = * }",
+    "metricValue": "1",
+    "dimensions": {"A": "$.a", "B": "$.b"},
+    "messages": [
+      {"probe": "dimension", "a": "alpha", "b": "beta"},
+      {"probe": "dimension", "a": "alpha"},
+      {"probe": "dimension", "b": "beta"},
+      {"probe": "dimension"}
+    ],
+    "expectedSeries": [
+      {"dimensions": {"A": "alpha", "B": "beta"}, "Sum": 1, "SampleCount": 1},
+      {"dimensions": {}, "Sum": 3, "SampleCount": 3}
+    ],
+    "absentSeries": [
+      {"dimensions": {"A": "alpha"}},
+      {"dimensions": {"B": "beta"}}
+    ],
+    "qualification": "No default configured. All events occupied one minute. ListMetrics confirmed complete and dimensionless series, not partial sets. Null or empty dimension values were not measured."
+  },
+  "systemDimensions": {
+    "filterPattern": "ERROR",
+    "metricValue": "3",
+    "defaultValue": 7,
+    "messages": ["ERROR", "INFO"],
+    "accountTransformerPolicyCount": 0,
+    "groupTransformerConfig": [],
+    "cases": [
+      {
+        "emitSystemFieldDimensions": ["@aws.account"],
+        "expectedSeries": [
+          {"dimensions": {"@aws.account": "<CALLER_ACCOUNT>"}, "Sum": 3, "SampleCount": 1},
+          {"dimensions": {}, "Sum": 7, "SampleCount": 1}
+        ]
+      },
+      {
+        "emitSystemFieldDimensions": ["@aws.region"],
+        "expectedSeries": [
+          {"dimensions": {"@aws.region": "eu-west-1"}, "Sum": 3, "SampleCount": 1},
+          {"dimensions": {}, "Sum": 7, "SampleCount": 1}
+        ]
+      },
+      {
+        "emitSystemFieldDimensions": ["@aws.account", "@aws.region"],
+        "expectedSeries": [
+          {"dimensions": {"@aws.account": "<CALLER_ACCOUNT>", "@aws.region": "eu-west-1"}, "Sum": 3, "SampleCount": 1},
+          {"dimensions": {}, "Sum": 7, "SampleCount": 1}
+        ]
+      }
+    ],
+    "qualification": "Regular noncentralized group. Matching events receive requested system dimensions; pattern-nonmatch defaults are dimensionless. This does not measure extraction-fallback defaults or centralized source provenance."
+  }
+}

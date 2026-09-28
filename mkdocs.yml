@@ -86,6 +86,7 @@ nav:
     - Docker Configuration: configuration/docker.md
     - Ports Reference: configuration/ports.md
     - Multi-Account Isolation: configuration/multi-account.md
+    - AWS Partitions: configuration/partitions.md
     - Storage Modes: configuration/storage.md
     - TLS / HTTPS: configuration/tls.md
     - Initialization Hooks: configuration/initialization-hooks.md
@@ -140,26 +141,31 @@ nav:
     - MemoryDB: services/memorydb.md
     - RDS: services/rds.md
     - RDS Data API: services/rds-data.md
+    - Timestream for InfluxDB: services/timestream-influxdb.md
     - MSK (Kafka): services/msk.md
     - Amazon MQ: services/amazonmq.md
     - Glue: services/glue.md
     - Lake Formation: services/lakeformation.md
     - Neptune: services/neptune.md
     - DocumentDB: services/docdb.md
+    - DMS: services/dms.md
     - Athena: services/athena.md
     - Redshift: services/redshift.md
     - Redshift Data API: services/redshift-data.md
+    - Redshift Serverless: services/redshift-serverless.md
     - Data Firehose: services/firehose.md
     - EventBridge: services/eventbridge.md
     - EventBridge Pipes: services/pipes.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
+    - CloudWatch Metric Filter Verification: services/cloudwatch-metric-filters-verification.md
     - CloudWatch OAM: services/oam.md
     - CloudWatch RUM: services/rum.md
     - Managed Prometheus (AMP): services/managed-prometheus.md
     - GuardDuty: services/guardduty.md
     - Connect: services/connect.md
     - AppIntegrations: services/appintegrations.md
+    - Amazon Data Lifecycle Manager: services/dlm.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md

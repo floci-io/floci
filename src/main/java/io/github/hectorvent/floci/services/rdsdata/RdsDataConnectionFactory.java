@@ -35,6 +35,8 @@ class RdsDataConnectionFactory {
                     + "?useSSL=false&allowPublicKeyRetrieval=true";
             case POSTGRES -> "jdbc:postgresql://" + host + ":" + port + "/" + database
                     + "?sslmode=disable";
+            case SQLSERVER -> throw new IllegalArgumentException(
+                    "RDS Data API is not supported for SQL Server");
         };
     }
 
@@ -43,6 +45,7 @@ class RdsDataConnectionFactory {
         return switch (engine) {
             case MYSQL, MARIADB -> "5000";
             case POSTGRES -> "5";
+            case SQLSERVER -> "5000";
         };
     }
 }

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -10,19 +11,20 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.IOException;
-import java.util.List;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
-
-import org.jboss.logging.Logger;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -94,11 +96,11 @@ class ElastiCacheIntegrationTest {
                     .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ReplicationGroupId", equalTo(GROUP_ID))
                     .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.Status", equalTo("available"))
                     .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.AuthTokenEnabled", equalTo("true"))
-                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Address", equalTo("localhost"))
-                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Port", notNullValue())
+                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Address", equalTo("localhost"))
+                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port", notNullValue())
                 .extract()
                     .xmlPath()
-                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Port");
+                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port");
     }
 
     @Test
@@ -114,8 +116,11 @@ class ElastiCacheIntegrationTest {
             .statusCode(200)
             .body("DescribeReplicationGroupsResponse.DescribeReplicationGroupsResult.ReplicationGroups.ReplicationGroup.ReplicationGroupId",
                     equalTo(GROUP_ID))
-            .body("DescribeReplicationGroupsResponse.DescribeReplicationGroupsResult.ReplicationGroups.ReplicationGroup.ConfigurationEndpoint.Port",
-                    equalTo(String.valueOf(firstProxyPort)));
+            .body("DescribeReplicationGroupsResponse.DescribeReplicationGroupsResult.ReplicationGroups.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port",
+                    equalTo(String.valueOf(firstProxyPort)))
+            .body("DescribeReplicationGroupsResponse.DescribeReplicationGroupsResult.ReplicationGroups.ReplicationGroup.ClusterEnabled",
+                    equalTo("false"))
+            .body(not(containsString("<ConfigurationEndpoint>")));
     }
 
     @Test
@@ -139,13 +144,25 @@ class ElastiCacheIntegrationTest {
 
     @Test
     @Order(5)
+    void groupAuthTokenWorksWithHelloAuth() throws Exception {
+        try (Socket socket = openSocket(firstProxyPort)) {
+            write(socket, respArray("HELLO", "3", "AUTH", "default", GROUP_AUTH_TOKEN));
+            assertTrue(readRespValue(socket).startsWith("%"));
+
+            write(socket, respArray("PING"));
+            assertEquals("+PONG\r\n", readLine(socket));
+        }
+    }
+
+    @Test
+    @Order(6)
     void wrongPasswordIsRejected() throws Exception {
         String reply = sendCommand(firstProxyPort, respArray("AUTH", "wrong-password"));
         assertEquals("-ERR invalid username-password pair or user is disabled.\r\n", reply);
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void createUser() {
         given()
             .formParam("Action", "CreateUser")
@@ -166,7 +183,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void unassociatedUserIsRejected() throws Exception {
         // Before associating the user with the group, auth should fail
         String reply = sendCommand(firstProxyPort, respArray("AUTH", USER_NAME, INITIAL_PASSWORD));
@@ -174,7 +191,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void associateUserWithGroup() {
         given()
             .formParam("Action", "ModifyReplicationGroup")
@@ -189,7 +206,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void describeUsersIncludesCreatedUser() {
         given()
             .formParam("Action", "DescribeUsers")
@@ -203,7 +220,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void crossGroupAuthIsRejected() throws Exception {
         // Ensure user exists if this test is run in isolation
         try {
@@ -235,7 +252,7 @@ class ElastiCacheIntegrationTest {
                     .statusCode(200)
                 .extract()
                     .xmlPath()
-                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Port");
+                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port");
 
             // User associated with GROUP_ID should be rejected on CROSS_GROUP_ID
             String reply = sendCommand(crossGroupPort, respArray("AUTH", USER_NAME, INITIAL_PASSWORD));
@@ -260,7 +277,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void userPasswordAuthWorks() throws Exception {
         try (Socket socket = openSocket(firstProxyPort)) {
             write(socket, respArray("AUTH", USER_NAME, INITIAL_PASSWORD));
@@ -272,7 +289,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void modifyUserPasswordInvalidatesOldPasswordAndAcceptsNewPassword() throws Exception {
         given()
             .formParam("Action", "ModifyUser")
@@ -299,7 +316,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void deleteUserRemovesUserFromDescribeUsers() {
         given()
             .formParam("Action", "DeleteUser")
@@ -318,11 +335,11 @@ class ElastiCacheIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserId", org.hamcrest.Matchers.not(equalTo(USER_ID)));
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserId", not(equalTo(USER_ID)));
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void deleteReplicationGroupReleasesProxyPortForReuse() {
         given()
             .formParam("Action", "DeleteReplicationGroup")
@@ -345,10 +362,10 @@ class ElastiCacheIntegrationTest {
                     .post("/")
                 .then()
                     .statusCode(200)
-                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Address", equalTo("localhost"))
+                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Address", equalTo("localhost"))
                 .extract()
                     .xmlPath()
-                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Port");
+                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port");
 
         assertEquals(firstProxyPort, reusedPort);
 
@@ -439,6 +456,51 @@ class ElastiCacheIntegrationTest {
             }
         }
         return new String(buffer, 0, offset, StandardCharsets.UTF_8);
+    }
+
+    private static String readRespValue(Socket socket) throws IOException {
+        String header = readLine(socket);
+        if (header.length() < 3) {
+            throw new IOException("Invalid RESP value header: " + header);
+        }
+
+        char type = header.charAt(0);
+        return switch (type) {
+            case '$', '!', '=' -> {
+                int count = parseRespLength(header);
+                if (count >= 0) {
+                    byte[] payload = socket.getInputStream().readNBytes(count + 2);
+                    if (payload.length != count + 2
+                            || payload[count] != '\r' || payload[count + 1] != '\n') {
+                        throw new IOException("Incomplete RESP bulk payload");
+                    }
+                }
+                yield header;
+            }
+            case '*', '~', '>' -> {
+                int count = parseRespLength(header);
+                for (int index = 0; index < count; index++) {
+                    readRespValue(socket);
+                }
+                yield header;
+            }
+            case '%', '|' -> {
+                int count = parseRespLength(header);
+                for (int index = 0; index < count * 2; index++) {
+                    readRespValue(socket);
+                }
+                yield header;
+            }
+            default -> header;
+        };
+    }
+
+    private static int parseRespLength(String header) throws IOException {
+        try {
+            return Integer.parseInt(header.substring(1, header.length() - 2));
+        } catch (NumberFormatException e) {
+            throw new IOException("Invalid RESP length: " + header, e);
+        }
     }
 
     private static String respArray(String... parts) {

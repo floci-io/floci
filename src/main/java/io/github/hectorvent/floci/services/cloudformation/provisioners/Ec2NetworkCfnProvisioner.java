@@ -31,7 +31,7 @@ import java.util.function.Supplier;
 /**
  * CloudFormation provisioning for the EC2 networking types: {@code AWS::EC2::Subnet},
  * {@code InternetGateway}, {@code RouteTable}, {@code Route}, {@code NatGateway}, {@code EIP} and
- * {@code SubnetRouteTableAssociation}. Extracted from {@code CloudFormationResourceProvisioner} as
+ * {@code SubnetRouteTableAssociation}. Extracted from the former CloudFormation monolith as
  * part of the per-service decomposition. The physical id is the EC2 id the service assigns, except
  * for a Route, whose id is the registry primary identifier {@code <RouteTableId>|<destination>} (what
  * Ref returns on AWS and what a delete needs), and an EIP, whose Ref is its public IP.

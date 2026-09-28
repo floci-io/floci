@@ -2,11 +2,15 @@ package io.github.hectorvent.floci.core.common;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import io.github.hectorvent.floci.testing.PartitionMatrix;
+import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -139,13 +143,43 @@ class AwsArnUtilsTest {
     }
 
     /**
-     * Global services pass no region, and they keep the commercial partition. Thirty call sites
-     * do this; anything else would rewrite every IAM, S3 and CloudFront ARN the emulator mints.
+     * A regionless {@code Arn.of} keeps the commercial partition: nothing in the region argument
+     * can say otherwise. Call sites that know the request's partition use {@link AwsArnUtils.Arn#global}.
      */
     @Test
     void aRegionlessArnStaysInTheCommercialPartition() {
         assertEquals("arn:aws:iam::000000000000:role/r",
                 AwsArnUtils.Arn.of("iam", "", "000000000000", "role/r").toString());
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.github.hectorvent.floci.testing.PartitionMatrix#cases")
+    void aGlobalArnCarriesTheGivenPartitionAndNoRegion(PartitionCase partitionCase) {
+        AwsArnUtils.Arn arn = AwsArnUtils.Arn.global(partitionCase.partition(), "iam", "000000000000", "role/r");
+        assertEquals("arn:" + partitionCase.partition() + ":iam::000000000000:role/r", arn.toString());
+        PartitionMatrix.assertGlobalArnIn(partitionCase, arn.toString());
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.github.hectorvent.floci.testing.PartitionMatrix#cases")
+    void resourceIfArnForYieldsTheResourceTailInEveryPartition(PartitionCase partitionCase) {
+        String prefix = "arn:" + partitionCase.partition() + ":s3:::";
+        assertEquals("bucket/key", AwsArnUtils.resourceIfArnFor(prefix + "bucket/key", "s3").orElseThrow());
+        assertEquals("", AwsArnUtils.resourceIfArnFor(prefix, "s3").orElseThrow());
+        assertTrue(AwsArnUtils.resourceIfArnFor(prefix + "bucket", "sqs").isEmpty());
+    }
+
+    @Test
+    void resourceIfArnForIsEmptyForNonArns() {
+        assertTrue(AwsArnUtils.resourceIfArnFor(null, "s3").isEmpty());
+        assertTrue(AwsArnUtils.resourceIfArnFor("bucket", "s3").isEmpty());
+        assertTrue(AwsArnUtils.resourceIfArnFor("arn:aws:s3", "s3").isEmpty());
+    }
+
+    @Test
+    void aPseudoRegionResolvesToItsPartitionWhenMinting() {
+        assertEquals("arn:aws-cn:sqs:aws-cn-global:000000000000:q",
+                AwsArnUtils.Arn.of("sqs", "aws-cn-global", "000000000000", "q").toString());
     }
 
     /** A region AWS has not launched yet must not fail closed. */
@@ -198,6 +232,29 @@ class AwsArnUtilsTest {
                 "dynamodb"));
         assertFalse(AwsArnUtils.isArnFor("my-table", "dynamodb"));
         assertFalse(AwsArnUtils.isArnFor(null, "dynamodb"));
+    }
+
+    @Test
+    void s3ObjectArnSplitsBucketAndKey() {
+        assertEquals(new AwsArnUtils.S3ObjectRef("logs", "firelens/extra.conf"),
+                AwsArnUtils.parseS3ObjectArn("arn:aws:s3:::logs/firelens/extra.conf"));
+        assertEquals(new AwsArnUtils.S3ObjectRef("logs", "extra.conf"),
+                AwsArnUtils.parseS3ObjectArn("arn:aws:s3:us-east-1:000000000000:logs/extra.conf"));
+    }
+
+    /**
+     * Everything ECS rejects as "Invalid arn syntax" for a FireLens {@code config-file-value}:
+     * not an ARN at all (the {@code s3://bucket/key} form users try), another service's ARN, and
+     * an ARN with no key or no bucket. Null rather than an exception, because the same helper
+     * backs the defensive path at task launch.
+     */
+    @Test
+    void s3ObjectArnIsNullForAnythingThatIsNotAnS3Object() {
+        assertNull(AwsArnUtils.parseS3ObjectArn("s3://logs/extra.conf"));
+        assertNull(AwsArnUtils.parseS3ObjectArn("arn:aws:s3:::logs"));
+        assertNull(AwsArnUtils.parseS3ObjectArn("arn:aws:s3:::logs/"));
+        assertNull(AwsArnUtils.parseS3ObjectArn("arn:aws:sqs:us-east-1:000000000000:my-queue"));
+        assertNull(AwsArnUtils.parseS3ObjectArn(null));
     }
 
     @Test

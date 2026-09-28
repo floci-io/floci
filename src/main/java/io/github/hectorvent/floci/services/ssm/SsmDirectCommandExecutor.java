@@ -10,7 +10,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -40,11 +39,22 @@ public class SsmDirectCommandExecutor {
             String documentName,
             Map<String, List<String>> parameters,
             int timeoutSeconds) {
-        if (!supports(instanceId, documentName)) {
+        return executeIfSupported(null, instanceId, documentName, parameters, timeoutSeconds);
+    }
+
+    public Optional<ExecutionResult> executeIfSupported(
+            String accountId,
+            String instanceId,
+            String documentName,
+            Map<String, List<String>> parameters,
+            int timeoutSeconds) {
+        if (!supports(accountId, instanceId, documentName)) {
             return Optional.empty();
         }
 
-        Instance instance = ec2Service.findInstanceById(instanceId);
+        Instance instance = accountId != null
+                ? ec2Service.findInstanceById(accountId, instanceId)
+                : ec2Service.findInstanceById(instanceId);
         String script = String.join("\n", parameters.getOrDefault("commands", List.of()));
         if (script.isBlank()) {
             return Optional.of(ExecutionResult.success("", "", 0));
@@ -66,10 +76,14 @@ public class SsmDirectCommandExecutor {
     }
 
     public boolean supports(String instanceId, String documentName) {
+        return supports(null, instanceId, documentName);
+    }
+
+    public boolean supports(String accountId, String instanceId, String documentName) {
         if (!"AWS-RunShellScript".equals(documentName)) {
             return false;
         }
-        return isContainerBacked(instanceId);
+        return isContainerBacked(accountId, instanceId);
     }
 
     /**
@@ -78,11 +92,19 @@ public class SsmDirectCommandExecutor {
      * managed instance is served through the SSM agent polling flow.
      */
     public boolean isContainerBacked(String instanceId) {
-        Instance instance = ec2Service.findInstanceById(instanceId);
+        return isContainerBacked(null, instanceId);
+    }
+
+    public boolean isContainerBacked(String accountId, String instanceId) {
+        Instance instance = accountId != null
+                ? ec2Service.findInstanceById(accountId, instanceId)
+                : ec2Service.findInstanceById(instanceId);
         if (instance == null || instance.getDockerContainerId() == null || instance.getDockerContainerId().isBlank()) {
             return false;
         }
-        return ec2Service.isInstanceContainerRunning(instanceId);
+        return accountId != null
+                ? ec2Service.isInstanceContainerRunning(accountId, instanceId)
+                : ec2Service.isInstanceContainerRunning(instanceId);
     }
 
     private ExecutionResult executeInContainer(String containerId, String script, String workingDirectory, int timeoutSeconds)
@@ -98,8 +120,8 @@ public class SsmDirectCommandExecutor {
 
         String execId = create.exec().getId();
         CountDownLatch latch = new CountDownLatch(1);
-        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
+        BoundedOutputCollector stdout = new BoundedOutputCollector(SsmCommandService.MAX_STDOUT_CHARS);
+        BoundedOutputCollector stderr = new BoundedOutputCollector(SsmCommandService.MAX_STDERR_CHARS);
         Instant start = Instant.now();
 
         ResultCallback<Frame> callback = dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
@@ -109,12 +131,8 @@ public class SsmDirectCommandExecutor {
                 if (payload == null) {
                     return;
                 }
-                ByteArrayOutputStream target = frame.getStreamType() == StreamType.STDERR ? stderr : stdout;
-                try {
-                    target.write(payload);
-                }
-                catch (IOException ignored) {
-                }
+                BoundedOutputCollector target = frame.getStreamType() == StreamType.STDERR ? stderr : stdout;
+                target.write(payload);
             }
 
             @Override
@@ -124,12 +142,8 @@ public class SsmDirectCommandExecutor {
 
             @Override
             public void onError(Throwable throwable) {
-                try {
-                    stderr.write((throwable.getMessage() != null ? throwable.getMessage() : throwable.toString())
-                            .getBytes(StandardCharsets.UTF_8));
-                }
-                catch (IOException ignored) {
-                }
+                stderr.write((throwable.getMessage() != null ? throwable.getMessage() : throwable.toString())
+                        .getBytes(StandardCharsets.UTF_8));
                 latch.countDown();
             }
         });
@@ -138,15 +152,15 @@ public class SsmDirectCommandExecutor {
         if (!completed) {
             closeQuietly(callback);
             return ExecutionResult.timedOut(
-                    stdout.toString(StandardCharsets.UTF_8),
+                    stdout.content(),
                     "Timed out after " + timeoutSeconds + "s",
                     start);
         }
 
         Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
         int responseCode = exitCode != null ? exitCode.intValue() : 1;
-        String standardOutput = stdout.toString(StandardCharsets.UTF_8);
-        String standardError = stderr.toString(StandardCharsets.UTF_8);
+        String standardOutput = stdout.content();
+        String standardError = stderr.content();
         if (isTimeoutExitCode(responseCode)) {
             logFailureDiagnostics(containerId);
             return ExecutionResult.timedOut(standardOutput, standardError, start);
@@ -196,7 +210,7 @@ public class SsmDirectCommandExecutor {
                 .withAttachStderr(true);
         String execId = create.exec().getId();
         CountDownLatch latch = new CountDownLatch(1);
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        BoundedOutputCollector output = new BoundedOutputCollector(SsmCommandService.MAX_STDOUT_CHARS);
         ResultCallback<Frame> callback = dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
             @Override
             public void onNext(Frame frame) {
@@ -204,11 +218,7 @@ public class SsmDirectCommandExecutor {
                 if (payload == null) {
                     return;
                 }
-                try {
-                    output.write(payload);
-                }
-                catch (IOException ignored) {
-                }
+                output.write(payload);
             }
 
             @Override
@@ -225,7 +235,7 @@ public class SsmDirectCommandExecutor {
         if (!completed) {
             closeQuietly(callback);
         }
-        return output.toString(StandardCharsets.UTF_8);
+        return output.content();
     }
 
     static String failureDiagnosticsScript() {

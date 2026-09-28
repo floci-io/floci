@@ -80,9 +80,14 @@ Floci follows a layered design:
 Typical service structure:
 
 - `services/<svc>/`
-  - `*Controller.java`
+  - `*Controller.java` (REST JSON / REST XML services, via JAX-RS)
+  - `*QueryHandler.java` (AWS Query/XML protocol services)
+  - `*JsonHandler.java` (AWS JSON 1.1 protocol services)
   - `*Service.java`
   - `model/`
+
+The entry-point class name depends on the service's AWS protocol (see "AWS Protocol
+Rules" below); `Controller` is not universal.
 
 Rule:
 Copy an existing service pattern before introducing a new one.
@@ -110,6 +115,25 @@ Floci must implement real AWS wire protocols.
 - Management APIs should be validated with AWS SDK clients, not only handcrafted HTTP requests
 
 ---
+
+### Partition literals
+
+Floci serves every AWS partition, not only the commercial one, so a literal that bakes
+`aws` into a code path is a bug in a GovCloud, China, ISO or EUSC deployment even when it
+prints correctly in `us-east-1`. `make partition-check` (CI: Partition Literals) inventories
+`src/main/java` for `arn:aws:` prefixes, `amazonaws.com` hosts, Route 53 hosted-zone ids
+and hand-rolled `arn:aws[a-z-]*:` regexes against `tools/partition/baseline.tsv`, per file.
+A literal in a new file fails, growth in an existing file fails, and a drop fails until you
+run `make partition-baseline` and commit the smaller baseline.
+
+- Mint ARNs through `AwsArnUtils.Arn.of(...)` / `RegionResolver.buildArn(...)`, recognise
+  them with `AwsArnUtils.isArn` / `PARTITION_REGEX`, and derive hosts from the region's
+  DNS suffix (`AwsRegions.dnsSuffixFor`).
+- A literal that is genuinely partition-invariant (an XML namespace URI, an S3 canned-ACL
+  grantee URI) goes in `tools/partition/allowlist.yaml` with a reason, or ends its line
+  with `// partition-literal: <reason>`. Both are printed by `make partition-audit`.
+- Tests are not scanned; only assert a partition-dependent value when the test is about
+  partitions.
 
 ## XML / JSON Rules
 
@@ -180,6 +204,11 @@ Critical areas:
     ./mvnw clean package
     ./mvnw clean package -DskipTests
 
+`make help` lists the Makefile shortcuts. The native binary and image: `make native`
+then `make native-image` (CI's flags, staged in `native/<arch>/`), `make native-host` for a
+binary built on this machine with the installed GraalVM, `make native-up` to run the image,
+`make compat SUITES="sdk-test-java compat-cdk"` for compatibility suites against it.
+
 ### Focused tests
 
     ./mvnw test -Dtest=SsmIntegrationTest
@@ -249,30 +278,36 @@ When adding functionality:
 
 ## Adding a New AWS Service
 
-1. Create a package under `services/<svc>/` with a Controller, a Service, and `model/`
+1. Create a package under `services/<svc>/` with a Controller or protocol-specific handler,
+   a Service, and `model/`
 2. Add a `<Svc>ServiceConfig` interface and its accessor on `ServicesConfig` in `EmulatorConfig`
 3. Add one `descriptor(...)` entry in `ResolvedServiceCatalog`. This is the registration point;
    `ServiceRegistry` only reads the catalog and has no registration API
 4. Add `floci.services.<key>.enabled` to both `src/main/resources/application.yml` and
    `src/test/resources/application.yml`
-5. JSON 1.1 only: inject the handler in `AwsJson11Controller`
+5. JSON 1.1 only: inject the `<Svc>JsonHandler` in `AwsJson11Controller`
 6. Obtain storage through `StorageFactory` and implement `Resettable`
 7. List any static `Random` or `SecureRandom` field under `--initialize-at-run-time` in
    `application.yml`
-8. Add `<Svc>ServiceTest` and `<Svc>IntegrationTest`
-9. Document it: `docs/services/<svc>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in
+8. Check every timestamp member you emit for a `TimestampFormatTrait` before using the
+   epoch-seconds idiom. It is the awsJson1.1 default, but a model can override it per
+   member, and the mismatch is invisible to the AWS CLI because botocore coerces the
+   value, while strict SDKs (Go, Java) reject the whole response. `javap -c` on the SDK
+   model class shows the traits on each `SdkField`
+9. Add `<Svc>ServiceTest` and `<Svc>IntegrationTest`
+10. Document it: `docs/services/<svc>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in
    `docs/services/index.md`, and a row in the README category table
-10. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and
+11. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and
     `make docs-check`
-11. Add a `TestFixtures` client factory and a `<Svc>Test` in `compatibility-tests/sdk-test-java`
+12. Add a `TestFixtures` client factory and a `<Svc>Test` in `compatibility-tests/sdk-test-java`
 
 ---
 
 ## Adding a CloudFormation Resource Type
 
-**Do not add cases to `CloudFormationResourceProvisioner`.** That class is a legacy
-monolith being dismantled; new types go in per-service provisioners under
-`services/cloudformation/provisioners/`.
+**Every type is served by a per-service provisioner under
+`services/cloudformation/provisioners/`.** `CfnResourceDispatcher` only routes a resource to
+the registry and stubs what nothing serves; never add type-specific code to it.
 
 1. Add the type to the existing `<Service>CfnProvisioner`, or create one:
    `@ApplicationScoped`, injecting only the service it wraps. CDI discovery via
@@ -320,6 +355,33 @@ References: `SqsCfnProvisioner` (smallest), `Ec2LaunchTemplateCfnProvisioner`
 (update-in-place and replacement), `LogsCfnProvisioner` (reconcile-vs-replace update).
 
 ---
+
+## Sidecars
+
+A dependency too heavy for the native image (a native runtime, a large engine, another language
+ecosystem) ships as a sidecar: a stateless HTTP service in its own container that Floci starts
+lazily over the Docker socket. Sidecars live in
+[floci-io/floci-sidecars](https://github.com/floci-io/floci-sidecars), one directory per sidecar
+on the shared `sidecar-core`, and are published as `floci/floci-sidecar-<name>:<semver>` on
+Docker Hub. They implement that repository's `docs/contract.md` and carry no AWS vocabulary: the
+sidecar answers a generic question, Floci maps its service semantics onto the answer.
+
+Floci-side rules:
+
+- Never add a `sidecars/` directory to this repository, never publish a `floci/floci:<tag>-<name>`
+  suffix, and never default an image to `:latest` (`ImageCacheService` never re-pulls a cached tag).
+- The consuming service owns two config knobs, `<name>-image` (an exact version) and `<name>-url`
+  (skip container management), and a `<Name>SidecarManager` plus `<Name>SidecarClient` pair.
+  `CedarSidecarManager` is the reference: it reads the contract JSON from `/health` and fails fast
+  on a contract-major mismatch.
+- The sidecar releases before the Floci PR that needs it, as a final or an `X.Y.Z-rc.N` tag; the
+  Floci PR pins that tag. A PR that needs an unreleased sidecar cannot pass CI.
+- Tests: the client's wire contract is covered by a JDK `HttpServer` fake; one Docker-gated
+  `@QuarkusTest` runs the pinned image through the real manager under its own
+  `floci.docker.resource-namespace`. A Floci test imports only Floci classes; the sidecar's own
+  behaviour is tested in its repository.
+- A sidecar that is a stock upstream image plus a script from the classpath needs no repository
+  but still goes through a manager with the same two knobs.
 
 ## Code Style
 
@@ -482,8 +544,8 @@ Treat release workflows as critical infrastructure.
 - Producing inconsistent URLs or ARNs
 - Testing only with raw HTTP
 - Introducing unnecessary new patterns
-- Adding a CloudFormation type to `CloudFormationResourceProvisioner` instead of a
-  per-service provisioner
+- Adding type-specific code to `CfnResourceDispatcher` instead of a per-service
+  provisioner
 - Setting a CloudFormation resource's physical id but not its `Fn::GetAtt`
   attributes (they are two separate mechanisms, and the miss is silent)
 - Hand-editing the resource-type table in `docs/services/cloudformation.md`, which is

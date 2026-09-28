@@ -3,18 +3,20 @@ package io.github.hectorvent.floci.services.efs;
 import io.github.hectorvent.floci.core.common.AwsException;
 import jakarta.ws.rs.core.Response.Status;
 
+import java.util.Map;
+
 public class EfsException extends AwsException {
 
     public EfsException(Status status, String errorCode, String message) {
         super(errorCode, message, status.getStatusCode());
     }
 
-    public EfsException(Status status, String errorCode, String message, java.util.Map<String, Object> extendedData) {
+    public EfsException(Status status, String errorCode, String message, Map<String, Object> extendedData) {
         super(errorCode, message, status.getStatusCode(), extendedData);
     }
 
     public static EfsException fileSystemAlreadyExists(String token, String fileSystemId) {
-        return new EfsException(Status.CONFLICT, "FileSystemAlreadyExists", "File system with creation token " + token + " already exists.", java.util.Map.of("FileSystemId", fileSystemId));
+        return new EfsException(Status.CONFLICT, "FileSystemAlreadyExists", "File system with creation token " + token + " already exists.", Map.of("FileSystemId", fileSystemId));
     }
 
     public static EfsException fileSystemNotFound(String fileSystemId) {
@@ -34,7 +36,7 @@ public class EfsException extends AwsException {
     }
 
     public static EfsException accessPointAlreadyExists(String token, String accessPointId) {
-        return new EfsException(Status.CONFLICT, "AccessPointAlreadyExists", "Access point with client token " + token + " already exists.", java.util.Map.of("AccessPointId", accessPointId));
+        return new EfsException(Status.CONFLICT, "AccessPointAlreadyExists", "Access point with client token " + token + " already exists.", Map.of("AccessPointId", accessPointId));
     }
     
     public static EfsException accessPointNotFound(String accessPointId) {

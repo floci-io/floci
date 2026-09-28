@@ -282,4 +282,92 @@ class IamResourceTagsInResponseTest {
             .body(not(containsString("<Tags>")))
             .body(not(containsString("profile-must-not-be-listed")));
     }
+
+    /**
+     * Unlike Role, User and Policy, AWS documents no listing-subset exclusion for
+     * InstanceProfile: ListInstanceProfiles uses the same InstanceProfile shape as
+     * CreateInstanceProfile and GetInstanceProfile, so its own tags (not the embedded role's)
+     * belong on all three. CreateInstanceProfile also accepts Tags at creation time, which it
+     * previously silently dropped.
+     */
+    @Test
+    void createAndGetInstanceProfileEchoTheirOwnTags() {
+        String profile = "TagEchoProfile";
+
+        iam("CreateInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+            .formParam("Tags.member.1.Key", "Environment")
+            .formParam("Tags.member.1.Value", "dev")
+        .when().post("/").then()
+            .statusCode(200)
+            .body(containsString("<Key>Environment</Key>"))
+            .body(containsString("<Value>dev</Value>"));
+
+        iam("GetInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+        .when().post("/").then()
+            .statusCode(200)
+            .body(containsString("<Key>Environment</Key>"))
+            .body(containsString("<Value>dev</Value>"));
+    }
+
+    @Test
+    void getInstanceProfileOmitsTheTagsElementEntirelyWhenUntagged() {
+        String profile = "UntaggedEchoProfile";
+
+        iam("CreateInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+        .when().post("/").then().statusCode(200);
+
+        iam("GetInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+        .when().post("/").then()
+            .statusCode(200)
+            .body(not(containsString("<Tags>")));
+    }
+
+    @Test
+    void listInstanceProfilesOmitsTagsEvenForATaggedProfile() {
+        String profile = "ListSubsetProfile";
+
+        iam("CreateInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+            .formParam("Tags.member.1.Key", "ListProfilesMarker")
+            .formParam("Tags.member.1.Value", "must-not-be-listed")
+        .when().post("/").then().statusCode(200);
+
+        // ListInstanceProfiles documents itself as a listing subset, the same note ListRoles
+        // carries: "this operation does not return tags, even though they are an attribute of
+        // the returned object."
+        iam("ListInstanceProfiles")
+        .when().post("/").then()
+            .statusCode(200)
+            .body(containsString("<InstanceProfileName>" + profile + "</InstanceProfileName>"))
+            .body(not(containsString("<Tags>")))
+            .body(not(containsString("must-not-be-listed")));
+    }
+
+    @Test
+    void listInstanceProfilesForRoleAndGetAccountAuthorizationDetailsStillIncludeInstanceProfileTags() {
+        String s = Long.toString(System.nanoTime(), 36);
+        String role = "ListForRoleTagRole-" + s;
+        String profile = "ListForRoleTagProfile-" + s;
+
+        iam("CreateRole").formParam("RoleName", role).formParam("Path", "/")
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .when().post("/").then().statusCode(200);
+        iam("CreateInstanceProfile")
+            .formParam("InstanceProfileName", profile)
+            .formParam("Tags.member.1.Key", "ListForRoleMarker")
+            .formParam("Tags.member.1.Value", "must-be-listed")
+        .when().post("/").then().statusCode(200);
+        iam("AddRoleToInstanceProfile").formParam("InstanceProfileName", profile).formParam("RoleName", role)
+            .when().post("/").then().statusCode(200);
+
+        // Unlike ListInstanceProfiles, this operation carries no listing-subset note.
+        iam("ListInstanceProfilesForRole").formParam("RoleName", role)
+        .when().post("/").then()
+            .statusCode(200)
+            .body(containsString("must-be-listed"));
+    }
 }

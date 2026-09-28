@@ -136,14 +136,29 @@ iterations.
   `ReaderConfig.ItemsPointer` selects a node inside it.
 - `JSONL` is one item per line. Blank lines are skipped, and `ItemsPointer` does not apply,
   matching AWS.
-- `CSV`, `PARQUET` and `MANIFEST` are accepted by `CreateStateMachine` and fail the execution
-  with `States.ItemReaderFailed`.
+- `CSV` takes its field names from the first row, or from `ReaderConfig.CSVHeaders` when
+  `CSVHeaderLocation` is `GIVEN`. Every value is a string: a row shorter than the headers pads
+  with empty strings, and a longer one drops the surplus. `ReaderConfig.CSVDelimiter` selects
+  `COMMA`, `PIPE`, `SEMICOLON`, `SPACE` or `TAB`, and a quoted field may contain the delimiter
+  or a line break without ending the record. A doubled quote stands for a single quote, in an
+  unquoted field as well as a quoted one, and a backslash escapes another backslash, a quote or
+  the delimiter. A backslash before anything else is dropped, as AWS documents.
+- `PARQUET` and `MANIFEST` are accepted by `CreateStateMachine` and fail the execution with
+  `States.ItemReaderFailed`.
 
 `arn:aws:states:::s3:listObjectsV2` reads every page under `Prefix`. Each item carries the AWS
 fields `Etag`, `Key`, `LastModified` (epoch seconds), `Size` and `StorageClass`. An empty prefix
 gives zero iterations and the Map succeeds.
 
-`ReaderConfig.MaxItems` applies to every reader; `MaxItemsPath` is not supported.
+`ReaderConfig.MaxItems` applies to every reader. Literal values cannot exceed 100,000,000; a
+larger value resolved by `MaxItemsPath` or a JSONata expression is capped at that reader limit.
+A dynamic limit resolving to zero reads the entire dataset.
+`MaxItemsPath` accepts integers and integer strings within the signed 64-bit range. Values
+outside that range or decimal values fail with `States.Runtime`; negative integers fail with
+`States.ItemReaderFailed`. JSONata expressions must return integers, not strings.
+JSONPath state machines may resolve the limit from the Map input with `MaxItemsPath`, while
+JSONata state machines may use a `{% %}` expression in `MaxItems`. `MaxItems` and `MaxItemsPath`
+are mutually exclusive, and `MaxItemsPath` is rejected for JSONata state machines.
 
 ## Distributed Map ItemBatcher
 
@@ -198,8 +213,19 @@ workflows converge: the `framework-isComplete-task` throws on every not-yet-comp
 
 `JitterStrategy` supports `NONE` (the default) and `FULL`. `FULL` draws the delay
 uniformly between zero and the computed delay, as on AWS. One deviation. The delay
-between attempts is capped at 30 seconds, the same cap Floci applies to `Wait` states,
-so emulated runs stay fast.
+between attempts is capped at `floci.services.stepfunctions.max-wait-seconds`
+(default 30), the same ceiling Floci applies to `Wait` states, so emulated runs stay fast.
+
+## Wait states
+
+A `Wait` state honors `Seconds`, `SecondsPath`, `Timestamp`, and `TimestampPath`. The two
+`Seconds` forms pause for the given number of seconds. The two `Timestamp` forms parse an
+ISO-8601 instant and pause until it, or return promptly when it has already passed. An
+unparseable timestamp fails the execution with `States.Runtime`. In a JSONata state machine,
+`Seconds` and `Timestamp` each accept a literal or a JSONata expression that produces the value.
+
+One deviation. Every pause is capped at `floci.services.stepfunctions.max-wait-seconds`
+(default 30) so emulated runs stay fast, where AWS sleeps the full duration.
 
 ## Timeouts
 
@@ -417,13 +443,25 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:sfn:startSyncExecution` | execution envelope | `Sfn.StateMachineTypeNotSupportedException` for a Standard child |
 | `arn:aws:states:::aws-sdk:sfn:sendTaskSuccess` | `{}` | `Sfn.InvalidTokenException` when no task is waiting on the token |
 | `arn:aws:states:::aws-sdk:sfn:sendTaskFailure` | `{}` | `Sfn.InvalidTokenException` |
+| `arn:aws:states:::aws-sdk:rdsdata:executeStatement` | RDS Data statement result | `RdsData.BadRequestException` for an invalid request |
 | `arn:aws:states:::aws-sdk:scheduler:createSchedule` | `{ScheduleArn}` | `Scheduler.ConflictException` when the name is taken |
 | `arn:aws:states:::aws-sdk:scheduler:updateSchedule` | `{ScheduleArn}` | `Scheduler.ResourceNotFoundException` |
+| `arn:aws:states:::aws-sdk:scheduler:deleteSchedule` | `{}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:sns:publish` | `{MessageId}` | `Sns.NotFoundException` when the topic does not exist |
+
+Scheduler create and update tasks accept `StartDate` and `EndDate` as RFC 3339 strings, including
+offsets and fractional seconds. The direct Scheduler API continues to use numeric epoch seconds.
+Structured JSON values supplied as `Target.Input` are serialized once to the Scheduler API's string
+field. Textual JSON remains unchanged, and malformed text reaches the existing Scheduler validation.
 
 `sendTaskSuccess` and `sendTaskFailure` resolve a token a `.waitForTaskToken` task is parked on. A
 token nobody is waiting for fails the calling task rather than reporting a delivery that never
 happened.
+
+`rdsdata:executeStatement` uses the existing RDS Data API implementation. Task arguments use SDK
+PascalCase names such as `ResourceArn`, `SecretArn`, `Sql` and `Parameters`; the adapter translates
+them to the direct API shape and returns a recursively PascalCase result. Other RDS Data actions are
+not routed through Step Functions yet.
 
 ## Publishing to SNS
 
@@ -463,6 +501,10 @@ cause is the response serialized as a string, so a `Catch` can read which entry 
 ```json
 {"FailedEntryCount":1,"Entries":[{"EventId":"08cbdc46-…"},{"ErrorCode":"InvalidArgument","ErrorMessage":"EventBus not found: no-such-bus"}]}
 ```
+
+The optimized integration accepts `Detail` as a JSON object in JSONPath and JSONata workflows. It
+serializes that object once for the EventBridge request, preserving nested values and escaped text.
+The direct EventBridge API continues to accept its native string-valued `Detail` field.
 
 One deviation, and it belongs to EventBridge rather than to the integration: Floci rejects an entry
 addressed to an event bus that does not exist, while AWS accepts it and returns an `EventId`.
@@ -614,6 +656,7 @@ no additional event is written.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_STEPFUNCTIONS_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_STEPFUNCTIONS_MAX_WAIT_SECONDS` | `30` | Ceiling in seconds on a `Wait` state pause and a `Retry` backoff |
 | `SFN_MOCK_CONFIG` | unset | Path to a Step Functions Local compatible mock configuration file (alias: `FLOCI_SERVICES_STEPFUNCTIONS_MOCK_CONFIG_FILE`) |
 
 ## Examples

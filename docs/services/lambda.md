@@ -33,7 +33,12 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `GetPolicy` | Get the function resource policy |
 | `RemovePermission` | Remove a resource-policy statement |
 | `GetFunctionCodeSigningConfig` | Return code-signing config (always empty) |
-| `ListFunctionsByCodeSigningConfig` | Validates the ARN; no code-signing config can exist, so every well-formed ARN returns `ResourceNotFoundException` |
+| `ListFunctionsByCodeSigningConfig` | List functions carrying a config. Always empty, since nothing can attach one |
+| `CreateCodeSigningConfig` | Create a code signing configuration |
+| `GetCodeSigningConfig` | Read a code signing configuration |
+| `UpdateCodeSigningConfig` | Update the members the request names |
+| `DeleteCodeSigningConfig` | Delete a code signing configuration |
+| `ListCodeSigningConfigs` | List the configurations in the region |
 | `CreateFunctionUrlConfig` | Provision a function URL |
 | `GetFunctionUrlConfig` | Read function URL config |
 | `UpdateFunctionUrlConfig` | Update function URL config |
@@ -52,8 +57,78 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `ListFunctionEventInvokeConfigs` | List the asynchronous invocation settings of every version and alias of a function |
 
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
-provisions it from a stack. Asynchronous invocations do not yet apply its retry, event age or
-destination settings.
+provisions it from a stack. Asynchronous invocations apply its retry, event age, destination settings,
+and dead-letter queue configurations (`DeadLetterConfig`).
+
+### Asynchronous Invocation Retries and Dead-Letter Queues
+
+An asynchronous invocation (`InvocationType: Event`) answers `202` immediately and runs on the background
+pool. If the invocation fails, it is retried up to `MaximumRetryAttempts` (default: 2, total 3 attempts)
+unless the event age exceeds `MaximumEventAgeInSeconds` (default: 21600 seconds, 6 hours). In Floci,
+retries run back to back without the delays of live AWS (which waits roughly one minute and then two) to keep
+local test runs fast.
+
+When retries are exhausted or event age is exceeded:
+
+- If an `OnFailure` destination is configured, the failure record is delivered to the destination.
+- Otherwise, if a `DeadLetterConfig` (`TargetArn`) is configured on the function, the original request payload
+  is delivered to the specified SQS queue or SNS topic with `RequestID`, `ErrorCode` (Number), and `ErrorMessage`
+  (String, truncated to the first 1 KB) message attributes.
+- If both are configured, Floci routes to the `OnFailure` destination rather than the dead-letter queue
+  by design choice (AWS describes dead-letter queues as an alternative to an on-failure destination without
+  specifying precedence).
+
+### Asynchronous Invocation Destinations
+
+An asynchronous invocation delivers its result to the `OnSuccess` or `OnFailure` destination the configuration
+names. Four of AWS's five destination kinds are supported, routed by the service in the destination ARN: an EventBridge
+event bus, an SQS queue, an SNS topic, and another Lambda function. A function with no destination configured
+is unaffected, and delivery never changes what the caller sees: the invoke still answers `202` immediately, and
+a destination that rejects the record is logged rather than reported back.
+
+Every destination receives the same invocation record AWS sends:
+
+```json
+{
+  "version": "1.0",
+  "timestamp": "2026-09-22T10:15:31.123Z",
+  "requestContext": {
+    "requestId": "8ea123e4-1db7-4aba-9559-05a9a25c8b78",
+    "functionArn": "arn:aws:lambda:us-east-1:000000000000:function:bank-pawnshop:$LATEST",
+    "condition": "Success",
+    "approximateInvokeCount": 1
+  },
+  "requestPayload": { "bankId": "BANK-PawnShop" },
+  "responseContext": { "statusCode": 200, "executedVersion": "$LATEST" },
+  "responsePayload": { "bankId": "PawnShop", "rate": 3.5 }
+}
+```
+
+On an EventBridge destination the record is the event `detail`, under the source `lambda` and the
+detail type `Lambda Function Invocation Result - Success`, so a rule can match a field of the
+function's own response at `detail.responsePayload.<field>`. A failed invocation carries the detail
+type `Lambda Function Invocation Result - Failure`, a `condition` of `RetriesExhausted`, a
+`responseContext.functionError` of `Unhandled`, and the error as its `responsePayload`. That
+`functionError` member is present only on a failure record. The `approximateInvokeCount` field reflects
+the actual number of attempts executed before completion or exhaustion.
+
+An alias-specific destination configuration is used when the alias is invoked. If the alias has
+none, Floci checks the configuration on the version that the alias resolves to.
+
+Two limits are worth knowing:
+
+- **An S3 `OnFailure` destination is not delivered.** AWS added an S3 bucket as a fifth
+  destination kind, on failure only. Floci routes on the service in the destination ARN and has
+  no `s3` arm, so such a record is dropped with a warning rather than written to the bucket. The
+  configuration is still stored and read back, so Terraform and CloudFormation converge; only the
+  delivery is missing.
+- **A chain of Lambda destinations stops at 16 hops, but only a chain of Lambda destinations.** A
+  function whose `OnSuccess` names another function would otherwise invoke forever; AWS halts such
+  a chain at about the same depth through recursive loop detection, and here the record at the
+  sixteenth hop is dropped with a warning. The bound is keyed on the destination being a Lambda
+  ARN, so a cycle that leaves and re-enters Lambda by another route is **not** bounded: a topic
+  that fans back to the function, or a bus rule targeting it, each start a fresh chain at zero.
+  Avoid configuring one until this is closed.
 
 ## Hot-Reloading via Reactive S3 Sync
 
@@ -92,7 +167,7 @@ aws lambda invoke --function-name my-function out.json
 
 ## Hot-Reload via Bind Mount
 
-For the tightest inner-loop development cycle, Floci supports a **bind-mount hot-reload** mode. Instead of packaging code into a ZIP and uploading it to S3, you point Floci directly at a directory on your host machine. The directory is bind-mounted into `/var/task` inside the container, so every invocation runs the files as they currently exist on disk, with no upload or redeploy.
+For the tightest inner-loop development cycle, Floci supports a **bind-mount hot-reload** mode. Instead of packaging code into a ZIP and uploading it to S3, you point Floci directly at a directory on your host machine. The directory is bind-mounted read-only into `/var/task` inside the container, as `/var/task` is read-only in AWS Lambda, so every invocation runs the files as they currently exist on disk, with no upload or redeploy.
 
 This is enabled by using the magic bucket name `hot-reload` when creating a function:
 
@@ -126,6 +201,8 @@ FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true
 FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS=/home/user/projects,/tmp
 ```
 
+An `S3Key` is accepted when it is one of the listed directories or inside one. `.` and `..` segments are resolved first, so `/home/user/projects/../secrets` and a sibling such as `/home/user/projects-old` are rejected. Symbolic links on the Docker host are not resolved by Floci. A path containing `:` is rejected. Without an allow-list any absolute host path is accepted except the host root, `/var`, `/proc`, and anything under `/run` or `/var/run`, where the Docker socket lives or can be reached. Floci logs a warning at startup when hot-reload is enabled without an allow-list.
+
 **Docker Compose setup**: enable the feature and share the Docker socket:
 
 ```yaml
@@ -136,6 +213,18 @@ services:
     environment:
       FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED: "true"
 ```
+
+### CloudFormation and SAM
+
+`AWS::Lambda::Function` accepts the same pair. A template whose `Code` is
+`{"S3Bucket": "hot-reload", "S3Key": "/absolute/path"}` is handed to Lambda unchanged instead of
+being resolved against S3, so the stack creates a hot-reload function and reaches
+`CREATE_COMPLETE`. A SAM `CodeUri` of `s3://hot-reload//absolute/path` expands to the same `Code`:
+the double slash keeps the key absolute, because SAM takes everything after the first slash as the key.
+Redeploying the stack with an unchanged path is a no-op for the code; a changed path updates the
+function's bind mount through `UpdateFunctionCode`. Lambda's own hot-reload checks still apply, so
+a stack whose hot-reload path is relative, outside the allow-list, or used while hot-reload is
+disabled fails with Lambda's error as the resource status reason.
 
 ### Limitations
 
@@ -236,7 +325,13 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
 - Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
 - `InvokeWithResponseStream`
-- Code signing management (only `GetFunctionCodeSigningConfig` and `ListFunctionsByCodeSigningConfig` are wired; there is no `PutFunctionCodeSigningConfig` or `CreateCodeSigningConfig`, so no code-signing config can exist and `ListFunctionsByCodeSigningConfig` reports every well-formed ARN as `ResourceNotFoundException` — a malformed ARN or an out-of-range `MaxItems` is rejected with `InvalidParameterValueException` first)
+- Code signing enforcement. A configuration is created, read, updated, deleted and listed, and
+  nothing verifies a signature against it, so it never gates a deployment. Attaching one to a
+  function is not wired either: there is no `PutFunctionCodeSigningConfig`, so
+  `GetFunctionCodeSigningConfig` still reports an empty ARN and `ListFunctionsByCodeSigningConfig`
+  always reports no functions. An unknown configuration is `ResourceNotFoundException`, and a
+  malformed ARN or an out-of-range `MaxItems` is rejected with `InvalidParameterValueException`
+  first
 
 ## Configuration
 
@@ -265,6 +360,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Enable bind-mount hot-reload via `S3Bucket=hot-reload` |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS` | *(unset)* | Comma-separated allowlist of host paths that may be bind-mounted |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | *(unset)* | Docker network to attach Lambda containers to (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
+| `FLOCI_SERVICES_LAMBDA_DOCKER_FLAGS` | *(unset)* | Additional Docker flags applied to Lambda containers, including `--env`, `--volume`, `--publish`, `--add-host`, `--dns`, `--label`, `--network`, `--user`, `--privileged`, and `--platform`. Published ports support `host:container` and `127.0.0.1:host:container` forms |
 | `FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS` | *(unset)* | Comma-separated `hostname:ip` entries added to each Lambda container's `/etc/hosts`; `ip` may be `host-gateway`, mirroring `docker run --add-host` |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
@@ -757,7 +853,9 @@ aws lambda update-function-code \
 
 Connect Lambda to SQS, Kinesis, or DynamoDB Streams. Self-managed Apache Kafka event source mappings are accepted, validated, persisted, and returned on the wire, but Floci does not run an active Kafka consumer poller:
 
-For DynamoDB Streams mappings, Floci retries failed batches with exponential backoff, honors `MaximumRetryAttempts` and `MaximumRecordAgeInSeconds`, and sends discarded batches to configured SQS or SNS `DestinationConfig.OnFailure` destinations.
+For DynamoDB Streams mappings, Floci retries failed batches with exponential backoff, honors `MaximumRetryAttempts` and `MaximumRecordAgeInSeconds`, and sends discarded batches to configured SQS, SNS, or S3 `DestinationConfig.OnFailure` destinations. With `BisectBatchOnFunctionError`, a batch that fails with a function error is split in half and retried, narrowing it down to the failing record, which then follows the normal retry and record age rules. Splits do not count as retry attempts, and only function errors split: throttles do not, and a partial batch response retries from the reported record. If the OnFailure destination refuses a discarded batch, Floci logs the failure, drops the batch and advances past it.
+
+A DynamoDB Streams mapping created with `StartingPosition: LATEST` delivers only records written after it is created, so a stream that is empty at creation delivers everything written later. After a restart it still resumes from the trim horizon, because native stream records are volatile. Deleting or disabling a mapping stops any poll that has not yet invoked the function. An invocation already running completes, but its checkpoint is not saved: a deleted mapping is never recreated and its result is dropped, and a disabled mapping re-reads that batch when it is enabled again.
 
 ```bash
 # SQS trigger

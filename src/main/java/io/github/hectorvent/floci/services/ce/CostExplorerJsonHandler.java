@@ -20,10 +20,12 @@ public class CostExplorerJsonHandler {
     private static final Logger LOG = Logger.getLogger(CostExplorerJsonHandler.class);
 
     private final CostExplorerService service;
+    private final CostAnomalyService anomalies;
 
     @Inject
-    public CostExplorerJsonHandler(CostExplorerService service) {
+    public CostExplorerJsonHandler(CostExplorerService service, CostAnomalyService anomalies) {
         this.service = service;
+        this.anomalies = anomalies;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -38,6 +40,29 @@ public class CostExplorerJsonHandler {
             case "GetSavingsPlansCoverage" -> Response.ok(service.getSavingsPlansCoverage()).build();
             case "GetSavingsPlansUtilization" -> Response.ok(service.getSavingsPlansUtilization()).build();
             case "GetCostCategories" -> Response.ok(service.getCostCategories(request)).build();
+            case "CreateAnomalyMonitor" -> Response.ok(anomalies.createMonitor(request)).build();
+            case "GetAnomalyMonitors" -> Response.ok(anomalies.getMonitors(request)).build();
+            case "UpdateAnomalyMonitor" -> Response.ok(anomalies.updateMonitor(request)).build();
+            case "DeleteAnomalyMonitor" -> {
+                anomalies.deleteMonitor(request);
+                yield Response.ok("{}").build();
+            }
+            case "CreateAnomalySubscription" -> Response.ok(anomalies.createSubscription(request)).build();
+            case "GetAnomalySubscriptions" -> Response.ok(anomalies.getSubscriptions(request)).build();
+            case "UpdateAnomalySubscription" -> Response.ok(anomalies.updateSubscription(request)).build();
+            case "DeleteAnomalySubscription" -> {
+                anomalies.deleteSubscription(request);
+                yield Response.ok("{}").build();
+            }
+            case "ListTagsForResource" -> Response.ok(anomalies.listTags(request)).build();
+            case "TagResource" -> {
+                anomalies.tagResource(request);
+                yield Response.ok("{}").build();
+            }
+            case "UntagResource" -> {
+                anomalies.untagResource(request);
+                yield Response.ok("{}").build();
+            }
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
                             "Unknown operation: AWSInsightsIndexService." + action))

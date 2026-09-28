@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.verifiedpermissions;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -13,13 +16,30 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Lazily starts and manages the Cedar 4 sidecar used by Amazon Verified Permissions. */
+/**
+ * Lazily starts and manages the Cedar 4 sidecar used by Amazon Verified Permissions.
+ *
+ * <p>The sidecar is the {@code floci/floci-sidecar-cedar} image from floci-io/floci-sidecars. Its
+ * {@code GET /health} answers the sidecar contract: {@code {"status","name","version","contract"}}.
+ * A sidecar speaking a different contract major fails fast with a message naming the fix, rather
+ * than surfacing later as an unexplained request error. A sidecar whose health body is not JSON
+ * predates the contract and is accepted with a warning.
+ */
 @ApplicationScoped
 public class CedarSidecarManager {
+    /** The sidecar contract major this manager speaks; see docs/contract.md in floci-io/floci-sidecars. */
+    static final String REQUIRED_CONTRACT = "1";
+    static final String IMAGE_ENV = "FLOCI_SERVICES_VERIFIEDPERMISSIONS_CEDAR_IMAGE";
+    static final String URL_ENV = "FLOCI_SERVICES_VERIFIEDPERMISSIONS_CEDAR_URL";
+
     private static final Logger LOG = Logger.getLogger(CedarSidecarManager.class);
     private static final String CONTAINER_NAME = "floci-cedar";
     private static final int CEDAR_PORT = 8180;
@@ -29,6 +49,8 @@ public class CedarSidecarManager {
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
+    private final ObjectMapper objectMapper;
+    private final AtomicBoolean contractReported = new AtomicBoolean();
 
     private volatile String resolvedUrl;
     private volatile String containerId;
@@ -36,10 +58,12 @@ public class CedarSidecarManager {
     @Inject
     public CedarSidecarManager(ContainerBuilder containerBuilder,
                                ContainerLifecycleManager lifecycleManager,
-                               EmulatorConfig config) {
+                               EmulatorConfig config,
+                               ObjectMapper objectMapper) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.config = config;
+        this.objectMapper = objectMapper;
     }
 
     public synchronized boolean isAvailable() {
@@ -71,7 +95,11 @@ public class CedarSidecarManager {
         }
         Optional<String> configured = config.services().verifiedpermissions().cedarUrl();
         if (configured.isPresent() && !configured.get().isBlank()) {
-            resolvedUrl = trimTrailingSlash(configured.get());
+            String url = trimTrailingSlash(configured.get());
+            // Best effort: a sidecar that is not up yet is reported by the first real call,
+            // but a sidecar speaking the wrong contract is refused here, once, with the fix.
+            probeHealth(url);
+            resolvedUrl = url;
             LOG.infov("Using pre-configured Cedar sidecar URL: {0}", resolvedUrl);
             return resolvedUrl;
         }
@@ -116,15 +144,60 @@ public class CedarSidecarManager {
         LOG.infov("Cedar sidecar is ready at {0}", resolvedUrl);
     }
 
+    /**
+     * {@code false} means not ready yet (connection refused, non-200, timeout). A sidecar that
+     * answers but speaks another contract major throws instead, so callers never retry it.
+     */
     private boolean probeHealth(String baseUrl) {
         try {
             HttpURLConnection connection = (HttpURLConnection) URI.create(baseUrl + "/health").toURL().openConnection();
             connection.setConnectTimeout(500);
             connection.setReadTimeout(500);
-            return connection.getResponseCode() == 200;
-        } catch (Exception e) {
+            if (connection.getResponseCode() != 200) {
+                return false;
+            }
+            String body;
+            try (InputStream in = connection.getInputStream()) {
+                body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            }
+            checkContract(baseUrl, body);
+            return true;
+        } catch (IOException e) {
             LOG.debugv(e, "Cedar sidecar health probe failed for {0}", baseUrl);
             return false;
+        }
+    }
+
+    private void checkContract(String baseUrl, String body) {
+        JsonNode health = parseHealth(body);
+        if (health == null || !health.hasNonNull("contract")) {
+            if (contractReported.compareAndSet(false, true)) {
+                LOG.warnv("Cedar sidecar at {0} predates the sidecar contract (health body is not contract JSON); "
+                        + "it still works, but move to floci/floci-sidecar-cedar to get version checks", baseUrl);
+            }
+            return;
+        }
+        String contract = health.path("contract").asText();
+        String name = health.path("name").asText("unknown");
+        String version = health.path("version").asText("unknown");
+        if (!REQUIRED_CONTRACT.equals(contract)) {
+            throw new IllegalStateException("Cedar sidecar at " + baseUrl + " (" + name + " " + version
+                    + ") speaks sidecar contract " + contract + " but this Floci requires contract "
+                    + REQUIRED_CONTRACT + ". Set " + IMAGE_ENV + " (currently "
+                    + config.services().verifiedpermissions().cedarImage() + ") or " + URL_ENV
+                    + " to a compatible sidecar.");
+        }
+        if (contractReported.compareAndSet(false, true)) {
+            LOG.infov("Cedar sidecar {0} {1} (contract {2}) at {3}", name, version, contract, baseUrl);
+        }
+    }
+
+    private JsonNode parseHealth(String body) {
+        try {
+            return objectMapper.readTree(body);
+        } catch (JsonProcessingException e) {
+            LOG.debugv(e, "Cedar sidecar health body is not JSON: {0}", body);
+            return null;
         }
     }
 

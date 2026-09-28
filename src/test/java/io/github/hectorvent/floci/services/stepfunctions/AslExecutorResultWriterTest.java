@@ -1,13 +1,13 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -20,6 +20,7 @@ import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -58,10 +59,12 @@ class AslExecutorResultWriterTest {
         // An exported Map run is retained through the service, so a Map state needs one to run.
         Instance<StepFunctionsService> sfnService = mock(Instance.class);
         when(sfnService.get()).thenReturn(mock(StepFunctionsService.class));
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.defaultRegion()).thenReturn("us-east-1");
         executor = new AslExecutor(
                 mock(LambdaExecutorService.class),
                 mock(LambdaFunctionStore.class),
-                mock(DynamoDbService.class),
+                mock(DynamoDbFacade.class),
                 mock(DynamoDbJsonHandler.class),
                 mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
                 mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
@@ -75,7 +78,7 @@ class AslExecutorResultWriterTest {
                 mapper,
                 new JsonataEvaluator(mapper),
                 sfnService,
-                mock(EmulatorConfig.class),
+                config,
                 null,
                 null);
 
@@ -128,7 +131,7 @@ class AslExecutorResultWriterTest {
         // Capture the two S3 writes: SUCCEEDED_0.json and manifest.json.
         ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<byte[]> bodies = ArgumentCaptor.forClass(byte[].class);
-        verify(s3Service, org.mockito.Mockito.times(2))
+        verify(s3Service, Mockito.times(2))
                 .putObject(eq("my-bucket"), keys.capture(), bodies.capture(), anyString(), any());
 
         int manifestIdx = keys.getAllValues().indexOf(manifestKey);
@@ -173,7 +176,7 @@ class AslExecutorResultWriterTest {
 
         // COMPACT keeps the original per-child array structure; no S3 Resource -> no export.
         assertEquals(results, out);
-        verify(s3Service, org.mockito.Mockito.never())
+        verify(s3Service, Mockito.never())
                 .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
     }
 
@@ -210,7 +213,7 @@ class AslExecutorResultWriterTest {
                 results, inputs, timings, sm, context, false);
 
         ArgumentCaptor<byte[]> bodies = ArgumentCaptor.forClass(byte[].class);
-        verify(s3Service, org.mockito.Mockito.times(2))
+        verify(s3Service, Mockito.times(2))
                 .putObject(eq("my-bucket"), anyString(), bodies.capture(), anyString(), any());
         // The records file is the JSON array write (the other write is manifest.json, an object).
         JsonNode first = mapper.readTree(bodies.getAllValues().get(0));
@@ -278,7 +281,7 @@ class AslExecutorResultWriterTest {
         assertTrue(manifestKey.startsWith("/csvJobs//" + mapRunId + "/"), manifestKey);
 
         ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
-        verify(s3Service, org.mockito.Mockito.times(2))
+        verify(s3Service, Mockito.times(2))
                 .putObject(eq("selected-bucket"), keys.capture(), any(byte[].class), anyString(), any());
         assertTrue(keys.getAllValues().stream().allMatch(key -> key.startsWith("/csvJobs//" + mapRunId + "/")));
     }
@@ -327,7 +330,7 @@ class AslExecutorResultWriterTest {
         JsonNode output = mapper.readTree(execution.getOutput());
         assertEquals("jsonata-bucket", output.path("ResultWriterDetails").path("Bucket").asText());
         ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
-        verify(s3Service, org.mockito.Mockito.times(2))
+        verify(s3Service, Mockito.times(2))
                 .putObject(eq("jsonata-bucket"), keys.capture(), any(byte[].class), anyString(), any());
         assertTrue(keys.getAllValues().stream().allMatch(key -> key.startsWith("exports/")));
     }
@@ -347,7 +350,7 @@ class AslExecutorResultWriterTest {
 
         assertEquals("States.QueryEvaluationError", failure.error);
         assertTrue(failure.getMessage().contains("must resolve to an object"), failure.getMessage());
-        verify(s3Service, org.mockito.Mockito.never())
+        verify(s3Service, Mockito.never())
                 .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
     }
 
@@ -366,7 +369,7 @@ class AslExecutorResultWriterTest {
 
         assertEquals("States.QueryEvaluationError", failure.error);
         assertTrue(failure.getMessage().contains("Bucket must resolve to a string"), failure.getMessage());
-        verify(s3Service, org.mockito.Mockito.never())
+        verify(s3Service, Mockito.never())
                 .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
     }
 
@@ -407,7 +410,7 @@ class AslExecutorResultWriterTest {
         assertEquals("States.QueryEvaluationError", nestedBucketFailure.error);
         assertTrue(nestedBucketFailure.getMessage().contains("Bucket must resolve to a string"));
 
-        verify(s3Service, org.mockito.Mockito.never())
+        verify(s3Service, Mockito.never())
                 .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
     }
 
@@ -428,7 +431,7 @@ class AslExecutorResultWriterTest {
         assertEquals("States.QueryEvaluationError", failure.error);
         assertEquals("The JSONata expression '$states.input.missing' specified for the field "
                 + "'ResultWriter/Arguments/Prefix' returned nothing (undefined).", failure.cause);
-        verify(s3Service, org.mockito.Mockito.never())
+        verify(s3Service, Mockito.never())
                 .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
     }
 
@@ -448,7 +451,7 @@ class AslExecutorResultWriterTest {
 
         assertEquals("States.ResultWriterFailed", failure.error);
         assertTrue(failure.getMessage().contains("same AWS Region"), failure.getMessage());
-        verify(s3Service, org.mockito.Mockito.never())
+        verify(s3Service, Mockito.never())
                 .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
     }
 
@@ -513,7 +516,7 @@ class AslExecutorResultWriterTest {
                         sm, context, false));
 
         assertEquals("States.ResultWriterFailed", failure.error);
-        verify(s3Service, org.mockito.Mockito.never())
+        verify(s3Service, Mockito.never())
                 .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
     }
 
@@ -544,7 +547,7 @@ class AslExecutorResultWriterTest {
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.Runtime", execution.getError());
         assertTrue(execution.getCause().contains("not supported for INLINE maps"), execution.getCause());
-        verify(s3Service, org.mockito.Mockito.never())
+        verify(s3Service, Mockito.never())
                 .putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
     }
 
@@ -564,7 +567,7 @@ class AslExecutorResultWriterTest {
         String resultKey = null;
         ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<byte[]> bodies = ArgumentCaptor.forClass(byte[].class);
-        verify(s3Service, org.mockito.Mockito.times(2))
+        verify(s3Service, Mockito.times(2))
                 .putObject(anyString(), keys.capture(), bodies.capture(), anyString(), any());
         for (int i = 0; i < keys.getAllValues().size(); i++) {
             if (keys.getAllValues().get(i).endsWith("SUCCEEDED_0.json")) {

@@ -102,13 +102,12 @@ class CloudFormationEcsCapacityIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
 
-        // One provider still, carrying the updated tag value. The updated AutoScalingGroupProvider
-        // is asserted in EcsCapacityCfnProvisionerTest instead: DescribeCapacityProviders does not
-        // serialize autoScalingGroupProvider, so it is not observable here.
+        // One provider still, carrying the updated tag value and the updated scaling target.
         String providers = describeCapacityProviders(providerName);
         assertThat(providers, containsString(providerName));
         assertThat(providers, containsString("infra"));
         assertThat(providers, not(containsString("platform")));
+        assertThat(providers, containsString("\"targetCapacity\":40"));
     }
 
     @Test
@@ -135,7 +134,11 @@ class CloudFormationEcsCapacityIntegrationTest {
         assertThat(settled, containsString("<StackStatus>DELETE_COMPLETE</StackStatus>"));
 
         // The capacity provider must be deregistered, not left behind by an unsupported delete.
-        assertThat(describeCapacityProviders(providerName), not(containsString(providerName)));
+        // A name that resolves to nothing comes back as a MISSING failure, so the provider is
+        // gone when the describe returns no providers at all.
+        String afterDelete = describeCapacityProviders(providerName);
+        assertThat(afterDelete, containsString("\"capacityProviders\":[]"));
+        assertThat(afterDelete, containsString("\"reason\":\"MISSING\""));
     }
 
     private static String template(String clusterName, String providerName) {
@@ -190,11 +193,12 @@ class CloudFormationEcsCapacityIntegrationTest {
         return xml.substring(xml.indexOf("<StackId>") + "<StackId>".length(), xml.indexOf("</StackId>"));
     }
 
+    /** Asks for TAGS explicitly: without the include, AWS leaves them out of the response. */
     private String describeCapacityProviders(String providerName) {
         return given()
             .header("X-Amz-Target", ECS_TARGET + "DescribeCapacityProviders")
             .contentType(ECS_CT)
-            .body("{\"capacityProviders\":[\"" + providerName + "\"]}")
+            .body("{\"capacityProviders\":[\"" + providerName + "\"],\"include\":[\"TAGS\"]}")
         .when()
             .post("/")
         .then()

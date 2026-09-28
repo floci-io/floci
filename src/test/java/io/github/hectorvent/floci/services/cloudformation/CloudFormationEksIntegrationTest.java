@@ -46,7 +46,8 @@ class CloudFormationEksIntegrationTest {
                     }
                   },
                   "Outputs": {
-                    "ClusterRef": {"Value": {"Ref": "Cluster"}}
+                    "ClusterRef": {"Value": {"Ref": "Cluster"}},
+                    "ClusterArn": {"Value": {"Fn::GetAtt": ["Cluster", "Arn"]}}
                   }
                 }
                 """.formatted(clusterName, nodegroupName);
@@ -72,7 +73,9 @@ class CloudFormationEksIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
-            .body(containsString(clusterName));
+            .body(containsString(clusterName))
+            // Fn::GetAtt Cluster.Arn resolves to a real EKS arn, not the literal "Cluster.Arn".
+            .body(containsString("arn:aws:eks:"));
 
         // The cluster really exists in EKS (provisioned, not stubbed).
         given()

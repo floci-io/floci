@@ -33,9 +33,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * The single-service CloudFormation provisioners extracted from
- * {@code CloudFormationResourceProvisioner} together, since each is a handful of lines with one
- * service call.
+ * The single-service CloudFormation provisioners extracted from the former CloudFormation
+ * monolith together, since each is a handful of lines with one service call.
  *
  * <p>Every case asserts the exact physical id and the exact {@code Fn::GetAtt} attribute keys.
  * Asserting status alone would prove nothing: an unmapped type still reports CREATE_COMPLETE via

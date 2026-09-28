@@ -258,6 +258,50 @@ class SnsCfnProvisionerTest {
         verify(sns).setTopicAttributes(TOPIC_ARN, "ContentBasedDeduplication", "false", REGION);
     }
 
+    @Test
+    void maximumMessageSizeIsForwardedOnlyWhenSet() {
+        ArgumentCaptor<Map<String, String>> attrs = ArgumentCaptor.forClass(Map.class);
+        when(sns.createTopic(anyString(), attrs.capture(), anyMap(), anyString())).thenReturn(topic(TOPIC_ARN));
+
+        provision("AWS::SNS::Topic", """
+                {"TopicName": "events", "MaximumMessageSize": 1048576}
+                """);
+        assertEquals("1048576", attrs.getValue().get("MaximumMessageSize"));
+
+        setUp();
+        ArgumentCaptor<Map<String, String>> plain = ArgumentCaptor.forClass(Map.class);
+        when(sns.createTopic(anyString(), plain.capture(), anyMap(), anyString())).thenReturn(topic(TOPIC_ARN));
+        provision("AWS::SNS::Topic", """
+                {"TopicName": "events"}
+                """);
+        assertFalse(plain.getValue().containsKey("MaximumMessageSize"),
+                "an absent size must not be sent as an empty attribute");
+    }
+
+    /**
+     * Dropping the property returns the topic to the AWS default -- but only where the topic
+     * actually carries one, since real SNS omits the attribute until it is set.
+     */
+    @Test
+    void anUpdateThatDropsMaximumMessageSizeResetsItOnlyWhenSet() {
+        Topic raised = topic(TOPIC_ARN);
+        raised.getAttributes().put("MaximumMessageSize", "1048576");
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(raised);
+
+        provisionUpdate("""
+                {"TopicName": "events"}
+                """);
+        verify(sns).setTopicAttributes(TOPIC_ARN, "MaximumMessageSize", "262144", REGION);
+
+        setUp();
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
+        provisionUpdate("""
+                {"TopicName": "events"}
+                """);
+        verify(sns, never()).setTopicAttributes(anyString(), eq("MaximumMessageSize"),
+                anyString(), anyString());
+    }
+
     /** Real SNS rejects both attributes on a standard topic, so an update must not invent them. */
     @Test
     void aStandardTopicUpdateWritesNoFifoDefaults() {

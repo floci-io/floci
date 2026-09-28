@@ -6,6 +6,8 @@ import org.junit.jupiter.api.*;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -119,7 +121,7 @@ class PipesPollerIntegrationTest {
                 return;
             }
         }
-        org.junit.jupiter.api.Assertions.fail("Source queue should be drained");
+        fail("Source queue should be drained");
     }
 
     @Test
@@ -270,7 +272,7 @@ class PipesPollerIntegrationTest {
         }
         assertTrue(body.contains("match-1"),
                 "Target should contain the matching message");
-        org.junit.jupiter.api.Assertions.assertFalse(body.contains("no-match"),
+        assertFalse(body.contains("no-match"),
                 "Target should NOT contain the non-matching message");
     }
 
@@ -294,7 +296,7 @@ class PipesPollerIntegrationTest {
                 return;
             }
         }
-        org.junit.jupiter.api.Assertions.fail(
+        fail(
                 "Source queue should be drained (non-matching messages deleted per AWS behavior)");
     }
 

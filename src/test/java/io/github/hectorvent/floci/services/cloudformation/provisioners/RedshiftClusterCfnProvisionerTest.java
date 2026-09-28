@@ -362,15 +362,27 @@ class RedshiftClusterCfnProvisionerTest {
     }
 
     @Test
-    void provisionRejectsManageMasterPassword() {
-        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(mock(RedshiftService.class));
+    void provisionSupportsManageMasterPassword() {
+        RedshiftService service = mock(RedshiftService.class);
+        when(service.createClusterWithManagedMasterPassword(anyString(), anyString(), anyString(), isNull(),
+                anyList(), anyList(), any(), anyString())).thenAnswer(inv -> {
+            Cluster cluster = availableCluster(inv.getArgument(0));
+            cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:redshift-managed");
+            return cluster;
+        });
+        RedshiftClusterCfnProvisioner p = new RedshiftClusterCfnProvisioner(service);
         StackResource r = new StackResource();
         r.setResourceType("AWS::Redshift::Cluster");
         r.setLogicalId("W");
 
-        AwsException ex = assertThrows(AwsException.class, () -> p.provision(r, json("""
-            {"NodeType":"ra3.large","MasterUsername":"admin","ManageMasterPassword":true}"""), ctx(null)));
-        assertEquals("ValidationException", ex.getErrorCode());
+        p.provision(r, json("""
+            {"NodeType":"ra3.large","MasterUsername":"admin","ManageMasterPassword":true,
+             "MasterPasswordSecretKmsKeyId":"alias/redshift-key"}"""), ctx(null));
+
+        verify(service).createClusterWithManagedMasterPassword(anyString(), eq("ra3.large"), eq("admin"),
+                isNull(), anyList(), eq(List.of()), eq("alias/redshift-key"), eq("us-east-1"));
+        assertEquals("arn:aws:secretsmanager:us-east-1:000000000000:secret:redshift-managed",
+                r.getAttributes().get("MasterPasswordSecretArn"));
     }
 
     @Test

@@ -8,7 +8,8 @@ import java.util.Map;
 public record AppSyncVtlResult(
         Object output,
         VtlErrorSignal error,
-        List<Map<String, Object>> appendedErrors
+        List<Map<String, Object>> appendedErrors,
+        boolean returned
 ) {
     public boolean hasError() {
         return error != null;

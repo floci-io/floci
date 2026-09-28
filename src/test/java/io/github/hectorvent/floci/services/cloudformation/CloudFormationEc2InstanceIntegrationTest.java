@@ -8,6 +8,8 @@ import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -23,6 +25,8 @@ class CloudFormationEc2InstanceIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/ap-southeast-2/cloudformation/aws4_request";
     private static final String EC2_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/ap-southeast-2/ec2/aws4_request";
+    private static final String IAM_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/iam/aws4_request";
 
     @Test
     void createStackProvisionsRealEc2Instance() {
@@ -38,7 +42,9 @@ class CloudFormationEc2InstanceIntegrationTest {
                     }
                   },
                   "Outputs": {
-                    "InstanceId": {"Value": {"Ref": "Server"}}
+                    "InstanceId": {"Value": {"Ref": "Server"}},
+                    "StateName": {"Value": {"Fn::GetAtt": ["Server", "State.Name"]}},
+                    "StateCode": {"Value": {"Fn::GetAtt": "Server.State.Code"}}
                   }
                 }
                 """;
@@ -72,6 +78,68 @@ class CloudFormationEc2InstanceIntegrationTest {
         String instanceId = m.group(1);
 
         // The instance really exists in EC2.
+        String describeInstances = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", instanceId)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString(instanceId))
+            .extract().asString();
+
+        // The schema's State is a nested object, so Fn::GetAtt exposes State.Code and State.Name:
+        // the state the launch settled to, as DescribeInstances reports it, in both GetAtt forms.
+        Matcher state = Pattern.compile("<instanceState>\\s*<code>(\\d+)</code>\\s*<name>([a-z-]+)</name>")
+                .matcher(describeInstances);
+        assertTrue(state.find(), "expected an instance state in DescribeInstances");
+        assertEquals("running", state.group(2));
+        assertEquals(state.group(2), output(describeStacks, "StateName"));
+        assertEquals(state.group(1), output(describeStacks, "StateCode"));
+    }
+
+    private static String output(String describeStacks, String key) {
+        Matcher m = Pattern.compile("<OutputKey>" + key + "</OutputKey>\\s*<OutputValue>([^<]*)</OutputValue>")
+                .matcher(describeStacks);
+        assertTrue(m.find(), "expected output " + key + " in " + describeStacks);
+        return m.group(1);
+    }
+
+    @Test
+    void updateStackResizesInstanceTypeInPlaceWithoutReplacingTheInstance() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-ec2-resize-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Server": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"ImageId": "ami-12345678", "InstanceType": "%s"}
+                    }
+                  },
+                  "Outputs": {
+                    "InstanceId": {"Value": {"Ref": "Server"}}
+                  }
+                }
+                """;
+
+        cfn("CreateStack", stackName, template.formatted("t3.micro"));
+        String createXml = describeStacks(stackName, "CREATE_COMPLETE");
+        Matcher m = Pattern.compile("<OutputValue>(i-[0-9a-fA-F]+)</OutputValue>").matcher(createXml);
+        assertTrue(m.find(), "expected an instance id in the stack outputs");
+        String instanceId = m.group(1);
+
+        cfn("UpdateStack", stackName, template.formatted("t3.small"));
+        String updateXml = describeStacks(stackName, "UPDATE_COMPLETE");
+
+        // Ref is unchanged: InstanceType is mutable, so the instance was resized in place rather
+        // than replaced with a new one.
+        assertTrue(updateXml.contains("<OutputValue>" + instanceId + "</OutputValue>"),
+                "instance id changed on update, so it was replaced not resized: " + updateXml);
+
+        // DescribeInstances reports the new type on the same instance.
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", EC2_AUTH)
@@ -81,6 +149,161 @@ class CloudFormationEc2InstanceIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString(instanceId));
+            .body(containsString("<instanceType>t3.small</instanceType>"));
+    }
+
+    @Test
+    void updateStackAppliesUserDataAndIamInstanceProfileInPlace() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-ec2-inplace-" + suffix;
+        String firstProfile = "cfn-inplace-" + suffix;
+        String secondProfile = "cfn-inplace-v2-" + suffix;
+        String firstArn = createInstanceProfile(firstProfile);
+        String secondArn = createInstanceProfile(secondProfile);
+        String template = """
+                {
+                  "Resources": {
+                    "Server": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"ImageId": "ami-12345678", "InstanceType": "t3.micro",
+                                     "UserData": "%s", "IamInstanceProfile": "%s"}
+                    }
+                  },
+                  "Outputs": {
+                    "InstanceId": {"Value": {"Ref": "Server"}}
+                  }
+                }
+                """;
+        try {
+            cfn("CreateStack", stackName, template.formatted("first boot", firstProfile));
+            String instanceId = instanceIdFrom(describeStacks(stackName, "CREATE_COMPLETE"));
+            assertUserData(instanceId, "Zmlyc3QgYm9vdA==");
+            assertInstanceProfile(instanceId, firstArn);
+
+            cfn("UpdateStack", stackName, template.formatted("second boot", secondProfile));
+            String updateXml = describeStacks(stackName, "UPDATE_COMPLETE");
+
+            // Both properties are mutable: the same instance carries the new values.
+            assertTrue(updateXml.contains("<OutputValue>" + instanceId + "</OutputValue>"),
+                    "instance id changed on update, so it was replaced not updated in place: " + updateXml);
+            assertUserData(instanceId, "c2Vjb25kIGJvb3Q=");
+            assertInstanceProfile(instanceId, secondArn);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", EC2_AUTH)
+                .formParam("Action", "DescribeInstances")
+                .formParam("InstanceId.1", instanceId)
+            .when().post("/").then().statusCode(200)
+                .body(containsString("<name>running</name>"));
+        } finally {
+            deleteInstanceProfile(firstProfile);
+            deleteInstanceProfile(secondProfile);
+        }
+    }
+
+    private static void assertUserData(String instanceId, String encoded) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", "DescribeInstanceAttribute")
+            .formParam("InstanceId", instanceId)
+            .formParam("Attribute", "userData")
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<value>" + encoded + "</value>"));
+    }
+
+    private static void assertInstanceProfile(String instanceId, String arn) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", "DescribeIamInstanceProfileAssociations")
+            .formParam("Filter.1.Name", "instance-id")
+            .formParam("Filter.1.Value.1", instanceId)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<arn>" + arn + "</arn>"));
+    }
+
+    private static String createInstanceProfile(String name) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateInstanceProfile")
+            .formParam("InstanceProfileName", name)
+        .when().post("/").then().statusCode(200)
+            .extract().path("CreateInstanceProfileResponse.CreateInstanceProfileResult.InstanceProfile.Arn");
+    }
+
+    private static void deleteInstanceProfile(String name) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "DeleteInstanceProfile")
+            .formParam("InstanceProfileName", name)
+        .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void changingPrivateIpAddressReplacesTheInstance() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-ec2-replace-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Server": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"ImageId": "ami-12345678", "InstanceType": "t3.micro",
+                                     "PrivateIpAddress": "%s"}
+                    }
+                  },
+                  "Outputs": {
+                    "InstanceId": {"Value": {"Ref": "Server"}}
+                  }
+                }
+                """;
+
+        cfn("CreateStack", stackName, template.formatted("10.0.0.5"));
+        String firstId = instanceIdFrom(describeStacks(stackName, "CREATE_COMPLETE"));
+
+        // PrivateIpAddress is createOnly, so changing it replaces the instance rather than reusing it.
+        cfn("UpdateStack", stackName, template.formatted("10.0.0.6"));
+        String secondId = instanceIdFrom(describeStacks(stackName, "UPDATE_COMPLETE"));
+
+        assertNotEquals(firstId, secondId, "PrivateIpAddress changed, so the instance must be replaced");
+
+        // The replacement instance really exists in EC2.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", secondId)
+        .when().post("/").then().statusCode(200)
+            .body(containsString(secondId));
+    }
+
+    private static void cfn(String action, String stackName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", action)
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200);
+    }
+
+    private static String describeStacks(String stackName, String expectedStatus) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
+            .extract().asString();
+    }
+
+    private static String instanceIdFrom(String stackXml) {
+        Matcher m = Pattern.compile("<OutputValue>(i-[0-9a-fA-F]+)</OutputValue>").matcher(stackXml);
+        assertTrue(m.find(), "expected an instance id in the stack outputs: " + stackXml);
+        return m.group(1);
     }
 }

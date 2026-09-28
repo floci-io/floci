@@ -337,4 +337,51 @@ class Ec2ReplaceRouteIntegrationTest {
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidRouteTableID.NotFound"));
     }
+
+    @Test
+    @Order(12)
+    void dryRunValidReplacementReportsSuccessWithoutChangingTheRoute() {
+        given()
+            .formParam("Action", "ReplaceRoute")
+            .formParam("RouteTableId", routeTableId)
+            .formParam("DestinationCidrBlock", DEFAULT_ROUTE)
+            .formParam("NatGatewayId", NAT_GATEWAY)
+            .formParam("DryRun", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(412)
+            .body("Response.Errors.Error.Code", equalTo("DryRunOperation"));
+
+        String table = given()
+            .formParam("Action", "DescribeRouteTables")
+            .formParam("RouteTableId.1", routeTableId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(DEFAULT_ROUTE_NODE + ".gatewayId", equalTo(INTERNET_GATEWAY))
+            .extract().asString();
+
+        assertThat(table, not(containsString(NAT_GATEWAY)));
+    }
+
+    @Test
+    @Order(13)
+    void dryRunStillRejectsAnUnknownDestination() {
+        given()
+            .formParam("Action", "ReplaceRoute")
+            .formParam("RouteTableId", routeTableId)
+            .formParam("DestinationCidrBlock", UNROUTED_CIDR)
+            .formParam("NatGatewayId", NAT_GATEWAY)
+            .formParam("DryRun", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidRoute.NotFound"));
+    }
 }

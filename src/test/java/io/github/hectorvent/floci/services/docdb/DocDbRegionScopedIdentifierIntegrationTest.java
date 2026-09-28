@@ -1,12 +1,11 @@
 package io.github.hectorvent.floci.services.docdb;
 
+import io.github.hectorvent.floci.testing.DocDbMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
@@ -23,22 +22,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * were keyed by identifier alone — so the name a caller used in one region was spent everywhere.
  */
 @QuarkusTest
-@TestProfile(DocDbRegionScopedIdentifierIntegrationTest.NoContainersProfile.class)
+@TestProfile(DocDbMockProfile.class)
 class DocDbRegionScopedIdentifierIntegrationTest {
-
-    public static class NoContainersProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.docdb.mock", "true");
-        }
-    }
 
     @Inject
     DocDbService service;
 
     private static final String ID = "shared-across-regions";
 
-    private static io.restassured.specification.RequestSpecification docdb(String region, String action) {
+    private static RequestSpecification docdb(String region, String action) {
         return given().header("Authorization",
                         "AWS4-HMAC-SHA256 Credential=test/20260615/" + region + "/docdb/aws4_request, "
                         + "SignedHeaders=content-type;host, Signature=test")

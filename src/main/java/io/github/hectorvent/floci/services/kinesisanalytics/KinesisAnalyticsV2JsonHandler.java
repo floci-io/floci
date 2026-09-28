@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.Snapshot;
@@ -36,21 +37,21 @@ public class KinesisAnalyticsV2JsonHandler {
 
     public Response handle(String action, JsonNode request, String region) {
         return switch (action) {
-            case "CreateApplication" -> handleCreateApplication(request);
-            case "CreateApplicationPresignedUrl" -> handleCreateApplicationPresignedUrl(request);
-            case "DescribeApplication" -> handleDescribeApplication(request);
-            case "ListApplications" -> handleListApplications(request);
-            case "StartApplication" -> handleStartApplication(request);
-            case "StopApplication" -> handleStopApplication(request);
-            case "UpdateApplication" -> handleUpdateApplication(request);
-            case "DeleteApplication" -> handleDeleteApplication(request);
+            case "CreateApplication" -> handleCreateApplication(request, region);
+            case "CreateApplicationPresignedUrl" -> handleCreateApplicationPresignedUrl(request, region);
+            case "DescribeApplication" -> handleDescribeApplication(request, region);
+            case "ListApplications" -> handleListApplications(request, region);
+            case "StartApplication" -> handleStartApplication(request, region);
+            case "StopApplication" -> handleStopApplication(request, region);
+            case "UpdateApplication" -> handleUpdateApplication(request, region);
+            case "DeleteApplication" -> handleDeleteApplication(request, region);
             case "TagResource" -> handleTagResource(request);
             case "UntagResource" -> handleUntagResource(request);
             case "ListTagsForResource" -> handleListTagsForResource(request);
-            case "CreateApplicationSnapshot" -> handleCreateApplicationSnapshot(request);
-            case "DescribeApplicationSnapshot" -> handleDescribeApplicationSnapshot(request);
-            case "ListApplicationSnapshots" -> handleListApplicationSnapshots(request);
-            case "DeleteApplicationSnapshot" -> handleDeleteApplicationSnapshot(request);
+            case "CreateApplicationSnapshot" -> handleCreateApplicationSnapshot(request, region);
+            case "DescribeApplicationSnapshot" -> handleDescribeApplicationSnapshot(request, region);
+            case "ListApplicationSnapshots" -> handleListApplicationSnapshots(request, region);
+            case "DeleteApplicationSnapshot" -> handleDeleteApplicationSnapshot(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation",
                             "Operation " + action + " is not supported."))
@@ -58,7 +59,7 @@ public class KinesisAnalyticsV2JsonHandler {
         };
     }
 
-    private Response handleCreateApplication(JsonNode request) {
+    private Response handleCreateApplication(JsonNode request, String region) {
         String applicationName = request.path("ApplicationName").asText(null);
         String runtimeEnvironment = request.path("RuntimeEnvironment").asText(null);
         String serviceExecutionRole = request.path("ServiceExecutionRole").asText(null);
@@ -83,17 +84,17 @@ public class KinesisAnalyticsV2JsonHandler {
         FlinkApplication app = service.createApplication(applicationName, runtimeEnvironment,
                 serviceExecutionRole, applicationDescription, applicationMode,
                 codeBucket, codeKey, codeVersion, parallelism, parseTags(request.path("Tags")),
-                environmentProperties, snapshotsEnabled);
+                environmentProperties, snapshotsEnabled, region);
         return applicationDetailResponse(app);
     }
 
-    private Response handleCreateApplicationPresignedUrl(JsonNode request) {
+    private Response handleCreateApplicationPresignedUrl(JsonNode request, String region) {
         String applicationName = request.path("ApplicationName").asText(null);
         String urlType = request.path("UrlType").asText(null);
         Long sessionExpirationDurationInSeconds = request.hasNonNull("SessionExpirationDurationInSeconds")
                 ? request.path("SessionExpirationDurationInSeconds").asLong() : null;
         String url = service.createApplicationPresignedUrl(applicationName, urlType,
-                sessionExpirationDurationInSeconds);
+                sessionExpirationDurationInSeconds, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("AuthorizedUrl", url);
         return Response.ok(response).build();
@@ -104,19 +105,18 @@ public class KinesisAnalyticsV2JsonHandler {
         if (bucketArn == null) {
             return null;
         }
-        String prefix = "arn:aws:s3:::";
-        return bucketArn.startsWith(prefix) ? bucketArn.substring(prefix.length()) : bucketArn;
+        return AwsArnUtils.resourceIfArnFor(bucketArn, "s3").orElse(bucketArn);
     }
 
-    private Response handleDescribeApplication(JsonNode request) {
+    private Response handleDescribeApplication(JsonNode request, String region) {
         String applicationName = request.path("ApplicationName").asText(null);
-        return applicationDetailResponse(service.describeApplication(applicationName));
+        return applicationDetailResponse(service.describeApplication(applicationName, region));
     }
 
-    private Response handleListApplications(JsonNode request) {
+    private Response handleListApplications(JsonNode request, String region) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode summaries = response.putArray("ApplicationSummaries");
-        for (FlinkApplication app : service.listApplications()) {
+        for (FlinkApplication app : service.listApplications(region)) {
             ObjectNode summary = summaries.addObject();
             summary.put("ApplicationName", app.getApplicationName());
             summary.put("ApplicationARN", app.getApplicationArn());
@@ -130,21 +130,21 @@ public class KinesisAnalyticsV2JsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleStartApplication(JsonNode request) {
+    private Response handleStartApplication(JsonNode request, String region) {
         String applicationName = request.path("ApplicationName").asText(null);
-        service.startApplication(applicationName);
+        service.startApplication(applicationName, region);
         // AWS StartApplication returns an empty body.
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    private Response handleStopApplication(JsonNode request) {
+    private Response handleStopApplication(JsonNode request, String region) {
         String applicationName = request.path("ApplicationName").asText(null);
-        service.stopApplication(applicationName);
+        service.stopApplication(applicationName, region);
         // AWS StopApplication returns an empty body.
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    private Response handleUpdateApplication(JsonNode request) {
+    private Response handleUpdateApplication(JsonNode request, String region) {
         String applicationName = request.path("ApplicationName").asText(null);
         // CurrentApplicationVersionId gates the update (optimistic concurrency); the service rejects a
         // stale or missing value.
@@ -171,55 +171,55 @@ public class KinesisAnalyticsV2JsonHandler {
                 ? null : snapshotsEnabledUpdate.asBoolean();
 
         return applicationDetailResponse(service.updateApplication(applicationName, currentVersionId,
-                serviceExecutionRole, codeBucket, codeKey, codeVersion, parallelism, snapshotsEnabled));
+                serviceExecutionRole, codeBucket, codeKey, codeVersion, parallelism, snapshotsEnabled, region));
     }
 
-    private Response handleDeleteApplication(JsonNode request) {
+    private Response handleDeleteApplication(JsonNode request, String region) {
         String applicationName = request.path("ApplicationName").asText(null);
         // CreateTimestamp is epoch seconds on the wire (possibly fractional); the service validates it
         // against the stored value.
         Instant createTimestamp = request.hasNonNull("CreateTimestamp")
                 ? Instant.ofEpochMilli(Math.round(request.path("CreateTimestamp").asDouble() * 1000))
                 : null;
-        service.deleteApplication(applicationName, createTimestamp);
+        service.deleteApplication(applicationName, createTimestamp, region);
         // AWS DeleteApplication returns an empty body.
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    private Response handleCreateApplicationSnapshot(JsonNode request) {
+    private Response handleCreateApplicationSnapshot(JsonNode request, String region) {
         String applicationName = request.path("ApplicationName").asText(null);
         String snapshotName = request.path("SnapshotName").asText(null);
-        service.createApplicationSnapshot(applicationName, snapshotName);
+        service.createApplicationSnapshot(applicationName, snapshotName, region);
         // AWS CreateApplicationSnapshot returns an empty body.
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    private Response handleDescribeApplicationSnapshot(JsonNode request) {
+    private Response handleDescribeApplicationSnapshot(JsonNode request, String region) {
         String applicationName = request.path("ApplicationName").asText(null);
         String snapshotName = request.path("SnapshotName").asText(null);
-        Snapshot snapshot = service.describeApplicationSnapshot(applicationName, snapshotName);
+        Snapshot snapshot = service.describeApplicationSnapshot(applicationName, snapshotName, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("SnapshotDetails", snapshotDetailNode(snapshot));
         return Response.ok(response).build();
     }
 
-    private Response handleListApplicationSnapshots(JsonNode request) {
+    private Response handleListApplicationSnapshots(JsonNode request, String region) {
         String applicationName = request.path("ApplicationName").asText(null);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode summaries = response.putArray("SnapshotSummaries");
-        for (Snapshot snapshot : service.listApplicationSnapshots(applicationName)) {
+        for (Snapshot snapshot : service.listApplicationSnapshots(applicationName, region)) {
             summaries.add(snapshotDetailNode(snapshot));
         }
         return Response.ok(response).build();
     }
 
-    private Response handleDeleteApplicationSnapshot(JsonNode request) {
+    private Response handleDeleteApplicationSnapshot(JsonNode request, String region) {
         String applicationName = request.path("ApplicationName").asText(null);
         String snapshotName = request.path("SnapshotName").asText(null);
         Instant snapshotCreationTimestamp = request.hasNonNull("SnapshotCreationTimestamp")
                 ? Instant.ofEpochMilli(Math.round(request.path("SnapshotCreationTimestamp").asDouble() * 1000))
                 : null;
-        service.deleteApplicationSnapshot(applicationName, snapshotName, snapshotCreationTimestamp);
+        service.deleteApplicationSnapshot(applicationName, snapshotName, snapshotCreationTimestamp, region);
         // AWS DeleteApplicationSnapshot returns an empty body.
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -329,7 +329,8 @@ public class KinesisAnalyticsV2JsonHandler {
         codeDesc.put("CodeContentType", "ZIPFILE");
         ObjectNode s3Desc = codeDesc.putObject("CodeContentDescription")
                 .putObject("S3ApplicationCodeLocationDescription");
-        s3Desc.put("BucketARN", "arn:aws:s3:::" + app.getCodeS3Bucket());
+        s3Desc.put("BucketARN", AwsArnUtils.Arn.global(AwsArnUtils.parse(app.getApplicationArn()).partition(),
+                "s3", "", app.getCodeS3Bucket()).toString());
         s3Desc.put("FileKey", app.getCodeS3Key());
         if (app.getCodeS3ObjectVersion() != null) {
             s3Desc.put("ObjectVersion", app.getCodeS3ObjectVersion());

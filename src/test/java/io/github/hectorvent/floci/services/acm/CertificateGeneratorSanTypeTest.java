@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.acm;
 
+import io.github.hectorvent.floci.services.acm.CertificateGenerator.GeneratedCertificate;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.asn1.x509.GeneralName;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -37,7 +38,7 @@ class CertificateGeneratorSanTypeTest {
 
     @Test
     void ipv4AddressEncodedAsIpAddressSanType() throws Exception {
-        var cert = generator.generateSelfSignedCertificate(
+        GeneratedCertificate cert = generator.generateSelfSignedCertificate(
                 "localhost",
                 List.of("localhost", "192.168.1.100"),
                 KeyAlgorithm.RSA_2048);
@@ -56,7 +57,7 @@ class CertificateGeneratorSanTypeTest {
 
     @Test
     void ipv6LoopbackEncodedAsIpAddressSanType() throws Exception {
-        var cert = generator.generateSelfSignedCertificate(
+        GeneratedCertificate cert = generator.generateSelfSignedCertificate(
                 "localhost",
                 List.of("localhost", "0.0.0.0", "::1"),
                 KeyAlgorithm.RSA_2048);
@@ -81,7 +82,7 @@ class CertificateGeneratorSanTypeTest {
 
     @Test
     void dnsNamesEncodedAsDnsNameSanType() throws Exception {
-        var cert = generator.generateSelfSignedCertificate(
+        GeneratedCertificate cert = generator.generateSelfSignedCertificate(
                 "localhost",
                 List.of("myhost.example.com", "floci"),
                 KeyAlgorithm.RSA_2048);
@@ -106,7 +107,7 @@ class CertificateGeneratorSanTypeTest {
 
     @Test
     void wildcardEncodedAsDnsNameSanType() throws Exception {
-        var cert = generator.generateSelfSignedCertificate(
+        GeneratedCertificate cert = generator.generateSelfSignedCertificate(
                 "localhost",
                 List.of("localhost", "*.localhost"),
                 KeyAlgorithm.RSA_2048);
@@ -123,7 +124,7 @@ class CertificateGeneratorSanTypeTest {
 
     @Test
     void mixedIpsAndDnsNamesEncodedCorrectly() throws Exception {
-        var cert = generator.generateSelfSignedCertificate(
+        GeneratedCertificate cert = generator.generateSelfSignedCertificate(
                 "localhost",
                 List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost", "floci", "10.0.0.5"),
                 KeyAlgorithm.RSA_2048);
@@ -158,7 +159,7 @@ class CertificateGeneratorSanTypeTest {
     @ParameterizedTest
     @ValueSource(strings = {"1234", "0", "beef", "cafe", "abcd"})
     void hexShapedLabelsAreDnsNamesNotAddresses(String name) throws Exception {
-        var cert = generator.generateSelfSignedCertificate(
+        GeneratedCertificate cert = generator.generateSelfSignedCertificate(
                 "localhost", List.of("localhost", name), KeyAlgorithm.RSA_2048);
 
         X509Certificate x509 = generator.parseCertificate(cert.certificatePem());
@@ -183,7 +184,7 @@ class CertificateGeneratorSanTypeTest {
     /** A malformed IPv6 literal still reaches the DNS-name fallback rather than being dropped. */
     @Test
     void aMalformedIpv6LiteralIsStillCoveredAsADnsName() throws Exception {
-        var cert = generator.generateSelfSignedCertificate(
+        GeneratedCertificate cert = generator.generateSelfSignedCertificate(
                 "localhost", List.of("localhost", "fffff::1"), KeyAlgorithm.RSA_2048);
 
         X509Certificate x509 = generator.parseCertificate(cert.certificatePem());

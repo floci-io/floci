@@ -250,7 +250,7 @@ class SamTransformProcessorTest {
     @Test
     void expandSamTemplate_functionWithPackageTypeImage() throws Exception {
         // PackageType must be carried through to the expanded AWS::Lambda::Function: without it,
-        // CloudFormationResourceProvisioner.buildLambdaDesiredState defaults PackageType to "Zip"
+        // LambdaCfnProvisioner.buildLambdaDesiredState defaults PackageType to "Zip"
         // (resolveOrDefault(props, "PackageType", engine, "Zip")), which then forces Runtime/Handler
         // defaults (nodejs18.x / index.handler) onto a function that never had either — the function
         // gets created as a Zip function running the wrong runtime instead of the real container image.
@@ -276,7 +276,7 @@ class SamTransformProcessorTest {
         assertEquals("000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo:latest",
                 lambdaProps.path("Code").path("ImageUri").asText());
         // No Handler/Runtime were declared and none should be synthesized by the transform itself —
-        // CloudFormationResourceProvisioner is responsible for not defaulting them once it sees
+        // LambdaCfnProvisioner is responsible for not defaulting them once it sees
         // PackageType: Image (verified separately in CloudFormationIntegrationTest).
         assertTrue(lambdaProps.path("Handler").isMissingNode());
         assertTrue(lambdaProps.path("Runtime").isMissingNode());
@@ -325,7 +325,7 @@ class SamTransformProcessorTest {
     @Test
     void expandSamTemplate_functionWithImageConfig() throws Exception {
         // ImageConfig (EntryPoint/Command/WorkingDirectory overrides for a container-image
-        // function) must also be carried through: CloudFormationResourceProvisioner.provisionLambda
+        // function) must also be carried through: LambdaCfnProvisioner
         // already reads it (putResolvedMapIfPresent(configRequest, props, "ImageConfig", ...)), but
         // the SAM transform previously dropped it, silently losing any container entry-point/command
         // override on a PackageType: Image SAM function.
@@ -409,6 +409,33 @@ class SamTransformProcessorTest {
 
         assertEquals("my-bucket", code.path("S3Bucket").asText());
         assertEquals("code.zip", code.path("S3Key").asText());
+    }
+
+    @Test
+    void expandSamTemplate_functionWithHotReloadCodeUri() throws Exception {
+        // Everything after the first slash is the key, so the documented double slash is what
+        // keeps a hot-reload host path absolute; the pair must reach AWS::Lambda::Function intact.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "HotFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "CodeUri": "s3://hot-reload//home/dev/project/dist"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode code = processor.expandSamTemplate(template)
+                .path("Resources").path("HotFunc").path("Properties").path("Code");
+
+        assertEquals("hot-reload", code.path("S3Bucket").asText());
+        assertEquals("/home/dev/project/dist", code.path("S3Key").asText());
     }
 
     @Test

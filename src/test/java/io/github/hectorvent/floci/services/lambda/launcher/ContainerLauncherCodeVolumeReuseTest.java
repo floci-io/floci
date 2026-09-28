@@ -81,7 +81,7 @@ class ContainerLauncherCodeVolumeReuseTest {
         EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
         when(config.storage()).thenReturn(storage);
         when(storage.persistentPath()).thenReturn(tempDir.toString());
-        // ensureCodeVolume resolves the configured container-name prefix (unset = "floci").
+        // ensureCodeVolume resolves the configured container-name prefix (unset = "floci-aws").
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambda);
         when(lambda.containerNamePrefix()).thenReturn(Optional.empty());
@@ -202,8 +202,8 @@ class ContainerLauncherCodeVolumeReuseTest {
     void successfulPopulationPrunesOnlyOrphanInternalMarkers() throws Exception {
         LambdaFunction fn = fn("sha-v1-abcdef0123456789");
         String vol = ContainerLauncher.codeVolumeName(fn);
-        String live = "floci-code-live";
-        String orphan = "floci-code-orphan";
+        String live = "floci-aws-code-live";
+        String orphan = "floci-aws-code-orphan";
         writeMarker(live);
         writeMarker(orphan);
         writeMarker("unrelated-marker");

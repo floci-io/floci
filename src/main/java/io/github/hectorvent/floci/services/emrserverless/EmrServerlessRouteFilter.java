@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.emrserverless;
 
+import io.github.hectorvent.floci.core.common.RequestHost;
 import jakarta.annotation.Priority;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -34,7 +35,7 @@ public class EmrServerlessRouteFilter implements ContainerRequestFilter {
             return;
         }
 
-        String host = ctx.getHeaderString("Host");
+        String host = RequestHost.of(ctx);
         boolean isEmrServerlessHost = host != null && host.startsWith("emr-serverless.");
 
         String auth = ctx.getHeaderString("Authorization");

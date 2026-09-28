@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.elbv2;
 
+import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.MethodOrderer;
@@ -12,7 +12,6 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -34,16 +33,9 @@ import static org.hamcrest.Matchers.equalTo;
  * disables that override to exercise the real listener.
  */
 @QuarkusTest
-@TestProfile(ElbV2LambdaTargetDataPlaneIntegrationTest.RealElbV2DataPlaneProfile.class)
+@TestProfile(RealElbV2DataPlaneProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ElbV2LambdaTargetDataPlaneIntegrationTest {
-
-    public static final class RealElbV2DataPlaneProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.elbv2.mock", "false");
-        }
-    }
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260427/us-east-1/elasticloadbalancing/aws4_request";

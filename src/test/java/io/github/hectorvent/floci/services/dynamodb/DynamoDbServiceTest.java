@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -30,11 +31,18 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -425,6 +433,30 @@ class DynamoDbServiceTest {
         service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
         service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
 
+        assertTrue(service.describeTable("Users", "us-east-1").getReplicaRegions().isEmpty());
+    }
+
+    @Test
+    void addingAReplicaMarksTheTableGlobalHomedInTheUpdateRegion() {
+        createUsersTable("us-east-1");
+        assertNull(service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
+
+        service.applyReplicaUpdates("Users", List.of("eu-west-1"), List.of(), "us-east-1");
+
+        assertEquals("us-east-1", service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
+        // The home region stays a global table even after the last replica is removed.
+        service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
+        assertEquals("us-east-1", service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
+    }
+
+    @Test
+    void ensureGlobalTableMarksTheHomeRegionAndIsIdempotent() {
+        createUsersTable("us-east-1");
+
+        service.ensureGlobalTable("Users", "us-east-1");
+        service.ensureGlobalTable("Users", "us-east-1");
+
+        assertEquals("us-east-1", service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
         assertTrue(service.describeTable("Users", "us-east-1").getReplicaRegions().isEmpty());
     }
 
@@ -3741,6 +3773,70 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void transactWriteItemsReplayDuringTheFirstCallWaitsForItsCapacity() throws Exception {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> itemStore = mock(StorageBackend.class);
+        DynamoDbService svc = new DynamoDbService(
+                new InMemoryStorage<>(), itemStore, new RegionResolver("us-east-1", "000000000000"));
+        svc.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+        CountDownLatch committing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            committing.countDown();
+            release.await();
+            return null;
+        }).when(itemStore).put(any(), any());
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"u1"}}}}
+                """);
+        JsonNode rawRequest = mapper.readTree("""
+                {"ClientRequestToken":"tok-wait","TransactItems":[{"Put":{"TableName":"Users","Item":{"userId":{"S":"u1"}}}}]}
+                """);
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<DynamoDbService.TransactWriteResult> first = executor.submit(() ->
+                    svc.transactWriteItems(List.of(put), "us-east-1", "tok-wait", rawRequest));
+            assertTrue(committing.await(5, TimeUnit.SECONDS));
+            Future<DynamoDbService.TransactWriteResult> replay = executor.submit(() ->
+                    svc.transactWriteItems(List.of(put), "us-east-1", "tok-wait", rawRequest));
+            assertThrows(TimeoutException.class, () -> replay.get(200, TimeUnit.MILLISECONDS));
+            release.countDown();
+
+            assertFalse(first.get(5, TimeUnit.SECONDS).replayed());
+            DynamoDbService.TransactWriteResult replayed = replay.get(5, TimeUnit.SECONDS);
+            assertTrue(replayed.replayed());
+            assertEquals(2.0, replayed.capacity().get("Users").table());
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void transactWriteItemsCancelledCallDoesNotKeepItsToken() throws Exception {
+        createUsersTable("us-east-1");
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"u1"}},"ConditionExpression":"attribute_exists(userId)"}}
+                """);
+        ObjectNode rawRequest = mapper.createObjectNode();
+        rawRequest.putArray("TransactItems").add(put);
+        rawRequest.put("ClientRequestToken", "tok-cancel");
+
+        assertThrows(TransactionCanceledException.class, () ->
+                service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest));
+        assertThrows(TransactionCanceledException.class, () ->
+                service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest));
+
+        service.putItem("Users", item("userId", "u1"), "us-east-1");
+        assertFalse(service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest).replayed());
+        assertTrue(service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest).replayed());
+    }
+
+    @Test
     void batchWriteItem_flushesOncePerTable_notPerItem() {
         @SuppressWarnings("unchecked")
         StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
@@ -4024,6 +4120,42 @@ class DynamoDbServiceTest {
                     .thenAnswer(invocation -> new ByteArrayInputStream(object.getData()));
         }
         return s3;
+    }
+
+    /** DescribeTable names the missing table, an item call does not. */
+    @Test
+    void itemCalls_missingTable_returnResourceNotFoundWithoutTableName() {
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
+        String region = "us-east-1";
+        ObjectNode key = item("userId", "u1");
+        ObjectNode keys = mapper.createObjectNode();
+        keys.set("Keys", mapper.createArrayNode().add(key));
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.putObject("PutRequest").set("Item", key);
+        ObjectNode transactPut = mapper.createObjectNode();
+        transactPut.putObject("Put").put("TableName", "Users").set("Item", key);
+        ObjectNode transactGet = mapper.createObjectNode();
+        transactGet.putObject("Get").put("TableName", "Users").set("Key", key);
+
+        List<Executable> itemCalls = List.of(
+                () -> svc.getItem("Users", key, region),
+                () -> svc.putItem("Users", key, null, null, null, region, "NONE"),
+                () -> svc.updateItem("Users", key, null, "SET x = :v", null, item("v", "1"), "NONE", region),
+                () -> svc.deleteItem("Users", key, region),
+                () -> svc.query("Users", null, item("pk", "u1"), "userId = :pk", null, null, region),
+                () -> svc.scan("Users", null, null, null, null, null, null, null, region),
+                () -> svc.batchGetItem(Map.of("Users", keys), region),
+                () -> svc.batchWriteItem(Map.of("Users", List.of(putRequest)), region),
+                () -> svc.transactWriteItems(List.of(transactPut), region, null, null),
+                () -> svc.transactGetItems(List.of(transactGet), region));
+        for (Executable call : itemCalls) {
+            AwsException e = assertThrows(AwsException.class, call);
+            assertEquals("ResourceNotFoundException", e.getErrorCode());
+            assertEquals("Requested resource not found", e.getMessage());
+        }
+
+        AwsException describe = assertThrows(AwsException.class, () -> svc.describeTable("Users", region));
+        assertEquals("Requested resource not found: Table: Users not found", describe.getMessage());
     }
 
     /** Checked against real DynamoDB: every item call on a CREATING table fails this way, DescribeTable still works. */

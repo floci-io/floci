@@ -45,6 +45,7 @@ public class Instance {
     private boolean ebsOptimized = false;
     private boolean enaSupport = true;
     private String iamInstanceProfileArn;
+    private Instant iamInstanceProfileAssociationTime;
     private String stateReasonCode;
     private String stateReasonMessage;
     private String region;
@@ -182,6 +183,8 @@ public class Instance {
 
     public String getIamInstanceProfileArn() { return iamInstanceProfileArn; }
     public void setIamInstanceProfileArn(String iamInstanceProfileArn) { this.iamInstanceProfileArn = iamInstanceProfileArn; }
+    public Instant getIamInstanceProfileAssociationTime() { return iamInstanceProfileAssociationTime; }
+    public void setIamInstanceProfileAssociationTime(Instant iamInstanceProfileAssociationTime) { this.iamInstanceProfileAssociationTime = iamInstanceProfileAssociationTime; }
 
     public String getStateReasonCode() { return stateReasonCode; }
     public void setStateReasonCode(String stateReasonCode) { this.stateReasonCode = stateReasonCode; }

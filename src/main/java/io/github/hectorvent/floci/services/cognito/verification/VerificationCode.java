@@ -22,7 +22,11 @@ public final class VerificationCode {
         // Attribute verification is keyed per attribute so email and phone_number codes
         // rate-limit and overwrite independently, matching AWS.
         EMAIL_ATTRIBUTE_VERIFICATION,
-        PHONE_ATTRIBUTE_VERIFICATION
+        PHONE_ATTRIBUTE_VERIFICATION,
+        // USER_AUTH choice-based sign-in codes (distinct from SMS_MFA/attribute verification
+        // so a sign-in code can't be replayed against those other purposes' consume() calls).
+        EMAIL_OTP,
+        SMS_OTP
     }
 
     private final String userPoolId;

@@ -4,16 +4,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
@@ -28,23 +24,14 @@ import static org.junit.jupiter.api.Assertions.*;
  * happy-path container-execution {@code .sync} poll-to-STOPPED is exercised empirically
  * against a live emulator with Docker available (it is not asserted here, to keep the
  * unit suite independent of a container runtime / image registry).
+ *
+ * <p>That works because ECS runs in mock mode, so {@code RunTask} moves a task to RUNNING with no
+ * container runtime behind it. Mock mode is the configured test default rather than something this
+ * class turns on, which is why it needs no profile of its own.
  */
 @QuarkusTest
-@TestProfile(StepFunctionsEcsRunTaskIntegrationTest.EcsMockProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class StepFunctionsEcsRunTaskIntegrationTest {
-
-    /**
-     * Runs ECS in mock mode so RunTask transitions tasks to RUNNING without a container
-     * runtime. These tests assert only the Step Functions↔ECS wiring (routing, casing,
-     * validation, error propagation), which is independent of real container execution.
-     */
-    public static final class EcsMockProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.ecs.mock", "true");
-        }
-    }
 
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String ECS_CONTENT_TYPE = "application/x-amz-json-1.1";

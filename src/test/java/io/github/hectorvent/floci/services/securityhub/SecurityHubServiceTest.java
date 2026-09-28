@@ -29,6 +29,7 @@ class SecurityHubServiceTest {
     void setUp() {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
+        when(regionResolver.getPartition()).thenReturn("aws");
         service = new SecurityHubService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID), regionResolver,
                 mock(OrganizationsService.class));
     }
@@ -45,6 +46,17 @@ class SecurityHubServiceTest {
         SecurityHubState state = service.state(REGION);
         assertTrue(state.isEnabled());
         assertEquals("STANDARD_CONTROL", state.getControlFindingGenerator());
+        assertEquals(Map.of("env", "test"), service.tagsForResource(REGION, service.hubArn(REGION)));
+    }
+
+    /** An account id is scoped to its partition: a China ARN of the same account names nothing here. */
+    @Test
+    void aResourceArnFromAnotherPartitionIsNotFound() throws Exception {
+        service.enableSecurityHub(REGION, objectMapper.readTree("{\"Tags\": {\"env\": \"test\"}}"));
+        String foreign = service.hubArn(REGION).replace("arn:aws:", "arn:aws-cn:");
+
+        AwsException notFound = assertThrows(AwsException.class, () -> service.tagsForResource(REGION, foreign));
+        assertEquals("ResourceNotFoundException", notFound.getErrorCode());
         assertEquals(Map.of("env", "test"), service.tagsForResource(REGION, service.hubArn(REGION)));
     }
 

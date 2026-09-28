@@ -48,14 +48,44 @@ class CognitoCustomDomainFilterTest {
     }
 
     @Test
+    void rewritesManagedLoginPathsOnACustomDomainAndPinsThePool() {
+        when(cognitoService.findCustomDomain(DOMAIN)).thenReturn(Optional.of(domain("us-east-1_abc")));
+        for (String path : new String[] {"/login", "/logout"}) {
+            ContainerRequestContext request = request("https://" + DOMAIN + path + "?client_id=c&state=a%26b", DOMAIN);
+
+            filter.filter(request);
+
+            verify(request).setProperty(CognitoCustomDomainFilter.POOL_PROPERTY, "us-east-1_abc");
+            verify(request).setProperty(AccountContextFilter.PINNED_ACCOUNT_PROPERTY, ACCOUNT);
+            verify(request).setRequestUri(URI.create("https://" + DOMAIN + "/cognito-idp" + path + "?client_id=c&state=a%26b"));
+        }
+    }
+
+    @Test
     void leavesOtherPathsAlone() {
-        ContainerRequestContext request = request("http://" + DOMAIN + "/cognito-idp/oauth2/token", DOMAIN);
+        for (String path : new String[] {"/cognito-idp/oauth2/token", "/login/", "/loginx", "/logout/x", "/signup"}) {
+            ContainerRequestContext request = request("http://" + DOMAIN + path, DOMAIN);
 
-        filter.filter(request);
+            filter.filter(request);
 
+            verify(request, never()).setRequestUri(any());
+            verify(request, never()).setProperty(any(), any());
+        }
         verifyNoInteractions(cognitoService);
-        verify(request, never()).setRequestUri(any());
-        verify(request, never()).setProperty(any(), any());
+    }
+
+    /** Without a custom domain, /login is an S3 bucket path and /logout the SSO portal's. */
+    @Test
+    void leavesManagedLoginPathsOfOtherHostsAlone() {
+        when(cognitoService.findCustomDomain("localhost")).thenReturn(Optional.empty());
+        for (String path : new String[] {"/login", "/logout"}) {
+            ContainerRequestContext request = request("http://localhost:4566" + path, "localhost:4566");
+
+            filter.filter(request);
+
+            verify(request, never()).setRequestUri(any());
+            verify(request, never()).setProperty(any(), any());
+        }
     }
 
     @Test

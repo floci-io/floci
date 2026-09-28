@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,7 +24,9 @@ import org.mockito.ArgumentCaptor;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -79,7 +82,7 @@ class EcsContainerManagerAwsBaselineTest {
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
                 containerDetector, config, regionResolver, awsEnv, mock(SsmService.class),
-                mock(SecretsManagerService.class), ecrRegistryManager, mock(HostVolumePolicy.class));
+                mock(SecretsManagerService.class), mock(S3Service.class), ecrRegistryManager, mock(HostVolumePolicy.class));
     }
 
     @Test
@@ -146,6 +149,36 @@ class EcsContainerManagerAwsBaselineTest {
                 "RunTask containerOverride should win over the baseline");
         assertFalse(env.contains("AWS_ENDPOINT_URL=http://localhost:4566"),
                 "overridden baseline endpoint should not remain");
+    }
+
+    @Test
+    void injectsTheTaskMetadataEndpointEachContainerCanReach() {
+        when(awsEnv.flociEndpoint()).thenReturn("http://host.docker.internal:4566");
+
+        ContainerDefinition app = containerDef("app", "app:latest", List.of());
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("test-family");
+        taskDef.setContainerDefinitions(List.of(app));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+
+        manager.startTask(task, taskDef, null, "us-east-1");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withEnv(envCaptor.capture());
+        String metadataUri = envCaptor.getValue().stream()
+                .filter(entry -> entry.startsWith("ECS_CONTAINER_METADATA_URI_V4="))
+                .findFirst()
+                .orElse(null);
+
+        assertNotNull(metadataUri, "every launched container is told where its metadata lives");
+        assertTrue(metadataUri.startsWith("ECS_CONTAINER_METADATA_URI_V4=http://host.docker.internal:4566/v4/"),
+                "the metadata URI must point at Floci's own v4 path: " + metadataUri);
+        // The id in the URI is the one the container is then found by.
+        String id = metadataUri.substring(metadataUri.lastIndexOf('/') + 1);
+        assertEquals(id, task.getContainers().getFirst().getMetadataId());
     }
 
     private static ContainerDefinition containerDef(String name, String image, List<KeyValuePair> env) {

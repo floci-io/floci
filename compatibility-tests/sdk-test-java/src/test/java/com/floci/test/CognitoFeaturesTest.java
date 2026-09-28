@@ -122,6 +122,7 @@ class CognitoFeaturesTest {
                 .clientName("compat-test-client")
                 .explicitAuthFlows(
                         ExplicitAuthFlowsType.ALLOW_USER_PASSWORD_AUTH,
+                        ExplicitAuthFlowsType.ALLOW_ADMIN_USER_PASSWORD_AUTH,
                         ExplicitAuthFlowsType.ALLOW_REFRESH_TOKEN_AUTH));
         clientId = resp.userPoolClient().clientId();
         assertThat(clientId).isNotBlank();
@@ -170,6 +171,10 @@ class CognitoFeaturesTest {
         assertThat(client.refreshTokenRotation())
                 .as("refreshTokenRotation must be null when not set")
                 .isNull();
+        assertThat(client.explicitAuthFlows())
+                .as("ExplicitAuthFlows must be empty when not set, matching AWS; the default"
+                        + " (refresh, SRP and custom auth) is enforced at auth time, not stored")
+                .isEmpty();
     }
 
     // ── Issue #229 — InitiateAuth rejects when no password hash is set ────────
@@ -466,6 +471,27 @@ class CognitoFeaturesTest {
         assertThat(challengeResp.authenticationResult().refreshToken()).isNotBlank();
 
         cognito.adminDeleteUser(b -> b.userPoolId(poolId).username(tempUser));
+    }
+
+    @Test
+    @Order(61)
+    void deletionProtectionRefusesDeleteUntilDeactivated() {
+        String protectedPoolId = cognito.createUserPool(b -> b
+                .poolName("compat-protected-pool")
+                .deletionProtection(DeletionProtectionType.ACTIVE))
+                .userPool().id();
+        try {
+            assertThatThrownBy(() -> cognito.deleteUserPool(b -> b.userPoolId(protectedPoolId)))
+                    .isInstanceOf(InvalidParameterException.class)
+                    .hasMessageContaining("deletion protection is activated");
+            assertThat(cognito.describeUserPool(b -> b.userPoolId(protectedPoolId)).userPool().deletionProtection())
+                    .isEqualTo(DeletionProtectionType.ACTIVE);
+        } finally {
+            cognito.updateUserPool(b -> b.userPoolId(protectedPoolId).deletionProtection(DeletionProtectionType.INACTIVE));
+            cognito.deleteUserPool(b -> b.userPoolId(protectedPoolId));
+        }
+        assertThatThrownBy(() -> cognito.describeUserPool(b -> b.userPoolId(protectedPoolId)))
+                .isInstanceOf(ResourceNotFoundException.class);
     }
 
     // ── Issue #234 note ───────────────────────────────────────────────────────

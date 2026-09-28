@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontDistributionFilter;
@@ -203,10 +205,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
                 return first;
             }
         }
-        if (hostHeader != null && !hostHeader.isBlank()) {
-            return hostHeader.trim();
-        }
-        return requestUri != null ? requestUri.getAuthority() : null;
+        return RequestHost.of(hostHeader, requestUri);
     }
 
     static String resolveHost(String hostHeader, URI requestUri) {
@@ -293,9 +292,12 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             return bucketFromPrefix(prefix, false);
         }
 
-        // Fallback: well-known AWS S3 domains, for users who route AWS DNS to Floci. An S3
-        // qualifier is required here, so a plain foo.amazonaws.com is not an S3 bucket.
-        String awsPrefix = stripHostSuffix(hostname, "amazonaws.com");
+        // Fallback: well-known AWS S3 domains in any partition, for users who route AWS DNS to
+        // Floci. Longest suffix first, so a China host keeps its .cn. An S3 qualifier is required
+        // here, so a plain foo.amazonaws.com is not an S3 bucket.
+        String awsPrefix = AwsPartitions.stripKnownDnsSuffix(hostname)
+                .map(AwsPartitions.DnsSuffixMatch::prefix)
+                .orElse(null);
         if (awsPrefix != null) {
             return bucketFromPrefix(awsPrefix, true);
         }

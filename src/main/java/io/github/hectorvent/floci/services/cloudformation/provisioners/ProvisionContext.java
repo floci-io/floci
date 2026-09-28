@@ -2,21 +2,38 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
+import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * The per-provision context every resource handler drew from: the template engine (for resolving
  * intrinsic functions in properties) plus the region/account/stack it is being created in. The
- * helpers are lifted verbatim from {@code CloudFormationResourceProvisioner}'s private methods
+ * helpers were lifted verbatim from the former CloudFormation monolith's private methods
  * so extracted provisioners produce byte-identical physical ids and resolved values.
  */
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
-                               String accountId, String stackName, String priorPhysicalId) {
+                               String accountId, String stackName, String priorPhysicalId,
+                               Consumer<StackEvent> progress) {
+
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName, String priorPhysicalId) {
+        this(engine, region, accountId, stackName, priorPhysicalId, event -> {});
+    }
+
+    /** Intermediate resource events retain the stack pipeline's event IDs and metadata. */
+    public static void report(Consumer<StackEvent> progress, String physicalId, String status, String reason) {
+        StackEvent event = new StackEvent();
+        event.setPhysicalResourceId(physicalId);
+        event.setResourceStatus(status);
+        event.setResourceStatusReason(reason);
+        progress.accept(event);
+    }
 
     /** A context for a first-time create, with no prior physical id. */
     public ProvisionContext(CloudFormationTemplateEngine engine, String region,
@@ -42,11 +59,12 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
     }
 
     /**
-     * Resolves a CloudFormation {@code [{Key, Value}]} tag list to a map, preserving template
-     * order. The whole node is resolved first so an {@code Fn::If} wrapping the list works, not
-     * just intrinsics inside each entry. Entries whose key resolves blank are skipped and a
-     * missing value becomes {@code ""}; an absent or non-array property yields an empty map, never
-     * null.
+     * Resolves a CloudFormation tag property to a map, preserving template order. Both registry
+     * shapes are read: the {@code [{Key, Value}]} list most types declare, and the
+     * {@code {key: value}} object types such as {@code AWS::Batch::*} declare. The whole node is
+     * resolved first so an {@code Fn::If} wrapping it works, not just intrinsics inside each entry.
+     * Entries whose key resolves blank are skipped and a missing value becomes {@code ""}; an
+     * absent property, or one of any other shape, yields an empty map, never null.
      *
      * <p>Deliberately does not validate. Callers needing AWS's tag rules (the 50-tag cap, the
      * reserved {@code aws:} prefix) keep their own validating parse, and callers using null to mean
@@ -58,7 +76,17 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
             return tags;
         }
         JsonNode resolved = engine.resolveNode(props.get(name));
-        if (resolved == null || !resolved.isArray()) {
+        if (resolved == null) {
+            return tags;
+        }
+        if (resolved.isObject()) {
+            resolved.fields().forEachRemaining(entry -> {
+                String value = engine.resolve(entry.getValue());
+                tags.put(entry.getKey(), value == null ? "" : value);
+            });
+            return tags;
+        }
+        if (!resolved.isArray()) {
             return tags;
         }
         for (JsonNode tag : resolved) {
@@ -81,6 +109,16 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
     }
 
     /**
+     * Resolves an optional property through the engine, falling back to {@code defaultValue} when it
+     * is absent or resolves to blank. Shared by the per-service provisioners so none carries its own
+     * copy.
+     */
+    public String resolveOrDefault(JsonNode props, String name, String defaultValue) {
+        String value = resolveOptional(props, name);
+        return (value != null && !value.isBlank()) ? value : defaultValue;
+    }
+
+    /**
      * Resolves a list property to its non-blank elements, or an empty list when absent.
      *
      * <p>Routes through {@code engine.resolveStringList} so a list-valued intrinsic
@@ -94,6 +132,17 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
             return new ArrayList<>();
         }
         return new ArrayList<>(engine.resolveStringList(props.get(name)));
+    }
+
+    /**
+     * The resolved {@code PolicyDocument} of an IAM policy resource as a JSON string, defaulting to
+     * an empty policy when the property is absent. Shared by the IAM policy provisioners so neither
+     * carries its own copy.
+     */
+    public String resolvePolicyDocument(JsonNode props) {
+        JsonNode documentNode = props != null ? props.get("PolicyDocument") : null;
+        String resolved = documentNode != null ? engine.resolveJsonAttributeStrict(documentNode) : null;
+        return resolved != null ? resolved : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
     }
 
     /**

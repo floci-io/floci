@@ -547,6 +547,31 @@ class SchedulerIntegrationTest {
     }
 
     @Test
+    @Order(43)
+    void createScheduleWithNonJsonInputForLambdaTargetReturns400() {
+        // Target.Input in the Scheduler API reference: templated Lambda, Step Functions and
+        // EventBridge targets require well-formed JSON.
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:lambda:us-east-1:000000000000:function:my-func",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "Input": "not json"
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/lambda-text-input")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
     @Order(21)
     void createScheduleWithEcsParametersRoundTrips() {
         given()

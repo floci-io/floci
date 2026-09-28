@@ -325,7 +325,7 @@ public class CloudFormationQueryHandler {
         try {
             List<Stack> stacks = cfnService.describeStacks(stackName, region);
             if (!stacks.isEmpty()) {
-                for (ChangeSet cs : stacks.get(0).getChangeSets().values()) {
+                for (ChangeSet cs : stacks.get(0).changeSetsSnapshot().values()) {
                     xml.start("member")
                        .elem("ChangeSetName", cs.getChangeSetName())
                        .elem("ChangeSetId", cs.getChangeSetId())
@@ -559,8 +559,11 @@ public class CloudFormationQueryHandler {
                .elem("StackId", s.getStackId())
                .elem("StackName", s.getStackName())
                .elem("StackStatus", s.getStatus())
-               .elem("CreationTime", ISO.format(s.getCreationTime()))
-               .end("member");
+               .elem("CreationTime", ISO.format(s.getCreationTime()));
+            if (s.getDeletionTime() != null) {
+                xml.elem("DeletionTime", ISO.format(s.getDeletionTime()));
+            }
+            xml.end("member");
         }
         xml.end("StackSummaries").end("ListStacksResult")
            .raw(AwsQueryResponse.responseMetadata())
@@ -601,6 +604,9 @@ public class CloudFormationQueryHandler {
         if (s.getLastUpdatedTime() != null) {
             xml.elem("LastUpdatedTime", ISO.format(s.getLastUpdatedTime()));
         }
+        if (s.getDeletionTime() != null) {
+            xml.elem("DeletionTime", ISO.format(s.getDeletionTime()));
+        }
         if (s.getStatusReason() != null) {
             xml.elem("StackStatusReason", s.getStatusReason());
         }
@@ -610,18 +616,19 @@ public class CloudFormationQueryHandler {
         }
         xml.end("Capabilities");
         xml.start("Parameters");
-        s.getParameters().forEach((k, v) ->
+        s.parametersSnapshot().forEach((k, v) ->
                 xml.start("member")
                    .elem("ParameterKey", k)
                    .elem("ParameterValue", v)
                    .end("member"));
         xml.end("Parameters");
         xml.start("Outputs");
-        s.getOutputs().forEach((k, v) -> {
+        Map<String, String> outputExportNames = s.outputExportNamesSnapshot();
+        s.outputsSnapshot().forEach((k, v) -> {
             xml.start("member")
                .elem("OutputKey", k)
                .elem("OutputValue", v);
-            String exportName = s.getOutputExportNames().get(k);
+            String exportName = outputExportNames.get(k);
             if (exportName != null) {
                 xml.elem("ExportName", exportName);
             }
@@ -629,7 +636,7 @@ public class CloudFormationQueryHandler {
         });
         xml.end("Outputs");
         xml.start("Tags");
-        s.getTags().forEach((k, v) ->
+        s.tagsSnapshot().forEach((k, v) ->
                 xml.start("member")
                    .elem("Key", k)
                    .elem("Value", v)

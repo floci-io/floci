@@ -19,6 +19,76 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ApiGatewayVtlCompatibilityTest {
 
     @Test
+    @DisplayName("Parsed map and collection methods work in native REST response templates")
+    void responseTemplateMapMethodsWorkInNativeImage() throws Exception {
+        Assumptions.assumeFalse(TestFixtures.isRealAws(), "Floci native-image regression test");
+
+        ApiGatewayClient apiGateway = TestFixtures.apiGatewayClient();
+        String apiId = apiGateway.createRestApi(request -> request.name(TestFixtures.uniqueName("apigw-vtl-response"))).id();
+
+        try {
+            String rootId = apiGateway.getResources(request -> request.restApiId(apiId)).items().stream()
+                    .filter(resource -> "/".equals(resource.path()))
+                    .findFirst()
+                    .map(Resource::id)
+                    .orElseThrow();
+            String resourceId = apiGateway.createResource(request -> request
+                    .restApiId(apiId)
+                    .parentId(rootId)
+                    .pathPart("response-map")).id();
+
+            apiGateway.putMethod(request -> request
+                    .restApiId(apiId)
+                    .resourceId(resourceId)
+                    .httpMethod("POST")
+                    .authorizationType("NONE"));
+            apiGateway.putIntegration(request -> request
+                    .restApiId(apiId)
+                    .resourceId(resourceId)
+                    .httpMethod("POST")
+                    .type(IntegrationType.MOCK)
+                    .requestTemplates(Map.of("application/json", "{\"statusCode\": 200}")));
+            apiGateway.putMethodResponse(request -> request
+                    .restApiId(apiId)
+                    .resourceId(resourceId)
+                    .httpMethod("POST")
+                    .statusCode("200"));
+
+            String responseTemplate = "#set($parsed = $util.parseJson($input.body))"
+                    + "#if($parsed.headers)$parsed.headers.isEmpty()|$parsed.headers.size()|"
+                    + "#foreach($entry in $parsed.headers.entrySet())$entry.getKey()=$entry.getValue()#end|"
+                    + "$parsed.items.isEmpty()|$parsed.items.size()|#foreach($item in $parsed.items)$item#end#end";
+            apiGateway.putIntegrationResponse(request -> request
+                    .restApiId(apiId)
+                    .resourceId(resourceId)
+                    .httpMethod("POST")
+                    .statusCode("200")
+                    .responseTemplates(Map.of("application/json", responseTemplate)));
+
+            String deploymentId = apiGateway.createDeployment(request -> request.restApiId(apiId)).id();
+            apiGateway.createStage(request -> request
+                    .restApiId(apiId)
+                    .stageName("test")
+                    .deploymentId(deploymentId));
+
+            HttpClient httpClient = TestFixtures.emulatorHttpClient();
+            URI uri = URI.create(TestFixtures.endpoint() + "/execute-api/" + apiId + "/test/response-map");
+            HttpRequest request = HttpRequest.newBuilder(uri)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(
+                            "{\"headers\":{\"x-test\":\"yes\"},\"items\":[\"a\",\"b\"]}"))
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.body().trim()).isEqualTo("false|1|x-test=yes|false|2|ab");
+        } finally {
+            apiGateway.deleteRestApi(request -> request.restApiId(apiId));
+            apiGateway.close();
+        }
+    }
+
+    @Test
     @DisplayName("Header map get and keySet work in the native image")
     void headerMapMethodsWorkInNativeImage() throws Exception {
         Assumptions.assumeFalse(TestFixtures.isRealAws(), "Floci native-image regression test");

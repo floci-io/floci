@@ -1,15 +1,14 @@
 package io.github.hectorvent.floci.services.cur;
 
+import io.github.hectorvent.floci.testing.FixedPortNoEmissionProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
-import java.util.HashMap;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -32,7 +31,7 @@ import static org.hamcrest.Matchers.equalTo;
  * {@code NoSuchBucket}.
  */
 @QuarkusTest
-@TestProfile(CurDailyEmissionAccountIsolationIntegrationTest.DailyProfile.class)
+@TestProfile(FixedPortNoEmissionProfile.class)
 @EnabledIfEnvironmentVariable(named = "FLOCI_DUCK_CROSS_CONTAINER_TEST", matches = "1|true|yes")
 class CurDailyEmissionAccountIsolationIntegrationTest {
 
@@ -42,21 +41,6 @@ class CurDailyEmissionAccountIsolationIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=" + ACCOUNT_ID + "/20260101/us-east-1/cur/aws4_request";
     private static final String S3_AUTH =
             "AWS4-HMAC-SHA256 Credential=" + ACCOUNT_ID + "/20260101/us-east-1/s3/aws4_request";
-
-    public static final class DailyProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            Map<String, String> o = new HashMap<>();
-            o.put("quarkus.http.test-port", "4566");
-            o.put("floci.base-url", "http://localhost:4566");
-            // Sync mode is off so the put-report call below does NOT emit
-            // immediately. The test then drives the scheduler's runDaily
-            // codepath directly via the engine to simulate the daily tick.
-            o.put("floci.services.cur.emit-mode", "off");
-            o.put("floci.services.bcm-data-exports.emit-mode", "off");
-            return o;
-        }
-    }
 
     @BeforeAll
     static void configureRestAssured() {

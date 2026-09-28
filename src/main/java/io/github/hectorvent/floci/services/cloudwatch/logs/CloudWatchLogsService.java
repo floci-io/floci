@@ -1,19 +1,25 @@
 package io.github.hectorvent.floci.services.cloudwatch.logs;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.storage.WriteProfile;
+import io.github.hectorvent.floci.services.cloudwatch.logs.filter.FilterPattern;
+import io.github.hectorvent.floci.services.cloudwatch.logs.filter.FilterPatternException;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.MetricFilter;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.ResourcePolicy;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Event;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -37,10 +43,14 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import java.time.Instant;
 import java.util.Set;
 
+import static io.github.hectorvent.floci.services.cloudwatch.logs.MetricFilterRules.invalid;
+
 @ApplicationScoped
 public class CloudWatchLogsService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchLogsService.class);
+    private static final int MAX_REGEX_FILTERS_PER_LOG_GROUP = 5;
+    private static final int MAX_FILTER_PATTERN_LENGTH = 1024;
 
     /**
      * Orders events by timestamp, then by ingestion sequence so that events sharing the same
@@ -57,8 +67,15 @@ public class CloudWatchLogsService implements ResourceProvider {
     private final StorageBackend<String, LogStream> streamStore;
     private final StorageBackend<String, LogEvent> eventStore;
     private final StorageBackend<String, SubscriptionFilter> subscriptionFilterStore;
+    private final StorageBackend<String, MetricFilter> metricFilterStore;
     private final StorageBackend<String, ResourcePolicy> resourcePolicyStore;
     private final RegionResolver regionResolver;
+    /**
+     * What ingestion and group deletion tell the rest of the emulator, so features AWS drives from
+     * them (metric filters) stay out of this class. Null when built by the test constructors.
+     */
+    private final Event<LogEventsIngested> logEventsIngested;
+    private final Event<LogGroupDeleted> logGroupDeleted;
     private final int maxEventsPerQuery;
     /** Ceiling on stored events across every group in an account; the oldest are evicted first once exceeded. */
     private final int maxStoredEvents;
@@ -94,15 +111,21 @@ public class CloudWatchLogsService implements ResourceProvider {
     @Inject
     public CloudWatchLogsService(StorageFactory storageFactory,
                                   EmulatorConfig config,
-                                  RegionResolver regionResolver) {
+                                  RegionResolver regionResolver,
+                                  Event<LogEventsIngested> logEventsIngested,
+                                  Event<LogGroupDeleted> logGroupDeleted) {
         this(
                 storageFactory.create("cloudwatchlogs", "cwlogs-groups.json",
                         new TypeReference<>() {}),
                 storageFactory.create("cloudwatchlogs", "cwlogs-streams.json",
                         new TypeReference<>() {}),
+                // Every PutLogEvents call lands here, so under persistent mode the store is
+                // journaled instead of rewritten in full per batch (#2500).
                 storageFactory.create("cloudwatchlogs", "cwlogs-events.json",
-                        new TypeReference<>() {}),
+                        new TypeReference<>() {}, WriteProfile.APPEND_HEAVY),
                 storageFactory.create("cloudwatchlogs", "cwlogs-subscription-filters.json",
+                        new TypeReference<>() {}),
+                storageFactory.create("cloudwatchlogs", "cwlogs-metric-filters.json",
                         new TypeReference<>() {}),
                 storageFactory.create("cloudwatchlogs", "cwlogs-resource-policies.json",
                         new TypeReference<>() {}),
@@ -110,7 +133,9 @@ public class CloudWatchLogsService implements ResourceProvider {
                 config.services().cloudwatchlogs().maxStoredEvents(),
                 regionResolver,
                 config.services().cloudwatchlogs().queryCompletionDelayMs(),
-                System::currentTimeMillis
+                System::currentTimeMillis,
+                logEventsIngested,
+                logGroupDeleted
         );
     }
 
@@ -118,9 +143,10 @@ public class CloudWatchLogsService implements ResourceProvider {
                            StorageBackend<String, LogStream> streamStore,
                            StorageBackend<String, LogEvent> eventStore,
                            StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
+                           StorageBackend<String, MetricFilter> metricFilterStore,
                            int maxEventsPerQuery,
                            RegionResolver regionResolver) {
-        this(groupStore, streamStore, eventStore, subscriptionFilterStore, new InMemoryStorage<>(),
+        this(groupStore, streamStore, eventStore, subscriptionFilterStore, metricFilterStore, new InMemoryStorage<>(),
                 maxEventsPerQuery, Integer.MAX_VALUE, regionResolver, 0L, System::currentTimeMillis);
     }
 
@@ -128,10 +154,11 @@ public class CloudWatchLogsService implements ResourceProvider {
                            StorageBackend<String, LogStream> streamStore,
                            StorageBackend<String, LogEvent> eventStore,
                            StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
+                           StorageBackend<String, MetricFilter> metricFilterStore,
                            int maxEventsPerQuery,
                            int maxStoredEvents,
                            RegionResolver regionResolver) {
-        this(groupStore, streamStore, eventStore, subscriptionFilterStore, new InMemoryStorage<>(),
+        this(groupStore, streamStore, eventStore, subscriptionFilterStore, metricFilterStore, new InMemoryStorage<>(),
                 maxEventsPerQuery, maxStoredEvents, regionResolver, 0L, System::currentTimeMillis);
     }
 
@@ -139,11 +166,12 @@ public class CloudWatchLogsService implements ResourceProvider {
                            StorageBackend<String, LogStream> streamStore,
                            StorageBackend<String, LogEvent> eventStore,
                            StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
+                           StorageBackend<String, MetricFilter> metricFilterStore,
                            int maxEventsPerQuery,
                            RegionResolver regionResolver,
                            long queryCompletionDelayMs,
                            LongSupplier clock) {
-        this(groupStore, streamStore, eventStore, subscriptionFilterStore, new InMemoryStorage<>(),
+        this(groupStore, streamStore, eventStore, subscriptionFilterStore, metricFilterStore, new InMemoryStorage<>(),
                 maxEventsPerQuery, Integer.MAX_VALUE, regionResolver, queryCompletionDelayMs, clock);
     }
 
@@ -151,16 +179,35 @@ public class CloudWatchLogsService implements ResourceProvider {
                            StorageBackend<String, LogStream> streamStore,
                            StorageBackend<String, LogEvent> eventStore,
                            StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
+                           StorageBackend<String, MetricFilter> metricFilterStore,
                            StorageBackend<String, ResourcePolicy> resourcePolicyStore,
                            int maxEventsPerQuery,
                            int maxStoredEvents,
                            RegionResolver regionResolver,
                            long queryCompletionDelayMs,
                            LongSupplier clock) {
+        this(groupStore, streamStore, eventStore, subscriptionFilterStore, metricFilterStore, resourcePolicyStore,
+                maxEventsPerQuery, maxStoredEvents, regionResolver, queryCompletionDelayMs, clock, null, null);
+    }
+
+    CloudWatchLogsService(StorageBackend<String, LogGroup> groupStore,
+                           StorageBackend<String, LogStream> streamStore,
+                           StorageBackend<String, LogEvent> eventStore,
+                           StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
+                           StorageBackend<String, MetricFilter> metricFilterStore,
+                           StorageBackend<String, ResourcePolicy> resourcePolicyStore,
+                           int maxEventsPerQuery,
+                           int maxStoredEvents,
+                           RegionResolver regionResolver,
+                           long queryCompletionDelayMs,
+                           LongSupplier clock,
+                           Event<LogEventsIngested> logEventsIngested,
+                           Event<LogGroupDeleted> logGroupDeleted) {
         this.groupStore = groupStore;
         this.streamStore = streamStore;
         this.eventStore = eventStore;
         this.subscriptionFilterStore = subscriptionFilterStore;
+        this.metricFilterStore = metricFilterStore;
         this.resourcePolicyStore = resourcePolicyStore;
         this.maxEventsPerQuery = maxEventsPerQuery;
         this.maxStoredEvents = maxStoredEvents;
@@ -173,6 +220,8 @@ public class CloudWatchLogsService implements ResourceProvider {
         // A negative delay is meaningless; treat it as instant completion.
         this.queryCompletionDelayMs = Math.max(0, queryCompletionDelayMs);
         this.clock = clock;
+        this.logEventsIngested = logEventsIngested;
+        this.logGroupDeleted = logGroupDeleted;
     }
 
     // ──────────────────────────── Log Groups ────────────────────────────
@@ -206,55 +255,67 @@ public class CloudWatchLogsService implements ResourceProvider {
     public void createLogGroupForAccount(
             String accountId, String name, Integer retentionInDays,
             Map<String, String> tags, boolean deletionProtectionEnabled, String kmsKeyId, String region) {
-        if (name == null || name.isBlank()) {
-            throw new AwsException("InvalidParameterException", "logGroupName is required.", 400);
+        synchronized (metricFilterStore) {
+            if (name == null || name.isBlank()) {
+                throw new AwsException("InvalidParameterException", "logGroupName is required.", 400);
+            }
+            String key = groupKey(region, name);
+            if (getForAccount(groupStore, accountId, key).isPresent()) {
+                throw new AwsException("ResourceAlreadyExistsException",
+                        "The specified log group already exists: " + name, 400);
+            }
+            LogGroup group = new LogGroup();
+            group.setLogGroupName(name);
+            group.setCreatedTime(System.currentTimeMillis());
+            group.setRetentionInDays(retentionInDays);
+            group.setDeletionProtectionEnabled(deletionProtectionEnabled);
+            if (kmsKeyId != null && !kmsKeyId.isBlank()) {
+                group.setKmsKeyId(kmsKeyId);
+            }
+            if (tags != null) {
+                group.setTags(new HashMap<>(tags));
+            }
+            putForAccount(groupStore, accountId, key, group);
+            LOG.infov("Created log group: {0} in region {1}", name, region);
         }
-        String key = groupKey(region, name);
-        if (getForAccount(groupStore, accountId, key).isPresent()) {
-            throw new AwsException("ResourceAlreadyExistsException",
-                    "The specified log group already exists: " + name, 400);
-        }
-        LogGroup group = new LogGroup();
-        group.setLogGroupName(name);
-        group.setCreatedTime(System.currentTimeMillis());
-        group.setRetentionInDays(retentionInDays);
-        group.setDeletionProtectionEnabled(deletionProtectionEnabled);
-        if (kmsKeyId != null && !kmsKeyId.isBlank()) {
-            group.setKmsKeyId(kmsKeyId);
-        }
-        if (tags != null) {
-            group.setTags(new HashMap<>(tags));
-        }
-        putForAccount(groupStore, accountId, key, group);
-        LOG.infov("Created log group: {0} in region {1}", name, region);
     }
 
     public void deleteLogGroup(String name, String region) {
-        String key = groupKey(region, name);
-        LogGroup group = groupStore.get(key)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + name, 400));
-        if (group.isDeletionProtectionEnabled()) {
-            throw new AwsException("ValidationException",
-                    "The specified log group has deletion protection enabled. "
-                            + "Disable deletion protection before deleting the log group.",
-                    400);
-        }
+        synchronized (metricFilterStore) {
+            String key = groupKey(region, name);
+            LogGroup group = groupStore.get(key)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "The specified log group does not exist: " + name, 400));
+            if (group.isDeletionProtectionEnabled()) {
+                throw new AwsException("ValidationException",
+                        "The specified log group has deletion protection enabled. "
+                                + "Disable deletion protection before deleting the log group.",
+                        400);
+            }
 
-        // Cascade: delete all streams and events for this group
-        String streamPrefix = streamKeyPrefix(region, name);
-        List<String> streamKeys = streamStore.keys().stream()
-                .filter(k -> k.startsWith(streamPrefix))
-                .toList();
-        for (String sk : streamKeys) {
-            LogStream stream = streamStore.get(sk).orElse(null);
-            if (stream != null) {
-                deleteEventsForStream(region, name, stream.getLogStreamName());
-                streamStore.delete(sk);
+            // Cascade: delete all streams, events and filters before removing the group.
+            String streamPrefix = streamKeyPrefix(region, name);
+            List<String> streamKeys = streamStore.keys().stream()
+                    .filter(k -> k.startsWith(streamPrefix))
+                    .toList();
+            for (String sk : streamKeys) {
+                LogStream stream = streamStore.get(sk).orElse(null);
+                if (stream != null) {
+                    deleteEventsForStream(region, name, stream.getLogStreamName());
+                    streamStore.delete(sk);
+                }
+            }
+            metricFilterStore.keys().stream().filter(k -> k.startsWith(streamPrefix))
+                    .toList().forEach(metricFilterStore::delete);
+            String subscriptionPrefix = subscriptionFilterKeyPrefix(region, name);
+            subscriptionFilterStore.keys().stream().filter(k -> k.startsWith(subscriptionPrefix))
+                    .toList().forEach(subscriptionFilterStore::delete);
+            groupStore.delete(key);
+            LOG.infov("Deleted log group: {0}", name);
+            if (logGroupDeleted != null) {
+                logGroupDeleted.fire(new LogGroupDeleted(region, name));
             }
         }
-        groupStore.delete(key);
-        LOG.infov("Deleted log group: {0}", name);
     }
 
     public boolean logGroupExists(String name, String region) {
@@ -275,6 +336,13 @@ public class CloudWatchLogsService implements ResourceProvider {
         });
         result.sort(Comparator.comparing(LogGroup::getLogGroupName));
         return result;
+    }
+
+    public long getStoredBytesForLogGroup(String groupName, String region) {
+        String storagePrefix = streamKeyPrefix(region, groupName);
+        return streamStore.scan(k -> k.startsWith(storagePrefix)).stream()
+                .mapToLong(LogStream::getStoredBytes)
+                .sum();
     }
 
     public void putLogGroupDeletionProtection(String groupName, boolean enabled, String region) {
@@ -556,6 +624,8 @@ public class CloudWatchLogsService implements ResourceProvider {
         long totalBytes = 0;
         Long minTs = null;
         Long maxTs = null;
+        List<LogEvent> stored = new ArrayList<>(events.size());
+        Map<String, LogEvent> logEvents = new LinkedHashMap<>();
 
         for (Map<String, Object> evt : events) {
             long ts = toLong(evt.get("timestamp"), now);
@@ -569,12 +639,14 @@ public class CloudWatchLogsService implements ResourceProvider {
             logEvent.setSequence(ingestionSequence.incrementAndGet());
 
             String eventKey = eventKey(region, groupName, streamName, ts, logEvent.getEventId());
-            putForAccount(eventStore, accountId, eventKey, logEvent);
+            logEvents.put(eventKey, logEvent);
+            stored.add(logEvent);
 
             totalBytes += msg.getBytes().length + 26; // approx overhead
             if (minTs == null || ts < minTs) { minTs = ts; }
             if (maxTs == null || ts > maxTs) { maxTs = ts; }
         }
+        putAllForAccount(eventStore, accountId, logEvents);
 
         evictEventsPastRetention(accountId, region, groupName, now);
         evictEventsBeyondCapacity(accountId);
@@ -594,6 +666,9 @@ public class CloudWatchLogsService implements ResourceProvider {
         stream.setUploadSequenceToken(nextToken);
         putForAccount(streamStore, accountId, streamKey, stream);
 
+        if (logEventsIngested != null && !stored.isEmpty()) {
+            logEventsIngested.fire(new LogEventsIngested(accountId, region, groupName, streamName, List.copyOf(stored)));
+        }
         return nextToken;
     }
 
@@ -625,9 +700,10 @@ public class CloudWatchLogsService implements ResourceProvider {
 
     /**
      * Keeps an account's event store under {@link #maxStoredEvents} by dropping the oldest events.
-     * The store is persisted as a single document rewritten in full on each flush, so its size
-     * is the cost of every flush; without a ceiling a chatty function turns log ingestion into a
-     * sustained disk writer.
+     * The ceiling bounds the memory footprint and the snapshot that the store is compacted into:
+     * under persistent mode a batch is appended to the journal and the whole store is rewritten
+     * only on the compaction interval, but without a ceiling a chatty function would still grow
+     * every snapshot without bound.
      * <p>
      * The ceiling is best-effort rather than atomic: this method is not synchronized, so two
      * concurrent PutLogEvents calls for the same account can each scan and evict independently and
@@ -672,6 +748,17 @@ public class CloudWatchLogsService implements ResourceProvider {
         store.put(key, value);
     }
 
+    private <V> void putAllForAccount(
+            StorageBackend<String, V> store, String accountId, Map<String, V> entries) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<?> rawAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<V> aware = (AccountAwareStorageBackend<V>) rawAware;
+            aware.putAllForAccount(accountId, entries);
+            return;
+        }
+        store.putAll(entries);
+    }
+
     private <V> Set<String> keysForAccount(StorageBackend<String, V> store, String accountId) {
         if (accountId != null && store instanceof AccountAwareStorageBackend<?> rawAware) {
             @SuppressWarnings("unchecked")
@@ -701,11 +788,13 @@ public class CloudWatchLogsService implements ResourceProvider {
 
         String eventPrefix = eventKeyPrefix(region, groupName, streamName);
         List<LogEvent> all = eventStore.scan(k -> k.startsWith(eventPrefix));
-        all.sort(EVENT_ORDER);
 
+        // Filter before sorting so a narrow time window only pays the comparison cost for
+        // the events it keeps, instead of sorting the whole stream and discarding most of it.
         List<LogEvent> filtered = all.stream()
                 .filter(e -> (startTime == null || e.getTimestamp() >= startTime)
                         && (endTime == null || e.getTimestamp() <= endTime))
+                .sorted(EVENT_ORDER)
                 .toList();
 
         int total = filtered.size();
@@ -785,13 +874,14 @@ public class CloudWatchLogsService implements ResourceProvider {
             eventStore.get(key).ifPresent(e -> all.add(new FilteredEvent(streamName, e)));
         }
 
-        all.sort(Comparator.comparing(FilteredEvent::event, EVENT_ORDER));
-
+        // Filter before sorting so a narrow time window or pattern only pays the comparison
+        // cost for the events it keeps, instead of sorting every stored event up front.
         List<FilteredEvent> matches = all.stream()
                 .filter(f -> (startTime == null || f.event().getTimestamp() >= startTime)
                         && (endTime == null || f.event().getTimestamp() <= endTime))
                 .filter(f -> filterPattern == null || filterPattern.isBlank()
                         || f.event().getMessage().contains(filterPattern))
+                .sorted(Comparator.comparing(FilteredEvent::event, EVENT_ORDER))
                 .toList();
 
         // The cursor indexes matches rather than stored events, which is why the window is applied
@@ -1021,24 +1111,80 @@ public class CloudWatchLogsService implements ResourceProvider {
 
     // ──────────────────────────── Subscription Filters ────────────────────────────
 
+    /**
+     * The canonical factory-backed metric store is also the shared monitor for both filter
+     * families' check-and-write operations and group creation/deletion. Direct constructors must
+     * supply this same store rather than silently creating a second quota pool.
+     */
+    StorageBackend<String, MetricFilter> metricFilterStore() {
+        return metricFilterStore;
+    }
+
+    static FilterPattern requireFilterPattern(String filterPattern) {
+        if (filterPattern == null) {
+            throw invalid("filterPattern is required.");
+        }
+        if (filterPattern.length() > MAX_FILTER_PATTERN_LENGTH) {
+            throw invalid("filterPattern must be at most " + MAX_FILTER_PATTERN_LENGTH + " characters.");
+        }
+        try {
+            return FilterPattern.parse(filterPattern);
+        } catch (FilterPatternException e) {
+            throw invalid(e.getMessage());
+        }
+    }
+
+    /** Called with the metric store monitor held through the caller's subsequent write. */
+    void validateFilterRegexQuota(String logGroupName, String filterName, FilterPattern pattern,
+                                  boolean metricFilter, String region) {
+        if (pattern.regexCount() == 0) {
+            return;
+        }
+        int used = 1;
+        String metricPrefix = region + "::" + logGroupName + "::";
+        for (MetricFilter other : metricFilterStore.scan(k -> k.startsWith(metricPrefix))) {
+            if ((!metricFilter || !filterName.equals(other.getFilterName()))
+                    && requireFilterPattern(other.getFilterPattern()).regexCount() > 0) {
+                used++;
+            }
+        }
+        String subscriptionPrefix = subscriptionFilterKeyPrefix(region, logGroupName);
+        for (SubscriptionFilter other : subscriptionFilterStore.scan(k -> k.startsWith(subscriptionPrefix))) {
+            if ((metricFilter || !filterName.equals(other.getFilterName()))
+                    && requireFilterPattern(other.getFilterPattern()).regexCount() > 0) {
+                used++;
+            }
+        }
+        if (used > MAX_REGEX_FILTERS_PER_LOG_GROUP) {
+            throw new AwsException("LimitExceededException",
+                    "The log group " + logGroupName + " already has the maximum of "
+                            + MAX_REGEX_FILTERS_PER_LOG_GROUP + " filters containing regular expressions.", 400);
+        }
+    }
+
     public void putSubscriptionFilter(String logGroupName, String filterName, String filterPattern,
                                        String destinationArn, String distribution, String region) {
-        String groupKey = groupKey(region, logGroupName);
-        groupStore.get(groupKey)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + logGroupName, 400));
+        synchronized (metricFilterStore) {
+            String groupKey = groupKey(region, logGroupName);
+            groupStore.get(groupKey)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "The specified log group does not exist: " + logGroupName, 400));
+            String normalizedPattern = filterPattern != null ? filterPattern : "";
+            FilterPattern pattern = requireFilterPattern(normalizedPattern);
+            validateFilterRegexQuota(logGroupName, filterName, pattern, false, region);
 
-        SubscriptionFilter filter = new SubscriptionFilter();
-        filter.setFilterName(filterName);
-        filter.setLogGroupName(logGroupName);
-        filter.setFilterPattern(filterPattern != null ? filterPattern : "");
-        filter.setDestinationArn(destinationArn);
-        filter.setDistribution(distribution != null ? distribution : "ByLogStream");
-        filter.setCreationTime(System.currentTimeMillis());
+            SubscriptionFilter filter = new SubscriptionFilter();
+            filter.setFilterName(filterName);
+            filter.setLogGroupName(logGroupName);
+            filter.setFilterPattern(normalizedPattern);
+            filter.setDestinationArn(destinationArn);
+            filter.setDistribution(distribution != null ? distribution : "ByLogStream");
+            filter.setCreationTime(System.currentTimeMillis());
 
-        String filterKey = subscriptionFilterKey(region, logGroupName, filterName);
-        subscriptionFilterStore.put(filterKey, filter);
-        LOG.infov("Created subscription filter: {0} on log group: {1}", filterName, logGroupName);
+            String filterKey = subscriptionFilterKey(region, logGroupName, filterName);
+            subscriptionFilterStore.put(filterKey, filter);
+            LOG.infov("Created subscription filter: {0} on log group: {1}", filterName, logGroupName);
+        }
     }
 
     public record DescribeSubscriptionFiltersResult(List<SubscriptionFilter> subscriptionFilters, String nextToken) {}
@@ -1076,17 +1222,19 @@ public class CloudWatchLogsService implements ResourceProvider {
     }
 
     public void deleteSubscriptionFilter(String logGroupName, String filterName, String region) {
-        String groupKey = groupKey(region, logGroupName);
-        groupStore.get(groupKey)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + logGroupName, 400));
+        synchronized (metricFilterStore) {
+            String groupKey = groupKey(region, logGroupName);
+            groupStore.get(groupKey)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "The specified log group does not exist: " + logGroupName, 400));
 
-        String filterKey = subscriptionFilterKey(region, logGroupName, filterName);
-        subscriptionFilterStore.get(filterKey)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified subscription filter does not exist: " + filterName, 400));
-        subscriptionFilterStore.delete(filterKey);
-        LOG.infov("Deleted subscription filter: {0} on log group: {1}", filterName, logGroupName);
+            String filterKey = subscriptionFilterKey(region, logGroupName, filterName);
+            subscriptionFilterStore.get(filterKey)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "The specified subscription filter does not exist: " + filterName, 400));
+            subscriptionFilterStore.delete(filterKey);
+            LOG.infov("Deleted subscription filter: {0} on log group: {1}", filterName, logGroupName);
+        }
     }
 
     // ──────────────────────────── Resource Policies ────────────────────────────
@@ -1212,8 +1360,8 @@ public class CloudWatchLogsService implements ResourceProvider {
             }
             String region = key.substring(0, separator);
             resources.add(new ExplorerResource(
-                    "arn:aws:logs:" + region + ":" + regionResolver.getAccountId()
-                            + ":log-group:" + group.getLogGroupName() + ":*",
+                    AwsArnUtils.Arn.of("logs", region, regionResolver.getAccountId(),
+                            "log-group:" + group.getLogGroupName() + ":*").toString(),
                     "logs:log-group", "logs",
                     region, regionResolver.getAccountId(),
                     group.getCreatedTime() > 0 ? Instant.ofEpochMilli(group.getCreatedTime()) : Instant.now(),

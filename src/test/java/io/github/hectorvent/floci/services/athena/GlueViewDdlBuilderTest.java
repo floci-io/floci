@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -314,6 +315,74 @@ class GlueViewDdlBuilderTest {
         assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"shop\".\"orders\""));
         assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"orders\""));
         Mockito.verify(glueService, Mockito.times(1)).getTables("shop");
+    }
+
+    private Table icebergTable(String name, String location, String metadataLocation) {
+        Table table = createTable(name, location, null, null);
+        table.setParameters(metadataLocation == null
+                ? Map.of("table_type", "ICEBERG")
+                : Map.of("table_type", "ICEBERG", "metadata_location", metadataLocation));
+        return table;
+    }
+
+    /**
+     * pyiceberg's GlueCatalog (and AWS's own Glue-Iceberg integration) never populate
+     * InputFormat/SerializationLibrary, so an Iceberg table must be detected from
+     * Parameters.table_type rather than format-sniffed like every other table kind.
+     */
+    @Test
+    void testIcebergTableUsesIcebergScanOnMetadataLocation() {
+        Table table = icebergTable("orders", "s3://bucket/warehouse/orders",
+                "s3://bucket/warehouse/orders/metadata/00001-abc.metadata.json");
+        String ddl = ddlFor(table);
+
+        assertTrue(ddl.contains(
+                "CREATE OR REPLACE VIEW \"audit\".\"orders\" AS SELECT * FROM "
+                        + "iceberg_scan('s3://bucket/warehouse/orders/metadata/00001-abc.metadata.json');\n"),
+                ddl);
+    }
+
+    /** The iceberg extension is expensive to install, so it's only requested when actually needed. */
+    @Test
+    void testIcebergExtensionSetupOnlyEmittedWhenTableIsIceberg() {
+        Table icebergTable = icebergTable("orders", "s3://bucket/orders",
+                "s3://bucket/orders/metadata/00000.metadata.json");
+        String ddlWithIceberg = ddlFor(icebergTable);
+        assertTrue(ddlWithIceberg.startsWith("INSTALL iceberg; LOAD iceberg;\n"), ddlWithIceberg);
+
+        Table plainTable = createTable("orders", "s3://bucket/orders", null, null);
+        String ddlWithoutIceberg = ddlFor(plainTable);
+        assertFalse(ddlWithoutIceberg.contains("iceberg"), ddlWithoutIceberg);
+    }
+
+    /** A malformed Iceberg table (flagged as Iceberg but missing metadata_location) falls back
+     *  to format inference rather than emitting an unusable iceberg_scan('') call. */
+    @Test
+    void testIcebergTableWithoutMetadataLocationFallsBackToFormatInference() {
+        Table table = icebergTable("orders", "s3://bucket/orders", null);
+        String ddl = ddlFor(table);
+
+        assertTrue(ddl.contains("FROM read_csv_auto('s3://bucket/orders/**');\n"), ddl);
+        assertFalse(ddl.contains("iceberg_scan"), ddl);
+    }
+
+    @Test
+    void testIsIcebergTableDetection() {
+        assertFalse(GlueViewDdlBuilder.isIcebergTable(null));
+        assertFalse(GlueViewDdlBuilder.isIcebergTable(createTable("t", "s3://b/t", null, null)));
+
+        Table table = createTable("t", "s3://b/t", null, null);
+        table.setParameters(Map.of("table_type", "iceberg"));
+        assertTrue(GlueViewDdlBuilder.isIcebergTable(table), "table_type comparison should be case-insensitive");
+
+        table.setParameters(Map.of("table_type", "EXTERNAL_TABLE"));
+        assertFalse(GlueViewDdlBuilder.isIcebergTable(table));
+    }
+
+    @Test
+    void testIcebergReadExpressionEscapesSingleQuotes() {
+        assertEquals("iceberg_scan('s3://bucket/it''s-a-table/metadata/x.json')",
+                GlueViewDdlBuilder.icebergReadExpression("s3://bucket/it's-a-table/metadata/x.json"));
     }
 }
 

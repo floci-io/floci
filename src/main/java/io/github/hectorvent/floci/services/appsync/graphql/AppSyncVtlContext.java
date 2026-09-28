@@ -3,7 +3,10 @@ package io.github.hectorvent.floci.services.appsync.graphql;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.appsync.graphql.util.AppSyncUtil;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 public class AppSyncVtlContext {
 
@@ -23,7 +26,8 @@ public class AppSyncVtlContext {
             String authType,
             ObjectMapper objectMapper
     ) {
-        this.contextMap = buildContextMap(arguments, source, identity, request, info, stash, prev, result);
+        this.contextMap = buildContextMap(arguments, source, identity, request, info, stash, prev,
+                result, null);
         this.appendedErrors = new ArrayList<>();
         this.util = new AppSyncUtil(objectMapper);
         this.util.setErrorList(this.appendedErrors);
@@ -33,7 +37,7 @@ public class AppSyncVtlContext {
     private AppSyncVtlContext(Builder builder) {
         this.contextMap = buildContextMap(
                 builder.arguments, builder.source, builder.identity, builder.request,
-                builder.info, builder.stash, builder.prev, builder.result);
+                builder.info, builder.stash, builder.prev, builder.result, builder.error);
         this.appendedErrors = new ArrayList<>();
         this.util = new AppSyncUtil(builder.objectMapper);
         this.util.setErrorList(this.appendedErrors);
@@ -42,23 +46,26 @@ public class AppSyncVtlContext {
 
     private static Map<String, Object> buildContextMap(
             Map<String, Object> arguments,
-            Map<String, Object> source,
+            Object source,
             Map<String, Object> identity,
             Map<String, Object> request,
             Map<String, Object> info,
             Map<String, Object> stash,
             Map<String, Object> prev,
-            Object result) {
+            Object result,
+            Object error) {
         Map<String, Object> map = new HashMap<>();
-        map.put("arguments", arguments != null ? arguments : Map.of());
-        map.put("source", source != null ? source : Map.of());
+        Map<String, Object> normalizedArguments = arguments != null ? arguments : Map.of();
+        map.put("arguments", normalizedArguments);
+        map.put("args", normalizedArguments);
+        map.put("source", source);
         map.put("result", result);
         map.put("identity", identity);
         map.put("request", request != null ? request : Map.of("headers", Map.of()));
         map.put("stash", stash != null ? stash : new HashMap<>());
         map.put("prev", prev);
         map.put("info", info != null ? info : Map.of());
-        map.put("error", null);
+        map.put("error", error);
         return map;
     }
 
@@ -81,13 +88,14 @@ public class AppSyncVtlContext {
     public static class Builder {
         private final ObjectMapper objectMapper;
         private Map<String, Object> arguments;
-        private Map<String, Object> source;
+        private Object source;
         private Map<String, Object> identity;
         private Map<String, Object> request;
         private Map<String, Object> info;
         private Map<String, Object> stash;
         private Map<String, Object> prev;
         private Object result;
+        private Object error;
         private String authType;
 
         Builder(ObjectMapper objectMapper) {
@@ -99,7 +107,7 @@ public class AppSyncVtlContext {
             return this;
         }
 
-        public Builder source(Map<String, Object> source) {
+        public Builder source(Object source) {
             this.source = source;
             return this;
         }
@@ -131,6 +139,11 @@ public class AppSyncVtlContext {
 
         public Builder result(Object result) {
             this.result = result;
+            return this;
+        }
+
+        public Builder error(Object error) {
+            this.error = error;
             return this;
         }
 

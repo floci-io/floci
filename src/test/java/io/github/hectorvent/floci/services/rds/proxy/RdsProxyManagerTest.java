@@ -178,7 +178,8 @@ class RdsProxyManagerTest {
 
     private static void start(RdsProxyManager manager, String key, int proxyPort) {
         manager.startProxy(key, DatabaseEngine.POSTGRES, false, proxyPort,
-                "localhost", 1, "localhost", "admin", "secret", "app", (user, password) -> true);
+                "localhost", 1, "localhost", "admin", "secret", "app", (user, password) -> true,
+                new RdsProxyBinding("localhost", proxyPort, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true));
     }
 
     private static RdsAuthProxy authProxy(String key) {

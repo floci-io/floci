@@ -60,7 +60,7 @@ public class S3UsageEnumerator implements ResourceUsageEnumerator {
         for (Bucket bucket : buckets) {
             String bucketRegion = bucket.getRegion();
             if (bucketRegion == null) {
-                bucketRegion = "us-east-1";
+                bucketRegion = "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
             }
             if (!bucketRegion.equals(region)) {
                 continue;

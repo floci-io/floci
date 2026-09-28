@@ -104,10 +104,10 @@ class WafV2IntegrationTest {
 
     @Test
     @Order(5)
-    void getWebAclWithWrongNameReturnsNotFound() {
+    void getWebAclWithWrongNameReturnsNonexistentItem() {
         call("GetWebACL",
                 "{\"Name\":\"wrong-name\",\"Scope\":\"REGIONAL\",\"Id\":\"" + webAclId + "\"}")
-                .then().statusCode(404)
+                .then().statusCode(400)
                 .body("__type", equalTo("WAFNonexistentItemException"));
     }
 
@@ -127,7 +127,7 @@ class WafV2IntegrationTest {
                         + "\"LockToken\":\"" + webAclLockToken + "\",\"Description\":\"must-not-apply\","
                         + "\"VisibilityConfig\":{\"SampledRequestsEnabled\":true,"
                         + "\"CloudWatchMetricsEnabled\":true,\"MetricName\":\"acl\"}}")
-                .then().statusCode(404)
+                .then().statusCode(400)
                 .body("__type", equalTo("WAFNonexistentItemException"));
 
         call("GetWebACL",
@@ -142,7 +142,7 @@ class WafV2IntegrationTest {
         call("DeleteWebACL",
                 "{\"Name\":\"wrong-name\",\"Scope\":\"REGIONAL\",\"Id\":\"" + webAclId + "\","
                         + "\"LockToken\":\"" + webAclLockToken + "\"}")
-                .then().statusCode(404)
+                .then().statusCode(400)
                 .body("__type", equalTo("WAFNonexistentItemException"));
 
         call("GetWebACL",
@@ -228,7 +228,7 @@ class WafV2IntegrationTest {
     void wrongNamesAreRejectedForAllResourceTypes() {
         call("GetIPSet",
                 "{\"Name\":\"wrong-name\",\"Scope\":\"REGIONAL\",\"Id\":\"" + ipSetId + "\"}")
-                .then().statusCode(404).body("__type", equalTo("WAFNonexistentItemException"));
+                .then().statusCode(400).body("__type", equalTo("WAFNonexistentItemException"));
 
         String ipLock = call("GetIPSet",
                 "{\"Name\":\"floci-waf-ips\",\"Scope\":\"REGIONAL\",\"Id\":\"" + ipSetId + "\"}")
@@ -237,12 +237,12 @@ class WafV2IntegrationTest {
                 + "\"Description\":\"must-not-apply\",\"Addresses\":[\"10.0.0.1/32\"],"
                 + "\"LockToken\":\"" + ipLock + "\"";
         call("UpdateIPSet", "{\"Name\":\"wrong-name\"," + ipUpdate + "}")
-                .then().statusCode(404).body("__type", equalTo("WAFNonexistentItemException"));
+                .then().statusCode(400).body("__type", equalTo("WAFNonexistentItemException"));
         call("UpdateIPSet", "{" + ipUpdate + "}")
                 .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
         call("DeleteIPSet", "{\"Name\":\"wrong-name\",\"Scope\":\"REGIONAL\",\"Id\":\""
                 + ipSetId + "\",\"LockToken\":\"" + ipLock + "\"}")
-                .then().statusCode(404).body("__type", equalTo("WAFNonexistentItemException"));
+                .then().statusCode(400).body("__type", equalTo("WAFNonexistentItemException"));
         call("DeleteIPSet", "{\"Scope\":\"REGIONAL\",\"Id\":\"" + ipSetId
                 + "\",\"LockToken\":\"" + ipLock + "\"}")
                 .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
@@ -265,21 +265,21 @@ class WafV2IntegrationTest {
 
         call("GetRegexPatternSet",
                 "{\"Name\":\"wrong-name\",\"Scope\":\"REGIONAL\",\"Id\":\"" + regexId + "\"}")
-                .then().statusCode(404).body("__type", equalTo("WAFNonexistentItemException"));
+                .then().statusCode(400).body("__type", equalTo("WAFNonexistentItemException"));
         call("GetRuleGroup",
                 "{\"Name\":\"wrong-name\",\"Scope\":\"REGIONAL\",\"Id\":\"" + ruleGroupId + "\"}")
-                .then().statusCode(404).body("__type", equalTo("WAFNonexistentItemException"));
+                .then().statusCode(400).body("__type", equalTo("WAFNonexistentItemException"));
 
         String regexUpdate = "\"Scope\":\"REGIONAL\",\"Id\":\"" + regexId + "\","
                 + "\"Description\":\"must-not-apply\",\"RegularExpressionList\":[{\"RegexString\":\"bar\"}],"
                 + "\"LockToken\":\"" + regexLock + "\"";
         call("UpdateRegexPatternSet", "{\"Name\":\"wrong-name\"," + regexUpdate + "}")
-                .then().statusCode(404).body("__type", equalTo("WAFNonexistentItemException"));
+                .then().statusCode(400).body("__type", equalTo("WAFNonexistentItemException"));
         call("UpdateRegexPatternSet", "{" + regexUpdate + "}")
                 .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
         call("DeleteRegexPatternSet", "{\"Name\":\"wrong-name\",\"Scope\":\"REGIONAL\",\"Id\":\""
                 + regexId + "\",\"LockToken\":\"" + regexLock + "\"}")
-                .then().statusCode(404).body("__type", equalTo("WAFNonexistentItemException"));
+                .then().statusCode(400).body("__type", equalTo("WAFNonexistentItemException"));
         call("DeleteRegexPatternSet", "{\"Scope\":\"REGIONAL\",\"Id\":\"" + regexId
                 + "\",\"LockToken\":\"" + regexLock + "\"}")
                 .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
@@ -289,12 +289,12 @@ class WafV2IntegrationTest {
         String ruleGroupUpdate = "\"Scope\":\"REGIONAL\",\"Id\":\"" + ruleGroupId + "\","
                 + "\"Rules\":[],\"LockToken\":\"" + ruleGroupLock + "\"";
         call("UpdateRuleGroup", "{\"Name\":\"wrong-name\"," + ruleGroupUpdate + "}")
-                .then().statusCode(404).body("__type", equalTo("WAFNonexistentItemException"));
+                .then().statusCode(400).body("__type", equalTo("WAFNonexistentItemException"));
         call("UpdateRuleGroup", "{" + ruleGroupUpdate + "}")
                 .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
         call("DeleteRuleGroup", "{\"Name\":\"wrong-name\",\"Scope\":\"REGIONAL\",\"Id\":\""
                 + ruleGroupId + "\",\"LockToken\":\"" + ruleGroupLock + "\"}")
-                .then().statusCode(404).body("__type", equalTo("WAFNonexistentItemException"));
+                .then().statusCode(400).body("__type", equalTo("WAFNonexistentItemException"));
         call("DeleteRuleGroup", "{\"Scope\":\"REGIONAL\",\"Id\":\"" + ruleGroupId
                 + "\",\"LockToken\":\"" + ruleGroupLock + "\"}")
                 .then().statusCode(400).body("__type", equalTo("WAFInvalidParameterException"));
@@ -304,6 +304,121 @@ class WafV2IntegrationTest {
 
     @Test
     @Order(15)
+    void tagResourcePersistsTagsForIpSet() {
+        call("TagResource",
+                "{\"ResourceARN\":\"" + ipSetArn + "\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"test\"},"
+                        + "{\"Key\":\"team\",\"Value\":\"waf\"}]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + ipSetArn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.ResourceARN", equalTo(ipSetArn))
+                .body("TagInfoForResource.TagList", hasSize(2))
+                .body("TagInfoForResource.TagList.find { it.Key == 'env' }.Value", equalTo("test"))
+                .body("TagInfoForResource.TagList.find { it.Key == 'team' }.Value", equalTo("waf"));
+
+        call("UntagResource", "{\"ResourceARN\":\"" + ipSetArn + "\",\"TagKeys\":[\"team\"]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + ipSetArn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.TagList", hasSize(1))
+                .body("TagInfoForResource.TagList[0].Key", equalTo("env"));
+    }
+
+    @Test
+    @Order(16)
+    void tagResourcePersistsTagsForWebAcl() {
+        call("TagResource",
+                "{\"ResourceARN\":\"" + webAclArn + "\",\"Tags\":[{\"Key\":\"owner\",\"Value\":\"floci\"}]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + webAclArn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.TagList", hasSize(1))
+                .body("TagInfoForResource.TagList[0].Key", equalTo("owner"))
+                .body("TagInfoForResource.TagList[0].Value", equalTo("floci"));
+
+        call("TagResource",
+                "{\"ResourceARN\":\"" + webAclArn + "\",\"Tags\":[{\"Key\":\"owner\",\"Value\":\"floci-team\"}]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + webAclArn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.TagList", hasSize(1))
+                .body("TagInfoForResource.TagList[0].Value", equalTo("floci-team"));
+
+        call("UntagResource", "{\"ResourceARN\":\"" + webAclArn + "\",\"TagKeys\":[\"owner\"]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + webAclArn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.TagList", hasSize(0));
+    }
+
+    @Test
+    @Order(17)
+    void tagResourcePersistsTagsForRegexPatternSet() {
+        Response created = call("CreateRegexPatternSet",
+                "{\"Name\":\"floci-tagged-regex\",\"Scope\":\"REGIONAL\",\"RegularExpressionList\":[]}");
+        created.then().statusCode(200);
+        String arn = created.jsonPath().getString("Summary.ARN");
+        String id = created.jsonPath().getString("Summary.Id");
+
+        assertTagAndUntagRoundTrip(arn);
+
+        String lockToken = call("GetRegexPatternSet",
+                "{\"Name\":\"floci-tagged-regex\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id + "\"}")
+                .then().statusCode(200).extract().jsonPath().getString("LockToken");
+        call("DeleteRegexPatternSet",
+                "{\"Name\":\"floci-tagged-regex\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id
+                        + "\",\"LockToken\":\"" + lockToken + "\"}")
+                .then().statusCode(200);
+    }
+
+    @Test
+    @Order(18)
+    void tagResourcePersistsTagsForRuleGroup() {
+        Response created = call("CreateRuleGroup",
+                "{\"Name\":\"floci-tagged-rules\",\"Scope\":\"REGIONAL\",\"Capacity\":1,\"Rules\":[]}");
+        created.then().statusCode(200);
+        String arn = created.jsonPath().getString("Summary.ARN");
+        String id = created.jsonPath().getString("Summary.Id");
+
+        assertTagAndUntagRoundTrip(arn);
+
+        String lockToken = call("GetRuleGroup",
+                "{\"Name\":\"floci-tagged-rules\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id + "\"}")
+                .then().statusCode(200).extract().jsonPath().getString("LockToken");
+        call("DeleteRuleGroup",
+                "{\"Name\":\"floci-tagged-rules\",\"Scope\":\"REGIONAL\",\"Id\":\"" + id
+                        + "\",\"LockToken\":\"" + lockToken + "\"}")
+                .then().statusCode(200);
+    }
+
+    private static void assertTagAndUntagRoundTrip(String arn) {
+        call("TagResource", "{\"ResourceARN\":\"" + arn
+                + "\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"test\"},{\"Key\":\"team\",\"Value\":\"waf\"}]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.ResourceARN", equalTo(arn))
+                .body("TagInfoForResource.TagList", hasSize(2))
+                .body("TagInfoForResource.TagList.find { it.Key == 'env' }.Value", equalTo("test"))
+                .body("TagInfoForResource.TagList.find { it.Key == 'team' }.Value", equalTo("waf"));
+
+        call("UntagResource", "{\"ResourceARN\":\"" + arn + "\",\"TagKeys\":[\"team\"]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("TagInfoForResource.TagList", hasSize(1))
+                .body("TagInfoForResource.TagList[0].Key", equalTo("env"));
+    }
+
+    @Test
+    @Order(19)
     void teardown() {
         call("DisassociateWebACL", "{\"ResourceArn\":\"" + API_RESOURCE_ARN + "\"}")
                 .then().statusCode(200);
@@ -325,11 +440,35 @@ class WafV2IntegrationTest {
     }
 
     @Test
-    @Order(16)
-    void getMissingWebAclReturnsNotFound() {
+    @Order(20)
+    void getMissingWebAclReturnsNonexistentItem() {
         call("GetWebACL",
                 "{\"Name\":\"nope\",\"Scope\":\"REGIONAL\",\"Id\":\"00000000-0000-0000-0000-000000000000\"}")
-                .then().statusCode(404)
+                .then().statusCode(400)
+                .body("__type", equalTo("WAFNonexistentItemException"));
+    }
+
+    @Test
+    @Order(21)
+    void arnLookupsOnMissingResourcesReturnNonexistentItemAs400() {
+        String missingArn = "arn:aws:wafv2:us-east-1:000000000000:regional/webacl/nope/"
+                + "00000000-0000-0000-0000-000000000000";
+
+        call("GetLoggingConfiguration", "{\"ResourceArn\":\"" + missingArn + "\"}")
+                .then().statusCode(400)
+                .body("__type", equalTo("WAFNonexistentItemException"));
+
+        call("GetPermissionPolicy", "{\"ResourceArn\":\"" + missingArn + "\"}")
+                .then().statusCode(400)
+                .body("__type", equalTo("WAFNonexistentItemException"));
+
+        call("ListTagsForResource", "{\"ResourceARN\":\"" + missingArn + "\"}")
+                .then().statusCode(400)
+                .body("__type", equalTo("WAFNonexistentItemException"));
+
+        call("AssociateWebACL", "{\"WebACLArn\":\"" + missingArn + "\","
+                + "\"ResourceArn\":\"arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/x/y\"}")
+                .then().statusCode(400)
                 .body("__type", equalTo("WAFNonexistentItemException"));
     }
 }

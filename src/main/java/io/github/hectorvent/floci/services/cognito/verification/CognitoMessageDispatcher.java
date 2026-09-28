@@ -26,7 +26,7 @@ public final class CognitoMessageDispatcher {
     private static final String DEFAULT_EMAIL_BODY = "Your verification code is {####}.";
     private static final String DEFAULT_SMS_BODY = "Your verification code is {####}.";
     private static final String DEFAULT_FROM = "no-reply@verificationemail.com";
-    private static final String DEFAULT_REGION = "us-east-1";
+    private static final String DEFAULT_REGION = "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
     private static final String CODE_PLACEHOLDER = "{####}";
 
     private final SesService ses;
@@ -79,6 +79,7 @@ public final class CognitoMessageDispatcher {
                     List.of(),     // emailTags
                     List.of(),     // additionalHeaders
                     null,          // listManagement
+                    null,          // tenantName
                     DEFAULT_REGION
                 );
             } else if ("SMS".equalsIgnoreCase(medium) && phone != null) {
@@ -109,13 +110,14 @@ public final class CognitoMessageDispatcher {
 
     /**
      * Resolves the raw SMS template from the correct AWS source for the purpose.
-     * {@code SmsAuthenticationMessage} (MFA) is a top-level UserPool attribute, NOT part of
-     * the VerificationMessageTemplate. For verification/signup codes, the template's
-     * {@code SmsMessage} takes precedence over the legacy top-level SmsVerificationMessage.
+     * {@code SmsAuthenticationMessage} is a top-level UserPool attribute, NOT part of the
+     * VerificationMessageTemplate, and per AWS covers both MFA and USER_AUTH's SMS_OTP. For
+     * verification/signup codes, the template's {@code SmsMessage} takes precedence over the
+     * legacy top-level SmsVerificationMessage.
      */
     private String resolveSmsTemplate(UserPool pool, Map<String, Object> template,
                                       VerificationCode.Purpose purpose) {
-        if (purpose == VerificationCode.Purpose.SMS_MFA) {
+        if (purpose == VerificationCode.Purpose.SMS_MFA || purpose == VerificationCode.Purpose.SMS_OTP) {
             return pool.getSmsAuthenticationMessage();
         }
         Object sms = template.get("SmsMessage");

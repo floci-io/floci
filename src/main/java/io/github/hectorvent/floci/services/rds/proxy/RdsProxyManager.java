@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -20,24 +21,21 @@ public class RdsProxyManager {
     private final RdsSigV4Validator sigV4Validator;
     private final RdsProxyTlsCertificates tlsCertificates;
     private final EmulatorConfig config;
+    private final RdsBackendGate backendGate;
     private final ConcurrentHashMap<String, RdsAuthProxy> proxies = new ConcurrentHashMap<>();
 
     @Inject
     public RdsProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
-                           EmulatorConfig config) {
+                           EmulatorConfig config, RdsBackendGate backendGate) {
         this.sigV4Validator = sigV4Validator;
         this.tlsCertificates = tlsCertificates;
         this.config = config;
+        this.backendGate = backendGate;
     }
 
-    public synchronized void startProxy(String instanceId, DatabaseEngine engine, boolean iamEnabled,
-                                        int proxyPort, String backendHost, int backendPort,
-                                        String advertisedHost,
-                                        String masterUsername, String masterPassword, String dbName,
-                                        RdsAuthProxy.MasterPasswordCheck passwordValidator) {
-        startProxy(instanceId, engine, iamEnabled, proxyPort, backendHost, backendPort,
-                advertisedHost, masterUsername, masterPassword, dbName, passwordValidator,
-                new RdsMysqlBinding(advertisedHost, proxyPort, regionFromRelayKey(instanceId)));
+    RdsProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
+                    EmulatorConfig config) {
+        this(sigV4Validator, tlsCertificates, config, RdsBackendGate.OPEN);
     }
 
     public synchronized void startProxy(String instanceId, DatabaseEngine engine, boolean iamEnabled,
@@ -45,14 +43,14 @@ public class RdsProxyManager {
                                         String advertisedHost,
                                         String masterUsername, String masterPassword, String dbName,
                                         RdsAuthProxy.MasterPasswordCheck passwordValidator,
-                                        RdsMysqlBinding mysqlBinding) {
+                                        RdsProxyBinding binding) {
         tlsCertificates.ensureHost(advertisedHost);
         EmulatorConfig.RdsServiceConfig rdsConfig = config.services().rds();
         RdsAuthProxy proxy = new RdsAuthProxy(
                 instanceId, backendHost, backendPort, engine, iamEnabled,
                 masterUsername, masterPassword, dbName, sigV4Validator, tlsCertificates, passwordValidator,
                 rdsConfig.proxyHandshakeTimeoutMillis(), rdsConfig.proxyBackendConnectTimeoutMillis(),
-                rdsConfig.proxyMaxConnections(), mysqlBinding);
+                rdsConfig.proxyMaxConnections(), binding, backendGate);
         try {
             proxy.start(proxyPort);
         } catch (IOException e) {
@@ -89,17 +87,6 @@ public class RdsProxyManager {
                 throw failure;
             }
         }
-    }
-
-    private String regionFromRelayKey(String relayKey) {
-        int arnStart = relayKey.indexOf("arn:");
-        if (arnStart >= 0) {
-            String[] parts = relayKey.substring(arnStart).split(":", 6);
-            if (parts.length > 3 && !parts[3].isBlank()) {
-                return parts[3];
-            }
-        }
-        return config.defaultRegion();
     }
 
     public synchronized void updateMasterPassword(String instanceId, String newPassword) {

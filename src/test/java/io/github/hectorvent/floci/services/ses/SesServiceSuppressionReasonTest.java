@@ -47,14 +47,14 @@ class SesServiceSuppressionReasonTest {
 
     @Test
     void onListAndReasonInAccountSettings_returnsReason() {
-        service.putSuppressedDestination(REGION, "bouncer@example.com", "BOUNCE");
+        suppression.putSuppressedDestination(REGION, "bouncer@example.com", "BOUNCE");
         // Account-level suppressedReasons defaults to [BOUNCE, COMPLAINT].
         assertEquals("BOUNCE", service.resolveSuppressionReason("bouncer@example.com", null, REGION));
     }
 
     @Test
     void onListButReasonNotInAccountSettings_returnsNull() {
-        service.putSuppressedDestination(REGION, "complainer@example.com", "COMPLAINT");
+        suppression.putSuppressedDestination(REGION, "complainer@example.com", "COMPLAINT");
         // Narrow the account settings to BOUNCE only.
         suppression.putAccountSuppressionAttributes(REGION, List.of("BOUNCE"));
         assertNull(service.resolveSuppressionReason("complainer@example.com", null, REGION));
@@ -62,7 +62,7 @@ class SesServiceSuppressionReasonTest {
 
     @Test
     void accountSettingsEmpty_returnsNull() {
-        service.putSuppressedDestination(REGION, "bouncer@example.com", "BOUNCE");
+        suppression.putSuppressedDestination(REGION, "bouncer@example.com", "BOUNCE");
         // Disable account-level suppression by passing an empty list.
         suppression.putAccountSuppressionAttributes(REGION, new ArrayList<>());
         assertNull(service.resolveSuppressionReason("bouncer@example.com", null, REGION));
@@ -70,7 +70,7 @@ class SesServiceSuppressionReasonTest {
 
     @Test
     void leadingTrailingWhitespaceIsNormalized() {
-        service.putSuppressedDestination(REGION, "trim-me@example.com", "BOUNCE");
+        suppression.putSuppressedDestination(REGION, "trim-me@example.com", "BOUNCE");
         // Caller may pass the recipient with surrounding whitespace (e.g. from a header).
         assertEquals("BOUNCE",
                 service.resolveSuppressionReason("  trim-me@example.com  ", null, REGION));

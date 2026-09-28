@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.mwaa.proxy;
 
 import io.github.hectorvent.floci.services.mwaa.MwaaEnvironmentManager;
 import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpMethod;
@@ -34,6 +35,10 @@ public class MwaaWebProxy {
 
     private static final Logger LOG = Logger.getLogger(MwaaWebProxy.class);
     private static final String CLI_PATH = "/aws_mwaa/cli";
+    // CLI execs get their own small pool, shared by name across environments, so a burst of
+    // slow Docker execs cannot occupy the Vert.x worker pool the rest of the emulator uses.
+    private static final String CLI_WORKER_POOL_NAME = "mwaa-cli";
+    private static final int CLI_WORKER_POOL_SIZE = 4;
 
     private static final List<String> HOP_BY_HOP_HEADERS = List.of(
             "connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailers",
@@ -45,6 +50,7 @@ public class MwaaWebProxy {
     private final int backendPort;
     private final CliTokenValidator tokenValidator;
     private final CliExecutor cliExecutor;
+    private final WorkerExecutor cliWorkers;
 
     private HttpServer server;
     private HttpClient client;
@@ -57,6 +63,7 @@ public class MwaaWebProxy {
         this.backendPort = backendPort;
         this.tokenValidator = tokenValidator;
         this.cliExecutor = cliExecutor;
+        this.cliWorkers = vertx.createSharedWorkerExecutor(CLI_WORKER_POOL_NAME, CLI_WORKER_POOL_SIZE);
     }
 
     /** Starts listening on {@code proxyPort}, blocking until bound (or throwing on failure). */
@@ -71,9 +78,12 @@ public class MwaaWebProxy {
         try {
             server.listen().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
+            // The manager only tracks proxies that started, so release what this one holds here.
+            stop();
             throw new IllegalStateException("Could not bind MWAA web proxy for environment "
                     + environmentName + " on port " + proxyPort, e.getCause() != null ? e.getCause() : e);
         } catch (TimeoutException e) {
+            stop();
             throw new IllegalStateException("Timed out binding MWAA web proxy for environment "
                     + environmentName + " on port " + proxyPort, e);
         }
@@ -88,6 +98,7 @@ public class MwaaWebProxy {
         if (client != null) {
             client.close();
         }
+        cliWorkers.close();
     }
 
     private void handleRequest(HttpServerRequest req) {
@@ -108,19 +119,22 @@ public class MwaaWebProxy {
         }
         req.bodyHandler(body -> {
             String command = body.toString(StandardCharsets.UTF_8).trim();
-            try {
-                MwaaEnvironmentManager.ExecResult result = cliExecutor.execute(command);
-                String stdoutB64 = Base64.getEncoder().encodeToString(result.stdout().getBytes(StandardCharsets.UTF_8));
-                String stderrB64 = Base64.getEncoder().encodeToString(result.stderr().getBytes(StandardCharsets.UTF_8));
-                req.response()
-                        .putHeader("Content-Type", "application/json")
-                        .end("{\"stdout\":\"" + stdoutB64 + "\",\"stderr\":\"" + stderrB64 + "\"}");
-            } catch (Exception e) {
-                LOG.warnv("MWAA CLI exec failed for environment {0}: {1}", environmentName, e.getMessage());
-                req.response().setStatusCode(500)
-                        .putHeader("Content-Type", "application/json")
-                        .end("{\"message\":\"" + escapeJson(e.getMessage()) + "\"}");
-            }
+            // The Docker exec can block for up to 30 seconds, so keep it off the event loop.
+            // Unordered: independent CLI calls should not queue behind each other.
+            cliWorkers.<MwaaEnvironmentManager.ExecResult>executeBlocking(() -> cliExecutor.execute(command), false)
+                    .onSuccess(result -> {
+                        String stdoutB64 = Base64.getEncoder().encodeToString(result.stdout().getBytes(StandardCharsets.UTF_8));
+                        String stderrB64 = Base64.getEncoder().encodeToString(result.stderr().getBytes(StandardCharsets.UTF_8));
+                        req.response()
+                                .putHeader("Content-Type", "application/json")
+                                .end("{\"stdout\":\"" + stdoutB64 + "\",\"stderr\":\"" + stderrB64 + "\"}");
+                    })
+                    .onFailure(e -> {
+                        LOG.warnv("MWAA CLI exec failed for environment {0}: {1}", environmentName, e.getMessage());
+                        req.response().setStatusCode(500)
+                                .putHeader("Content-Type", "application/json")
+                                .end("{\"message\":\"" + escapeJson(e.getMessage()) + "\"}");
+                    });
         });
     }
 

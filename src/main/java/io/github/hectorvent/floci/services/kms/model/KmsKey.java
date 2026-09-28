@@ -22,6 +22,9 @@ public class KmsKey {
     private String keyMaterialId;
     private KmsKeyUsage keyUsage = KmsKeyUsage.ENCRYPT_DECRYPT;
     private KmsKeySpec keySpec = KmsKeySpec.SYMMETRIC_DEFAULT;
+    private boolean multiRegion;
+    private String multiRegionKeyType;
+    private String multiRegionPrimaryRegion;
     private long creationDate;
     private long deletionDate;
     private String policy;
@@ -80,6 +83,17 @@ public class KmsKey {
 
     public KmsKeySpec getKeySpec() { return keySpec; }
     public void setKeySpec(KmsKeySpec spec) { this.keySpec = spec; }
+
+    public boolean isMultiRegion() { return multiRegion; }
+    public void setMultiRegion(boolean multiRegion) { this.multiRegion = multiRegion; }
+
+    public String getMultiRegionKeyType() { return multiRegionKeyType; }
+    public void setMultiRegionKeyType(String multiRegionKeyType) { this.multiRegionKeyType = multiRegionKeyType; }
+
+    public String getMultiRegionPrimaryRegion() { return multiRegionPrimaryRegion; }
+    public void setMultiRegionPrimaryRegion(String multiRegionPrimaryRegion) {
+        this.multiRegionPrimaryRegion = multiRegionPrimaryRegion;
+    }
 
     public long getCreationDate() { return creationDate; }
     public void setCreationDate(long creationDate) { this.creationDate = creationDate; }

@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.kinesis;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -12,6 +14,9 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -1383,5 +1388,85 @@ class KinesisIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    private static void createStream(String name, int shardCount) {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + name + "\", \"ShardCount\": " + shardCount + "}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private static Response listShardsPage(String streamName, Integer maxResults, String nextToken) {
+        ObjectNode request = MAPPER.createObjectNode();
+        if (streamName != null) {
+            request.put("StreamName", streamName);
+        }
+        if (maxResults != null) {
+            request.put("MaxResults", maxResults);
+        }
+        if (nextToken != null) {
+            request.put("NextToken", nextToken);
+        }
+        return given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListShards")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body(request.toString())
+        .when()
+            .post("/")
+        .then()
+            .extract().response();
+    }
+
+    @Test
+    @Order(68)
+    void listShardsPaginatesWithNextTokenAndExhausts() {
+        createStream("kinesis-pagination-test", 3);
+
+        List<String> seen = new ArrayList<>();
+        String nextToken = null;
+        int pages = 0;
+        do {
+            // AWS documents NextToken as the only stream identifier once paging has started, so only
+            // the first page names the stream.
+            Response response = listShardsPage(pages == 0 ? "kinesis-pagination-test" : null, 1, nextToken);
+            response.then().statusCode(200);
+            seen.addAll(response.jsonPath().getList("Shards.ShardId", String.class));
+            nextToken = response.jsonPath().getString("NextToken");
+            pages++;
+        } while (nextToken != null && pages < 10);
+
+        assertEquals(3, seen.size(), "every shard is seen exactly once across pages");
+        assertEquals(3, new HashSet<>(seen).size(), "no shard repeats across pages");
+        assertNull(nextToken, "the final page must omit NextToken");
+    }
+
+    @Test
+    @Order(69)
+    void listShardsRejectsStreamNameTogetherWithNextToken() {
+        createStream("kinesis-pagination-a", 2);
+
+        Response firstPage = listShardsPage("kinesis-pagination-a", 1, null);
+        firstPage.then().statusCode(200);
+        String token = firstPage.jsonPath().getString("NextToken");
+        assertNotNull(token, "a partial first page must carry a NextToken");
+
+        listShardsPage("kinesis-pagination-a", 1, token)
+            .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(70)
+    void listShardsRejectsAMalformedToken() {
+        listShardsPage("list-shards-test", 1, "not-a-valid-token!")
+            .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
     }
 }

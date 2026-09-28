@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
+import javax.xml.crypto.dsig.CanonicalizationMethod;
+import javax.xml.crypto.dsig.Transform;
 import javax.xml.crypto.dsig.XMLSignature;
 import javax.xml.crypto.dsig.XMLSignatureFactory;
 import javax.xml.crypto.dsig.dom.DOMValidateContext;
@@ -17,12 +20,18 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Set;
 
 /** Verifies the specific SAML assertion contract consumed by STS. */
 final class SAMLAssertionVerifier {
     private static final String SAML = "urn:oasis:names:tc:SAML:2.0:assertion";
     private static final String DS = "http://www.w3.org/2000/09/xmldsig#";
     private static final String AUDIENCE = "urn:amazon:webservices";
+    static final String ASSERTION_INVALID = "The SAML assertion is invalid.";
+    static final String SIGNATURE_INVALID = "Response signature invalid";
+    // SAML 2.0 core 5.4.4. AWS rejects any other reference transform as an invalid signature.
+    private static final Set<String> ALLOWED_TRANSFORMS = Set.of(
+            Transform.ENVELOPED, CanonicalizationMethod.EXCLUSIVE, CanonicalizationMethod.EXCLUSIVE_WITH_COMMENTS);
 
     private SAMLAssertionVerifier() {}
 
@@ -50,6 +59,18 @@ final class SAMLAssertionVerifier {
             Element signature = first(assertion, DS, "Signature");
             if (signature == null) {
                 throw invalid("signature missing");
+            }
+            Element signedInfo = first(signature, DS, "SignedInfo");
+            if (signedInfo == null) {
+                throw invalid("signed info missing");
+            }
+            // Checked on the DOM because unmarshalling some transform parameters fails in the native image.
+            NodeList transforms = signedInfo.getElementsByTagNameNS(DS, "Transform");
+            for (int i = 0; i < transforms.getLength(); i++) {
+                String algorithm = ((Element) transforms.item(i)).getAttribute("Algorithm");
+                if (!ALLOWED_TRANSFORMS.contains(algorithm)) {
+                    throw new InvalidAssertionException("reference transform " + algorithm, SIGNATURE_INVALID);
+                }
             }
             X509Certificate certificate = certificate(provider.getCertificate());
             var context = new DOMValidateContext(certificate.getPublicKey(), signature);
@@ -132,9 +153,9 @@ final class SAMLAssertionVerifier {
                     if (pair.length != 2) {
                         throw invalid("role pair format");
                     }
-                    if (pair[0].startsWith("arn:aws:iam::") && pair[1].contains(":saml-provider/")) {
+                    if (AwsArnUtils.isArnFor(pair[0], "iam") && pair[1].contains(":saml-provider/")) {
                         roles.add(new RolePair(pair[0], pair[1]));
-                    } else if (pair[1].startsWith("arn:aws:iam::") && pair[0].contains(":saml-provider/")) {
+                    } else if (AwsArnUtils.isArnFor(pair[1], "iam") && pair[0].contains(":saml-provider/")) {
                         roles.add(new RolePair(pair[1], pair[0]));
                     } else {
                         throw invalid("role pair ARN");
@@ -196,8 +217,25 @@ final class SAMLAssertionVerifier {
     }
 
     static final class InvalidAssertionException extends Exception {
-        InvalidAssertionException(Throwable cause) { super(cause); }
-        InvalidAssertionException(String message) { super(message); }
+        private final String awsMessage;
+
+        InvalidAssertionException(Throwable cause) {
+            super(cause);
+            this.awsMessage = ASSERTION_INVALID;
+        }
+
+        InvalidAssertionException(String message) {
+            this(message, ASSERTION_INVALID);
+        }
+
+        InvalidAssertionException(String reason, String awsMessage) {
+            super(reason);
+            this.awsMessage = awsMessage;
+        }
+
+        String awsMessage() {
+            return awsMessage;
+        }
     }
 
 }

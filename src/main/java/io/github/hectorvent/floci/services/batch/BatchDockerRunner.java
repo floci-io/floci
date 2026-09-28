@@ -25,6 +25,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
@@ -36,6 +37,7 @@ public class BatchDockerRunner implements ContainerTeardown {
     // Containers of jobs currently inside run(); drained on emulator shutdown so a
     // SIGTERM mid-job does not orphan the container.
     private final ConcurrentHashMap<String, String> inFlightContainers = new ConcurrentHashMap<>();
+    private final Set<String> stopRequestedJobs = ConcurrentHashMap.newKeySet();
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -59,7 +61,7 @@ public class BatchDockerRunner implements ContainerTeardown {
     public BatchRunResult run(BatchJob job, int attemptNumber) {
         String logStreamName = logStreamer.generateLogStreamName(
                 job.getJobDefinitionName() + "/default/" + job.getJobId());
-        String containerName = ContainerStorageHelper.dockerName(config, "floci-batch-" + job.getJobId() + "-" + attemptNumber);
+        String containerName = ContainerStorageHelper.dockerName(config, "batch-" + job.getJobId() + "-" + attemptNumber);
         return runContainer(job, job.getJobId(), containerName, logStreamName,
                 "batch:" + job.getJobName() + ":" + job.getJobId(),
                 job.getContainerImage(), "Job definition container image is missing",
@@ -71,7 +73,7 @@ public class BatchDockerRunner implements ContainerTeardown {
         String logStreamName = logStreamer.generateLogStreamName(
                 job.getJobDefinitionName() + "/default/" + job.getJobId() + "/" + node.getNodeIndex());
         String containerName = ContainerStorageHelper.dockerName(config,
-                "floci-batch-" + job.getJobId() + "-" + attemptNumber + "-node" + node.getNodeIndex());
+                "batch-" + job.getJobId() + "-" + attemptNumber + "-node" + node.getNodeIndex());
         String inFlightKey = job.getJobId() + "#node" + node.getNodeIndex();
         return runContainer(job, inFlightKey, containerName, logStreamName,
                 "batch:" + job.getJobName() + ":" + job.getJobId() + ":node" + node.getNodeIndex(),
@@ -88,6 +90,9 @@ public class BatchDockerRunner implements ContainerTeardown {
         String containerId = null;
 
         try {
+            if (stopRequestedJobs.contains(job.getJobId())) {
+                return stopped(startedAt, logStreamName);
+            }
             if (image == null || image.isBlank()) {
                 return failed(startedAt, logStreamName, missingImageMessage);
             }
@@ -110,7 +115,15 @@ public class BatchDockerRunner implements ContainerTeardown {
             ContainerSpec spec = builder.build();
             containerId = lifecycleManager.createAndStart(spec).containerId();
             inFlightContainers.put(inFlightKey, containerId);
+            if (stopRequestedJobs.contains(job.getJobId())) {
+                releaseAndStop(inFlightKey, containerId, null);
+                return stopped(startedAt, logStreamName);
+            }
             logHandle = logStreamer.attach(containerId, LOG_GROUP, logStreamName, job.getRegion(), logSourceLabel);
+            if (stopRequestedJobs.contains(job.getJobId())) {
+                releaseAndStop(inFlightKey, containerId, logHandle);
+                return stopped(startedAt, logStreamName);
+            }
 
             Integer exitCode = waitForExit(containerId, timeout(job));
             long stoppedAt = System.currentTimeMillis();
@@ -129,7 +142,30 @@ public class BatchDockerRunner implements ContainerTeardown {
         }
     }
 
-    // Whoever wins the map removal owns the stop — stopManagedContainers() may have
+    public void requestStop(String jobId) {
+        stopRequestedJobs.add(jobId);
+    }
+
+    public void stopJob(String jobId) {
+        for (Map.Entry<String, String> entry : new ConcurrentHashMap<>(inFlightContainers).entrySet()) {
+            if (!entry.getKey().equals(jobId) && !entry.getKey().startsWith(jobId + "#node")) {
+                continue;
+            }
+            if (inFlightContainers.remove(entry.getKey(), entry.getValue())) {
+                try {
+                    lifecycleManager.stopAndRemove(entry.getValue(), null);
+                } catch (Exception e) {
+                    LOG.warnv("Failed to stop Batch container for job {0}: {1}", jobId, e.getMessage());
+                }
+            }
+        }
+    }
+
+    public void clearStopRequest(String jobId) {
+        stopRequestedJobs.remove(jobId);
+    }
+
+    // Whoever wins the map removal owns the stop. stopManagedContainers() may have
     // claimed the container first during shutdown, but the log stream is still ours.
     private void releaseAndStop(String jobId, String containerId, Closeable logHandle) {
         if (inFlightContainers.remove(jobId, containerId)) {
@@ -163,6 +199,11 @@ public class BatchDockerRunner implements ContainerTeardown {
 
     private BatchRunResult failed(long startedAt, String logStreamName, String reason) {
         return new BatchRunResult(1, reason, logStreamName, startedAt, System.currentTimeMillis(), false);
+    }
+
+    private BatchRunResult stopped(long startedAt, String logStreamName) {
+        return new BatchRunResult(137, "Job terminated", logStreamName,
+                startedAt, System.currentTimeMillis(), false);
     }
 
     private List<String> buildEnvironment(BatchJob job, int attemptNumber) {

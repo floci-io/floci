@@ -50,7 +50,7 @@ class CognitoMessageDispatcherTest {
             eq("Verify your account"),
             eq("Hi! Your code is 123456."),
             isNull(), isNull(), eq(List.of()), eq(List.of()),
-            isNull(), eq("us-east-1"));
+            isNull(), isNull(), eq("us-east-1"));
         verifyNoInteractions(sns);
     }
 
@@ -93,6 +93,24 @@ class CognitoMessageDispatcherTest {
     }
 
     @Test
+    void dispatch_smsOtpFlow_usesSmsAuthenticationMessageTemplate() {
+        // Per AWS: SmsAuthenticationMessage covers "SMS OTP and MFA authentication", not just MFA.
+        UserPool pool = pool(Map.of("SmsMessage", "Signup: {####}"));
+        pool.setSmsAuthenticationMessage("Auth code: {####}");
+        CognitoUser user = user("alice@example.com", "+5215551234567");
+
+        dispatcher.dispatch(pool, user, VerificationCode.Purpose.SMS_OTP,
+            "654321", List.of("SMS"));
+
+        verify(sns).publish(
+            isNull(), isNull(),
+            eq("+5215551234567"),
+            eq("Auth code: 654321"),
+            isNull(), isNull(), eq("us-east-1"));
+        verifyNoInteractions(ses);
+    }
+
+    @Test
     void dispatch_emptyTemplate_usesDefaults() {
         UserPool pool = pool(Map.of());
         CognitoUser user = user("alice@example.com", null);
@@ -105,7 +123,7 @@ class CognitoMessageDispatcherTest {
             eq(List.of()), eq(List.of()), eq(List.of()), isNull(),
             eq("Your verification code"),
             eq("Your verification code is 111222."),
-            isNull(), isNull(), eq(List.of()), eq(List.of()), isNull(), eq("us-east-1"));
+            isNull(), isNull(), eq(List.of()), eq(List.of()), isNull(), isNull(), eq("us-east-1"));
     }
 
     @Test
@@ -121,7 +139,7 @@ class CognitoMessageDispatcherTest {
             eq(List.of()), eq(List.of()), eq(List.of()), isNull(),
             anyString(),
             eq("Welcome, please verify.\nCode: 999000"),
-            isNull(), isNull(), eq(List.of()), eq(List.of()), isNull(), eq("us-east-1"));
+            isNull(), isNull(), eq(List.of()), eq(List.of()), isNull(), isNull(), eq("us-east-1"));
     }
 
     @Test
@@ -134,7 +152,7 @@ class CognitoMessageDispatcherTest {
 
         verify(ses).sendEmail(anyString(), eq(List.of("alice@example.com")),
             any(), any(), any(), isNull(), anyString(), anyString(), isNull(), isNull(), any(), any(),
-            isNull(), anyString());
+            isNull(), isNull(), anyString());
         verifyNoInteractions(sns);
     }
 

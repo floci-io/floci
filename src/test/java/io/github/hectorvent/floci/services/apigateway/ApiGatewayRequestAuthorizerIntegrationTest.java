@@ -11,8 +11,13 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -979,23 +984,17 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
 
     @Test
     @Order(99)
-    void cleanup() {
+    void cleanup() throws Exception {
         if (apiId != null) given().when().delete("/restapis/" + apiId).then().statusCode(202);
         if (tokenApiId != null) given().when().delete("/restapis/" + tokenApiId).then().statusCode(202);
         if (noneApiId != null) given().when().delete("/restapis/" + noneApiId).then().statusCode(202);
         if (denyApiId != null) given().when().delete("/restapis/" + denyApiId).then().statusCode(202);
         if (stageVarApiId != null) given().when().delete("/restapis/" + stageVarApiId).then().statusCode(202);
         if (apiKeyApiId != null) given().when().delete("/restapis/" + apiKeyApiId).then().statusCode(202);
-        deleteFunction(AUTHORIZER_FUNCTION);
-        deleteFunction(PROXY_FUNCTION);
-        deleteFunction(TOKEN_AUTHORIZER_FUNCTION);
-        deleteFunction(TOKEN_PROXY_FUNCTION);
-        deleteFunction(NONE_INTEGRATION_FUNCTION);
-        deleteFunction(DENY_AUTHORIZER_FUNCTION);
-        deleteFunction("apigw-stagevar-auth-echo");
-        deleteFunction("apigw-stagevar-proxy");
-        deleteFunction("apigw-apikey-auth-echo");
-        deleteFunction("apigw-apikey-proxy");
+        deleteFunctions(AUTHORIZER_FUNCTION, PROXY_FUNCTION, TOKEN_AUTHORIZER_FUNCTION, TOKEN_PROXY_FUNCTION,
+                NONE_INTEGRATION_FUNCTION, DENY_AUTHORIZER_FUNCTION,
+                "apigw-stagevar-auth-echo", "apigw-stagevar-proxy",
+                "apigw-apikey-auth-echo", "apigw-apikey-proxy");
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
@@ -1031,6 +1030,18 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
             }
         }
         return baos.toByteArray();
+    }
+
+    private static void deleteFunctions(String... functionNames) throws Exception {
+        try (ExecutorService executor = Executors.newFixedThreadPool(functionNames.length)) {
+            List<Future<?>> deletions = new ArrayList<>();
+            for (String functionName : functionNames) {
+                deletions.add(executor.submit(() -> deleteFunction(functionName)));
+            }
+            for (Future<?> deletion : deletions) {
+                deletion.get();
+            }
+        }
     }
 
     private static void deleteFunction(String functionName) {

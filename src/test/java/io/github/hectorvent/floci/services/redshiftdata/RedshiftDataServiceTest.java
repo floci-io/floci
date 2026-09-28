@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshiftdata;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import org.h2.Driver;
@@ -155,7 +156,7 @@ class RedshiftDataServiceTest {
         r.put("ClusterIdentifier", "wh");
         r.put("DbUser", "admin");
         r.put("Database", "dev");
-        var array = r.putArray("Sqls");
+        ArrayNode array = r.putArray("Sqls");
         for (String sql : sqls) {
             array.add(sql);
         }

@@ -34,7 +34,8 @@ import io.github.hectorvent.floci.services.iot.rules.RuleSqlContext;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlEvaluator;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlParseException;
 import io.github.hectorvent.floci.services.iot.rules.RuleSqlParser;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
@@ -71,6 +72,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
@@ -117,7 +119,7 @@ public class IotService {
     private final SnsService snsService;
     private final S3Service s3Service;
     private final KinesisService kinesisService;
-    private final DynamoDbService dynamoDbService;
+    private final DynamoDbFacade dynamoDb;
     private final LambdaService lambdaService;
     private final FirehoseService firehoseService;
     private final CloudWatchLogsService cloudWatchLogsService;
@@ -136,7 +138,7 @@ public class IotService {
                         SnsService snsService,
                         S3Service s3Service,
                         KinesisService kinesisService,
-                        DynamoDbService dynamoDbService,
+                        DynamoDbFacade dynamoDb,
                         LambdaService lambdaService,
                         FirehoseService firehoseService,
                         CloudWatchLogsService cloudWatchLogsService,
@@ -156,7 +158,7 @@ public class IotService {
                 storageFactory.create("iot", "iot-thing-groups.json", new TypeReference<Map<String, IotThingGroup>>() {}),
                 storageFactory.create("iot", "iot-thing-group-memberships.json", new TypeReference<Map<String, Set<String>>>() {}),
                 config, regionResolver, objectMapper, publishEventRecorder, mqttBrokerService, sqsService, snsService,
-                s3Service, kinesisService, dynamoDbService, lambdaService, firehoseService, cloudWatchLogsService, certificateAuthority,
+                s3Service, kinesisService, dynamoDb, lambdaService, firehoseService, cloudWatchLogsService, certificateAuthority,
                 policyEvaluator);
     }
 
@@ -182,7 +184,7 @@ public class IotService {
                   SnsService snsService,
                   S3Service s3Service,
                   KinesisService kinesisService,
-                  DynamoDbService dynamoDbService,
+                  DynamoDbFacade dynamoDb,
                   LambdaService lambdaService,
                   FirehoseService firehoseService,
                   CloudWatchLogsService cloudWatchLogsService,
@@ -210,7 +212,7 @@ public class IotService {
         this.snsService = snsService;
         this.s3Service = s3Service;
         this.kinesisService = kinesisService;
-        this.dynamoDbService = dynamoDbService;
+        this.dynamoDb = dynamoDb;
         this.lambdaService = lambdaService;
         this.firehoseService = firehoseService;
         this.cloudWatchLogsService = cloudWatchLogsService;
@@ -883,6 +885,15 @@ public class IotService {
 
     /** {@code clientId} is the MQTT client that published, or null for a message that did not come over MQTT. */
     public void publish(String topic, byte[] payload, boolean retain, int qos, String region, String clientId) {
+        publish(topic, payload, retain, qos, region, clientId, Runnable::run);
+    }
+
+    /**
+     * Stores or clears the retained message and records the publish on the calling thread, then
+     * hands the topic rule evaluation to {@code ruleRunner}.
+     */
+    public void publish(String topic, byte[] payload, boolean retain, int qos, String region, String clientId,
+                        Executor ruleRunner) {
         byte[] eventPayload = payload == null ? new byte[0] : payload;
         if (retain) {
             if (eventPayload.length == 0) {
@@ -896,7 +907,7 @@ public class IotService {
                 retainedMessageStore.put(retainedMessageKey(topic), retained);
             }
         }
-        handlePublish(topic, eventPayload, true, region, clientId);
+        handlePublish(topic, eventPayload, true, region, clientId, ruleRunner);
     }
 
     public void deleteConnection(String clientId, boolean cleanSession) {
@@ -1280,18 +1291,21 @@ public class IotService {
         topicRuleStore.put(topicRuleKey(region, ruleName), rule);
     }
 
-    void handlePublish(String topic, byte[] payload, boolean evaluateRules, String region, String clientId) {
+    void handlePublish(String topic, byte[] payload, boolean evaluateRules, String region, String clientId,
+                       Executor ruleRunner) {
         byte[] eventPayload = payload == null ? new byte[0] : payload;
         publishEventRecorder.record(topic, eventPayload);
         if (!evaluateRules) {
             return;
         }
-        for (IotTopicRule rule : rulesForPublish(region)) {
-            if (!rule.isRuleDisabled()) {
-                matchAndProject(rule, topic, clientId, eventPayload)
-                        .ifPresent(document -> executeTopicRule(rule, topic, eventPayload, document));
+        ruleRunner.execute(() -> {
+            for (IotTopicRule rule : rulesForPublish(region)) {
+                if (!rule.isRuleDisabled()) {
+                    matchAndProject(rule, topic, clientId, eventPayload)
+                            .ifPresent(document -> executeTopicRule(rule, topic, eventPayload, document));
+                }
             }
-        }
+        });
     }
 
     /**
@@ -1491,7 +1505,7 @@ public class IotService {
             case "republish" -> {
                 String targetTopic = action.path("topic").asText(null);
                 if (targetTopic != null && !targetTopic.isBlank()) {
-                    handlePublish(targetTopic, payload, false, region, null);
+                    handlePublish(targetTopic, payload, false, region, null, Runnable::run);
                     mqttBrokerService.publish(targetTopic, payload);
                 }
             }
@@ -1527,7 +1541,10 @@ public class IotService {
             case "dynamoDBv2" -> {
                 String tableName = action.path("putItem").path("tableName").asText(null);
                 if (tableName != null && !tableName.isBlank()) {
-                    dynamoDbService.putItem(tableName, toDynamoDbItem(payload), region);
+                    // An MQTT publish evaluates rules with no request account, so the write names the rule's owner explicitly.
+                    Scope scope = new Scope(
+                            AwsArnUtils.accountOrDefault(rule.getRuleArn(), config.defaultAccountId()), region);
+                    dynamoDb.items().putItem(scope, tableName, toDynamoDbItem(payload), null, null, null);
                 }
             }
             case "lambda" -> {

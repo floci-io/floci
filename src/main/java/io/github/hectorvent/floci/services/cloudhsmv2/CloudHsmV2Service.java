@@ -677,14 +677,14 @@ public class CloudHsmV2Service {
 
     public Backup copyBackupToRegion(String destinationRegion, String backupId, String sourceRegion) {
         // Source region emulation: we'll just clone the backup locally.
-        Backup source = getBackup(backupId, sourceRegion != null ? sourceRegion : "us-east-1");
+        Backup source = getBackup(backupId, sourceRegion != null ? sourceRegion : "us-east-1"); // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
         Backup copy = new Backup();
         copy.setBackupId("backup-" + generateShortId());
         copy.setBackupState("READY");
         copy.setClusterId(source.getClusterId());
         copy.setCreateTimestamp(source.getCreateTimestamp());
         copy.setCopyTimestamp(Instant.now());
-        copy.setSourceRegion(sourceRegion != null ? sourceRegion : "us-east-1");
+        copy.setSourceRegion(sourceRegion != null ? sourceRegion : "us-east-1"); // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
         copy.setSourceBackup(backupId);
         copy.setSourceCluster(source.getClusterId());
         copy.setMode(source.getMode());

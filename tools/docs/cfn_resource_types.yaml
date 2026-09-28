@@ -149,10 +149,10 @@ service_labels:
 
 # Parenthetical shown after a type name. Keyed by the full type.
 notes:
-  AWS::S3::BucketPolicy: accepted; policy not enforced
+  AWS::S3::BucketPolicy: document stored on the bucket; S3 does not evaluate it
   AWS::SQS::QueuePolicy: accepted; policy not enforced
-  AWS::Lambda::Function: Zip via S3/inline `ZipFile`, and Image
-  AWS::Lambda::EventSourceMapping: SQS, Kinesis, DynamoDB Streams
+  AWS::Lambda::Function: Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket
+  AWS::Lambda::EventSourceMapping: 'SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored'
   AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into
   AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
   AWS::RDS::DBInstance: starts a real container
@@ -160,6 +160,7 @@ notes:
   AWS::Redshift::ClusterSecurityGroup: accepted; no EC2-Classic security group model
   AWS::Redshift::Cluster: single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported
   AWS::CDK::Metadata: accepted; no-op
+  AWS::IAM::User: 'template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete'
   AWS::IoT::DomainConfiguration: '`ServerCertificates` resolves to a JSON string'
   AWS::IoT::Policy: 'deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached'
   Custom::DynamoDBReplica: applied natively against DynamoDB, not via a provider Lambda

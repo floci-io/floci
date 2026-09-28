@@ -38,6 +38,8 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
+import static io.github.hectorvent.floci.services.iot.IotMqttEnabledIntegrationTest.AWS_MAX_PAYLOAD;
+import static io.github.hectorvent.floci.services.iot.IotMqttEnabledIntegrationTest.randomPayload;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -214,6 +216,38 @@ class IotMqttTlsIntegrationTest {
     }
 
     @Test
+    void publishOfTheAwsMaximumPayloadIsDeliveredOverTls() throws Exception {
+        String topic = "tls/limit/" + System.nanoTime();
+        byte[] payload = randomPayload(AWS_MAX_PAYLOAD);
+
+        try (TlsClient subscriber = TlsClient.connect("tls-limit-sub-" + System.nanoTime())) {
+            subscriber.subscribe(topic, 1);
+            try (TlsClient publisher = TlsClient.connect("tls-limit-pub-" + System.nanoTime())) {
+                publisher.publish(topic, payload, 1);
+            }
+            assertArrayEquals(payload, subscriber.takePayload());
+        }
+    }
+
+    @Test
+    void publishAboveTheAwsMaximumPayloadDisconnectsOverTls() throws Exception {
+        String topic = "tls/over-limit/" + System.nanoTime();
+        byte[] after = "after".getBytes(StandardCharsets.UTF_8);
+
+        try (TlsClient subscriber = TlsClient.connect("tls-over-sub-" + System.nanoTime())) {
+            subscriber.subscribe(topic, 1);
+            try (TlsClient publisher = TlsClient.connect("tls-over-pub-" + System.nanoTime())) {
+                assertThrows(MqttException.class, () -> publisher.publish(topic, randomPayload(AWS_MAX_PAYLOAD + 1), 1));
+                publisher.awaitDisconnected();
+            }
+            try (TlsClient next = TlsClient.connect("tls-over-next-" + System.nanoTime())) {
+                next.publish(topic, after, 0);
+            }
+            assertArrayEquals(after, subscriber.takePayload(), "the oversized publish is never delivered");
+        }
+    }
+
+    @Test
     void aRestartOfTheBrokerServesTlsAgain() throws Exception {
         broker.stop();
         broker.startIfEnabled();
@@ -263,6 +297,7 @@ class IotMqttTlsIntegrationTest {
 
         static TlsClient connect(String clientId) throws Exception {
             MqttClient client = new MqttClient("ssl://127.0.0.1:" + TLS_PORT, clientId, new MemoryPersistence());
+            client.setTimeToWait(10_000);
             TlsClient tlsClient = new TlsClient(client);
             client.setCallback(new MqttCallback() {
                 @Override
@@ -313,7 +348,7 @@ class IotMqttTlsIntegrationTest {
                 }
                 Thread.sleep(25);
             }
-            throw new AssertionError("the TLS session stayed open after its client id reconnected elsewhere");
+            throw new AssertionError("the TLS session stayed open");
         }
 
         @Override

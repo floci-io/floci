@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.autoscaling.model.*;
@@ -63,6 +64,8 @@ public class AutoScalingService {
     // region :: name → resource
     private Map<String, LaunchConfiguration> launchConfigs = new ConcurrentHashMap<>();
     private Map<String, AutoScalingGroup> groups = new ConcurrentHashMap<>();
+    private final Map<String, Object> groupLocks = new ConcurrentHashMap<>();
+    private AccountAwareStorageBackend<AutoScalingGroup> groupsStore;
     private Map<String, LifecycleHook> hooks = new ConcurrentHashMap<>();
     private Map<String, ScalingPolicy> policies = new ConcurrentHashMap<>();
     private Map<String, ScalingActivity> activities = new ConcurrentHashMap<>();
@@ -77,7 +80,9 @@ public class AutoScalingService {
             return;
         }
         this.launchConfigs = storageBacked("autoscaling-launch-configurations.json", new TypeReference<Map<String, LaunchConfiguration>>() {});
-        this.groups = storageBacked("autoscaling-groups.json", new TypeReference<Map<String, AutoScalingGroup>>() {});
+        this.groupsStore = storageFactory.create("autoscaling", "autoscaling-groups.json",
+                new TypeReference<Map<String, AutoScalingGroup>>() {});
+        this.groups = new StorageBackedMap<>(groupsStore);
         this.hooks = storageBacked("autoscaling-lifecycle-hooks.json", new TypeReference<Map<String, LifecycleHook>>() {});
         this.policies = storageBacked("autoscaling-policies.json", new TypeReference<Map<String, ScalingPolicy>>() {});
         this.activities = storageBacked("autoscaling-activities.json", new TypeReference<Map<String, ScalingActivity>>() {});
@@ -328,29 +333,32 @@ public class AutoScalingService {
     }
 
     public void deleteAutoScalingGroup(String region, String name, boolean forceDelete) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        List<AsgInstance> active = asg.getInstances().stream()
-                .filter(i -> !"Terminated".equals(i.getLifecycleState()))
-                .collect(Collectors.toList());
-        if (!active.isEmpty() && !forceDelete) {
-            throw new AwsException("ResourceInUse",
-                    "Auto Scaling group '" + name + "' has " + active.size()
-                            + " instance(s). Set ForceDelete=true to delete anyway.", 400);
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            AutoScalingGroup asg = requireGroup(region, name);
+            List<AsgInstance> active = asg.getInstances().stream()
+                    .filter(i -> !"Terminated".equals(i.getLifecycleState()))
+                    .collect(Collectors.toList());
+            if (!active.isEmpty() && !forceDelete) {
+                throw new AwsException("ResourceInUse",
+                        "Auto Scaling group '" + name + "' has " + active.size()
+                                + " instance(s). Set ForceDelete=true to delete anyway.", 400);
+            }
+            if (forceDelete && ec2Service != null && !active.isEmpty()) {
+                active.stream()
+                        .map(AsgInstance::getInstanceId)
+                        .filter(Objects::nonNull)
+                        .forEach(instanceId -> {
+                            try {
+                                ec2Service.terminateInstances(region, List.of(instanceId));
+                            }
+                            catch (AwsException ignored) {
+                                // ForceDelete should remove stale ASG membership even if EC2 no longer has the instance.
+                            }
+                        });
+            }
+            groups.remove(key);
         }
-        if (forceDelete && ec2Service != null && !active.isEmpty()) {
-            active.stream()
-                    .map(AsgInstance::getInstanceId)
-                    .filter(Objects::nonNull)
-                    .forEach(instanceId -> {
-                        try {
-                            ec2Service.terminateInstances(region, List.of(instanceId));
-                        }
-                        catch (AwsException ignored) {
-                            // ForceDelete should remove stale ASG membership even if EC2 no longer has the instance.
-                        }
-                    });
-        }
-        groups.remove(asgKey(region, name));
         // clean up associated hooks and policies
         hooks.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         policies.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
@@ -372,8 +380,29 @@ public class AutoScalingService {
                 .collect(Collectors.toList());
     }
 
-    public void saveAutoScalingGroup(AutoScalingGroup asg) {
-        groups.put(asgKey(asg.getRegion(), asg.getAutoScalingGroupName()), asg);
+    public boolean saveAutoScalingGroupIfPresent(AutoScalingGroup asg) {
+        String key = asgKey(asg.getRegion(), asg.getAutoScalingGroupName());
+        synchronized (lockFor(key)) {
+            AutoScalingGroup current = groups.get(key);
+            if (current == asg) {
+                groups.put(key, asg);
+                return true;
+            }
+            return false;
+        }
+    }
+
+    private Object lockFor(String key) {
+        return groupLocks.computeIfAbsent(key, ignored -> new Object());
+    }
+
+    Set<String> autoScalingGroupAccountIds() {
+        if (groupsStore == null) {
+            return Set.of();
+        }
+        return groupsStore.scanAllAccountEntries(key -> true).stream()
+                .map(AccountAwareStorageBackend.AccountEntry::accountId)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     public void setDesiredCapacity(String region, String name, int desiredCapacity) {

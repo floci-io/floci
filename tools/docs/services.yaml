@@ -60,6 +60,10 @@ services:
       UpdateTarget: UpdateGatewayTarget
       DeleteTarget: DeleteGatewayTarget
       ListTargets: ListGatewayTargets
+  - service: ce
+    doc: docs/services/ce.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/ce/CostExplorerJsonHandler.java, mode: switch }
   - service: cloudformation
     doc: docs/services/cloudformation.md
     sources:
@@ -154,6 +158,19 @@ services:
       - TagResourceByBody
       - TagResourcePut
       - UntagResourceByQuery
+  - service: dlm
+    doc: docs/services/dlm.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/dlm/DlmController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
   - service: connect
     doc: docs/services/connect.md
     sources:
@@ -179,6 +196,10 @@ services:
     doc: docs/services/detective.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/detective/DetectiveController.java, mode: rest }
+  - service: dms
+    doc: docs/services/dms.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/dms/DmsJsonHandler.java, mode: switch }
   - service: docdb
     doc: docs/services/docdb.md
     sources:
@@ -281,10 +302,10 @@ services:
     doc: docs/services/redshift.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/redshift/RedshiftQueryHandler.java, mode: switch }
-    # SubnetIds / VpcSecurityGroupIds / TagKeys / DbGroups are labels of an inner
-    # member-name switch (memberKeyRegex), not actions, same shape as the rds
-    # exclusions above.
-    exclude_actions: [SubnetIds, VpcSecurityGroupIds, TagKeys, DbGroups]
+    # SubnetIds / VpcSecurityGroupIds / IamRoles / AddIamRoles / RemoveIamRoles / TagKeys / DbGroups
+    # are labels of an inner member-name switch (memberKeyRegex), not actions, same shape as the
+    # rds exclusions above.
+    exclude_actions: [SubnetIds, VpcSecurityGroupIds, IamRoles, AddIamRoles, RemoveIamRoles, TagKeys, DbGroups]
   - service: redshiftdata
     doc: docs/services/redshift-data.md
     sources:
@@ -292,6 +313,10 @@ services:
     # ExecuteSql / BatchExecuteSql are the deprecated pre-2020 operations: the handler
     # recognizes them only to return a ValidationException, they are not supported actions.
     exclude_actions: [ExecuteSql, BatchExecuteSql]
+  - service: redshiftserverless
+    doc: docs/services/redshift-serverless.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/redshiftserverless/RedshiftServerlessJsonHandler.java, mode: switch }
   - service: cognitoidentity
     doc: docs/services/cognitoidentity.md
     sources:
@@ -366,6 +391,10 @@ services:
     doc: docs/services/verifiedpermissions.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/verifiedpermissions/VerifiedPermissionsJsonHandler.java, mode: switch }
+  - service: timestream-influxdb
+    doc: docs/services/timestream-influxdb.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/timestreaminfluxdb/TimestreamInfluxDbJsonHandler.java, mode: switch }
   - service: sqs
     doc: docs/services/sqs.md
     sources:
@@ -392,10 +421,10 @@ deferred_handlers:
   - { path: src/main/java/io/github/hectorvent/floci/services/autoscaling/AutoScalingQueryHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/bcmpricingcalculator/BcmPricingCalculatorJsonHandler.java }  # focused workload-estimate surface
   - { path: src/main/java/io/github/hectorvent/floci/services/bcmdataexports/BcmDataExportsJsonHandler.java }  # no standalone action table yet
-  - { path: src/main/java/io/github/hectorvent/floci/services/ce/CostExplorerJsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/cloudcontrol/CloudControlJsonHandler.java }  # no standalone action table yet
   - { path: src/main/java/io/github/hectorvent/floci/services/cloudmap/CloudMapHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/cloudwatch/logs/CloudWatchLogsHandler.java }  # multi-table doc (nested handler)
+  - { path: src/main/java/io/github/hectorvent/floci/services/cloudwatch/logs/CloudWatchLogsMetricFilterHandler.java }  # multi-table doc (nested handler, reached through CloudWatchLogsHandler)
   - { path: src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java }  # multi-table doc (nested handler)
   - { path: src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsQueryHandler.java }  # multi-table doc (nested handler)
   - { path: src/main/java/io/github/hectorvent/floci/services/codebuild/CodeBuildJsonHandler.java }  # non-tabular doc (grouped/inline)
@@ -403,8 +432,8 @@ deferred_handlers:
   - { path: src/main/java/io/github/hectorvent/floci/services/cognito/CognitoJsonHandler.java }  # non-tabular doc (grouped/inline); separate docs effort
   - { path: src/main/java/io/github/hectorvent/floci/services/configservice/ConfigServiceJsonHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/cur/CurJsonHandler.java }  # no standalone action table yet
-  - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbJsonHandler.java }  # multi-table doc
-  - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbStreamsJsonHandler.java }  # multi-table doc
+  - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/NativeDynamoDbJsonHandler.java }  # multi-table doc
+  - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/NativeDynamoDbStreamsJsonHandler.java }  # multi-table doc
   - { path: src/main/java/io/github/hectorvent/floci/services/ec2/Ec2QueryHandler.java }  # non-tabular doc (grouped/inline)
   - { path: src/main/java/io/github/hectorvent/floci/services/ecr/EcrJsonHandler.java }  # doc packs multiple actions per row (`A` / `B`) + REST endpoints; needs de-grouping
   - { path: src/main/java/io/github/hectorvent/floci/services/ecs/EcsJsonHandler.java }  # non-tabular doc (grouped/inline)

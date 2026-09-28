@@ -285,6 +285,68 @@ class ProjectionEvaluatorTest {
         assertEquals(Set.of("[alpha]", "list"), attributes);
     }
 
+    @Test
+    void rejectsDuplicatePathsAsAnOverlap() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.validateExpression("a, a", null));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid ProjectionExpression: Two document paths overlap with each other; "
+                + "must remove or rewrite one of these paths; path one: [a], path two: [a]",
+                ex.getMessage());
+    }
+
+    @Test
+    void rejectsTwoAliasesResolvingToOneAttribute() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.validateExpression("#a, #b", readValue("""
+                        {"#a": "a", "#b": "a"}
+                        """)));
+        assertEquals("Invalid ProjectionExpression: Two document paths overlap with each other; "
+                + "must remove or rewrite one of these paths; path one: [a], path two: [a]",
+                ex.getMessage());
+    }
+
+    @Test
+    void rejectsParentAndChildPaths() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.validateExpression("a, a.b.c", null));
+        assertEquals("Invalid ProjectionExpression: Two document paths overlap with each other; "
+                + "must remove or rewrite one of these paths; path one: [a], path two: [a, b, c]",
+                ex.getMessage());
+    }
+
+    @Test
+    void reportsOverlappingPathsInRequestOrder() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.validateExpression("a.b, a", null));
+        assertEquals("Invalid ProjectionExpression: Two document paths overlap with each other; "
+                + "must remove or rewrite one of these paths; path one: [a, b], path two: [a]",
+                ex.getMessage());
+    }
+
+    @Test
+    void rejectsAListAndOneOfItsElements() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.validateExpression("l, l[0]", null));
+        assertEquals("Invalid ProjectionExpression: Two document paths overlap with each other; "
+                + "must remove or rewrite one of these paths; path one: [l], path two: [l, [0]]",
+                ex.getMessage());
+    }
+
+    @Test
+    void keepsDistinctSiblingPaths() {
+        assertDoesNotThrow(() -> ProjectionEvaluator.validateExpression("a.b, a.c, l[0], l[1]", null));
+    }
+
+    @Test
+    void rejectsAnUndefinedExpressionAttributeName() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.validateExpression("#undef", null));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid ProjectionExpression: An expression attribute name used in the document path "
+                + "is not defined; attribute name: #undef", ex.getMessage());
+    }
+
     private static ObjectNode readValue(String json) {
         try {
             return (ObjectNode) mapper.readTree(json);

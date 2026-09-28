@@ -174,6 +174,46 @@ class CloudFrontOriginHttpClientTest {
     }
 
     @Test
+    void sendsTheBodyWithItsExactLengthAndTheCallerContentType() throws Exception {
+        AtomicReference<String> method = new AtomicReference<>();
+        AtomicReference<String> contentType = new AtomicReference<>();
+        AtomicReference<String> contentLength = new AtomicReference<>();
+        AtomicReference<byte[]> body = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            method.set(exchange.getRequestMethod());
+            contentType.set(exchange.getRequestHeaders().getFirst("Content-Type"));
+            contentLength.set(exchange.getRequestHeaders().getFirst("Content-Length"));
+            body.set(exchange.getRequestBody().readAllBytes());
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        server.start();
+
+        byte[] payload = "{\"a\":1}".getBytes(StandardCharsets.UTF_8);
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            HttpRequest request = HttpRequest.newBuilder(java.net.URI.create(
+                            "http://origin.invalid:" + server.getAddress().getPort() + "/items"))
+                    .timeout(Duration.ofSeconds(5))
+                    .header("Content-Type", "application/json")
+                    .method("PUT", HttpRequest.BodyPublishers.noBody())
+                    .build();
+
+            HttpResponse<byte[]> response = client.send(
+                    request, List.of(), Map.of(), payload, HttpResponse.BodyHandlers.ofByteArray());
+
+            assertEquals(204, response.statusCode());
+            assertEquals("PUT", method.get());
+            assertEquals("application/json", contentType.get());
+            assertEquals(Integer.toString(payload.length), contentLength.get());
+            assertArrayEquals(payload, body.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void httpsPinningPreservesSniAndHostnameVerification() throws Exception {
         if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
             Security.addProvider(new BouncyCastleProvider());

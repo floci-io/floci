@@ -39,7 +39,7 @@ Floci tells the Docker daemon to start a sidecar/service container and bind its 
 ```
 host:9400  ←──  opensearch container:9200  (Docker binds 9400 directly on the host)
                         ↑
-       Floci reaches it via Docker network: floci-opensearch-{name}:9200
+       Floci reaches it via Docker network: floci-aws-opensearch-{name}:9200
 ```
 
 No `docker-compose.yml` `ports:` mapping is needed — the port is already on the host.
@@ -76,7 +76,7 @@ redis-cli -h localhost -p 6379
 
 When you create an EKS cluster in real mode, Floci asks the Docker daemon to start a k3s container and bind its API server port (6443) to the next available host port in `6500–6599`. The port is bound directly on the host by Docker — no `docker-compose.yml` mapping is needed.
 
-The `endpoint` field returned by `DescribeCluster` points to `https://localhost:<hostPort>` when running outside a container, or `https://floci-eks-<name>:6443` when Floci is running inside Docker.
+The `endpoint` field returned by `DescribeCluster` points to `https://localhost:<hostPort>` when running outside a container, or `https://floci-aws-eks-<name>:6443` when Floci is running inside Docker.
 
 ```bash
 aws eks create-cluster \
@@ -123,7 +123,7 @@ Configure the range with `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` and `FLOC
 
 When you create an OpenSearch domain in real mode, Floci asks the Docker daemon to start an `opensearchproject/opensearch` container and bind its REST port (9200) to the next available host port in `9400–9499`. The port is bound directly on the host by Docker — no `docker-compose.yml` mapping is needed.
 
-The `endpoint` field returned by `DescribeDomain` points to `http://localhost:<hostPort>` when running outside a container, or `http://floci-opensearch-<name>:9200` when Floci is running inside Docker.
+The `endpoint` field returned by `DescribeDomain` points to `http://localhost:<hostPort>` when running outside a container, or `http://floci-aws-opensearch-<name>:9200` when Floci is running inside Docker.
 
 ```bash
 aws opensearch create-domain \

@@ -97,7 +97,7 @@ public class SsmService implements ResourceProvider {
                int maxParameterHistory) {
         this(parameterStore, historyStore, documentPermissionStore, new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), maxParameterHistory,
-                new RegionResolver("us-east-1", "000000000000"));
+                new RegionResolver("us-east-1", "000000000000")); // partition-literal: test-shaped constructor default
     }
 
     /**
@@ -108,7 +108,7 @@ public class SsmService implements ResourceProvider {
                int maxParameterHistory) {
         this(parameterStore, historyStore, new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), maxParameterHistory,
-                new RegionResolver("us-east-1", "000000000000"));
+                new RegionResolver("us-east-1", "000000000000")); // partition-literal: test-shaped constructor default
     }
 
     SsmService(StorageBackend<String, Parameter> parameterStore,
@@ -259,7 +259,7 @@ public class SsmService implements ResourceProvider {
         }
         return imageCatalog.findByPublicParameterName(name).map(image -> {
             Parameter parameter = new Parameter(name, image.imageId, "String");
-            parameter.setArn("arn:aws:ssm:" + region + "::parameter" + name);
+            parameter.setArn(AwsArnUtils.Arn.of("ssm", region, "", "parameter" + name).toString());
             parameter.setLastModifiedDate(Instant.parse(image.creationDate));
             return parameter;
         });
@@ -939,7 +939,7 @@ public class SsmService implements ResourceProvider {
         requireKnownSetting(settingId);
         ServiceSetting setting = new ServiceSetting(settingId, settingValue,
                 settingArn(settingId, region), "Customized",
-                "arn:aws:iam::" + regionResolver.getAccountId() + ":root");
+                regionResolver.buildGlobalArn("iam", "root"));
         serviceSettingStore.put(settingKey(region, settingId), setting);
     }
 
@@ -973,8 +973,7 @@ public class SsmService implements ResourceProvider {
 
     private String settingArn(String settingId, String region) {
         // Setting ids begin with "/", so concatenation yields .../servicesetting/ssm/...
-        return "arn:aws:ssm:" + region + ":" + regionResolver.getAccountId()
-                + ":servicesetting" + settingId;
+        return AwsArnUtils.Arn.of("ssm", region, regionResolver.getAccountId(), "servicesetting" + settingId).toString();
     }
 
     private static String regionKey(String region, String name) {

@@ -19,6 +19,8 @@ public class EcsCluster {
     private List<ClusterSetting> settings;
     private List<String> capacityProviders;
     private List<Map<String, Object>> defaultCapacityProviderStrategy;
+    private Map<String, Object> configuration;
+    private Map<String, Object> serviceConnectDefaults;
     private Map<String, String> tags = new HashMap<>();
 
     public String getClusterArn() { return clusterArn; }
@@ -50,6 +52,12 @@ public class EcsCluster {
 
     public List<Map<String, Object>> getDefaultCapacityProviderStrategy() { return defaultCapacityProviderStrategy; }
     public void setDefaultCapacityProviderStrategy(List<Map<String, Object>> s) { this.defaultCapacityProviderStrategy = s; }
+
+    public Map<String, Object> getConfiguration() { return configuration; }
+    public void setConfiguration(Map<String, Object> configuration) { this.configuration = configuration; }
+
+    public Map<String, Object> getServiceConnectDefaults() { return serviceConnectDefaults; }
+    public void setServiceConnectDefaults(Map<String, Object> defaults) { this.serviceConnectDefaults = defaults; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

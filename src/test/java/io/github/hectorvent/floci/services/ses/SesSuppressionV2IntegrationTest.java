@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.github.hectorvent.floci.services.ses.SesV2TimestampMatchers.DECIMAL_NUMBERS;
+import static io.github.hectorvent.floci.services.ses.SesV2TimestampMatchers.epochSecondsWithMillis;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -53,6 +55,7 @@ class SesSuppressionV2IntegrationTest {
     @Order(3)
     void getSuppressedDestination_returnsStoredEntry() {
         given()
+            .config(DECIMAL_NUMBERS)
             .header("Authorization", AUTH_HEADER)
         .when()
             .get("/v2/email/suppression/addresses/bounce-1@example.com")
@@ -60,7 +63,7 @@ class SesSuppressionV2IntegrationTest {
             .statusCode(200)
             .body("SuppressedDestination.EmailAddress", equalTo("bounce-1@example.com"))
             .body("SuppressedDestination.Reason", equalTo("BOUNCE"))
-            .body("SuppressedDestination.LastUpdateTime", notNullValue());
+            .body("SuppressedDestination.LastUpdateTime", epochSecondsWithMillis());
     }
 
     @Test
@@ -102,6 +105,7 @@ class SesSuppressionV2IntegrationTest {
     @Order(6)
     void listSuppressedDestinations_returnsAll() {
         given()
+            .config(DECIMAL_NUMBERS)
             .header("Authorization", AUTH_HEADER)
         .when()
             .get("/v2/email/suppression/addresses")
@@ -109,7 +113,8 @@ class SesSuppressionV2IntegrationTest {
             .statusCode(200)
             .body("SuppressedDestinationSummaries", hasSize(greaterThanOrEqualTo(2)))
             .body("SuppressedDestinationSummaries.EmailAddress",
-                  hasItems("bounce-1@example.com", "complaint-1@example.com"));
+                  hasItems("bounce-1@example.com", "complaint-1@example.com"))
+            .body("SuppressedDestinationSummaries.LastUpdateTime", everyItem(epochSecondsWithMillis()));
     }
 
     @Test

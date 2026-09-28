@@ -9,9 +9,8 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
  * gone; on false the caller retries until {@code attempts} reaches 3 and then reports
  * {@code failureReason} against {@code previousPhysicalId}.
  *
- * <p>It lives in this package rather than inside {@code CloudFormationResourceProvisioner} so an
- * extracted {@link CfnResourceProvisioner} can return one without depending on the monolith it was
- * extracted from.
+ * <p>It lives in this package so a {@link CfnResourceProvisioner} can return one and
+ * {@code CfnResourceDispatcher} can aggregate it.
  */
 public record UpdateCleanupResult(
         boolean applicable,

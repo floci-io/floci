@@ -3,7 +3,10 @@ package io.github.hectorvent.floci.services.acm;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.bouncycastle.asn1.ASN1Primitive;
+import org.bouncycastle.asn1.DEROctetString;
 import org.bouncycastle.asn1.pkcs.EncryptedPrivateKeyInfo;
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.BasicConstraints;
@@ -20,6 +23,7 @@ import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.X509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.openssl.PEMKeyPair;
 import org.bouncycastle.openssl.PEMParser;
 import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
@@ -27,14 +31,9 @@ import org.bouncycastle.openssl.jcajce.JcePEMEncryptorBuilder;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS8EncryptedPrivateKeyInfo;
-import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.util.io.pem.PemObject;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Cipher;
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.spec.PBEParameterSpec;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.math.BigInteger;
@@ -49,6 +48,8 @@ import java.security.Security;
 import java.security.Signature;
 import java.security.cert.X509Certificate;
 import java.security.interfaces.ECKey;
+import java.security.interfaces.ECPublicKey;
+import java.security.interfaces.RSAPublicKey;
 import java.security.spec.ECGenParameterSpec;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -58,6 +59,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
+import javax.crypto.Cipher;
+import javax.crypto.SecretKey;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.PBEParameterSpec;
 
 @ApplicationScoped
 public class CertificateGenerator {
@@ -347,7 +353,7 @@ public class CertificateGenerator {
                 String raw = stripBrackets(san);
                 byte[] addr = InetAddress.getByName(raw).getAddress();
                 return new GeneralName(GeneralName.iPAddress,
-                        new org.bouncycastle.asn1.DEROctetString(addr));
+                        new DEROctetString(addr));
             } catch (Exception e) {
                 // Only a malformed IPv6 literal reaches this: IPv4 is range-checked before it
                 // gets here, and a value only arrives with a colon and a literal-shaped first
@@ -448,18 +454,18 @@ public class CertificateGenerator {
             // salt and iteration count are passed explicitly so the output does not depend
             // on provider defaults. The ASN.1 below only wraps the result, so it needs no
             // provider either.
-            var secretKey = SecretKeyFactory.getInstance(PBE_ALGORITHM)
+            SecretKey secretKey = SecretKeyFactory.getInstance(PBE_ALGORITHM)
                 .generateSecret(new PBEKeySpec(passphrase.toCharArray()));
-            var salt = new byte[PBE_SALT_BYTES];
+            byte[] salt = new byte[PBE_SALT_BYTES];
             SECURE_RANDOM.nextBytes(salt);
-            var cipher = Cipher.getInstance(PBE_ALGORITHM);
+            Cipher cipher = Cipher.getInstance(PBE_ALGORITHM);
             cipher.init(Cipher.ENCRYPT_MODE, secretKey, new PBEParameterSpec(salt, PBE_ITERATIONS));
-            var ciphertext = cipher.doFinal(privateKey.getEncoded());
+            byte[] ciphertext = cipher.doFinal(privateKey.getEncoded());
 
-            var scheme = new AlgorithmIdentifier(
+            AlgorithmIdentifier scheme = new AlgorithmIdentifier(
                 PKCSObjectIdentifiers.id_PBES2,
                 ASN1Primitive.fromByteArray(cipher.getParameters().getEncoded()));
-            var encryptedInfo =
+            PKCS8EncryptedPrivateKeyInfo encryptedInfo =
                 new PKCS8EncryptedPrivateKeyInfo(new EncryptedPrivateKeyInfo(scheme, ciphertext));
 
             StringWriter sw = new StringWriter();
@@ -493,10 +499,10 @@ public class CertificateGenerator {
             Object obj = parser.readObject();
             JcaPEMKeyConverter converter = new JcaPEMKeyConverter();
 
-            if (obj instanceof org.bouncycastle.openssl.PEMKeyPair pemKeyPair) {
+            if (obj instanceof PEMKeyPair pemKeyPair) {
                 // Only the private half is needed, and a SEC1 key may carry no public half at all.
                 return converter.getPrivateKey(pemKeyPair.getPrivateKeyInfo());
-            } else if (obj instanceof org.bouncycastle.asn1.pkcs.PrivateKeyInfo pkInfo) {
+            } else if (obj instanceof PrivateKeyInfo pkInfo) {
                 return converter.getPrivateKey(pkInfo);
             }
             throw new IllegalArgumentException("Invalid private key PEM format");
@@ -518,7 +524,7 @@ public class CertificateGenerator {
         String algorithm = publicKey.getAlgorithm();
         if ("RSA".equals(algorithm)) {
             try {
-                java.security.interfaces.RSAPublicKey rsaKey = (java.security.interfaces.RSAPublicKey) publicKey;
+                RSAPublicKey rsaKey = (RSAPublicKey) publicKey;
                 int keySize = rsaKey.getModulus().bitLength();
                 return switch (keySize) {
                     case 1024 -> KeyAlgorithm.RSA_1024;
@@ -531,7 +537,7 @@ public class CertificateGenerator {
             }
         } else if ("EC".equals(algorithm)) {
             try {
-                java.security.interfaces.ECPublicKey ecKey = (java.security.interfaces.ECPublicKey) publicKey;
+                ECPublicKey ecKey = (ECPublicKey) publicKey;
                 int fieldSize = ecKey.getParams().getCurve().getField().getFieldSize();
                 return switch (fieldSize) {
                     case 384 -> KeyAlgorithm.EC_secp384r1;

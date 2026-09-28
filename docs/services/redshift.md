@@ -23,27 +23,77 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `CreateClusterSnapshot` | Back up a cluster to a SQL dump via `pg_dump` |
 | `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier |
 | `DeleteClusterSnapshot` | Remove a snapshot and its stored dump |
-| `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql` |
+| `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-account, same-region `SnapshotArn` |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
 | `DescribeClusterParameterGroups` | List parameter groups, optionally filtered by name |
 | `DescribeClusterParameters` | Return the parameters of a group, with any values set by `ModifyClusterParameterGroup` |
 | `ModifyClusterParameterGroup` | Update parameter values on a group |
 | `DeleteClusterParameterGroup` | Remove a parameter group |
-| `CreateTags` | Add or overwrite tags on a cluster, snapshot, subnet group or parameter group |
+| `CreateTags` | Add or overwrite tags on a cluster, snapshot, subnet group, parameter group or snapshot copy grant |
 | `DeleteTags` | Remove tags by key from a resource |
 | `DescribeTags` | List tagged resources and their tags |
 | `CreateClusterSubnetGroup` | Register a cluster subnet group (metadata only) |
-| `CreateIntegration` | Register a zero-ETL integration (metadata only; no data is replicated). Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
+| `CreateIntegration` | Create a DynamoDB Streams to provisioned Redshift zero-ETL integration. Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
 | `DescribeIntegrations` | List integrations with `Filters`, `MaxRecords` and `Marker` pagination, or the one an `IntegrationArn` names |
 | `DeleteIntegration` | Remove a zero-ETL integration |
 | `DescribeClusterSubnetGroups` | List subnet groups, optionally filtered by name |
 | `ModifyClusterSubnetGroup` | Update a subnet group's description or subnet list |
 | `DeleteClusterSubnetGroup` | Remove a subnet group |
-| `ModifyCluster` | Update node type, parameter group, security groups, or the master password |
+| `CreateSnapshotCopyGrant` | Register a snapshot copy grant, defaulting `KmsKeyId` to the AWS-managed Redshift key. `SnapshotCopyGrantName` must be 1-63 characters, start with a lowercase letter, and contain only lowercase letters, digits and non-consecutive hyphens |
+| `DescribeSnapshotCopyGrants` | List snapshot copy grants, optionally filtered by name, paged with `MaxRecords` and `Marker` |
+| `DeleteSnapshotCopyGrant` | Remove a snapshot copy grant |
+| `ModifyCluster` | Update node type, parameter group, security groups, Multi-AZ flag, or the master password |
+| `DescribeClusterVersions` | Return the single emulated engine version and its parameter group family |
+| `DescribeOrderableClusterOptions` | Return the static node types and cluster types, optionally filtered by `NodeType` or `ClusterVersion` |
+| `ModifyClusterIamRoles` | Add or remove the IAM roles associated with a cluster; COPY and UNLOAD see the change on new connections. `DefaultIamRoleArn` is ignored |
+| `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration |
+| `EnableLogging` | Store audit-logging configuration (S3 bucket, CloudWatch, or S3 table via `LogDestinationType`); no logs are delivered |
+| `DisableLogging` | Clear a cluster's audit-logging configuration |
 | `RebootCluster` | Restart a cluster's container |
 | `GetClusterCredentials` | Issue a short-lived DbUser / DbPassword pair the auth proxy and Data API accept for a non-master user |
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |
 <!-- floci:actions:end -->
+
+### Snapshot copy grants
+
+- **`KmsKeyId` defaults to an alias ARN.** Floci has no per-account AWS-managed key, so
+  `CreateSnapshotCopyGrant` without `KmsKeyId` stores
+  `arn:aws:kms:<region>:<account>:alias/aws/redshift` where AWS would store the key ARN it
+  resolves to. The value only has to round-trip through `DescribeSnapshotCopyGrants`, which is
+  what Terraform reads back.
+- **Tag limits are not validated.** The 50-tag count and the AWS key/value length limits are not
+  enforced on grants, as elsewhere in Floci's Redshift tagging.
+- **A missing grant reports different faults on different actions**, because AWS models them
+  that way. `DescribeSnapshotCopyGrants` and `DeleteSnapshotCopyGrant` return
+  `SnapshotCopyGrantNotFoundFault`, which the Redshift model pins at HTTP 400.
+  `CreateTags`/`DeleteTags`/`DescribeTags` do not list that fault at all and return
+  `ResourceNotFoundFault` (HTTP 404) for any missing resource, grants included.
+
+## DynamoDB zero-ETL
+
+The supported zero-ETL path is DynamoDB Streams to a provisioned Redshift cluster. The source ARN
+must identify an enabled local DynamoDB stream, and the target ARN must identify an existing
+provisioned Redshift cluster.
+
+Each stream record is written to a stable landing table named `floci_zetl_<integration-id>`.
+The landing table stores the event id, event name, source, region, sequence number, creation time,
+and DynamoDB keys and images as JSON text. Record event ids are unique, so retries are idempotent.
+
+The integration consumer keeps its own checkpoint for each stream shard and does not share Lambda
+event source mapping state. A batch is checkpointed only once it is written, so a failed write is
+retried with the same records. After a Floci restart the consumer resumes from the trim horizon,
+because native stream records are volatile. Deleting an integration stops its consumer while
+retaining the landing table.
+
+Items already present in the source table when `CreateIntegration` runs are backfilled into the
+landing table with a paginated `Scan`, one page per poll tick, and the scan resumes after a Floci
+restart. While the backfill runs, `DescribeIntegrations` reports `Status` as `syncing` (as a Floci
+approximation to indicate that initial backfill is in progress); it becomes `active` once the scan is
+exhausted. The landing table is an append-only log, so an item changed while its table is still being
+backfilled can appear twice: once from the scan and once from the stream.
+
+Serverless Redshift targets, schema inference, and relational projection are not supported in this
+first implementation.
 
 ## CloudFormation
 
@@ -70,7 +120,9 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 - `Port` is ignored: Floci assigns the dynamic host proxy port returned in `Endpoint.Port`.
 - `DBName` other than `dev` is ignored: the emulated PostgreSQL container database is always `dev`.
 - `NumberOfNodes` is not stored on cluster create: every emulated cluster is backed by a single PostgreSQL container.
-- `ManageMasterPassword` is rejected: set `MasterUserPassword` instead.
+- `ManageMasterPassword` creates a Redshift-owned Secrets Manager secret. The secret contains the
+  managed username, password, endpoint, port, and database name. `MasterPasswordSecretKmsKeyId`
+  selects the KMS key used for the secret metadata and is validated through KMS.
 - `SnapshotIdentifier` is ignored: a fresh cluster is created instead of restoring from a snapshot.
 - `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
 
@@ -184,6 +236,41 @@ Floci's Redshift auth proxy inspects frontend queries on the PostgreSQL wire pro
 - The rewrite only runs when the statement's first keyword is `CREATE TABLE` or `ALTER TABLE`. A `SELECT`, `INSERT`, function body, or string literal that merely contains one of these keywords is forwarded byte-for-byte. Single-quoted and dollar-quoted string literals are masked before the rewrite, so a keyword inside a quoted value (including in a later statement of a multi-statement query) is preserved.
 - Columns legitimately named `distkey`, `sortkey`, or `encode` survive.
 
+### Redshift Spectrum Phase 1
+
+The PostgreSQL wire proxy supports a bounded Spectrum subset for CSV data in S3. The supported
+statements are:
+
+```sql
+CREATE EXTERNAL SCHEMA <schema>
+  FROM DATA CATALOG DATABASE '<database>' IAM_ROLE '<role>';
+
+CREATE EXTERNAL TABLE <schema>.<table> (<name> <type>, ...)
+  STORED AS TEXTFILE LOCATION 's3://<bucket>/<prefix>/'
+  TBLPROPERTIES ('skip.header.line.count'='<n>');
+```
+
+Supported column types are `VARCHAR`, `CHAR`, `INTEGER`, `BIGINT`, `DECIMAL`, `BOOLEAN`, `DATE`,
+and `TIMESTAMP`. CSV reads support `DELIMITER`, `QUOTE`, `ESCAPE`, `NULL AS`, and
+`skip.header.line.count`. Objects under the location are read in lexicographic key order.
+
+The query path supports `SELECT *`, explicit column projections, and simple `WHERE` predicates
+over one external table. Queries with joins, grouping, ordering, subqueries, parameters, or
+multiple statements are outside Phase 1 and are forwarded to PostgreSQL, which returns its own
+error. Rows are materialized into a connection-local temporary table (`CREATE TEMP TABLE`) before
+the rewritten query is sent to PostgreSQL. The temporary table is not visible to another
+connection. Under the Extended Query protocol, the temporary table is dropped eagerly once
+the cursor is exhausted or closed. Under the Simple Query protocol, the table remains
+session-scoped and is cleaned up when the connection terminates, avoiding race conditions
+with the streaming backend-to-client pump. Each query materializes its own table, so a
+long-lived or pooled connection holds one copy per query until it closes.
+
+`IAM_ROLE` is parsed and retained in the external schema metadata. Phase 1 does not yet assume
+the role or evaluate its IAM policy for Spectrum reads. S3 authorization therefore follows the
+current S3 emulator authorization mode, and role-specific Spectrum access enforcement is a
+future phase. Parquet, JSON, Avro, ORC, partition discovery, `ALTER`, and `DROP` lifecycle
+operations are not supported in Phase 1.
+
 ### COPY from S3
 
 `COPY <table> [(<columns>)] FROM 's3://<bucket>/<keyOrPrefix>' [options]` sent over the Simple
@@ -192,16 +279,37 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 `COPY ... FROM STDIN`.
 
 - Supported options: `DELIMITER`, `FORMAT CSV` (or a bare `CSV`), `GZIP`, `IGNOREHEADER <n>` and
-  `HEADER`, `NULL AS`, and an explicit column list.
+  `HEADER`, `NULL AS`, `FORMAT AS JSON 'auto'`, `FORMAT AS JSON 'auto ignorecase'` (or bare `JSON 'auto'`),
+  `MANIFEST`, and an explicit column list.
 - The default framing is pipe-delimited text, matching Redshift. `FORMAT CSV` switches to CSV with
   a comma default delimiter.
+- `FORMAT AS JSON 'auto'` loads JSON objects, mapping JSON keys to table columns with exact case
+  sensitivity. `FORMAT AS JSON 'auto ignorecase'` performs case-insensitive key matching. Input
+  objects can be separated by any whitespace, including multiline pretty-printed JSON. Non-object root
+  values abort the load. When columns are not specified in the COPY statement, table column names and
+  order are automatically discovered from the database catalog, but only over the **Simple Query
+  protocol**. Over Extended Query (the default for a JDBC `PreparedStatement`, and for a plain
+  `Statement` under recent pgjdbc versions) the column list is fixed by the time `Parse` is sent,
+  before any backend round trip is possible, so catalog discovery cannot run there: omitting the column
+  list fails the COPY with a clear error instead of silently guessing. Specify the column list explicitly
+  for Extended Query, or connect with `preferQueryMode=simple` to use discovery. Nested objects and
+  arrays are serialized as JSON strings.
+- `MANIFEST` resolves file keys from a JSON manifest file (`{"entries": [{"url": "s3://...", "mandatory": boolean}]}`),
+  compatible with output from `UNLOAD ... MANIFEST`. Missing files marked `mandatory: true` abort the load.
+  When `mandatory` is omitted, it defaults to `false`. All entries in the manifest must reside in the same S3
+  bucket as the manifest file itself; cross-bucket manifest entries are rejected as an intentional deviation.
 - `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
 - `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
-- S3 access is authorized as an unsigned request: with `FLOCI_SERVICES_S3_ENFORCE_AUTH` off it is
-  unrestricted; with it on, bucket policy and public access settings apply.
-- Any other clause (`FIXEDWIDTH`, `JSON`, `PARQUET`, `AVRO`, `ORC`, `MANIFEST`, `MAXERROR`,
+- `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster (at
+  `CreateCluster` or through `ModifyClusterIamRoles`; connections opened before a change keep the
+  roles they started with), exist in
+  the local IAM service, and trust Redshift to assume it. With
+  `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
+  identity policy must allow the required S3 actions, and any bucket policy must not deny the
+  request. `IAM_ROLE default` is not supported.
+- Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`, `MAXERROR`,
   `DATEFORMAT`, `TIMEFORMAT`, `REGION`, `ENCODING`, `ESCAPE`, `REMOVEQUOTES`, `BLANKSASNULL`,
-  `EMPTYASNULL`, `TRUNCATECOLUMNS`, `ACCEPTINVCHARS`, credentials clauses, and so on) is not
+  `EMPTYASNULL`, `TRUNCATECOLUMNS`, `ACCEPTINVCHARS`, `CREDENTIALS`, and so on) is not
   recognized: the statement is forwarded unchanged and PostgreSQL returns its own error.
 - A multi-statement query whose COPY is followed by another statement is not intercepted; send the
   COPY on its own.
@@ -248,8 +356,12 @@ the result to S3 as one or more objects under `<prefix>`.
   `ALLOWOVERWRITE` a failed UNLOAD leaves its objects in place (they may have replaced prior data,
   so they are not deleted); a `MANIFEST` request that fails this way can leave data objects without
   a manifest, and rerunning the same statement overwrites them.
-- S3 access is authorized as an unsigned request, like COPY from S3.
-- Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `IAM_ROLE` / `CREDENTIALS`,
+- `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster, exist in
+  the local IAM service, and trust Redshift to assume it. With
+  `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
+  identity policy must allow the required S3 actions, and any bucket policy must not deny the
+  request. `IAM_ROLE default` is not supported.
+- Any other option (`PARQUET`, `ENCRYPTED`, `REGION`, `CREDENTIALS`,
   `ZSTD`, `EXTENSION`, `CLEANPATH`, `PARTITION`, and so on) is not intercepted; the
   statement is forwarded and PostgreSQL reports its own error.
 - Extended Query UNLOAD is supported when the complete statement is present in `Parse` and has no
@@ -282,10 +394,14 @@ These views expose the documented Redshift column names, types, and ordering map
 
 ## Out of Scope
 
-- Real Redshift SQL semantics: the data plane is stock PostgreSQL. Redshift-only table DDL keywords (DISTSTYLE / DISTKEY / SORTKEY / ENCODE) are stripped so CREATE TABLE / ALTER TABLE executes (see [SQL Interceptor](#sql-interceptor)), but the distribution/sort behavior they request is not; SUPER/SPECTRUM are not emulated.
+- Real Redshift SQL semantics: the data plane is stock PostgreSQL. Redshift-only table DDL keywords (DISTSTYLE / DISTKEY / SORTKEY / ENCODE) are stripped so CREATE TABLE / ALTER TABLE executes (see [SQL Interceptor](#sql-interceptor)), but the distribution/sort behavior they request is not; SUPER and Spectrum features outside the documented [Phase 1 subset](#redshift-spectrum-phase-1) are not emulated.
 - Multi-node clusters: `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.
 - Resize, pause/resume, IAM authentication, snapshot schedules, and cross-region snapshot copy.
+- `IAM_ROLE default` and cross-account role ARNs are not supported for COPY or UNLOAD.
 - The auth proxy validates the master user's password and any live `GetClusterCredentials` credential. Other non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
+- A cluster using `ManageMasterPassword` keeps its generated password in sync with the
+  Redshift-owned Secrets Manager secret. Updating `MasterUserPassword` through `ModifyCluster`
+  updates the current secret version as well.
 - IAM database authentication over the wire, and `sslmode=verify-full` against the self-signed proxy certificate.

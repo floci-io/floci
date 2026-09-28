@@ -32,7 +32,7 @@ import java.util.Optional;
 public class FlociDuckManager {
 
     private static final Logger LOG = Logger.getLogger(FlociDuckManager.class);
-    private static final String CONTAINER_NAME = "floci-duck";
+    private static final String CONTAINER_NAME = "duck";
     private static final int DUCK_PORT = 3000;
     private static final int HEALTH_POLL_MAX_MS = 30_000;
     private static final int HEALTH_POLL_INTERVAL_MS = 500;
@@ -112,7 +112,7 @@ public class FlociDuckManager {
         LOG.infov("Starting floci-duck container using image {0}", image);
 
         String containerName = ContainerStorageHelper.dockerName(config, CONTAINER_NAME);
-        lifecycleManager.removeIfExists(containerName);
+        ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, containerName);
 
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(containerName)

@@ -210,7 +210,7 @@ class CognitoCfnIntegrationTest {
         assertEquals(renewedCertificateArn, description.path("CustomDomainConfig").path("CertificateArn").asText());
 
         cloudFormation(CUSTOM_STACK, "DeleteStack", null);
-        awaitStackDeleted(CUSTOM_STACK);
+        CfnStackWaits.awaitStackDeleted(CUSTOM_STACK);
 
         assertDomainIsGone(REPLACEMENT_DOMAIN);
         assertCertificateIsGone(renewedCertificateArn);
@@ -234,7 +234,7 @@ class CognitoCfnIntegrationTest {
         assertFalse(description.has("CustomDomainConfig"));
 
         cloudFormation(PREFIX_STACK, "DeleteStack", null);
-        awaitStackDeleted(PREFIX_STACK);
+        CfnStackWaits.awaitStackDeleted(PREFIX_STACK);
 
         assertDomainIsGone(PREFIX_DOMAIN);
     }
@@ -282,7 +282,7 @@ class CognitoCfnIntegrationTest {
         assertClientInPool(livePool, "orphan-web", "orphan-web");
 
         cloudFormation(stack, "DeleteStack", null);
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         cognitoAction("DeleteUserPool", "{\"UserPoolId\": \"" + livePool + "\"}").then().statusCode(200);
     }
 
@@ -316,11 +316,11 @@ class CognitoCfnIntegrationTest {
         describeStacks(OVERRIDE_STACK + "-2", "ROLLBACK_COMPLETE");
         assertClientInPool(poolId, "override-web", "override-web");
         cloudFormation(OVERRIDE_STACK + "-2", "DeleteStack", null);
-        awaitStackDeleted(OVERRIDE_STACK + "-2");
+        CfnStackWaits.awaitStackDeleted(OVERRIDE_STACK + "-2");
         assertClientInPool(poolId, "override-web", "override-web");
 
         cloudFormation(OVERRIDE_STACK, "DeleteStack", null);
-        awaitStackDeleted(OVERRIDE_STACK);
+        CfnStackWaits.awaitStackDeleted(OVERRIDE_STACK);
         assertClientIsGone(poolId, "override-web");
         cognitoAction("DeleteUserPool", "{\"UserPoolId\": \"" + poolId + "\"}").then().statusCode(200);
     }
@@ -380,7 +380,7 @@ class CognitoCfnIntegrationTest {
             .body("UserPoolClient.ClientSecret", nullValue());
 
         cloudFormation(CLIENT_STACK, "DeleteStack", null);
-        awaitStackDeleted(CLIENT_STACK);
+        CfnStackWaits.awaitStackDeleted(CLIENT_STACK);
 
         assertClientIsGone(poolB, withoutSecret);
         cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolB + "\"}")
@@ -400,6 +400,75 @@ class CognitoCfnIntegrationTest {
         cognitoAction("DescribeUserPoolClient", "{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
             .then()
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    /**
+     * A pool with deletion protection refuses its own delete, and the stack has to say so: on AWS
+     * the resource and the stack report DELETE_FAILED with Cognito's reason, the pool stays, and
+     * the stack can only go once an update has switched the protection off.
+     */
+    @Test
+    void deletingAStackWhosePoolHasDeletionProtectionFailsAndLeavesThePoolUntilItIsDeactivated() throws Exception {
+        String stack = "cognito-cfn-deletion-protection-it";
+        cloudFormation(stack, "CreateStack", deletionProtectionTemplate("ACTIVE"));
+        String stacks = describeStacks(stack, "CREATE_COMPLETE");
+        String poolId = outputValue(stacks, "PoolId");
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("UserPool.DeletionProtection", equalTo("ACTIVE"));
+
+        cloudFormation(stack, "DeleteStack", null);
+        awaitStackStatus(stack, "DELETE_FAILED");
+        String events = describeStackEvents(stack);
+        assertTrue(events.contains("<ResourceStatus>DELETE_FAILED</ResourceStatus>"), events);
+        assertTrue(events.contains("deletion protection is activated"), events);
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("UserPool.Id", equalTo(poolId));
+
+        cloudFormation(stack, "UpdateStack", deletionProtectionTemplate("INACTIVE"));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("UserPool.DeletionProtection", equalTo("INACTIVE"));
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then()
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    private static String deletionProtectionTemplate(String deletionProtection) {
+        return """
+            {
+              "AWSTemplateFormatVersion": "2010-09-09",
+              "Resources": {
+                "Pool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {"UserPoolName": "cognito-cfn-protected-pool", "DeletionProtection": "%s"}
+                }
+              },
+              "Outputs": {"PoolId": {"Value": {"Ref": "Pool"}}}
+            }
+            """.formatted(deletionProtection);
+    }
+
+    private static void awaitStackStatus(String stack, String expectedStatus) throws InterruptedException {
+        String body = null;
+        for (int i = 0; i < 100; i++) {
+            body = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stack)
+            .when().post("/").then().extract().asString();
+            if (body.contains("<StackStatus>" + expectedStatus + "</StackStatus>")) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        fail("stack " + stack + " did not reach " + expectedStatus + " within the timeout: " + body);
     }
 
     private static void cloudFormation(String stack, String action, String templateBody) {
@@ -436,24 +505,6 @@ class CognitoCfnIntegrationTest {
     }
 
     /** DeleteStack runs asynchronously; a successful delete removes the stack entirely. */
-    private static void awaitStackDeleted(String stack) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stack)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stack + " was not deleted within the timeout");
-    }
 
     private static JsonNode describeDomain(String domain) throws Exception {
         return cognitoJson("DescribeUserPoolDomain", "{\"Domain\": \"" + domain + "\"}").path("DomainDescription");

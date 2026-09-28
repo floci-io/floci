@@ -342,9 +342,7 @@ sha256_composite_by_sizes() {
 }
 
 @test "OpenTofu: VPC enableDnsSupport persisted as false" {
-    VPC_ID=$(aws_cmd ec2 describe-vpcs \
-        --filters "Name=tag:Name,Values=floci-compat-vpc" \
-        --query 'Vpcs[0].VpcId' --output text)
+    VPC_ID=$(tofu output -raw vpc_id)
     run aws_cmd ec2 describe-vpc-attribute \
         --vpc-id "$VPC_ID" --attribute enableDnsSupport
     assert_success
@@ -352,9 +350,7 @@ sha256_composite_by_sizes() {
 }
 
 @test "OpenTofu: VPC enableDnsHostnames persisted as false" {
-    VPC_ID=$(aws_cmd ec2 describe-vpcs \
-        --filters "Name=tag:Name,Values=floci-compat-vpc" \
-        --query 'Vpcs[0].VpcId' --output text)
+    VPC_ID=$(tofu output -raw vpc_id)
     run aws_cmd ec2 describe-vpc-attribute \
         --vpc-id "$VPC_ID" --attribute enableDnsHostnames
     assert_success

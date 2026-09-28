@@ -7,6 +7,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 
 /**
@@ -26,8 +27,7 @@ final class PausingStorageBackend<V> implements StorageBackend<String, V> {
     private final StorageBackend<String, V> delegate;
     private volatile Call pauseOn;
     private volatile String pauseKey;
-    private final java.util.concurrent.atomic.AtomicInteger skip =
-            new java.util.concurrent.atomic.AtomicInteger();
+    private final AtomicInteger skip = new AtomicInteger();
     private final CountDownLatch reached = new CountDownLatch(1);
     private final CountDownLatch release = new CountDownLatch(1);
 

@@ -7,6 +7,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class KinesisStreamingDestination {
 
+    public static final String PRECISION_MILLISECOND = "MILLISECOND";
+    public static final String PRECISION_MICROSECOND = "MICROSECOND";
+
     private String streamArn;
     private String destinationStatus;
     private String destinationStatusDescription;
@@ -15,10 +18,14 @@ public class KinesisStreamingDestination {
     public KinesisStreamingDestination() {}
 
     public KinesisStreamingDestination(String streamArn) {
+        this(streamArn, PRECISION_MILLISECOND);
+    }
+
+    public KinesisStreamingDestination(String streamArn, String approximateCreationDateTimePrecision) {
         this.streamArn = streamArn;
         this.destinationStatus = "ACTIVE";
         this.destinationStatusDescription = "Kinesis streaming is enabled for this table";
-        this.approximateCreationDateTimePrecision = "MILLISECOND";
+        this.approximateCreationDateTimePrecision = approximateCreationDateTimePrecision;
     }
 
     public String getStreamArn() { return streamArn; }
@@ -30,7 +37,10 @@ public class KinesisStreamingDestination {
     public String getDestinationStatusDescription() { return destinationStatusDescription; }
     public void setDestinationStatusDescription(String desc) { this.destinationStatusDescription = desc; }
 
-    public String getApproximateCreationDateTimePrecision() { return approximateCreationDateTimePrecision; }
+    /** Destinations persisted before the precision was stored read back as the AWS default, MILLISECOND. */
+    public String getApproximateCreationDateTimePrecision() {
+        return approximateCreationDateTimePrecision != null ? approximateCreationDateTimePrecision : PRECISION_MILLISECOND;
+    }
     public void setApproximateCreationDateTimePrecision(String precision) {
         this.approximateCreationDateTimePrecision = precision;
     }

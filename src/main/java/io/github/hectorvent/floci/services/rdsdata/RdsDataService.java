@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
+import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
@@ -53,15 +54,17 @@ public class RdsDataService implements Resettable {
     private final Duration transactionTtl;
     private final ConcurrentMap<String, TransactionContext> transactions = new ConcurrentHashMap<>();
     private final ScheduledExecutorService transactionCleanupExecutor;
+    private final RdsBackendGate backendGate;
 
     @Inject
     public RdsDataService(RdsDataResourceResolver resourceResolver,
                           SecretsManagerService secretsManagerService,
                           ObjectMapper objectMapper,
                           RdsDataConnectionFactory connectionFactory,
-                          EmulatorConfig config) {
+                          EmulatorConfig config,
+                          RdsBackendGate backendGate) {
         this(resourceResolver, secretsManagerService, objectMapper, connectionFactory,
-                Duration.ofSeconds(config.services().rdsData().transactionTtlSeconds()));
+                Duration.ofSeconds(config.services().rdsData().transactionTtlSeconds()), backendGate);
     }
 
     RdsDataService(RdsDataResourceResolver resourceResolver,
@@ -69,11 +72,22 @@ public class RdsDataService implements Resettable {
                    ObjectMapper objectMapper,
                    RdsDataConnectionFactory connectionFactory,
                    Duration transactionTtl) {
+        this(resourceResolver, secretsManagerService, objectMapper, connectionFactory, transactionTtl,
+                RdsBackendGate.OPEN);
+    }
+
+    RdsDataService(RdsDataResourceResolver resourceResolver,
+                   SecretsManagerService secretsManagerService,
+                   ObjectMapper objectMapper,
+                   RdsDataConnectionFactory connectionFactory,
+                   Duration transactionTtl,
+                   RdsBackendGate backendGate) {
         this.resourceResolver = resourceResolver;
         this.secretsManagerService = secretsManagerService;
         this.objectMapper = objectMapper;
         this.connectionFactory = connectionFactory;
         this.transactionTtl = transactionTtl;
+        this.backendGate = backendGate;
         this.transactionCleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "rds-data-transaction-cleanup");
             thread.setDaemon(true);
@@ -95,7 +109,7 @@ public class RdsDataService implements Resettable {
             synchronized (tx) {
                 if (transactions.remove(id, tx)) {
                     rollbackQuietly(tx.connection);
-                    closeQuietly(tx.connection);
+                    tx.close();
                 }
             }
         });
@@ -106,7 +120,7 @@ public class RdsDataService implements Resettable {
             synchronized (tx) {
                 if (transactions.remove(id, tx)) {
                     rollbackQuietly(tx.connection);
-                    closeQuietly(tx.connection);
+                    tx.close();
                 }
             }
         });
@@ -149,13 +163,18 @@ public class RdsDataService implements Resettable {
         Credentials credentials = credentials(request, target, region);
         String database = databaseName(request, target);
 
+        // The transaction's connection keeps the cluster awake until it commits, rolls back or expires.
+        RdsBackendGate.Lease lease = enterBackend(target);
+        boolean leaseHandedOver = false;
         Connection connection = null;
         try {
             connection = connectionFactory.open(target, credentials.username(), credentials.password(), database);
             connection.setAutoCommit(false);
             String transactionId = UUID.randomUUID().toString();
             transactions.put(transactionId, new TransactionContext(
-                    transactionId, connection, target.engine(), target.arn(), database, region, transactionTtl));
+                    transactionId, connection, target.engine(), target.arn(), database, region, transactionTtl,
+                    lease));
+            leaseHandedOver = true;
 
             ObjectNode response = objectMapper.createObjectNode();
             response.put("transactionId", transactionId);
@@ -165,6 +184,10 @@ public class RdsDataService implements Resettable {
                 closeQuietly(connection);
             }
             throw databaseError(e);
+        } finally {
+            if (!leaseHandedOver) {
+                lease.close();
+            }
         }
     }
 
@@ -184,7 +207,7 @@ public class RdsDataService implements Resettable {
             } catch (SQLException e) {
                 throw databaseError(e);
             } finally {
-                closeQuietly(tx.connection);
+                tx.close();
             }
         }
         ObjectNode response = objectMapper.createObjectNode();
@@ -208,7 +231,7 @@ public class RdsDataService implements Resettable {
             } catch (SQLException e) {
                 throw databaseError(e);
             } finally {
-                closeQuietly(tx.connection);
+                tx.close();
             }
         }
         ObjectNode response = objectMapper.createObjectNode();
@@ -236,8 +259,25 @@ public class RdsDataService implements Resettable {
                 resourceResolver.resolve(resourceArn, region);
         Credentials credentials = credentials(request, target, region);
         String database = databaseName(request, target);
-        try (Connection connection = connectionFactory.open(target, credentials.username(), credentials.password(), database)) {
+        try (RdsBackendGate.Lease _ = enterBackend(target);
+             Connection connection = connectionFactory.open(target, credentials.username(), credentials.password(), database)) {
             return work.execute(connection, target.engine());
+        }
+    }
+
+    /**
+     * Resumes an auto-paused Aurora cluster before the Data API uses its database, as Aurora
+     * does, and keeps it from pausing again until the returned lease is closed.
+     */
+    private RdsBackendGate.Lease enterBackend(RdsDataResourceResolver.DatabaseTarget target) {
+        try {
+            return backendGate.enter(target.host(), target.port());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AwsException("InternalServerErrorException",
+                    "Interrupted while the DB cluster was resuming.", 500);
+        } catch (IllegalStateException e) {
+            throw new AwsException("InternalServerErrorException", e.getMessage(), 500);
         }
     }
 
@@ -395,7 +435,7 @@ public class RdsDataService implements Resettable {
     private static boolean returnsGeneratedKeys(DatabaseEngine engine) {
         return switch (engine) {
             case MYSQL, MARIADB -> true;
-            case POSTGRES -> false;
+            case POSTGRES, SQLSERVER -> false;
         };
     }
 
@@ -407,7 +447,7 @@ public class RdsDataService implements Resettable {
     private static boolean usesBackslashEscapes(DatabaseEngine engine) {
         return switch (engine) {
             case MYSQL, MARIADB -> true;
-            case POSTGRES -> false;
+            case POSTGRES, SQLSERVER -> false;
         };
     }
 
@@ -506,16 +546,18 @@ public class RdsDataService implements Resettable {
     private Credentials credentials(JsonNode request, RdsDataResourceResolver.DatabaseTarget target, String region) {
         String secretArn = textOrNull(request, "secretArn");
         if (secretArn != null && !secretArn.isBlank()) {
+            SecretVersion secret;
             try {
-                SecretVersion secret = secretsManagerService.getSecretValue(secretArn, null, null, region);
-                Credentials fromSecret = parseSecretCredentials(secret.getSecretString());
-                if (fromSecret != null) {
-                    return fromSecret;
-                }
+                secret = secretsManagerService.getSecretValue(secretArn, null, null, region);
             } catch (AwsException e) {
-                LOG.debugv("Falling back to RDS master credentials for Data API secret {0}: {1}",
-                        secretArn, e.getMessage());
+                throw new AwsException("SecretsErrorException", e.getMessage(), 400);
             }
+            Credentials fromSecret = parseSecretCredentials(secret.getSecretString());
+            if (fromSecret != null) {
+                return fromSecret;
+            }
+            throw new AwsException("InvalidSecretException",
+                    "The secret must contain username and password fields.", 400);
         }
         String username = target.username() != null && !target.username().isBlank() ? target.username() : "root";
         return new Credentials(username, target.password());
@@ -536,9 +578,11 @@ public class RdsDataService implements Resettable {
                 return new Credentials(username, password);
             }
         } catch (Exception e) {
-            LOG.debugv("Could not parse RDS Data API secret credentials: {0}", e.getMessage());
+            throw new AwsException("InvalidSecretException",
+                    "The secret must contain valid JSON credentials.", 400);
         }
-        return null;
+        throw new AwsException("InvalidSecretException",
+                "The secret must contain username and password fields.", 400);
     }
 
     private String databaseName(JsonNode request, RdsDataResourceResolver.DatabaseTarget target) {
@@ -579,7 +623,7 @@ public class RdsDataService implements Resettable {
                 synchronized (tx) {
                     if (tx.expiresAt.isBefore(now) && transactions.remove(id, tx)) {
                         rollbackQuietly(tx.connection);
-                        closeQuietly(tx.connection);
+                        tx.close();
                     }
                 }
             }
@@ -733,22 +777,32 @@ public class RdsDataService implements Resettable {
         private final String resourceArn;
         private final String database;
         private final String region;
+        private final RdsBackendGate.Lease lease;
         private volatile Instant expiresAt;
 
         private TransactionContext(
                 String id, Connection connection, DatabaseEngine engine, String resourceArn,
-                String database, String region, Duration ttl) {
+                String database, String region, Duration ttl, RdsBackendGate.Lease lease) {
             this.id = id;
             this.connection = connection;
             this.engine = engine;
             this.resourceArn = resourceArn;
             this.database = database;
             this.region = region;
+            this.lease = lease;
             refresh(ttl);
         }
 
         private void refresh(Duration ttl) {
             this.expiresAt = Instant.now().plus(ttl);
+        }
+
+        private void close() {
+            try {
+                closeQuietly(connection);
+            } finally {
+                lease.close();
+            }
         }
     }
 

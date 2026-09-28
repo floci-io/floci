@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -287,7 +288,7 @@ public class WebSocketProxyEventBuilder {
     }
 
     private String buildDomainName(String apiId, String region) {
-        return apiId + ".execute-api." + region + ".amazonaws.com";
+        return AwsEndpoints.executeApiHost(apiId, region);
     }
 
     private String buildMethodArn(String region, String apiId, String stageName) {

@@ -21,7 +21,7 @@ class ControlCatalogServiceTest {
     void listControlsFiltersByImplementationIdentifierAndProvider() throws Exception {
         var response = service.listControls(objectMapper.readTree("""
                 {"Filter":{"Implementations":{"Identifiers":["CT.S3.PV.5"]},"GovernedProviders":["AWS"]}}
-                """), null, null);
+                """), null, null, "aws");
 
         assertEquals(1, response.path("Controls").size());
         assertEquals("CT.S3.PV.5", response.path("Controls").get(0).path("Implementation").path("Identifier").asText());
@@ -30,7 +30,7 @@ class ControlCatalogServiceTest {
     @Test
     void listControlsRejectsInvalidProviderFilter() throws Exception {
         AwsException error = assertThrows(AwsException.class, () -> service.listControls(
-                objectMapper.readTree("{\"Filter\":{\"GovernedProviders\":[\"invalid\"]}}"), null, null));
+                objectMapper.readTree("{\"Filter\":{\"GovernedProviders\":[\"invalid\"]}}"), null, null, "aws"));
         assertEquals("ValidationException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
     }
@@ -39,13 +39,13 @@ class ControlCatalogServiceTest {
     void clearRemovesPersistedCatalogAndNextReadReseedsIt() {
         assertTrue(controls.keysForAccount("000000000000").isEmpty());
 
-        service.listControls(objectMapper.createObjectNode(), null, null);
+        service.listControls(objectMapper.createObjectNode(), null, null, "aws");
         assertFalse(controls.keysForAccount("000000000000").isEmpty());
 
         service.clear();
         assertTrue(controls.keysForAccount("000000000000").isEmpty());
 
-        var response = service.listControls(objectMapper.createObjectNode(), null, null);
+        var response = service.listControls(objectMapper.createObjectNode(), null, null, "aws");
         assertEquals(6, response.path("Controls").size());
         assertFalse(controls.keysForAccount("000000000000").isEmpty());
     }

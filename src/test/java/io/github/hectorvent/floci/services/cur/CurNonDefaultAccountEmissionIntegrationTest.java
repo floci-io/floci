@@ -1,15 +1,12 @@
 package io.github.hectorvent.floci.services.cur;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SynchronousBillingEmissionProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
-
-import java.util.HashMap;
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -30,7 +27,7 @@ import static org.hamcrest.Matchers.equalTo;
  * {@link ParquetEmitterIntegrationTest} for prerequisites.
  */
 @QuarkusTest
-@TestProfile(CurNonDefaultAccountEmissionIntegrationTest.SyncProfile.class)
+@TestProfile(SynchronousBillingEmissionProfile.class)
 @EnabledIfEnvironmentVariable(named = "FLOCI_DUCK_CROSS_CONTAINER_TEST", matches = "1|true|yes")
 class CurNonDefaultAccountEmissionIntegrationTest {
 
@@ -40,18 +37,6 @@ class CurNonDefaultAccountEmissionIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=" + ACCOUNT_ID + "/20260101/us-east-1/cur/aws4_request";
     private static final String S3_AUTH =
             "AWS4-HMAC-SHA256 Credential=" + ACCOUNT_ID + "/20260101/us-east-1/s3/aws4_request";
-
-    public static final class SyncProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            Map<String, String> o = new HashMap<>();
-            o.put("quarkus.http.test-port", "4566");
-            o.put("floci.base-url", "http://localhost:4566");
-            o.put("floci.services.cur.emit-mode", "synchronous");
-            o.put("floci.services.bcm-data-exports.emit-mode", "synchronous");
-            return o;
-        }
-    }
 
     @BeforeAll
     static void configureRestAssured() {

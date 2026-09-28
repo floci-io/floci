@@ -27,7 +27,7 @@ import java.util.Set;
 /**
  * Provisions {@code AWS::SecretsManager::SecretTargetAttachment}.
  *
- * <p>Extracted from {@code CloudFormationResourceProvisioner}. Unlike most provisioners this one
+ * <p>Extracted from the former CloudFormation monolith. Unlike most provisioners this one
  * wraps three services rather than one: an attachment reads the endpoint of the RDS or DocumentDB
  * instance or cluster it points at, so it can write the connection detail (engine, host, port,
  * dbname, identifier) into the target secret. That dependency is inherent to the type, and it is
@@ -37,9 +37,8 @@ import java.util.Set;
  * overrides {@code delete(StackResource, String)}. The delete needs two create-time attributes
  * that no physical id carries: which secret fields this attachment managed, so only those are
  * stripped, and which attachment owns the secret, so a second attachment's fields are left alone.
- * Registering that here is what lets the type leave the engine's
- * {@code DELETE_NEEDS_STACK_RESOURCE} set; the two must change together or
- * {@code CfnDeletePrecedenceTest} fails with both claiming it.
+ * The dispatcher hands the owner the whole resource on delete, which is what makes that
+ * possible.
  */
 @ApplicationScoped
 public class SecretTargetAttachmentCfnProvisioner implements CfnResourceProvisioner {
@@ -109,7 +108,7 @@ public class SecretTargetAttachmentCfnProvisioner implements CfnResourceProvisio
         String targetId = requireSecretTargetProperty(props, "TargetId", ctx);
         String targetType = requireSecretTargetProperty(props, "TargetType", ctx);
         validateSecretTargetType(targetType);
-        SecretTargetConnection connection = resolveSecretTargetConnection(targetType, targetId);
+        SecretTargetConnection connection = resolveSecretTargetConnection(targetType, targetId, region);
 
         String previousSecretId = r.getPhysicalId();
         String previousManagedKeys = r.getAttributes().get(SECRET_TARGET_MANAGED_KEYS_ATTR);
@@ -246,18 +245,18 @@ public class SecretTargetAttachmentCfnProvisioner implements CfnResourceProvisio
                 "SecretString for AWS::SecretsManager::SecretTargetAttachment must be a JSON object.", 400);
     }
 
-    private SecretTargetConnection resolveSecretTargetConnection(String targetType, String targetId) {
+    private SecretTargetConnection resolveSecretTargetConnection(String targetType, String targetId, String region) {
         return switch (targetType) {
-            case "AWS::RDS::DBInstance" -> dbInstanceConnection(targetId);
-            case "AWS::RDS::DBCluster" -> dbClusterConnection(targetId);
-            case "AWS::DocDB::DBInstance" -> docDbInstanceConnection(targetId);
-            case "AWS::DocDB::DBCluster" -> docDbClusterConnection(targetId);
+            case "AWS::RDS::DBInstance" -> dbInstanceConnection(targetId, region);
+            case "AWS::RDS::DBCluster" -> dbClusterConnection(targetId, region);
+            case "AWS::DocDB::DBInstance" -> docDbInstanceConnection(targetId, region);
+            case "AWS::DocDB::DBCluster" -> docDbClusterConnection(targetId, region);
             default -> throw new IllegalStateException("Validated target type was not handled: " + targetType);
         };
     }
 
-    private SecretTargetConnection dbInstanceConnection(String targetId) {
-        DbInstance instance = rdsService.getDbInstance(targetId);
+    private SecretTargetConnection dbInstanceConnection(String targetId, String region) {
+        DbInstance instance = rdsService.getDbInstance(targetId, region);
         if (instance == null || instance.getEngine() == null || instance.getEndpoint() == null
                 || instance.getEndpoint().address() == null
                 || instance.getEndpoint().address().isBlank()
@@ -275,8 +274,8 @@ public class SecretTargetAttachmentCfnProvisioner implements CfnResourceProvisio
                 instance.getDbInstanceIdentifier());
     }
 
-    private SecretTargetConnection dbClusterConnection(String targetId) {
-        DbCluster cluster = rdsService.getDbCluster(targetId);
+    private SecretTargetConnection dbClusterConnection(String targetId, String region) {
+        DbCluster cluster = rdsService.getDbCluster(targetId, region);
         if (cluster == null || cluster.getEngine() == null || cluster.getEndpoint() == null
                 || cluster.getEndpoint().address() == null
                 || cluster.getEndpoint().address().isBlank()
@@ -294,8 +293,8 @@ public class SecretTargetAttachmentCfnProvisioner implements CfnResourceProvisio
                 cluster.getDbClusterIdentifier());
     }
 
-    private SecretTargetConnection docDbInstanceConnection(String targetId) {
-        DocDbInstance instance = docDbService.getDbInstance(targetId);
+    private SecretTargetConnection docDbInstanceConnection(String targetId, String region) {
+        DocDbInstance instance = docDbService.getDbInstance(targetId, region);
         if (instance == null || instance.getEndpoint() == null
                 || instance.getEndpoint().isBlank()
                 || instance.getPort() <= 0
@@ -312,8 +311,8 @@ public class SecretTargetAttachmentCfnProvisioner implements CfnResourceProvisio
                 instance.getDbInstanceIdentifier());
     }
 
-    private SecretTargetConnection docDbClusterConnection(String targetId) {
-        DocDbCluster cluster = docDbService.getDbCluster(targetId);
+    private SecretTargetConnection docDbClusterConnection(String targetId, String region) {
+        DocDbCluster cluster = docDbService.getDbCluster(targetId, region);
         if (cluster == null || cluster.getEndpoint() == null
                 || cluster.getEndpoint().isBlank()
                 || cluster.getPort() <= 0

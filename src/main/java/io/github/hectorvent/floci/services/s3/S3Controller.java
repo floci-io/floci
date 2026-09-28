@@ -2,10 +2,12 @@ package io.github.hectorvent.floci.services.s3;
 
 import static io.github.hectorvent.floci.services.s3.S3RequestParser.hasQueryParam;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
@@ -76,6 +78,9 @@ import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
 @Path("/")
 public class S3Controller {
 
+    /** The one region S3 treats specially in every partition: no LocationConstraint, idempotent CreateBucket. */
+    private static final String US_EAST_1 = "us-east-1"; // partition-literal: S3's own global-endpoint rule
+
     private static final Logger LOG = Logger.getLogger(S3Controller.class);
     private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
             .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
@@ -96,6 +101,7 @@ public class S3Controller {
     private final RequestContext requestContext;
     private final IamService iamService;
     private final IamEnforcementFilter iamEnforcementFilter;
+    private final EmulatorConfig config;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
@@ -107,7 +113,8 @@ public class S3Controller {
                         AccountResolver accountResolver,
                         RequestContext requestContext,
                         IamService iamService,
-                        IamEnforcementFilter iamEnforcementFilter) {
+                        IamEnforcementFilter iamEnforcementFilter,
+                        EmulatorConfig config) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
@@ -119,6 +126,7 @@ public class S3Controller {
         this.requestContext = requestContext;
         this.iamService = iamService;
         this.iamEnforcementFilter = iamEnforcementFilter;
+        this.config = config;
     }
 
     private void emitCloudTrailEvent(String eventName, String bucket, String key,
@@ -400,29 +408,28 @@ public class S3Controller {
 
             s3Service.authorizeCreateBucket(authorization);
             String locationConstraint = null;
+            Map<String, String> creationTags = Map.of();
             if (body != null && body.length > 0) {
-                locationConstraint = XmlParser.extractFirst(new String(body, StandardCharsets.UTF_8),
-                        "LocationConstraint", null);
-            }
-            if (locationConstraint != null) {
-                locationConstraint = locationConstraint.trim();
-                if (locationConstraint.isEmpty()) {
-                    locationConstraint = null;
-                } else if ("us-east-1".equalsIgnoreCase(locationConstraint)) {
-                    throw new AwsException("InvalidLocationConstraint",
-                            "The specified location-constraint is not valid.", 400);
+                XmlParser.XmlElement configuration = parseCreateBucketConfiguration(body);
+                XmlParser.XmlElement locationNode = configuration.child("LocationConstraint");
+                if (locationNode != null) {
+                    locationConstraint = locationNode.text().trim();
+                    if (locationConstraint.isEmpty()) {
+                        locationConstraint = null;
+                    } else if (!isValidLocationConstraint(locationConstraint)) {
+                        throw new AwsException("InvalidLocationConstraint",
+                                "The specified location-constraint is not valid.", 400);
+                    }
                 }
+                creationTags = XmlParser.extractPairs(
+                        new String(body, StandardCharsets.UTF_8), "Tag", "Key", "Value");
             }
-            String region = locationConstraint != null ? locationConstraint : regionResolver.resolveRegion(httpHeaders);
+            String region = bucketRegionForCreate(locationConstraint, regionResolver.resolveRegion(httpHeaders));
             s3Service.createBucket(bucket, region);
             // CreateBucketConfiguration may carry a <Tags> array; AWS applies those tags to the
             // new bucket, so a follow-up GetBucketTagging / ListTagsForResource must return them.
-            if (body != null && body.length > 0) {
-                Map<String, String> creationTags = XmlParser.extractPairs(
-                        new String(body, StandardCharsets.UTF_8), "Tag", "Key", "Value");
-                if (!creationTags.isEmpty()) {
-                    s3Service.putBucketTagging(bucket, creationTags);
-                }
+            if (!creationTags.isEmpty()) {
+                s3Service.putBucketTagging(bucket, creationTags);
             }
             String lockEnabled = httpHeaders.getHeaderString("x-amz-bucket-object-lock-enabled");
             if ("true".equalsIgnoreCase(lockEnabled)) {
@@ -818,7 +825,7 @@ public class S3Controller {
                             copySource, bucket, key, uploadId, partNumber, httpHeaders, authorization);
                 }
                 byte[] partData = decodeAwsChunked(body, contentEncoding, contentSha256);
-                validateChecksumHeaders(httpHeaders, partData, getChecksumAlgorithm(httpHeaders));
+                validateChecksumHeaders(httpHeaders, uriInfo, partData, getChecksumAlgorithm(httpHeaders, uriInfo));
                 Part part = s3Service.storePart(bucket, key, uploadId, partNumber, partData,
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
@@ -837,7 +844,7 @@ public class S3Controller {
 
             if (copySource != null && !copySource.isEmpty()) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
-                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, authorization);
+                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, uriInfo, authorization);
             }
 
             Map<String, String> inlineTags = parseInlineTaggingHeader(resolveInlineTaggingSource(tagging, uriInfo));
@@ -848,8 +855,8 @@ public class S3Controller {
             Instant retainUntil = retainUntilStr != null ? Instant.parse(retainUntilStr) : null;
 
             byte[] data = decodeAwsChunked(body, contentEncoding, contentSha256);
-            String checksumAlgorithm = getChecksumAlgorithm(httpHeaders);
-            validateChecksumHeaders(httpHeaders, data, checksumAlgorithm);
+            String checksumAlgorithm = getChecksumAlgorithm(httpHeaders, uriInfo);
+            validateChecksumHeaders(httpHeaders, uriInfo, data, checksumAlgorithm);
             String persistedEncoding = toPersistedContentEncoding(contentEncoding);
             String contentDisposition = httpHeaders.getHeaderString("Content-Disposition");
             String cacheControl = httpHeaders.getHeaderString("Cache-Control");
@@ -881,7 +888,7 @@ public class S3Controller {
                             .withGrantReadAcp(httpHeaders.getHeaderString("x-amz-grant-read-acp"))
                             .withGrantWriteAcp(httpHeaders.getHeaderString("x-amz-grant-write-acp"))
                             .withChecksumAlgorithm(checksumAlgorithm)
-                            .withClientChecksum(extractChecksumFromHeaders(httpHeaders))
+                            .withClientChecksum(extractChecksum(httpHeaders, uriInfo))
                             .withIfMatch(ifMatch)
                             .withIfNoneMatch(ifNoneMatch)
                             .withTagging(inlineTags));
@@ -1011,7 +1018,7 @@ public class S3Controller {
                         "Request specific response headers cannot be used for anonymous GET requests.", 400));
             }
 
-            boolean includeChecksum = "ENABLED".equalsIgnoreCase(checksumMode);
+            boolean includeChecksum = "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
                 return handleRangeRequest(obj, rangeHeader, overrides, includeChecksum);
             }
@@ -1218,7 +1225,7 @@ public class S3Controller {
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
-            boolean includeChecksum = "ENABLED".equalsIgnoreCase(checksumMode);
+            boolean includeChecksum = "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
             appendObjectHeaders(resp, obj, overrides, includeChecksum);
             emitCloudTrailEvent("HeadObject", bucket, key, 0L, obj.getSize(), null, null);
             return resp.build();
@@ -1429,8 +1436,8 @@ public class S3Controller {
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
-                        getChecksumAlgorithm(httpHeaders),
-                        httpHeaders.getHeaderString("x-amz-checksum-type"),
+                        getChecksumAlgorithm(httpHeaders, uriInfo),
+                        resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-type"),
                         parseInlineTaggingHeader(
                                 resolveInlineTaggingSource(httpHeaders.getHeaderString("x-amz-tagging"), uriInfo)));
                 String xml = new XmlBuilder()
@@ -1473,8 +1480,8 @@ public class S3Controller {
                 if (preconditionResponse != null) {
                     return preconditionResponse;
                 }
-                String checksumType = httpHeaders.getHeaderString("x-amz-checksum-type");
-                S3Checksum expectedChecksum = extractChecksumFromHeaders(httpHeaders);
+                String checksumType = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-type");
+                S3Checksum expectedChecksum = extractChecksum(httpHeaders, uriInfo);
                 S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
                         completedPartETags(completedParts), completedPartChecksums(completedParts), checksumType,
                         expectedChecksum);
@@ -2053,12 +2060,43 @@ public class S3Controller {
         }
     }
 
+    /**
+     * S3's CreateBucket region rules, the same in every partition (moto's {@code aws_verified}
+     * matrix): every regional endpoint but {@code us-east-1} requires a constraint naming exactly
+     * its region and answers {@code IllegalLocationConstraintException} otherwise, including for a
+     * {@code us-east-1} constraint, so in a China or GovCloud deployment the constraint is de facto
+     * required; the {@code us-east-1} endpoint takes any constraint but its own, which is
+     * {@code InvalidLocationConstraint}.
+     */
+    static String bucketRegionForCreate(String locationConstraint, String endpointRegion) {
+        boolean globalEndpoint = US_EAST_1.equals(endpointRegion);
+        if (locationConstraint == null) {
+            if (!globalEndpoint) {
+                throw new AwsException("IllegalLocationConstraintException",
+                        "The unspecified location constraint is incompatible for the region specific "
+                                + "endpoint this request was sent to.", 400);
+            }
+            return US_EAST_1;
+        }
+        if (!globalEndpoint && !locationConstraint.equalsIgnoreCase(endpointRegion)) {
+            throw new AwsException("IllegalLocationConstraintException",
+                    "The " + locationConstraint + " location constraint is incompatible for the region "
+                            + "specific endpoint this request was sent to.", 400);
+        }
+        if (US_EAST_1.equalsIgnoreCase(locationConstraint)) {
+            throw new AwsException("InvalidLocationConstraint",
+                    "The specified location-constraint is not valid.", 400);
+        }
+        return locationConstraint;
+    }
+
     // --- Bucket Location ---
 
     private Response handleGetBucketLocation(String bucket) {
         String region = s3Service.getBucketRegion(bucket);
         String xml;
-        if (region == null || "us-east-1".equals(region)) {
+        // Null only for us-east-1, in every partition (GetBucketLocationOutput in the S3 model).
+        if (region == null || US_EAST_1.equals(region)) {
             xml = "<LocationConstraint xmlns=\"" + AwsNamespaces.S3 + "\"/>";
         } else {
             xml = new XmlBuilder()
@@ -2081,6 +2119,9 @@ public class S3Controller {
 
     private Response handleGetBucketTagging(String bucket) {
         Map<String, String> tags = s3Service.getBucketTagging(bucket);
+        if (tags.isEmpty()) {
+            throw new AwsException("NoSuchTagSet", "The TagSet does not exist", 404);
+        }
         return Response.ok(buildTaggingXml(tags)).type(MediaType.APPLICATION_XML).build();
     }
 
@@ -2243,9 +2284,9 @@ public class S3Controller {
                     httpHeaders.getHeaderString("x-amz-content-sha256"));
             String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
             String versionId = uriInfo.getQueryParameters().getFirst("versionId");
-            String algorithmHeader = getChecksumAlgorithm(httpHeaders);
+            String algorithmHeader = getChecksumAlgorithm(httpHeaders, uriInfo);
             ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(algorithmHeader);
-            validateChecksumHeaders(httpHeaders, payload, algorithmHeader);
+            validateChecksumHeaders(httpHeaders, uriInfo, payload, algorithmHeader);
             validateContentMd5(httpHeaders, payload);
             ObjectAnnotation annotation = s3Service.putObjectAnnotation(bucket, key, annotationName,
                     versionId, payload, httpHeaders.getHeaderString("x-amz-object-if-match"), algorithm);
@@ -2281,7 +2322,7 @@ public class S3Controller {
             if (annotation.getVersionId() != null) {
                 response.header("x-amz-object-version-id", annotation.getVersionId());
             }
-            if ("ENABLED".equalsIgnoreCase(httpHeaders.getHeaderString("x-amz-checksum-mode"))) {
+            if ("ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-mode"))) {
                 appendAnnotationChecksumHeaders(response, annotation);
             }
             appendAnnotationSseHeader(response, annotation);
@@ -2635,6 +2676,7 @@ public class S3Controller {
 
     private Response handleCopyObject(String copySource, String destBucket, String destKey,
                                       String contentType, HttpHeaders httpHeaders,
+                                      UriInfo uriInfo,
                                       S3Service.RequestAuthorization authorization) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
@@ -2683,7 +2725,7 @@ public class S3Controller {
                         .withCopySourceSseCustomerAlgorithm(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-algorithm"))
                         .withCopySourceSseCustomerKey(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key"))
                         .withCopySourceSseCustomerKeyMd5(httpHeaders.getHeaderString("x-amz-copy-source-server-side-encryption-customer-key-MD5"))
-                        .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders))
+                        .withChecksumAlgorithm(getChecksumAlgorithm(httpHeaders, uriInfo))
                         .withAnnotationDirective(annotationDirective)
                         .withAcl(cannedAcl)
                         .withGrantRead(httpHeaders.getHeaderString("x-amz-grant-read"))
@@ -2886,12 +2928,41 @@ public class S3Controller {
         return metadata;
     }
 
-    private S3Checksum extractChecksumFromHeaders(HttpHeaders httpHeaders) {
-        String crc32 = httpHeaders.getHeaderString("x-amz-checksum-crc32");
-        String crc32c = httpHeaders.getHeaderString("x-amz-checksum-crc32c");
-        String crc64nvme = httpHeaders.getHeaderString("x-amz-checksum-crc64nvme");
-        String sha1 = httpHeaders.getHeaderString("x-amz-checksum-sha1");
-        String sha256 = httpHeaders.getHeaderString("x-amz-checksum-sha256");
+    static String resolveHeaderOrQueryParam(HttpHeaders httpHeaders, UriInfo uriInfo, String name) {
+        String headerVal = httpHeaders != null ? httpHeaders.getHeaderString(name) : null;
+        return resolveHeaderOrQueryParam(headerVal, uriInfo, name);
+    }
+
+    static String resolveHeaderOrQueryParam(String headerValue, UriInfo uriInfo, String name) {
+        if (headerValue != null && !headerValue.isBlank()) {
+            return headerValue;
+        }
+        if (uriInfo != null) {
+            MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+            if (queryParams != null) {
+                String val = queryParams.getFirst(name);
+                if (val != null && !val.isBlank()) {
+                    return val;
+                }
+                for (Map.Entry<String, List<String>> entry : queryParams.entrySet()) {
+                    if (entry.getKey().equalsIgnoreCase(name) && !entry.getValue().isEmpty()) {
+                        String v = entry.getValue().get(0);
+                        if (v != null && !v.isBlank()) {
+                            return v;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private S3Checksum extractChecksum(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        String crc32 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32");
+        String crc32c = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32c");
+        String crc64nvme = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc64nvme");
+        String sha1 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-sha1");
+        String sha256 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-sha256");
         if (crc32 == null && crc32c == null && crc64nvme == null && sha1 == null && sha256 == null) {
             return null;
         }
@@ -2905,36 +2976,36 @@ public class S3Controller {
         return checksum;
     }
 
-    private String getChecksumAlgorithm(HttpHeaders httpHeaders) {
-        String algorithm = httpHeaders.getHeaderString("x-amz-checksum-algorithm");
+    private String getChecksumAlgorithm(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        String algorithm = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-algorithm");
         if (algorithm == null || algorithm.isBlank()) {
-            algorithm = httpHeaders.getHeaderString("x-amz-sdk-checksum-algorithm");
+            algorithm = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-sdk-checksum-algorithm");
         }
         return algorithm;
     }
 
-    private void validateChecksumHeaders(HttpHeaders httpHeaders, byte[] data, String algorithm) {
-        String sha1 = httpHeaders.getHeaderString("x-amz-checksum-sha1");
+    private void validateChecksumHeaders(HttpHeaders httpHeaders, UriInfo uriInfo, byte[] data, String algorithm) {
+        String sha1 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-sha1");
         if (sha1 != null && !sha1.equals(S3Checksum.sha1Base64(data))) {
             throw new AwsException("BadDigest", "The SHA1 checksum you specified did not match the payload.", 400);
         }
 
-        String sha256 = httpHeaders.getHeaderString("x-amz-checksum-sha256");
+        String sha256 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-sha256");
         if (sha256 != null && !sha256.equals(S3Checksum.sha256Base64(data))) {
             throw new AwsException("BadDigest", "The SHA256 checksum you specified did not match the payload.", 400);
         }
 
-        String crc32 = httpHeaders.getHeaderString("x-amz-checksum-crc32");
+        String crc32 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32");
         if (crc32 != null && !crc32.equals(S3Checksum.crc32Base64(data))) {
             throw new AwsException("BadDigest", "The CRC32 checksum you specified did not match the payload.", 400);
         }
 
-        String crc32c = httpHeaders.getHeaderString("x-amz-checksum-crc32c");
+        String crc32c = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc32c");
         if (crc32c != null && !crc32c.equals(S3Checksum.crc32cBase64(data))) {
             throw new AwsException("BadDigest", "The CRC32C checksum you specified did not match the payload.", 400);
         }
 
-        String crc64nvme = httpHeaders.getHeaderString("x-amz-checksum-crc64nvme");
+        String crc64nvme = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc64nvme");
         if (crc64nvme != null && !crc64nvme.equals(S3Checksum.crc64NvmeBase64(data))) {
             throw new AwsException("BadDigest", "The CRC64NVME checksum you specified did not match the payload.", 400);
         }
@@ -3323,9 +3394,11 @@ public class S3Controller {
          * itself no-ops when IAM enforcement is disabled.
          */
         String credential = lcFields.get("x-amz-credential");
+        rejectUnknownPostRegion(credential);
         if (credential != null && !credential.isEmpty()) {
             iamEnforcementFilter.authorizeAdditionalResource(
-                    "Credential=" + credential, "s3:PutObject", S3PublicAccessEvaluator.objectArn(bucket, key));
+                    "Credential=" + credential, "s3:PutObject",
+                    S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key));
         }
 
         if (s3Service.isAuthEnforced()) {
@@ -3378,6 +3451,23 @@ public class S3Controller {
             response.header("x-amz-version-id", obj.getVersionId());
         }
         return response.build();
+    }
+
+    /**
+     * The presigned-POST counterpart of {@code AccountContextFilter}'s unknown-region refusal: the
+     * form's {@code x-amz-credential} never reaches that filter. minio runs this credential through
+     * the same scope parser as a signed header and answers a wrong region with
+     * {@code AuthorizationHeaderMalformed}.
+     */
+    private void rejectUnknownPostRegion(String credential) {
+        if (credential == null || credential.isEmpty() || config.partitions().allowUnknownRegions()) {
+            return;
+        }
+        String region = regionResolver.resolveRegionFromPresignedCredential(credential);
+        if (!RegionResolver.isKnownRegion(region)) {
+            throw new AwsException("AuthorizationHeaderMalformed", "The authorization header is malformed; "
+                    + "the region '" + region + "' is wrong; expecting a region AWS publishes.", 400);
+        }
     }
 
     /**
@@ -3720,7 +3810,7 @@ public class S3Controller {
     }
 
     /**
-     * Extracts the object key from the raw Vert.x request URI, preserving leading slashes
+     * Extracts the object key from the raw Vert.x request path, preserving leading slashes
      * that JAX-RS path normalization would otherwise strip.
      */
     private String extractObjectKey(UriInfo uriInfo, String bucket) {
@@ -3729,23 +3819,50 @@ public class S3Controller {
 
     private String extractObjectKey(UriInfo uriInfo, String bucket, String fallbackKey) {
         validateRawUri();
-        String rawUri = currentVertxRequest.getCurrent().request().uri();
-        int qIdx = rawUri.indexOf('?');
-        String rawPath = qIdx >= 0 ? rawUri.substring(0, qIdx) : rawUri;
+        String rawPath = currentVertxRequest.getCurrent().request().path();
         String bucketPrefix = "/" + bucket + "/";
-        int prefixIndex = rawPath.indexOf(bucketPrefix);
-        if (prefixIndex < 0) {
-            // Should not happen on standard /{bucket}/{key:.+} routes, but can happen when
-            // requests are rerouted from a single-segment route (e.g. createBucket / handleBucketPost)
-            String pathKey = uriInfo.getPathParameters().getFirst("key");
-            String resolvedKey = pathKey != null ? pathKey : fallbackKey;
-            validateKeyNoTraversal(resolvedKey);
-            return resolvedKey;
+        String rawKey;
+        if (isVirtualHostedRawPath(uriInfo, bucket, rawPath)) {
+            // Virtual-hosted style: S3VirtualHostFilter rewrote the JAX-RS URI to "/<bucket>" +
+            // path, but the RAW path is still the key alone. Searching it for "/<bucket>/" finds
+            // that string only when the KEY happens to contain the bucket's name as a segment,
+            // and everything up to that segment was then dropped from the key.
+            rawKey = rawPath.substring(1);
+        } else {
+            int prefixIndex = rawPath.indexOf(bucketPrefix);
+            if (prefixIndex < 0) {
+                // Should not happen on standard /{bucket}/{key:.+} routes, but can happen when
+                // requests are rerouted from a single-segment route (e.g. createBucket / handleBucketPost)
+                String pathKey = uriInfo.getPathParameters().getFirst("key");
+                String resolvedKey = pathKey != null ? pathKey : fallbackKey;
+                validateKeyNoTraversal(resolvedKey);
+                return resolvedKey;
+            }
+            rawKey = rawPath.substring(prefixIndex + bucketPrefix.length());
         }
-        String rawKey = rawPath.substring(prefixIndex + bucketPrefix.length());
         String key = URLDecoder.decode(rawKey.replace("+", "%2B"), StandardCharsets.UTF_8);
         validateKeyNoTraversal(key);
         return key;
+    }
+
+    /**
+     * True when the raw request path carries no bucket prefix because the bucket came from the
+     * Host header: the rewritten request URI is then exactly "/" + bucket + rawPath, which is
+     * what {@link S3VirtualHostFilter} produces and what a path-style request never is. JAX-RS
+     * collapses consecutive slashes before the filter sees the path, so a leading-slash key
+     * ({@code //file.txt} on the wire) is rewritten to {@code /<bucket>/file.txt}; the collapsed
+     * form is compared as well so that key keeps its slash.
+     */
+    private static boolean isVirtualHostedRawPath(UriInfo uriInfo, String bucket, String rawPath) {
+        if (rawPath.isEmpty() || rawPath.charAt(0) != '/') {
+            return false;
+        }
+        String rewritten = uriInfo.getRequestUri().getRawPath();
+        if (rewritten == null || rewritten.equals(rawPath)) {
+            return false;
+        }
+        return rewritten.equals("/" + bucket + rawPath)
+                || rewritten.equals("/" + bucket + rawPath.replaceAll("/{2,}", "/"));
     }
 
     private void validateKeyNoTraversal(String key) {
@@ -3767,9 +3884,7 @@ public class S3Controller {
     }
 
     private void validateRawUri() {
-        String rawUri = currentVertxRequest.getCurrent().request().uri();
-        int queryIndex = rawUri.indexOf('?');
-        String rawPath = queryIndex >= 0 ? rawUri.substring(0, queryIndex) : rawUri;
+        String rawPath = currentVertxRequest.getCurrent().request().path();
         String decodedPath;
         try {
             decodedPath = URLDecoder.decode(rawPath.replace("+", "%2B"), StandardCharsets.UTF_8);
@@ -3859,7 +3974,8 @@ public class S3Controller {
     private void authorizeCopySourceRead(HttpHeaders httpHeaders, CopySourceRef source,
                                          S3Service.RequestAuthorization authorization) {
         String action = source.versionId() == null ? "s3:GetObject" : "s3:GetObjectVersion";
-        String resource = S3PublicAccessEvaluator.objectArn(source.bucket(), source.objectKey());
+        String resource = S3PublicAccessEvaluator.objectArn(
+                s3Service.bucketPartition(source.bucket()), source.bucket(), source.objectKey());
         S3Service.SignedPrincipalResourcePolicyEvaluation resourcePolicyEvaluation =
                 s3Service.signedPrincipalResourcePolicyDecision(
                         source.bucket(), action, resource, authorization);
@@ -4089,5 +4205,38 @@ public class S3Controller {
         }
         String text = new String(body, StandardCharsets.UTF_8).trim();
         return text.startsWith("<") && text.contains("CreateBucketConfiguration");
+    }
+
+    /**
+     * Validates a non-empty CreateBucket body before any bucket state is created. A malformed
+     * document, a root other than {@code CreateBucketConfiguration}, or an unknown root child is a
+     * {@code MalformedXML} error.
+     */
+    private static XmlParser.XmlElement parseCreateBucketConfiguration(byte[] body) {
+        String xml = new String(body, StandardCharsets.UTF_8);
+        if (!"CreateBucketConfiguration".equals(XmlParser.rootElementName(xml))) {
+            throw malformedXml();
+        }
+        XmlParser.XmlElement configuration = XmlParser.extractElementTree(xml, "CreateBucketConfiguration");
+        if (configuration == null) {
+            throw malformedXml();
+        }
+        for (XmlParser.XmlElement child : configuration.children()) {
+            String name = child.name();
+            if (!"LocationConstraint".equals(name) && !"Location".equals(name)
+                    && !"Bucket".equals(name) && !"Tags".equals(name)) {
+                throw malformedXml();
+            }
+        }
+        return configuration;
+    }
+
+    private static AwsException malformedXml() {
+        return new AwsException("MalformedXML",
+                "The XML you provided was not well-formed or did not validate against our published schema", 400);
+    }
+
+    private static boolean isValidLocationConstraint(String value) {
+        return "EU".equalsIgnoreCase(value) || AwsRegions.isRegionId(value);
     }
 }

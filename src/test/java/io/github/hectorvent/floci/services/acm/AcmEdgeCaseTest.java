@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.acm;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -117,7 +118,7 @@ class AcmEdgeCaseTest {
             .body("CertificateArn", startsWith("arn:aws:acm:"))
             .extract().jsonPath().getString("CertificateArn");
 
-        var validationOptions = given()
+        JsonPath validationOptions = given()
             .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
             .contentType(ACM_CONTENT_TYPE)
             .body("""

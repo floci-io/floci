@@ -551,6 +551,7 @@ class MwaaServiceTest {
         private MwaaEnvironmentManager environmentManager;
         private MwaaProxyManager proxyManager;
         private MwaaService realModeService;
+        private boolean keepRunningOnShutdown;
 
         @BeforeEach
         void setUpRealMode() {
@@ -571,6 +572,7 @@ class MwaaServiceTest {
                         case "proxyBasePort" -> 8700;
                         case "proxyMaxPort" -> 8799;
                         case "dagSyncIntervalSeconds" -> 30;
+                        case "keepRunningOnShutdown" -> keepRunningOnShutdown;
                         default -> defaultValue(method);
                     });
             EmulatorConfig.ServicesConfig servicesConfig = proxy(EmulatorConfig.ServicesConfig.class,
@@ -609,6 +611,16 @@ class MwaaServiceTest {
             realModeService.deleteEnvironment("real-env");
 
             verify(portAllocator).release(8701);
+        }
+
+        @Test
+        void shutdownLeavesEnvironmentContainersRunningWhenRetentionIsEnabled() {
+            keepRunningOnShutdown = true;
+            realModeService.createEnvironment("kept-env", createRequest("arn:aws:s3:::my-bucket", "dags"));
+
+            realModeService.shutdown();
+
+            verify(environmentManager, Mockito.never()).stopEnvironment(any());
         }
 
         @Test

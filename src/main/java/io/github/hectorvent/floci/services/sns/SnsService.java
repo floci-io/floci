@@ -5,11 +5,14 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -30,8 +33,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.math.BigDecimal;
+import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -55,14 +61,32 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SnsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SnsService.class);
     private static final Duration FIFO_DEDUP_WINDOW = Duration.ofMinutes(5);
-    private static final int MAX_PUBLISH_SIZE = 262_144;
+    /** Includes the original send and two immediate retries for local SQS fan-out. */
+    private static final int SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS = 3;
+    private static final String SUBSCRIPTION_REDRIVE_POLICY = "RedrivePolicy";
+    /** Default value of the {@code MaximumMessageSize} topic attribute, and the ceiling below
+     *  which a topic carries no subscription restrictions. AWS raised the maximum to 1 MiB in
+     *  September 2026 but left the default at 256 KiB, so an unconfigured topic is unchanged. */
+    public static final int DEFAULT_MAX_MESSAGE_SIZE = 262_144;
+    private static final int MIN_MAX_MESSAGE_SIZE = 1_024;
+    private static final int MAX_MAX_MESSAGE_SIZE = 1_048_576;
+    /** The only protocols allowed on a topic above {@link #DEFAULT_MAX_MESSAGE_SIZE}. */
+    private static final Set<String> LARGE_PAYLOAD_PROTOCOLS = Set.of("sqs", "firehose", "lambda");
+    private static final String SUBSCRIPTION_ROLE_ARN = "SubscriptionRoleArn";
+    private static final Pattern IAM_ROLE_ARN = Pattern.compile(
+            "arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+");
+    /** How many subscriptions a topic above {@link #DEFAULT_MAX_MESSAGE_SIZE} may carry. */
+    private static final int LARGE_PAYLOAD_SUBSCRIPTION_LIMIT = 100;
+    private static final String MAXIMUM_MESSAGE_SIZE = "MaximumMessageSize";
     private static final int PUSH_CAPTURE_LIMIT = 1000;
+    private static final int MAX_SUBJECT_LENGTH = 100;
     private static final String CONTROL_TOWER_AGGREGATE_SECURITY_TOPIC =
             "aws-controltower-AggregateSecurityNotifications";
     private static final List<String> PENDING_CONFIRMATION_PROTOCOLS =
@@ -90,6 +114,7 @@ public class SnsService implements Resettable, ResourceProvider {
     private final RegionResolver regionResolver;
     private final SqsService sqsService;
     private final LambdaService lambdaService;
+    private final FirehoseService firehoseService;
     private final String baseUrl;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
@@ -99,7 +124,8 @@ public class SnsService implements Resettable, ResourceProvider {
     @Inject
     public SnsService(StorageFactory storageFactory, EmulatorConfig config,
                       RegionResolver regionResolver, SqsService sqsService,
-                      LambdaService lambdaService, ObjectMapper objectMapper) {
+                      LambdaService lambdaService, FirehoseService firehoseService,
+                      ObjectMapper objectMapper) {
         this(
                 storageFactory.create("sns", "sns-topics.json",
                         new TypeReference<Map<String, Topic>>() {
@@ -119,6 +145,7 @@ public class SnsService implements Resettable, ResourceProvider {
                 regionResolver,
                 sqsService,
                 lambdaService,
+                firehoseService,
                 config.effectiveBaseUrl(),
                 objectMapper
         );
@@ -131,10 +158,18 @@ public class SnsService implements Resettable, ResourceProvider {
                StorageBackend<String, Subscription> subscriptionStore,
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService) {
+        this(topicStore, subscriptionStore, regionResolver, sqsService, lambdaService, null);
+    }
+
+    SnsService(StorageBackend<String, Topic> topicStore,
+               StorageBackend<String, Subscription> subscriptionStore,
+               RegionResolver regionResolver, SqsService sqsService,
+               LambdaService lambdaService,
+               FirehoseService firehoseService) {
         this(topicStore, subscriptionStore,
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                regionResolver, sqsService, lambdaService);
+                regionResolver, sqsService, lambdaService, firehoseService);
     }
 
     SnsService(StorageBackend<String, Topic> topicStore,
@@ -143,6 +178,17 @@ public class SnsService implements Resettable, ResourceProvider {
                StorageBackend<String, PlatformEndpoint> platformEndpointStore,
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService) {
+        this(topicStore, subscriptionStore, platformAppStore, platformEndpointStore,
+                regionResolver, sqsService, lambdaService, null);
+    }
+
+    SnsService(StorageBackend<String, Topic> topicStore,
+               StorageBackend<String, Subscription> subscriptionStore,
+               StorageBackend<String, PlatformApplication> platformAppStore,
+               StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+               RegionResolver regionResolver, SqsService sqsService,
+               LambdaService lambdaService,
+               FirehoseService firehoseService) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
@@ -151,6 +197,7 @@ public class SnsService implements Resettable, ResourceProvider {
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
+        this.firehoseService = firehoseService;
         this.baseUrl = "http://localhost:4566";
         this.objectMapper = new ObjectMapper();
         this.httpClient = null;
@@ -163,6 +210,18 @@ public class SnsService implements Resettable, ResourceProvider {
                StorageBackend<String, SentSms> smsStore,
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService, String baseUrl, ObjectMapper objectMapper) {
+        this(topicStore, subscriptionStore, platformAppStore, platformEndpointStore,
+                smsStore, regionResolver, sqsService, lambdaService, null, baseUrl, objectMapper);
+    }
+
+    SnsService(StorageBackend<String, Topic> topicStore,
+               StorageBackend<String, Subscription> subscriptionStore,
+               StorageBackend<String, PlatformApplication> platformAppStore,
+               StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+               StorageBackend<String, SentSms> smsStore,
+               RegionResolver regionResolver, SqsService sqsService,
+               LambdaService lambdaService, FirehoseService firehoseService,
+               String baseUrl, ObjectMapper objectMapper) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
@@ -171,6 +230,7 @@ public class SnsService implements Resettable, ResourceProvider {
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
+        this.firehoseService = firehoseService;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
         this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
@@ -185,6 +245,9 @@ public class SnsService implements Resettable, ResourceProvider {
                              Map<String, String> tags, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameter", "Topic name is required.", 400);
+        }
+        if (attributes != null && attributes.containsKey(MAXIMUM_MESSAGE_SIZE)) {
+            validateMaximumMessageSize(attributes.get(MAXIMUM_MESSAGE_SIZE), true);
         }
         String topicArn = regionResolver.buildArn("sns", region, name);
         String key = topicKey(region, topicArn);
@@ -269,8 +332,107 @@ public class SnsService implements Resettable, ResourceProvider {
         String key = topicKey(region, topicArn);
         Topic topic = topicStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
+        if (MAXIMUM_MESSAGE_SIZE.equals(attributeName)
+                && validateMaximumMessageSize(attributeValue, false) > DEFAULT_MAX_MESSAGE_SIZE) {
+            requireLargePayloadSubscriptions(topicArn, region);
+        }
         topic.getAttributes().put(attributeName, attributeValue);
         topicStore.put(key, topic);
+    }
+
+    /**
+     * Parse and range-check a {@code MaximumMessageSize} attribute value, returning it. AWS
+     * parses strictly: surrounding whitespace, a decimal point and an empty value are all
+     * rejected rather than trimmed, coerced or treated as a reset -- which is where this
+     * differs from the SQS attribute of the same name. {@code CreateTopic} reports the same
+     * reason behind its own prefix.
+     */
+    private static int validateMaximumMessageSize(String value, boolean onCreate) {
+        int parsed = -1;
+        if (value != null) {
+            try {
+                parsed = Integer.parseInt(value);
+            } catch (NumberFormatException ignored) {
+                parsed = -1;
+            }
+        }
+        if (parsed < MIN_MAX_MESSAGE_SIZE || parsed > MAX_MAX_MESSAGE_SIZE) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: " + (onCreate ? "Attributes Reason: " : "")
+                            + MAXIMUM_MESSAGE_SIZE + ": " + (value == null ? "" : value)
+                            + " is not an integer between " + MIN_MAX_MESSAGE_SIZE + " and "
+                            + MAX_MAX_MESSAGE_SIZE + " bytes", 400);
+        }
+        return parsed;
+    }
+
+    /**
+     * Enforce what AWS asks of a topic carrying payloads above 256 KiB: at most 100
+     * subscriptions, every one of them Amazon SQS, Amazon Data Firehose or Lambda. Pending
+     * confirmations count towards both. Only the protocol half is also checked on Subscribe --
+     * AWS lets the count drift past 100 once the attribute is already raised, and catches it
+     * the next time the attribute is set.
+     */
+    private void requireLargePayloadSubscriptions(String topicArn, String region) {
+        List<Subscription> subs = subscriptionsByTopic(topicArn, region);
+        for (Subscription sub : subs) {
+            requireLargePayloadProtocol(sub.getProtocol());
+        }
+        if (subs.size() > LARGE_PAYLOAD_SUBSCRIPTION_LIMIT) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: A topic with " + MAXIMUM_MESSAGE_SIZE + " greater than "
+                            + DEFAULT_MAX_MESSAGE_SIZE + " bytes supports a maximum of "
+                            + LARGE_PAYLOAD_SUBSCRIPTION_LIMIT + " subscriptions", 400);
+        }
+    }
+
+    private static void requireLargePayloadProtocol(String protocol) {
+        if (protocol != null && LARGE_PAYLOAD_PROTOCOLS.contains(protocol)) {
+            return;
+        }
+        throw new AwsException("InvalidParameter",
+                "Invalid parameter: " + MAXIMUM_MESSAGE_SIZE + " greater than "
+                        + DEFAULT_MAX_MESSAGE_SIZE
+                        + " bytes is not supported for the following protocol: ["
+                        + protocol + "]", 400);
+    }
+
+    /** The topic's configured {@code MaximumMessageSize}, or the AWS default when unset. */
+    private int topicMaxMessageSize(String topicArn, String region) {
+        return topicStore.get(topicKey(region, topicArn))
+                .map(SnsService::maxMessageSize)
+                .orElse(DEFAULT_MAX_MESSAGE_SIZE);
+    }
+
+    /**
+     * The read path is deliberately more forgiving than {@link #validateMaximumMessageSize}: a
+     * topic persisted before the attribute was known holds whatever the old generic setter
+     * accepted, and an out-of-range value there is as unusable as a nonnumeric one. Above the
+     * AWS ceiling it would wave a publish past the limit AWS enforces; at zero or below it
+     * would reject every publish and silently gate subscriptions. Both fall back to the
+     * default rather than being honoured.
+     */
+    private static int maxMessageSize(Topic topic) {
+        String value = topic.getAttributes().get(MAXIMUM_MESSAGE_SIZE);
+        if (value == null) {
+            return DEFAULT_MAX_MESSAGE_SIZE;
+        }
+        try {
+            int parsed = Integer.parseInt(value);
+            if (parsed >= MIN_MAX_MESSAGE_SIZE && parsed <= MAX_MAX_MESSAGE_SIZE) {
+                return parsed;
+            }
+        } catch (NumberFormatException ignored) {
+            // Not a number at all: same treatment as out of range, handled below.
+        }
+        return DEFAULT_MAX_MESSAGE_SIZE;
+    }
+
+    private static void requireWithinMaxMessageSize(int payloadSize, int maxMessageSize) {
+        if (payloadSize > maxMessageSize) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Message too long", 400);
+        }
     }
 
     public Subscription subscribe(String topicArn, String protocol, String endpoint, String region, Map<String, String> attributes) {
@@ -285,6 +447,15 @@ public class SnsService implements Resettable, ResourceProvider {
                 || ("https".equals(protocol) && endpoint != null && !endpoint.startsWith("https://"))) {
             throw new AwsException("InvalidParameter",
                     "Invalid parameter: Endpoint scheme does not match protocol '" + protocol + "'.", 400);
+        }
+        if ("http".equals(protocol) || "https".equals(protocol)) {
+            requireDeliverableEndpoint(endpoint);
+        }
+        if ("firehose".equals(protocol)) {
+            requireFirehoseRoleArn(attributes == null ? null : attributes.get(SUBSCRIPTION_ROLE_ARN));
+        }
+        if (topicMaxMessageSize(topicArn, region) > DEFAULT_MAX_MESSAGE_SIZE) {
+            requireLargePayloadProtocol(protocol);
         }
 
         for (Subscription existing : subscriptionsByTopic(topicArn, region)) {
@@ -394,16 +565,16 @@ public class SnsService implements Resettable, ResourceProvider {
                           Map<String, MessageAttributeValue> messageAttributes,
                           String messageGroupId, String messageDeduplicationId, String region) {
         int messageBytes = message == null ? 0 : message.getBytes(StandardCharsets.UTF_8).length;
-        int payloadSize = computePublishSize(messageBytes, subject, messageAttributes);
-        if (payloadSize > MAX_PUBLISH_SIZE) {
-            throw new AwsException("InvalidParameter",
-                    "Invalid parameter: Message too long", 400);
-        }
+        // The limit is a per-topic attribute, so it cannot be applied until the topic is in
+        // hand. SMS and mobile-push publishes never reach a topic and keep the AWS default.
+        int payloadSize = computePublishSize(messageBytes, messageAttributes);
+        validateSubject(subject);
 
         // Send SMS
         if (phoneNumber != null) {
+            requireWithinMaxMessageSize(payloadSize, DEFAULT_MAX_MESSAGE_SIZE);
             String messageId = UUID.randomUUID().toString();
-            String effectiveRegion = region != null ? region : "us-east-1";
+            String effectiveRegion = region != null ? region : regionResolver.getDefaultRegion();
             SentSms sms = new SentSms(messageId, effectiveRegion, phoneNumber,
                     message, subject, Instant.now());
             smsStore.put("sms::" + effectiveRegion + "::" + messageId, sms);
@@ -421,6 +592,7 @@ public class SnsService implements Resettable, ResourceProvider {
         }
 
         if (isEndpointArn(effectiveArn)) {
+            requireWithinMaxMessageSize(payloadSize, DEFAULT_MAX_MESSAGE_SIZE);
             return publishToEndpoint(effectiveArn, message, subject, messageStructure,
                     messageAttributes, region);
         }
@@ -433,6 +605,8 @@ public class SnsService implements Resettable, ResourceProvider {
         String topicStoreKey = topicKey(region, effectiveArn);
         Topic topic = topicStore.get(topicStoreKey)
                 .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
+
+        requireWithinMaxMessageSize(payloadSize, maxMessageSize(topic));
 
         validateTopicMessageStructure(message, messageStructure);
 
@@ -754,6 +928,23 @@ public class SnsService implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * Subjects must be UTF-8 text with no line breaks or control characters and at most 100
+     * characters long. A null or empty subject is the absent optional parameter and is accepted.
+     */
+    static void validateSubject(String subject) {
+        if (subject == null || subject.isEmpty()) {
+            return;
+        }
+        if (subject.length() > MAX_SUBJECT_LENGTH
+                || subject.chars().anyMatch(Character::isISOControl)) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Subject Reason: Subjects must be UTF-8 text with no line"
+                            + " breaks or control characters, and at most 100 characters long.",
+                    400);
+        }
+    }
+
     private void recordPushNotification(PushNotification notification) {
         pushCapture.addFirst(notification);
         while (pushCapture.size() > PUSH_CAPTURE_LIMIT) {
@@ -825,8 +1016,19 @@ public class SnsService implements Resettable, ResourceProvider {
         String key = subKey(region, subscriptionArn);
         Subscription sub = subscriptionStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFound", "Subscription does not exist.", 404));
+        if ("firehose".equals(sub.getProtocol()) && SUBSCRIPTION_ROLE_ARN.equals(attributeName)) {
+            requireFirehoseRoleArn(attributeValue);
+        }
         sub.getAttributes().put(attributeName, attributeValue);
         subscriptionStore.put(key, sub);
+    }
+
+    private static void requireFirehoseRoleArn(String roleArn) {
+        if (roleArn == null || !IAM_ROLE_ARN.matcher(roleArn).matches()) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: SubscriptionRoleArn must be a valid IAM role ARN for firehose subscriptions.",
+                    400);
+        }
     }
 
     public record BatchPublishResult(List<String[]> successful, List<String[]> failed) {
@@ -840,16 +1042,15 @@ public class SnsService implements Resettable, ResourceProvider {
         int batchSize = 0;
         for (Map<String, Object> entry : entries) {
             String message = (String) entry.get("Message");
-            String subject = (String) entry.get("Subject");
             @SuppressWarnings("unchecked")
             Map<String, MessageAttributeValue> attrs =
                     (Map<String, MessageAttributeValue>) entry.get("MessageAttributes");
             int entryMessageBytes = message == null ? 0 : message.getBytes(StandardCharsets.UTF_8).length;
-            batchSize += computePublishSize(entryMessageBytes, subject, attrs);
+            batchSize += computePublishSize(entryMessageBytes, attrs);
         }
-        if (batchSize > MAX_PUBLISH_SIZE) {
+        if (batchSize > maxMessageSize(topic)) {
             throw new AwsException("BatchRequestTooLong",
-                    "Batch requests cannot be longer than " + MAX_PUBLISH_SIZE + " bytes.", 400);
+                    "The length of all the messages put together is more than the limit.", 400);
         }
 
         boolean isFifo = "true".equals(topic.getAttributes().get("FifoTopic"));
@@ -869,6 +1070,7 @@ public class SnsService implements Resettable, ResourceProvider {
             String messageDeduplicationId = (String) entry.get("MessageDeduplicationId");
 
             try {
+                validateSubject(subject);
                 validateTopicMessageStructure(message, messageStructure);
             } catch (AwsException e) {
                 failed.add(new String[]{id, e.getErrorCode(), e.getMessage(), "true"});
@@ -1042,6 +1244,14 @@ public class SnsService implements Resettable, ResourceProvider {
      */
     private boolean matchesBodyPolicy(JsonNode policy, JsonNode body) {
         if (!policy.isObject()) {
+            return false;
+        }
+        if (body != null && body.isArray()) {
+            for (JsonNode element : body) {
+                if (matchesBodyPolicy(policy, element)) {
+                    return true;
+                }
+            }
             return false;
         }
         var fields = policy.fields();
@@ -1523,19 +1733,20 @@ public class SnsService implements Resettable, ResourceProvider {
                     Map<String, MessageAttributeValue> sqsAttributes = rawDelivery
                             ? toSqsMessageAttributes(messageAttributes)
                             : Collections.emptyMap();
-                    sqsService.sendMessage(queueUrl, body, 0, messageGroupId, messageDeduplicationId, sqsAttributes, region);
-                    LOG.debugv("Delivered SNS message to SQS: {0} ({1}) raw={2}", sub.getEndpoint(), queueUrl, rawDelivery);
+                    deliverToSqsSubscription(sub, queueUrl, body, messageId, messageGroupId,
+                            messageDeduplicationId, sqsAttributes, region, rawDelivery);
                 }
                 case "lambda" -> {
-                    String fnName = extractFunctionName(sub.getEndpoint());
                     String region = extractRegionFromArn(sub.getEndpoint());
                     String eventJson = buildSnsLambdaEvent(topicArn, messageId, protocolMessage,
                             subject, messageAttributes, sub.getSubscriptionArn());
-                    lambdaService.invoke(region, fnName, eventJson.getBytes(), InvocationType.Event);
+                    lambdaService.invoke(region, sub.getEndpoint(), eventJson.getBytes(), InvocationType.Event);
                     LOG.debugv("Delivered SNS message to Lambda: {0}", sub.getEndpoint());
                 }
                 case "http", "https" -> {
-                    if (httpClient == null) break;
+                    if (httpClient == null) {
+                        break;
+                    }
                     boolean rawDelivery = "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
                     String body = rawDelivery
                             ? protocolMessage
@@ -1555,9 +1766,9 @@ public class SnsService implements Resettable, ResourceProvider {
                             .POST(HttpRequest.BodyPublishers.ofString(body))
                             .build();
                     String endpoint = sub.getEndpoint();
-                    httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
-                            .thenAccept(response -> logHttpResult("Delivered SNS notification", endpoint, response.statusCode()))
-                            .exceptionally(ex -> { LOG.warnv("Failed to deliver SNS message to {0}: {1}", endpoint, ex.getMessage()); return null; });
+                    // Screened off this thread: Publish fans out to every subscriber here, and a
+                    // slow DNS answer for one endpoint must not hold up the others or the caller.
+                    postScreenedAsync(request, endpoint, "Delivered SNS notification");
                 }
                 case "application" -> {
                     String region = extractRegionFromArn(sub.getEndpoint());
@@ -1584,6 +1795,41 @@ public class SnsService implements Resettable, ResourceProvider {
                     capturePushForEndpoint(endpoint, app, message, subject, messageStructure, messageAttributes);
                     LOG.debugv("Delivered SNS message to platform endpoint: {0}", endpointArn);
                 }
+                case "firehose" -> {
+                    if (firehoseService == null) {
+                        break;
+                    }
+                    String streamName;
+                    String region;
+                    String accountId;
+                    if (AwsArnUtils.isArn(sub.getEndpoint())) {
+                        AwsArnUtils.Arn arn = AwsArnUtils.parse(sub.getEndpoint());
+                        region = arn.region().isEmpty() ? extractRegionFromArn(topicArn) : arn.region();
+                        accountId = arn.accountId().isEmpty() ? regionResolver.getAccountId() : arn.accountId();
+                        String resource = arn.resource();
+                        streamName = resource.startsWith("deliverystream/")
+                                ? resource.substring("deliverystream/".length())
+                                : resource;
+                    } else {
+                        streamName = sub.getEndpoint();
+                        region = extractRegionFromArn(topicArn);
+                        accountId = regionResolver.getAccountId();
+                    }
+                    if (region == null || region.isEmpty()) {
+                        region = regionResolver.getDefaultRegion();
+                    }
+                    if (accountId == null || accountId.isEmpty()) {
+                        accountId = regionResolver.getAccountId();
+                    }
+                    boolean rawDelivery = sub.getAttributes() != null
+                            && "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
+                    String body = rawDelivery
+                            ? protocolMessage
+                            : buildSnsEnvelope(protocolMessage, subject, messageAttributes, topicArn, messageId);
+                    byte[] data = body.getBytes(StandardCharsets.UTF_8);
+                    firehoseService.putRecord(accountId, region, streamName, new Record(data));
+                    LOG.debugv("Delivered SNS message to Firehose: {0} ({1}) raw={2}", sub.getEndpoint(), streamName, rawDelivery);
+                }
                 case "email", "email-json" -> LOG.infov("SNS email delivery (stub): to={0}, subject={1}, message={2}",
                         sub.getEndpoint(), subject, protocolMessage);
                 case "sms" -> LOG.infov("SNS SMS delivery (stub): to={0}, message={1}", sub.getEndpoint(), protocolMessage);
@@ -1592,14 +1838,81 @@ public class SnsService implements Resettable, ResourceProvider {
             }
         } catch (Exception e) {
             // Delivery failures are per-subscriber and never reported to the publisher, which
-            // matches AWS. SNS caps a publish at MAX_PUBLISH_SIZE (262144 bytes) while SQS
-            // accepts up to 1048576 bytes, so for ordinary text the non-raw sqs envelope stays
-            // under the queue limit. That is not a guarantee: the envelope is serialized as
-            // JSON, and escaping expands every control character below 0x20 to six bytes, so a
-            // publish made largely of them can serialize several times larger and cross the
-            // limit. A queue configured with a smaller MaximumMessageSize crosses it more
-            // easily still. Either way the message is dropped here.
+            // matches AWS. Both SNS and SQS now top out at 1048576 bytes, so a publish at the
+            // SNS limit no longer fits a queue at all: the non-raw sqs envelope wraps the body
+            // in a few hundred bytes of JSON, and escaping expands every control character
+            // below 0x20 to six bytes, so a publish made largely of them can serialize several
+            // times larger. A topic left at the 262144-byte default clears an ordinary queue
+            // with room to spare; a queue configured with a smaller MaximumMessageSize crosses
+            // the limit more easily. Either way the message is dropped here.
             LOG.warnv("Failed to deliver SNS message to {0}: {1}", sub.getEndpoint(), e.getMessage());
+        }
+    }
+
+    private void deliverToSqsSubscription(Subscription sub, String queueUrl, String body, String messageId,
+                                          String messageGroupId, String messageDeduplicationId,
+                                          Map<String, MessageAttributeValue> sqsAttributes,
+                                          String region, boolean rawDelivery) {
+        RuntimeException deliveryFailure = null;
+        for (int attempt = 1; attempt <= SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS; attempt++) {
+            try {
+                sqsService.sendMessage(queueUrl, body, null, messageGroupId,
+                        messageDeduplicationId, sqsAttributes, region);
+                LOG.debugv("Delivered SNS message to SQS: {0} ({1}) raw={2}",
+                        sub.getEndpoint(), queueUrl, rawDelivery);
+                return;
+            } catch (RuntimeException e) {
+                deliveryFailure = e;
+            }
+        }
+
+        String deadLetterTargetArn = subscriptionDeadLetterTargetArn(sub);
+        if (deadLetterTargetArn != null) {
+            try {
+                String deadLetterRegion = extractRegionFromArn(deadLetterTargetArn);
+                if (deadLetterRegion == null) {
+                    deadLetterRegion = region;
+                }
+                boolean fifoDeadLetterQueue = AwsArnUtils.parse(deadLetterTargetArn)
+                        .resource().endsWith(".fifo");
+                String deadLetterGroupId = messageGroupId;
+                String deadLetterDeduplicationId = messageDeduplicationId;
+                if (fifoDeadLetterQueue) {
+                    if (deadLetterGroupId == null || deadLetterGroupId.isBlank()) {
+                        deadLetterGroupId = messageId;
+                    }
+                    // Each failed subscription is a distinct DLQ delivery, even when
+                    // several subscriptions share this queue for the same publish.
+                    deadLetterDeduplicationId = sha256(messageId + "\0" + sub.getSubscriptionArn());
+                }
+                sqsService.sendMessage(sqsArnToUrl(deadLetterTargetArn), body, null,
+                        deadLetterGroupId, deadLetterDeduplicationId, sqsAttributes, deadLetterRegion);
+                LOG.warnv("SNS delivery to {0} failed after {1} attempts; sent notification to subscription DLQ {2}",
+                        sub.getEndpoint(), SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS, deadLetterTargetArn);
+                return;
+            } catch (RuntimeException deadLetterFailure) {
+                LOG.warnv("SNS delivery to {0} and subscription DLQ {1} failed: {2}",
+                        sub.getEndpoint(), deadLetterTargetArn, deadLetterFailure.getMessage());
+            }
+        }
+        LOG.warnv("SNS delivery to {0} failed after {1} attempts: {2}",
+                sub.getEndpoint(), SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS,
+                deliveryFailure == null ? "unknown failure" : deliveryFailure.getMessage());
+    }
+
+    private String subscriptionDeadLetterTargetArn(Subscription sub) {
+        String redrivePolicy = sub.getAttributes().get(SUBSCRIPTION_REDRIVE_POLICY);
+        if (redrivePolicy == null || redrivePolicy.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode policy = objectMapper.readTree(redrivePolicy);
+            String targetArn = policy.path("deadLetterTargetArn").asText(null);
+            return AwsArnUtils.isArnFor(targetArn, "sqs") ? targetArn : null;
+        } catch (Exception e) {
+            LOG.warnv("Ignoring invalid SNS subscription RedrivePolicy for {0}: {1}",
+                    sub.getSubscriptionArn(), e.getMessage());
+            return null;
         }
     }
 
@@ -1647,30 +1960,6 @@ public class SnsService implements Resettable, ResourceProvider {
         } catch (Exception e) {
             return "{\"Records\":[]}";
         }
-    }
-
-    private static final String FUNCTION_MARKER = ":function:";
-
-    /**
-     * Function name out of a Lambda ARN, which may carry a qualifier:
-     * {@code arn:aws:lambda:<region>:<account>:function:<name>[:<alias-or-version>]}.
-     *
-     * <p>Taking the segment after the last colon reads the qualifier as the function name, so a
-     * subscription to {@code ...:function:order-processor:PROD} invoked a function called
-     * {@code PROD} and the message went nowhere. Cut after {@code :function:} instead, matching
-     * what S3 and Step Functions already do for the same ARN.
-     */
-    static String extractFunctionName(String functionArn) {
-        if (functionArn == null) {
-            return null;
-        }
-        int functionMarker = functionArn.indexOf(FUNCTION_MARKER);
-        if (functionMarker < 0) {
-            return functionArn;
-        }
-        String suffix = functionArn.substring(functionMarker + FUNCTION_MARKER.length());
-        int qualifierSeparator = suffix.indexOf(':');
-        return qualifierSeparator >= 0 ? suffix.substring(0, qualifierSeparator) : suffix;
     }
 
     private static String extractRegionFromArn(String arn) {
@@ -1794,13 +2083,93 @@ public class SnsService implements Resettable, ResourceProvider {
                     .header("x-amz-sns-subscription-arn", "PendingConfirmation")
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
-            String endpoint = subscription.getEndpoint();
-            httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
-                    .thenAccept(response -> logHttpResult("Sent SubscriptionConfirmation", endpoint, response.statusCode()))
-                    .exceptionally(ex -> { LOG.warnv("Failed to send SubscriptionConfirmation to {0}: {1}", endpoint, ex.getMessage()); return null; });
+            postScreenedAsync(request, subscription.getEndpoint(), "Sent SubscriptionConfirmation");
         } catch (Exception e) {
             LOG.warnv("Failed to send SubscriptionConfirmation to {0}: {1}", subscription.getEndpoint(), e.getMessage());
         }
+    }
+
+    /**
+     * Rejects an endpoint that resolves to a link-local or cloud instance-metadata address. Floci
+     * posts to a subscribed endpoint itself, so without this an unauthenticated Subscribe turns the
+     * emulator into a blind request forwarder against addresses only it can reach. Loopback and
+     * private ranges stay allowed: a local topic delivering to a neighbouring container is the
+     * normal case here.
+     */
+    private static void requireDeliverableEndpoint(String endpoint) {
+        if (endpoint == null) {
+            return;
+        }
+        String host;
+        try {
+            host = URI.create(endpoint).getHost();
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameter", "Invalid parameter: Endpoint is not a valid URL.", 400);
+        }
+        if (host == null || host.isBlank()) {
+            throw new AwsException("InvalidParameter", "Invalid parameter: Endpoint is not a valid URL.", 400);
+        }
+        try {
+            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(host), host);
+        } catch (UnknownHostException e) {
+            // Unresolvable now does not mean unresolvable at delivery time, and AWS accepts an
+            // endpoint whose DNS is not yet live, so this is not the place to refuse it.
+            LOG.debugv("SNS endpoint host {0} did not resolve at subscribe time: {1}", host, e.getMessage());
+        } catch (IOException e) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Endpoint " + endpoint + " is not a permitted address.", 400);
+        }
+    }
+
+    /** Screens the endpoint, then posts. Nothing here resolves a name, so nothing here blocks. */
+    private void postScreenedAsync(HttpRequest request, String endpoint, String what) {
+        if (!deliverable(endpoint)) {
+            return;
+        }
+        httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+                .thenAccept(response -> logHttpResult(what, endpoint, response.statusCode()))
+                .exceptionally(ex -> {
+                    LOG.warnv("Failed to reach SNS endpoint {0}: {1}", endpoint, ex.getMessage());
+                    return null;
+                });
+    }
+
+    /**
+     * Whether this endpoint may be posted to, judged without resolving anything. Subscribe is where
+     * a name gets resolved and screened; this catches the endpoint that names an address outright,
+     * including a subscription stored before Subscribe began refusing them.
+     *
+     * <p>Deliberately not a second DNS lookup. {@link HttpClient} resolves the name again when it
+     * connects and cannot be handed the result of a check, so a lookup here could never be the thing
+     * that decides where the request goes: it would cost a resolution per delivery and still leave
+     * the same rebinding residual.
+     */
+    static boolean deliverable(String endpoint) {
+        String host;
+        try {
+            host = URI.create(endpoint).getHost();
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Refusing to deliver to SNS endpoint {0}: not a valid URL", endpoint);
+            return false;
+        }
+        if (host == null || !isIpLiteral(host)) {
+            return true;
+        }
+        try {
+            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(host), host);
+            return true;
+        } catch (IOException e) {
+            LOG.warnv("Refusing to deliver to SNS endpoint {0}: {1}", endpoint, e.getMessage());
+            return false;
+        }
+    }
+
+    /** True for a bracketed IPv6 literal or a dotted IPv4 one, neither of which needs resolving. */
+    private static boolean isIpLiteral(String host) {
+        String bare = host.startsWith("[") && host.endsWith("]")
+                ? host.substring(1, host.length() - 1)
+                : host;
+        return bare.indexOf(':') >= 0 || bare.matches("[0-9.]+");
     }
 
     private String sqsArnToUrl(String arn) {
@@ -1810,12 +2179,14 @@ public class SnsService implements Resettable, ResourceProvider {
         return AwsArnUtils.arnToQueueUrl(arn, baseUrl);
     }
 
-    private static int computePublishSize(int messageBytes, String subject,
+    /**
+     * Payload size as AWS counts it against {@code MaximumMessageSize}: UTF-8 body bytes plus,
+     * per attribute, its name, data type and value. {@code Subject} is excluded -- a publish of
+     * exactly the limit succeeds however long its subject is.
+     */
+    private static int computePublishSize(int messageBytes,
                                           Map<String, MessageAttributeValue> attributes) {
         int total = messageBytes;
-        if (subject != null) {
-            total += subject.getBytes(StandardCharsets.UTF_8).length;
-        }
         if (attributes != null) {
             for (Map.Entry<String, MessageAttributeValue> entry : attributes.entrySet()) {
                 total += entry.getKey().getBytes(StandardCharsets.UTF_8).length;

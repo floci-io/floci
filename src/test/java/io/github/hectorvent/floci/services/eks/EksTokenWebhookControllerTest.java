@@ -22,7 +22,7 @@ class EksTokenWebhookControllerTest {
     private final IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey(
             ACCESS_KEY_ID, SECRET_ACCESS_KEY);
     private final EksTokenWebhookController controller = new EksTokenWebhookController(
-            new EksTokenValidator(iamService));
+            new EksTokenValidator(iamService), new EksWorkerAuthentication(iamService, null, null, null));
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> status(Response response) {
@@ -40,7 +40,7 @@ class EksTokenWebhookControllerTest {
     @Test
     @SuppressWarnings("unchecked")
     void awsIamTokenAuthenticatesAsClusterAdmin() throws Exception {
-        Response response = controller.review(CLUSTER_NAME, tokenReview(validToken()));
+        Response response = controller.review(CLUSTER_NAME, null, null, null, tokenReview(validToken()));
 
         Map<String, Object> status = status(response);
         assertEquals(Boolean.TRUE, status.get("authenticated"));
@@ -51,20 +51,20 @@ class EksTokenWebhookControllerTest {
 
     @Test
     void unrecognisedTokenIsRejected() {
-        Response response = controller.review(CLUSTER_NAME, tokenReview("some-random-bearer-token"));
+        Response response = controller.review(CLUSTER_NAME, null, null, null, tokenReview("some-random-bearer-token"));
         assertEquals(Boolean.FALSE, status(response).get("authenticated"));
     }
 
     @Test
     void emptyOrMalformedReviewIsRejected() {
-        assertFalse((Boolean) status(controller.review(CLUSTER_NAME, Map.of())).get("authenticated"));
-        assertFalse((Boolean) status(controller.review(CLUSTER_NAME,
+        assertFalse((Boolean) status(controller.review(CLUSTER_NAME, null, null, null, Map.of())).get("authenticated"));
+        assertFalse((Boolean) status(controller.review(CLUSTER_NAME, null, null, null,
                 Map.of("spec", Map.of()))).get("authenticated"));
     }
 
     @Test
     void responseIsAlwaysAWellFormedTokenReview() throws Exception {
-        Response response = controller.review(CLUSTER_NAME, tokenReview(validToken()));
+        Response response = controller.review(CLUSTER_NAME, null, null, null, tokenReview(validToken()));
         Map<?, ?> body = (Map<?, ?>) response.getEntity();
         assertEquals("authentication.k8s.io/v1", body.get("apiVersion"));
         assertEquals("TokenReview", body.get("kind"));
@@ -80,7 +80,7 @@ class EksTokenWebhookControllerTest {
                 "kind", "TokenReview",
                 "spec", Map.of("token", validToken()));
 
-        Response response = controller.review(CLUSTER_NAME, v1beta1Review);
+        Response response = controller.review(CLUSTER_NAME, null, null, null, v1beta1Review);
         Map<?, ?> body = (Map<?, ?>) response.getEntity();
         assertEquals("authentication.k8s.io/v1beta1", body.get("apiVersion"));
         assertEquals(Boolean.TRUE, status(response).get("authenticated"));
@@ -91,7 +91,7 @@ class EksTokenWebhookControllerTest {
         String token = SigV4TokenTestHelper.createEksToken(
                 "other-cluster", ACCESS_KEY_ID, SECRET_ACCESS_KEY, Instant.now(), 60);
 
-        Response response = controller.review(CLUSTER_NAME, tokenReview(token));
+        Response response = controller.review(CLUSTER_NAME, null, null, null, tokenReview(token));
 
         assertEquals(Boolean.FALSE, status(response).get("authenticated"));
     }

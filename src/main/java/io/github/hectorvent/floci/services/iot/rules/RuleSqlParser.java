@@ -233,11 +233,15 @@ public final class RuleSqlParser {
         return new ArrayLiteral(elements);
     }
 
+    /** Only an exponent that a {@code BigDecimal} cannot hold, such as {@code 1e99999999999}, is out of range. */
     private Literal numberLiteral(Token token) {
         try {
-            return token.text().indexOf('.') < 0
-                    ? RuleSql.number(Long.parseLong(token.text()))
-                    : RuleSql.decimal(new BigDecimal(token.text()));
+            String text = token.text();
+            BigDecimal value = new BigDecimal(text);
+            boolean integer = text.indexOf('.') < 0 && text.indexOf('e') < 0 && text.indexOf('E') < 0;
+            return integer && value.unscaledValue().bitLength() < 64
+                    ? RuleSql.number(value.longValue())
+                    : RuleSql.decimal(value);
         } catch (NumberFormatException e) {
             throw fail("Number is out of range", token);
         }
@@ -391,6 +395,15 @@ public final class RuleSqlParser {
                 i++;
             } else {
                 break;
+            }
+        }
+        if (i + 1 < sql.length() && (sql.charAt(i) == 'e' || sql.charAt(i) == 'E')) {
+            int digit = sql.charAt(i + 1) == '+' || sql.charAt(i + 1) == '-' ? i + 2 : i + 1;
+            if (digit < sql.length() && Character.isDigit(sql.charAt(digit))) {
+                i = digit + 1;
+                while (i < sql.length() && Character.isDigit(sql.charAt(i))) {
+                    i++;
+                }
             }
         }
         tokens.add(new Token(Kind.NUMBER, sql.substring(start, i), start));

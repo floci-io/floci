@@ -295,7 +295,7 @@ public class PricingService {
     }
 
     private List<JsonNode> loadProducts(String serviceCode, String region) {
-        String resolvedRegion = (region == null || region.isEmpty()) ? "us-east-1" : region;
+        String resolvedRegion = (region == null || region.isEmpty()) ? "us-east-1" : region; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
         requireSafePathSegment(resolvedRegion, "regionCode");
         String resource = PRODUCTS_DIR + "/" + serviceCode + "/" + resolvedRegion + ".json";
         JsonNode node;

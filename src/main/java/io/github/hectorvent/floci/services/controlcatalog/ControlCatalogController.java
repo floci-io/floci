@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.controlcatalog;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import jakarta.inject.Inject;
@@ -43,7 +44,8 @@ public class ControlCatalogController {
     public Response listControls(@QueryParam("maxResults") String maxResults,
                                  @QueryParam("nextToken") String nextToken,
                                  String body) {
-        return Response.ok(controlCatalogService.listControls(readTree(body), maxResults, nextToken)).build();
+        return Response.ok(controlCatalogService.listControls(readTree(body), maxResults, nextToken,
+                AwsRegions.partitionFor(requestContext.getRegion()))).build();
     }
 
     private JsonNode readTree(String body) {

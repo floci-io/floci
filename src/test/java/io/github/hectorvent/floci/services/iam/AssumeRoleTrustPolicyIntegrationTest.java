@@ -1,11 +1,10 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -18,15 +17,8 @@ import static org.hamcrest.Matchers.startsWith;
  * Floci does not know about stays permissive (backward-compatible).
  */
 @QuarkusTest
-@TestProfile(AssumeRoleTrustPolicyIntegrationTest.EnforcementProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class AssumeRoleTrustPolicyIntegrationTest {
-
-    public static class EnforcementProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "true");
-        }
-    }
 
     private static final String ACCOUNT_A = "111111111111";
     private static final String ACCOUNT_B = "222222222222";

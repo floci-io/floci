@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -20,7 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * the paritysuite dynamodb-conformance tier1 suite. Reads cost half a unit per 4KB,
  * doubled for a strongly consistent read, and Query and Scan are sized on what was
  * read before the filter. Writes charge the table plus each index whose stored view
- * the write changes, and no operation reports a read/write split.
+ * the write changes. Only transactions report a read/write split, and they charge the
+ * table twice the normal rate.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -437,6 +439,208 @@ class DynamoDbConsumedCapacityIntegrationTest {
                 {"TableName": "CapacityLsiTable"}
                 """)
         .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    @Order(14)
+    void transactWriteChargesTheTableTwiceAndEachIndexOnce() {
+        transactWrite("""
+            {
+                "TransactItems": [{"Put": {"TableName": "%s",
+                    "Item": {"pk": {"S": "cc-tx"}, "gsiPk": {"S": "t1"}, "gsi2Pk": {"S": "t2"}}}}],
+                "ReturnConsumedCapacity": "INDEXES"
+            }
+            """.formatted(TABLE))
+            .body("ConsumedCapacity", hasSize(1))
+            .body("ConsumedCapacity[0].TableName", equalTo(TABLE))
+            .body("ConsumedCapacity[0].CapacityUnits", equalTo(4.0f))
+            .body("ConsumedCapacity[0].WriteCapacityUnits", equalTo(4.0f))
+            .body("ConsumedCapacity[0].ReadCapacityUnits", nullValue())
+            .body("ConsumedCapacity[0].Table.CapacityUnits", equalTo(2.0f))
+            .body("ConsumedCapacity[0].Table.WriteCapacityUnits", equalTo(2.0f))
+            .body("ConsumedCapacity[0].GlobalSecondaryIndexes.gsi1.WriteCapacityUnits", equalTo(1.0f))
+            .body("ConsumedCapacity[0].GlobalSecondaryIndexes.gsi2.WriteCapacityUnits", equalTo(1.0f));
+    }
+
+    @Test
+    @Order(15)
+    void transactConditionCheckIsChargedAsAWriteOfTheCheckedItem() {
+        putItem("""
+            {"pk": {"S": "cc-tx-checked"}, "filler": {"S": "%s"}}
+            """.formatted("x".repeat(5000)));
+        transactWrite("""
+            {
+                "TransactItems": [
+                    {"Put": {"TableName": "%1$s", "Item": {"pk": {"S": "cc-tx-put"}}}},
+                    {"ConditionCheck": {"TableName": "%1$s", "Key": {"pk": {"S": "cc-tx-checked"}},
+                        "ConditionExpression": "attribute_exists(pk)"}}
+                ],
+                "ReturnConsumedCapacity": "TOTAL"
+            }
+            """.formatted(TABLE))
+            .body("ConsumedCapacity", hasSize(1))
+            .body("ConsumedCapacity[0].CapacityUnits", equalTo(12.0f))
+            .body("ConsumedCapacity[0].WriteCapacityUnits", equalTo(12.0f))
+            .body("ConsumedCapacity[0].Table", nullValue());
+    }
+
+    @Test
+    @Order(16)
+    void transactReplayReportsAReadSizedOnTheFirstCall() {
+        String body = """
+            {
+                "ClientRequestToken": "cc-tx-replay",
+                "TransactItems": [{"Put": {"TableName": "%s",
+                    "Item": {"pk": {"S": "cc-tx-replay"}, "gsiPk": {"S": "r"}, "filler": {"S": "%s"}}}}],
+                "ReturnConsumedCapacity": "INDEXES"
+            }
+            """.formatted(TABLE, "x".repeat(1536));
+        transactWrite(body)
+            .body("ConsumedCapacity[0].WriteCapacityUnits", equalTo(6.0f))
+            .body("ConsumedCapacity[0].Table.WriteCapacityUnits", equalTo(4.0f))
+            .body("ConsumedCapacity[0].GlobalSecondaryIndexes.gsi1.WriteCapacityUnits", equalTo(2.0f))
+            .body("ConsumedCapacity[0].ReadCapacityUnits", nullValue());
+        putItem("""
+            {"pk": {"S": "cc-tx-replay"}, "filler": {"S": "%s"}}
+            """.formatted("x".repeat(5000)));
+        transactWrite(body)
+            .body("ConsumedCapacity[0].CapacityUnits", equalTo(2.0f))
+            .body("ConsumedCapacity[0].ReadCapacityUnits", equalTo(2.0f))
+            .body("ConsumedCapacity[0].WriteCapacityUnits", nullValue())
+            .body("ConsumedCapacity[0].Table.ReadCapacityUnits", equalTo(2.0f))
+            .body("ConsumedCapacity[0].GlobalSecondaryIndexes", nullValue());
+    }
+
+    @Test
+    @Order(17)
+    void transactGetChargesTheWholeItemAndAMissingItem() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactGetItems")
+            .contentType(CT)
+            .body("""
+                {
+                    "TransactItems": [
+                        {"Get": {"TableName": "%1$s", "Key": {"pk": {"S": "cc-tx-checked"}},
+                            "ProjectionExpression": "pk"}},
+                        {"Get": {"TableName": "%1$s", "Key": {"pk": {"S": "cc-tx-missing"}}}}
+                    ],
+                    "ReturnConsumedCapacity": "INDEXES"
+                }
+                """.formatted(TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConsumedCapacity", hasSize(1))
+            .body("ConsumedCapacity[0].CapacityUnits", equalTo(6.0f))
+            .body("ConsumedCapacity[0].ReadCapacityUnits", equalTo(6.0f))
+            .body("ConsumedCapacity[0].WriteCapacityUnits", nullValue())
+            .body("ConsumedCapacity[0].Table.ReadCapacityUnits", equalTo(6.0f));
+    }
+
+    @Test
+    @Order(18)
+    void executeTransactionIsChargedLikeATransaction() {
+        putItem("""
+            {"pk": {"S": "cc-et"}, "data": {"S": "x"}}
+            """);
+        String update = """
+            {
+                "ClientRequestToken": "cc-et-tx",
+                "TransactStatements": [{"Statement": "UPDATE \\"%s\\" SET data = 'y' WHERE pk = 'cc-et'"}],
+                "ReturnConsumedCapacity": "INDEXES"
+            }
+            """.formatted(TABLE);
+        send("ExecuteTransaction", update)
+            .body("ConsumedCapacity[0].WriteCapacityUnits", equalTo(2.0f))
+            .body("ConsumedCapacity[0].Table.WriteCapacityUnits", equalTo(2.0f))
+            .body("ConsumedCapacity[0].ReadCapacityUnits", nullValue());
+        send("ExecuteTransaction", update)
+            .body("ConsumedCapacity[0].ReadCapacityUnits", equalTo(2.0f))
+            .body("ConsumedCapacity[0].WriteCapacityUnits", nullValue());
+        send("ExecuteTransaction", """
+            {
+                "TransactStatements": [
+                    {"Statement": "SELECT * FROM \\"%1$s\\" WHERE pk = 'cc-et'"},
+                    {"Statement": "SELECT * FROM \\"%1$s\\" WHERE pk = 'cc-et-missing'"}
+                ],
+                "ReturnConsumedCapacity": "TOTAL"
+            }
+            """.formatted(TABLE))
+            .body("ConsumedCapacity", hasSize(1))
+            .body("ConsumedCapacity[0].CapacityUnits", equalTo(4.0f))
+            .body("ConsumedCapacity[0].ReadCapacityUnits", equalTo(4.0f));
+    }
+
+    @Test
+    @Order(19)
+    void transactionsRejectAnInvalidReturnConsumedCapacityBeforeWriting() {
+        String invalid = "Value 'INVALID' at 'returnConsumedCapacity' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]";
+        rejected("TransactWriteItems", """
+            {
+                "TransactItems": [{"Put": {"TableName": "%s", "Item": {"pk": {"S": "cc-rcc"}}}}],
+                "ReturnConsumedCapacity": "INVALID"
+            }
+            """.formatted(TABLE))
+            .body("message", equalTo("1 validation error detected: " + invalid));
+        rejected("ExecuteTransaction", """
+            {
+                "TransactStatements": [{"Statement": "INSERT INTO \\"%s\\" VALUE {'pk': 'cc-rcc-et'}"}],
+                "ReturnConsumedCapacity": "INVALID"
+            }
+            """.formatted(TABLE))
+            .body("message", equalTo("1 validation error detected: " + invalid));
+        rejected("TransactGetItems", """
+            {
+                "TransactItems": [{"Get": {"TableName": "%s", "Key": {"pk": {"S": "cc-get"}}}}],
+                "ReturnConsumedCapacity": "INVALID"
+            }
+            """.formatted(TABLE))
+            .body("message", equalTo("1 validation error detected: " + invalid));
+        rejected("TransactWriteItems", """
+            {"TransactItems": [], "ReturnConsumedCapacity": "INVALID"}
+            """)
+            .body("message", equalTo("2 validation errors detected: Value '[]' at 'transactItems' failed to "
+                    + "satisfy constraint: Member must have length greater than or equal to 1; " + invalid));
+
+        send("TransactGetItems", """
+            {
+                "TransactItems": [
+                    {"Get": {"TableName": "%1$s", "Key": {"pk": {"S": "cc-rcc"}}}},
+                    {"Get": {"TableName": "%1$s", "Key": {"pk": {"S": "cc-rcc-et"}}}}
+                ]
+            }
+            """.formatted(TABLE))
+            .body("Responses[0].Item", nullValue())
+            .body("Responses[1].Item", nullValue());
+    }
+
+    private static ValidatableResponse rejected(String operation, String body) {
+        return given()
+                .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+                .contentType(CT)
+                .body(body)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+    }
+
+    private static ValidatableResponse transactWrite(String body) {
+        return send("TransactWriteItems", body);
+    }
+
+    private static ValidatableResponse send(String operation, String body) {
+        return given()
+                .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+                .contentType(CT)
+                .body(body)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
     }
 
     private static void putItem(String itemJson) {

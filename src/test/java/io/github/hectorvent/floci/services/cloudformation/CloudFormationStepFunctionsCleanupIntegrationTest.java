@@ -167,7 +167,7 @@ class CloudFormationStepFunctionsCleanupIntegrationTest {
     void updateAfterStubUpgradeProvisionsTheRealStateMachine() {
         // A stack that was created by a floci build that did not yet expand
         // AWS::Serverless::StateMachine had this resource stubbed with a non-ARN physical id
-        // (<logicalId>-<8 hex>, see CloudFormationResourceProvisioner's default provisioning arm).
+        // (<logicalId>-<8 hex>, see CfnResourceDispatcher's stub arm).
         // Its next update must provision the real state machine instead of failing with InvalidArn
         // when findStateMachine tries to describe that non-ARN value.
         String suffix = Long.toString(System.nanoTime(), 36);

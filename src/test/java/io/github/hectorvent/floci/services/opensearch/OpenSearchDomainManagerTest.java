@@ -177,11 +177,12 @@ class OpenSearchDomainManagerTest {
     }
 
     /**
-     * Keep-running shutdown leaves the container holding its Docker binding, so
-     * the reservation has to survive with it.
+     * Explicit DeleteDomain tears down through {@code stopDomain}. The shutdown retention
+     * option is decided by {@link OpenSearchService#shutdown()}, so it must not leave a deleted
+     * domain's container running or its port reserved.
      */
     @Test
-    void stopDomainKeepsTheReservationWhenTheContainerKeepsRunning() {
+    void stopDomainRemovesTheContainerEvenWhenShutdownRetentionIsEnabled() {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.OpenSearchServiceConfig opensearch = mock(EmulatorConfig.OpenSearchServiceConfig.class);
@@ -197,14 +198,13 @@ class OpenSearchDomainManagerTest {
                 mock(RegionResolver.class));
 
         Domain domain = new Domain();
-        domain.setDomainName("keep-running");
+        domain.setDomainName("deleted-domain");
         domain.setContainerId("container-id");
         domain.setHostPort(9401);
 
         manager.stopDomain(domain);
 
-        verify(lifecycleManager, never()).stopAndRemove(anyString(), any());
-        verify(portAllocator, never()).release(9401);
-        assertEquals(Integer.valueOf(9401), domain.getHostPort());
+        verify(lifecycleManager).stopAndRemove("container-id", null);
+        verify(portAllocator).release(9401);
     }
 }

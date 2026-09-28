@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -89,15 +91,31 @@ class Ec2CapturedImageReclaimIntegrationTest {
         when(containerManager.removeCommittedImage(anyString())).thenReturn(true);
     }
 
+    /**
+     * Post-teardown callbacks handed to the container manager and not yet run. Production runs
+     * these on the teardown executor once the container is really gone; a test that wants to
+     * model teardown still being in flight leaves them here and runs them when it chooses.
+     */
+    private final List<Runnable> pendingTeardowns = new ArrayList<>();
+
     @BeforeEach
     void terminationMarksInstancesTerminated() {
         // Outside mock mode Ec2Service delegates termination to the container manager, which is
         // mocked here, so without this an instance stays "running" in the store forever and any
         // assertion about terminated instances would be vacuous.
+        pendingTeardowns.clear();
         doAnswer(invocation -> {
             invocation.<Instance>getArgument(0).setState(InstanceState.terminated());
+            runTeardownCallback(invocation.getArgument(1));
             return null;
-        }).when(containerManager).terminate(any(Instance.class));
+        }).when(containerManager).terminate(any(Instance.class), any());
+    }
+
+    /** Runs a post-teardown callback if one was supplied, mirroring the production finally block. */
+    private void runTeardownCallback(Object callback) {
+        if (callback instanceof Runnable runnable) {
+            runnable.run();
+        }
     }
 
     private Instance launch(String imageId) {
@@ -261,6 +279,11 @@ class Ec2CapturedImageReclaimIntegrationTest {
         // clearing the reference on a transient docker failure leaks the layer permanently. The
         // second termination is the later attempt: it only reaches the daemon at all if the
         // reference survived the first failure.
+        //
+        // Counts: one termination reaches the daemon twice, once in the synchronous loop and
+        // once from the post-teardown callback. The second termination adds only one, because
+        // its synchronous attempt succeeds and clears the reference, so the callback that
+        // follows finds nothing left to reclaim.
         String tag = "floci-ami/ami-removal-refused:latest";
         Image image = captureAmi("removal-refused", tag);
         Instance dependent = launch(image.getImageId());
@@ -269,12 +292,12 @@ class Ec2CapturedImageReclaimIntegrationTest {
 
         when(containerManager.removeCommittedImage(tag)).thenReturn(false);
         service.terminateInstances(REGION, List.of(dependent.getInstanceId()));
-        verify(containerManager, times(1)).removeCommittedImage(tag);
+        verify(containerManager, times(2)).removeCommittedImage(tag);
 
         when(containerManager.removeCommittedImage(tag)).thenReturn(true);
         service.terminateInstances(REGION, List.of(dependent.getInstanceId()));
 
-        verify(containerManager, times(2)).removeCommittedImage(tag);
+        verify(containerManager, times(3)).removeCommittedImage(tag);
     }
 
     // ─── Termination reclaims what deregistration had to retain ───────────────
@@ -306,6 +329,143 @@ class Ec2CapturedImageReclaimIntegrationTest {
         service.terminateInstances(REGION, List.of(first.getInstanceId()));
 
         verify(containerManager, never()).removeCommittedImage(tag);
+    }
+
+    /**
+     * Reproduces what production termination actually does to the store: the container manager
+     * flips the instance to {@code shutting-down} synchronously and only reaches
+     * {@code terminated} once its asynchronous teardown finishes. The default stub in this class
+     * terminates immediately, which hides every ordering question about a batch.
+     */
+    private void terminationLeavesInstancesShuttingDown() {
+        doAnswer(invocation -> {
+            invocation.<Instance>getArgument(0).setState(InstanceState.shuttingDown());
+            if (invocation.getArgument(1) instanceof Runnable callback) {
+                // Teardown has not finished, so the callback is held rather than run. A test that
+                // wants to model teardown completing drains pendingTeardowns itself.
+                pendingTeardowns.add(callback);
+            }
+            return null;
+        }).when(containerManager).terminate(any(Instance.class), any());
+    }
+
+    @Test
+    void terminatingAWholeBatchOfDependentsReleasesTheCapture() {
+        // Every instance in one TerminateInstances request goes away together, so none of them
+        // can pin the capture. Counting the siblings as live leaves the layer on disk forever:
+        // the reclaim runs only from termination and deregistration, deregistration is rejected
+        // the second time, and nothing revisits the batch after its teardown completes.
+        String tag = "floci-ami/ami-batch:latest";
+        Image image = captureAmi("batch-terminated", tag);
+        terminationLeavesInstancesShuttingDown();
+        Instance first = launch(image.getImageId());
+        Instance second = launch(image.getImageId());
+        service.deregisterImage(REGION, image.getImageId(), false);
+        verify(containerManager, never()).removeCommittedImage(tag);
+
+        service.terminateInstances(REGION,
+                List.of(first.getInstanceId(), second.getInstanceId()));
+
+        verify(containerManager).removeCommittedImage(tag);
+    }
+
+    @Test
+    void aBatchReclaimTheDaemonRefusesEarlyIsRetriedLaterInTheSameBatch() {
+        // With the whole batch excluded the reclaim is attempted on the first instance, while the
+        // other containers may still exist and Docker may refuse to delete the layer. The
+        // reference is only cleared on success, so the attempt has to come round again as the
+        // rest of the batch is processed.
+        String tag = "floci-ami/ami-batch-retry:latest";
+        Image image = captureAmi("batch-retry", tag);
+        terminationLeavesInstancesShuttingDown();
+        Instance first = launch(image.getImageId());
+        Instance second = launch(image.getImageId());
+        service.deregisterImage(REGION, image.getImageId(), false);
+        when(containerManager.removeCommittedImage(tag)).thenReturn(false, true);
+
+        service.terminateInstances(REGION,
+                List.of(first.getInstanceId(), second.getInstanceId()));
+
+        verify(containerManager, times(2)).removeCommittedImage(tag);
+    }
+
+    @Test
+    void aBatchWhoseTeardownOutlastsTheLoopIsReclaimedOnceTeardownCompletes() {
+        // The in-loop attempts are not enough on their own. Container teardown is asynchronous,
+        // so a batch whose containers are all still present while the loop runs has every
+        // attempt refused by the daemon, and the loop then ends. Without an attempt after
+        // teardown the layer would stay on disk for the lifetime of the emulator.
+        String tag = "floci-ami/ami-batch-slow-teardown:latest";
+        Image image = captureAmi("batch-slow-teardown", tag);
+        terminationLeavesInstancesShuttingDown();
+        Instance first = launch(image.getImageId());
+        Instance second = launch(image.getImageId());
+        service.deregisterImage(REGION, image.getImageId(), false);
+        // The daemon refuses while any container of the batch still exists.
+        when(containerManager.removeCommittedImage(tag)).thenReturn(false);
+
+        service.terminateInstances(REGION,
+                List.of(first.getInstanceId(), second.getInstanceId()));
+
+        // Every synchronous attempt was refused, so the layer is still held.
+        verify(containerManager, times(2)).removeCommittedImage(tag);
+
+        // Teardown completes. The containers are gone, so the daemon now accepts the removal.
+        when(containerManager.removeCommittedImage(tag)).thenReturn(true);
+        pendingTeardowns.forEach(Runnable::run);
+
+        verify(containerManager, times(3)).removeCommittedImage(tag);
+    }
+
+    @Test
+    void aBatchInANonDefaultAccountStillReclaimsAfterTeardown() throws Exception {
+        // The hook runs on the teardown executor, which carries no request context, so every
+        // account-aware store it touches falls back to the default account. For a function of
+        // this shape that is silent: capturedImageFor finds no registered image under
+        // 000000000000, returns null, and the reclaim returns at its first guard with nothing
+        // logged -- which is indistinguishable from "this AMI was never captured".
+        //
+        // The other batch tests cannot catch it. They drain pendingTeardowns on the test thread,
+        // where the request context IS active, so the fallback never happens. This one drains on
+        // a bare thread, which is what the executor actually gives the hook.
+        String tag = "floci-ami/ami-other-account:latest";
+        String otherAccount = "210987654321";
+
+        Image image = RequestScopes.callAs(otherAccount, () -> {
+            when(containerManager.commitInstance(any(Instance.class), anyString())).thenReturn(tag);
+            Instance source = launch(BASE_AMI);
+            Image captured = service.createImage(REGION, source.getInstanceId(),
+                    "other-account", "captured", true);
+            service.terminateInstances(REGION, List.of(source.getInstanceId()));
+            return captured;
+        });
+
+        RequestScopes.runAs(otherAccount, () -> {
+            terminationLeavesInstancesShuttingDown();
+            Instance first = launch(image.getImageId());
+            Instance second = launch(image.getImageId());
+            service.deregisterImage(REGION, image.getImageId(), false);
+            when(containerManager.removeCommittedImage(tag)).thenReturn(false);
+            service.terminateInstances(REGION,
+                    List.of(first.getInstanceId(), second.getInstanceId()));
+        });
+
+        // The two synchronous attempts ran on the request thread, where the account IS active, so
+        // they found the AMI and were refused by the daemon rather than by a wrong-account lookup.
+        // That is exactly why this bug is invisible to the other batch tests.
+        verify(containerManager, times(2)).removeCommittedImage(tag);
+
+        // Teardown finishes on a thread with no request scope at all, as it does in production.
+        when(containerManager.removeCommittedImage(tag)).thenReturn(true);
+        List<Runnable> draining = List.copyOf(pendingTeardowns);
+        Thread bare = new Thread(() -> draining.forEach(Runnable::run), "teardown-no-request-scope");
+        bare.start();
+        bare.join(30_000);
+
+        // The third attempt is the hook's. Without the account captured on the request thread it
+        // never happens: the lookup resolves under the default account, finds nothing, and the
+        // reclaim returns at its first guard, leaving the layer on disk for good.
+        verify(containerManager, times(3)).removeCommittedImage(tag);
     }
 
     @Test

@@ -18,19 +18,25 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -51,6 +57,9 @@ import static org.mockito.Mockito.when;
  * triggerSource, and that their responses are correctly applied to the auth flow.
  */
 class CognitoLambdaTriggersTest {
+    private static final List<String> AUTH_FLOWS = List.of("ALLOW_USER_PASSWORD_AUTH",
+            "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_CUSTOM_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH");
+
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -93,7 +102,16 @@ class CognitoLambdaTriggersTest {
     }
 
     private UserPoolClient createClient(UserPool pool) {
-        return service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        return service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of(),
+                null, List.of(), null, AUTH_FLOWS, null, null, List.of(), null, List.of(), null,
+                null, null, List.of(), null, null);
+    }
+
+    /** An OAuth client for the authorization-code flow, allowed exactly {@code allowedScopes}. */
+    private UserPoolClient createOAuthClient(UserPool pool, List<String> allowedScopes) {
+        return service.createUserPoolClient(pool.getId(), "oauth", false, true, List.of("code"), allowedScopes,
+                null, List.of("https://application.example.test/callback"), null, AUTH_FLOWS, null, null,
+                List.of(), null, List.of(), null, null, null, List.of(), null, null);
     }
 
     private void seedUser(UserPool pool, String username, String password) {
@@ -117,6 +135,17 @@ class CognitoLambdaTriggersTest {
 
     private static InvokeResult lambdaError(String error) {
         return new InvokeResult(200, error, new byte[0], null, "req-id");
+    }
+
+    private static InvokeResult lambdaError(String error, String errorMessage) {
+        try {
+            byte[] payload = MAPPER.writeValueAsBytes(Map.of(
+                    "errorType", "Error",
+                    "errorMessage", errorMessage));
+            return new InvokeResult(200, error, payload, null, "req-id");
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static InvokeResult rawPayload(String payload) {
@@ -147,6 +176,40 @@ class CognitoLambdaTriggersTest {
                 .invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), eq(InvocationType.RequestResponse));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void preAuthenticationIncludesCognitoUserStatusAttribute(boolean adminAuth) throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class),
+                eq(InvocationType.RequestResponse)))
+                .thenReturn(ok(Map.of()));
+
+        if (adminAuth) {
+            service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",
+                    Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        } else {
+            service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                    Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        }
+
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre"), payloadCaptor.capture(),
+                eq(InvocationType.RequestResponse));
+
+        Map<String, Object> event = MAPPER.readValue(payloadCaptor.getValue(), new TypeReference<>() {});
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = (Map<String, Object>) event.get("request");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> userAttributes = (Map<String, Object>) request.get("userAttributes");
+        assertEquals("CONFIRMED", userAttributes.get("cognito:user_status"));
+        assertEquals("alice@example.com", userAttributes.get("email"));
+        assertFalse(service.adminGetUser(pool.getId(), "alice").getAttributes()
+                .containsKey("cognito:user_status"));
+    }
+
     @Test
     void preAuthenticationLambdaErrorBlocksAuthentication() {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
@@ -160,6 +223,54 @@ class CognitoLambdaTriggersTest {
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                         Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
         assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("PreAuthentication failed with error Unhandled.", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void preAuthenticationLambdaErrorPreservesThrownMessage(boolean adminAuth) {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any()))
+                .thenReturn(lambdaError("Unhandled", "Email not verified"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> {
+            if (adminAuth) {
+                service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+            } else {
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+            }
+        });
+
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("PreAuthentication failed with error Email not verified.", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"not-json", "{}", "{\"errorMessage\":null}",
+            "{\"errorMessage\":\"\"}", "{\"errorMessage\":\" \"}",
+            "{\"errorMessage\":123}", "{\"errorMessage\":true}",
+            "{\"errorMessage\":[]}", "{\"errorMessage\":{}}"})
+    void preAuthenticationLambdaErrorFallsBackWithoutUsableMessage(String errorPayload) {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreAuthentication", "arn:aws:lambda:::pre"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        byte[] payload = errorPayload == null ? null : errorPayload.getBytes(StandardCharsets.UTF_8);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any()))
+                .thenReturn(new InvokeResult(200, "Unhandled", payload, null, "req-id"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("PreAuthentication failed with error Unhandled.", ex.getMessage());
     }
 
     // =========================================================================
@@ -259,7 +370,7 @@ class CognitoLambdaTriggersTest {
     // =========================================================================
 
     @Test
-    void preSignUpFiresOnSignUp() {
+    void preSignUpFiresOnSignUp() throws Exception {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
         UserPoolClient client = createClient(pool);
 
@@ -270,9 +381,11 @@ class CognitoLambdaTriggersTest {
         service.signUp(client.getClientId(), "alice", "Perm1234!",
                 Map.of("email", "alice@example.com"));
 
-        verify(lambdaService, atLeastOnce())
-                .invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
-                        any(byte[].class), eq(InvocationType.RequestResponse));
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                payloadCaptor.capture(), eq(InvocationType.RequestResponse));
+        assertFalse(MAPPER.readTree(payloadCaptor.getValue()).path("request")
+                .path("userAttributes").has("cognito:user_status"));
     }
 
     @Test
@@ -571,6 +684,234 @@ class CognitoLambdaTriggersTest {
     // UserMigration
     // =========================================================================
 
+    // =========================================================================
+    // Managed login shares USER_PASSWORD_AUTH's password check and its triggers
+    // =========================================================================
+
+    @Test
+    void managedLoginFiresPreAndPostAuthenticationButIssuesNoTokens() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of(
+                "PreAuthentication", "arn:aws:lambda:::pre",
+                "PostAuthentication", "arn:aws:lambda:::post",
+                "PreTokenGeneration", "arn:aws:lambda:::pretoken"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), anyString(), any(byte[].class), any())).thenReturn(ok(Map.of()));
+
+        CognitoUser user = service.authenticateManagedLogin(client, "alice", "Perm1234!");
+
+        assertEquals("alice", user.getUsername());
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any());
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::post"), any(byte[].class), any());
+        // Sign-in issues no tokens in the authorization-code flow: it hands back a code, and the
+        // token endpoint mints the tokens later. PreTokenGeneration therefore belongs to redemption,
+        // not here; see the hostedAuth tests below.
+        verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::pretoken"), any(byte[].class), any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void preTokenGenerationFiresWhenTheTokenEndpointRedeemsAnAuthorizationCode() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of("claimsOverrideDetails", Map.of(
+                        "claimsToAddOrOverride", Map.of("tenant", "acme"),
+                        "groupOverrideDetails", Map.of("groupsToOverride", List.of("admins"))))));
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null,
+                List.of("openid", "email"));
+
+        Map<String, Object> event;
+        Map<String, Object> idClaims;
+        Map<String, Object> accessClaims;
+        try {
+            event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+            idClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("IdToken")), new TypeReference<>() {});
+            accessClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("AccessToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals("TokenGeneration_HostedAuth", event.get("triggerSource"),
+                "AWS uses TokenGeneration_HostedAuth for sign-in through the hosted UI");
+        assertEquals(List.of("openid", "email"), ((Map<String, Object>) event.get("request")).get("scopes"),
+                "a V2 lambda may branch on the scopes the authorization request asked for");
+        assertEquals("acme", idClaims.get("tenant"), "the trigger's claims should reach the ID token");
+        assertEquals("acme", accessClaims.get("tenant"), "the trigger's claims should reach the access token");
+        assertEquals(List.of("admins"), accessClaims.get("cognito:groups"),
+                "groupOverrideDetails should apply on redemption as it does on InitiateAuth");
+    }
+
+    /**
+     * Nothing checks an authorization request's scopes against the client's AllowedOAuthScopes when the
+     * code is issued, so the stored code can name a scope the client may not use. A V2 trigger may grant
+     * claims or scopes from what it is told was requested, so it must never be told about one.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aScopeTheClientIsNotAllowedNeverReachesTheTrigger() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of()));
+
+        service.generateAuthResultForHostedAuth(user, pool, client, null,
+                List.of("openid", "admin/superuser", "email"));
+
+        Map<String, Object> event;
+        try {
+            event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals(List.of("openid", "email"), ((Map<String, Object>) event.get("request")).get("scopes"),
+                "an unallowed scope must be dropped, so a trigger cannot grant entitlements from it");
+    }
+
+    @Test
+    void anOAuthClientWithNoAllowedScopesSendsTheTriggerNone() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of());
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of()));
+
+        service.generateAuthResultForHostedAuth(user, pool, client, null, List.of("openid"));
+
+        Map<String, Object> event;
+        try {
+            event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        @SuppressWarnings("unchecked")
+        Object scopes = ((Map<String, Object>) event.get("request")).get("scopes");
+        assertEquals(List.of(), scopes, "a client allowed no scopes grants the trigger none");
+    }
+
+    /**
+     * The OIDC flow owns {@code nonce}, and AWS lists it among the claims this trigger cannot
+     * override or suppress. A trigger that tries must not displace the request's value.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void redemptionKeepsTheRequestNonceOverATriggerThatTriesToChangeIt() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsOverrideDetails", Map.of(
+                        "claimsToAddOrOverride", Map.of("nonce", "trigger-nonce", "tier", "gold"),
+                        "claimsToSuppress", List.of("nonce")))));
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client,
+                new CognitoService.ClaimsOverride(Map.of("nonce", "request-nonce"), null, null, null,
+                        null, null, null, null, null), List.of("openid"));
+
+        Map<String, Object> idClaims;
+        try {
+            idClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("IdToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals("request-nonce", idClaims.get("nonce"),
+                "the authorization request's nonce must survive a trigger that overrides or suppresses it");
+        assertEquals("gold", idClaims.get("tier"), "the trigger's other claims should still apply");
+    }
+
+    @Test
+    void redemptionMintsTokensWhenNoPreTokenGenerationTriggerIsConfigured() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of());
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client,
+                new CognitoService.ClaimsOverride(Map.of("nonce", "request-nonce"), null, null, null,
+                        null, null, null, null, null), List.of("openid"));
+
+        assertNotNull(auth.get("IdToken"));
+        assertNotNull(auth.get("AccessToken"));
+        assertNotNull(auth.get("RefreshToken"));
+        Map<String, Object> idClaims;
+        try {
+            idClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("IdToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals("request-nonce", idClaims.get("nonce"));
+        verify(lambdaService, never()).invoke(anyString(), anyString(), any(byte[].class), any());
+    }
+
+    @Test
+    void managedLoginPreAuthenticationErrorBlocksSignIn() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of(
+                "PreAuthentication", "arn:aws:lambda:::pre",
+                "PostAuthentication", "arn:aws:lambda:::post"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre"), any(byte[].class), any()))
+                .thenReturn(lambdaError("Unhandled", "Email not verified"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.authenticateManagedLogin(client, "alice", "Perm1234!"));
+
+        assertEquals("PreAuthentication failed with error Email not verified.", ex.getMessage());
+        verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::post"), any(byte[].class), any());
+    }
+
+    @Test
+    void managedLoginMigratesAMissingUser() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("UserMigration", "arn:aws:lambda:::migrate"));
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::migrate"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("userAttributes", Map.of("email", "newcomer@example.com"),
+                        "finalUserStatus", "CONFIRMED")));
+
+        CognitoUser user = service.authenticateManagedLogin(client, "newcomer", "MyPassword1!");
+
+        assertEquals("newcomer", user.getUsername());
+        assertEquals("newcomer@example.com", service.adminGetUser(pool.getId(), "newcomer").getAttributes().get("email"));
+    }
+
+    /** Managed login needs neither ALLOW_USER_PASSWORD_AUTH nor a SECRET_HASH for a client with a secret. */
+    @Test
+    void managedLoginIgnoresExplicitAuthFlowsAndSecretHash() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of());
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", true, false, List.of(), List.of(),
+                null, List.of(), null, List.of("ALLOW_REFRESH_TOKEN_AUTH"), null, null, List.of(), null, List.of(),
+                null, null, null, List.of(), null, null);
+
+        assertThrows(AwsException.class, () -> service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("alice", service.authenticateManagedLogin(client, "alice", "Perm1234!").getUsername());
+    }
+
+    @Test
+    void managedLoginRefusesAUserWhoMustSetANewPassword() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PostAuthentication", "arn:aws:lambda:::post"));
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "Temp1234!");
+        UserPoolClient client = createClient(pool);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.authenticateManagedLogin(client, "alice", "Temp1234!"));
+
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("must set a new password"), ex.getMessage());
+        verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::post"), any(byte[].class), any());
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void userMigrationCreatesAndAuthenticatesMissingUser() {
@@ -692,6 +1033,121 @@ class CognitoLambdaTriggersTest {
 
         assertNotNull(((Map<String, Object>) tokens.get("AuthenticationResult")).get("AccessToken"));
         verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any());
+    }
+
+    private CognitoService serviceWithClock(MutableClock clock) {
+        return new CognitoService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                "http://localhost:4566", "cloudfront.net", regionResolver, lambdaService, mock(AcmService.class),
+                null, null, mock(TlsCertificateManager.class), clock);
+    }
+
+    private UserPoolClient customAuthClient(CognitoService clockedService) {
+        Map<String, Object> req = new HashMap<>();
+        req.put("PoolName", "trigger-pool");
+        req.put("LambdaConfig", Map.of(
+                "DefineAuthChallenge", "arn:aws:lambda:::define",
+                "CreateAuthChallenge", "arn:aws:lambda:::create",
+                "VerifyAuthChallengeResponse", "arn:aws:lambda:::verify"));
+        UserPool pool = clockedService.createUserPool(req, "us-east-1");
+        clockedService.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), null);
+        clockedService.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+        return clockedService.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of(),
+                null, List.of(), null, AUTH_FLOWS, null, null, List.of(), null, List.of(), null,
+                null, null, List.of(), null, null);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void customAuthSessionValidityStartsWhenTheSessionIsIssued() {
+        MutableClock clock = new MutableClock();
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPoolClient client = customAuthClient(clockedService);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")))
+                .thenReturn(ok(Map.of("issueTokens", true)));
+        // A slow CreateAuthChallenge trigger: two minutes pass before the session is handed out.
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class), any()))
+                .thenAnswer(invocation -> {
+                    clock.advance(Duration.ofMinutes(2));
+                    return ok(Map.of("privateChallengeParameters", Map.of("answer", "blue")));
+                });
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("answerCorrect", true)));
+
+        String session = (String) clockedService.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "alice")).get("Session");
+        clock.advance(Duration.ofMinutes(2));
+
+        Map<String, Object> tokens = clockedService.respondToAuthChallenge(client.getClientId(),
+                "CUSTOM_CHALLENGE", session, Map.of("USERNAME", "alice", "ANSWER", "blue"));
+
+        assertNotNull(((Map<String, Object>) tokens.get("AuthenticationResult")).get("AccessToken"));
+    }
+
+    @Test
+    void customAuthSessionExpiresThreeMinutesAfterItIsIssued() {
+        MutableClock clock = new MutableClock();
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPoolClient client = customAuthClient(clockedService);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("privateChallengeParameters", Map.of("answer", "blue"))));
+
+        String session = (String) clockedService.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "alice")).get("Session");
+        clock.advance(Duration.ofMinutes(client.getAuthSessionValidity()).plusSeconds(1));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                clockedService.respondToAuthChallenge(client.getClientId(), "CUSTOM_CHALLENGE", session,
+                        Map.of("USERNAME", "alice", "ANSWER", "blue")));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("Invalid session for the user, session is expired.", ex.getMessage());
+        verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any());
+    }
+
+    @Test
+    void customAuthSessionUsesConfiguredClientValidityAcrossOtherClientInitiation() {
+        MutableClock clock = new MutableClock();
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPoolClient longClient = customAuthClient(clockedService);
+        longClient.setAuthSessionValidity(10);
+        UserPoolClient shortClient = clockedService.createUserPoolClient(
+                longClient.getUserPoolId(), "short", false, false, List.of(), List.of(),
+                null, List.of(), null, AUTH_FLOWS, null, null, List.of(), null, List.of(), null,
+                null, null, List.of(), null, null);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")))
+                .thenReturn(ok(Map.of("issueTokens", true)))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("privateChallengeParameters", Map.of("answer", "blue"))));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("answerCorrect", true)));
+
+        String longSession = (String) clockedService.initiateAuth(longClient.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "alice")).get("Session");
+        clock.advance(Duration.ofMinutes(4));
+        clockedService.initiateAuth(shortClient.getClientId(), "CUSTOM_AUTH", Map.of("USERNAME", "alice"));
+
+        Map<String, Object> result = clockedService.respondToAuthChallenge(longClient.getClientId(),
+                "CUSTOM_CHALLENGE", longSession, Map.of("USERNAME", "alice", "ANSWER", "blue"));
+        assertNotNull(result.get("AuthenticationResult"));
+
+        String expiringSession = (String) clockedService.initiateAuth(longClient.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "alice")).get("Session");
+        clock.advance(Duration.ofMinutes(longClient.getAuthSessionValidity()).plusSeconds(1));
+        AwsException expired = assertThrows(AwsException.class, () -> clockedService.respondToAuthChallenge(
+                longClient.getClientId(), "CUSTOM_CHALLENGE", expiringSession,
+                Map.of("USERNAME", "alice", "ANSWER", "blue")));
+        assertEquals("Invalid session for the user, session is expired.", expired.getMessage());
     }
 
     @Test
@@ -945,7 +1401,7 @@ class CognitoLambdaTriggersTest {
                 eq(List.of()), eq(List.of()), eq(List.of()), isNull(),
                 eq("TRIGGER-FIRED"),
                 eq("TRIGGER-FIRED code=246962"),
-                any(), any(), eq(List.of()), eq(List.of()), any(), anyString());
+                any(), any(), eq(List.of()), eq(List.of()), any(), isNull(), anyString());
     }
 
     @Test
@@ -1002,7 +1458,7 @@ class CognitoLambdaTriggersTest {
                 any(), any(), any(), isNull(),
                 eq("Your verification code"),
                 eq("Your verification code is 246962."),
-                any(), any(), any(), any(), any(), anyString());
+                any(), any(), any(), any(), any(), isNull(), anyString());
     }
 
     @Test
@@ -1026,7 +1482,7 @@ class CognitoLambdaTriggersTest {
                 any(), any(), any(), isNull(),
                 eq("Your verification code"),
                 eq("Your verification code is 246962."),
-                any(), any(), any(), any(), any(), anyString());
+                any(), any(), any(), any(), any(), isNull(), anyString());
     }
 
     @Test

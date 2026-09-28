@@ -44,9 +44,47 @@ Floci emulates SageMaker control-plane APIs and runs real Docker containers for 
 
 `CreateTrainingJob` starts `AlgorithmSpecification.TrainingImage` with command `train` unless `ContainerEntrypoint`/`ContainerArguments` are supplied. Floci writes SageMaker config files under `/opt/ml/input/config`, downloads channel data from S3 into `/opt/ml/input/data/<channel>`, waits for container exit, and uploads `/opt/ml/model` as `model.tar.gz` under `OutputDataConfig.S3OutputPath/<TrainingJobName>/output/`.
 
+## GPU-backed training
+
+On AWS, `ResourceConfig.InstanceType` *is* the hardware: `ml.g5.xlarge` provisions a machine that physically has one A10G. Floci has one host with whatever cards it has, so a GPU instance type is served by substituting a local device. That substitution is off by default and the SDK request is unchanged either way.
+
+How many accelerators each `ml.*` type carries is a property of AWS, so it ships with Floci in `sagemaker/instance-type-catalog.yaml`. Configuration covers only the local decision of which of this machine's devices may be handed out:
+
+```yaml
+floci:
+  services:
+    sagemaker:
+      gpu:
+        enabled: true
+        mode: cdi            # cdi | device-ids | count
+        devices:
+          - nvidia.com/gpu=GPU-0e1f2a3b
+```
+
+| Setting | Meaning |
+| --- | --- |
+| `enabled` | Off by default. While off, every training container is CPU-only, exactly as before. |
+| `mode` | How the request reaches the daemon. `cdi` names [Container Device Interface](https://github.com/cncf-tags/container-device-interface) devices, `device-ids` uses daemon device ids, and `count` asks for a number and lets the daemon choose. |
+| `devices` | The devices Floci may use, for `cdi` and `device-ids`. Unset allows none, so a shared machine does not hand over every GPU by default. Ignored by `count`. |
+
+`mode` defaults to `cdi` because daemons differ: Podman resolves only CDI and will accept a count request while attaching no device ([containers/podman#22645](https://github.com/containers/podman/issues/22645)). Choosing CDI means a misconfiguration fails the container start rather than quietly training on CPU. Use `count` or `device-ids` against Docker.
+
+Floci does not reserve configured devices across concurrent training jobs. In `cdi` and `device-ids` modes, each job takes the first devices it needs from the allowlist, so two simultaneous one-GPU jobs can target the same local card and contend for memory.
+
+A training job fails with an explanatory `FailureReason`, rather than running on CPU, when:
+
+- the instance type belongs to a GPU family (`ml.g*`, `ml.p*`, `ml.inf*`, `ml.trn*`) that the catalog does not list, so its accelerator count is unknown
+- fewer devices are allowed than the instance type needs
+- `cdi` or `device-ids` is selected with no `devices` configured
+- `InstanceCount` is above one, since Floci runs a job as a single container
+
+Only the accelerator is substituted. An instance type also implies vCPU and memory, which Floci does not emulate for any service: EC2 instance types are metadata for `DescribeInstanceTypes` and do not size containers, and RDS records `DBInstanceClass` without acting on it. Resource limits are applied only where an API supplies an explicit number, as Lambda's `MemorySize` does.
+
 ## Endpoint hosting
 
 `CreateEndpoint` starts the model image as a long-lived Docker container with command `serve`, port `8080`, `/ping` health checks, and `/invocations` runtime proxying. `ModelDataUrl` artifacts are downloaded from S3 and placed in `/opt/ml/model`.
+
+Endpoint containers are CPU-only for now; the `gpu` settings above apply to training jobs.
 
 ## Examples
 

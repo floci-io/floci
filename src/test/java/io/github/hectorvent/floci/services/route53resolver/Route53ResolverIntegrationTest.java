@@ -86,4 +86,90 @@ class Route53ResolverIntegrationTest {
         .then()
             .statusCode(400);
     }
+
+    // ── CreateResolverEndpoint: the request member is IpAddresses ──────────────
+    //
+    // AWS names it IpAddresses; its list shape is named IpAddressRequest, which is
+    // where the emulator's earlier wire name came from. Every SDK, the CLI and the
+    // Terraform provider send IpAddresses, and the CLI will not send the old name at
+    // all, so reading only the old one made the operation dispatch and stay
+    // uncallable. These cover both spellings so the alias cannot be dropped silently.
+
+    private static String createEndpointBody(String ipMember, String creatorRequestId) {
+        return "{\"Name\":\"ep\",\"Direction\":\"INBOUND\","
+             + "\"CreatorRequestId\":\"" + creatorRequestId + "\","
+             + "\"SecurityGroupIds\":[\"sg-abc123\"],"
+             + "\"" + ipMember + "\":[{\"SubnetId\":\"subnet-abc\",\"Ip\":\"10.0.0.10\"}]}";
+    }
+
+    @Test
+    void createResolverEndpoint_acceptsTheAwsIpAddressesMember() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body(createEndpointBody("IpAddresses", "aws-member-1"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.Id", startsWith("rslvr-in-"))
+            .body("ResolverEndpoint.Direction", equalTo("INBOUND"))
+            .body("ResolverEndpoint.IpAddressCount", equalTo(1));
+    }
+
+    @Test
+    void createResolverEndpoint_stillAcceptsTheLegacyMember() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body(createEndpointBody("IpAddressRequests", "legacy-member-1"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.IpAddressCount", equalTo(1));
+    }
+
+    @Test
+    void createResolverEndpoint_replayMatchesAcrossTheTwoSpellings() {
+        // A caller that created an endpoint with the old name and retries with the AWS
+        // one is sending the same request. The idempotency check compares contents, so
+        // it must not read the rename as a conflict.
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body(createEndpointBody("IpAddressRequests", "replay-across-names"))
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body(createEndpointBody("IpAddresses", "replay-across-names"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.IpAddressCount", equalTo(1));
+    }
+
+    @Test
+    void createResolverEndpoint_withoutAddressesNamesTheAwsMember() {
+        // The message is the only hint a caller gets about which member to send, so it
+        // must name the one AWS documents rather than the emulator's internal spelling.
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Name\":\"ep\",\"Direction\":\"INBOUND\","
+                + "\"CreatorRequestId\":\"no-addresses\",\"SecurityGroupIds\":[\"sg-abc123\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("message", equalTo("IpAddresses is required"));
+    }
 }

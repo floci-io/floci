@@ -386,6 +386,32 @@ public class SesContactService {
         return existing;
     }
 
+    /**
+     * Replaces a contact outright, as a contact-list import job's {@code PUT} action does. Probed
+     * against real AWS: an imported record is the whole contact, so preferences, attributes, and
+     * the unsubscribe flag it omits are cleared rather than merged, unlike
+     * {@link #updateContact}, whose topic preferences merge by name.
+     */
+    public Contact replaceContact(String listName, String emailAddress, List<TopicPreference> topicPreferences,
+                                  Boolean unsubscribeAll, String attributesData, String region) {
+        validateContactInput(listName, emailAddress, topicPreferences, region);
+        String key = contactKey(region, listName, emailAddress);
+        Contact existing;
+        // Same lock as create/update: a concurrent deleteContactList must not slip between the
+        // validation and the write.
+        synchronized (contactMutationLock) {
+            getContactList(listName, region);
+            existing = contactStore.get(key).orElseThrow(() -> contactNotFound(emailAddress));
+            existing.setTopicPreferences(topicPreferences);
+            existing.setUnsubscribeAll(unsubscribeAll != null && unsubscribeAll);
+            existing.setAttributesData(attributesData);
+            existing.setLastUpdatedTimestamp(Instant.now(clock));
+            contactStore.put(key, existing);
+        }
+        LOG.infov("Replaced SES contact {0} in list {1}", emailAddress, listName);
+        return existing;
+    }
+
     public void deleteContact(String listName, String emailAddress, String region) {
         validateEmailAddress(emailAddress);
         String key = contactKey(region, listName, emailAddress);
@@ -631,9 +657,9 @@ public class SesContactService {
     /**
      * Resolves the recipients suppressed by SES V2 {@code SendEmail} {@code ListManagementOptions}:
      * for each envelope recipient that is opted out of the named contact list (or the given topic),
-     * returns a {@code BOUNCE} suppression reason so the shared send path drops the recipient from
-     * the relay and publishes a Bounce event, matching AWS ("SES will issue a bounce event for a
-     * message that is sent to an unsubscribed contact"). Returns an empty map when no
+     * marks the recipient with {@link SesRecipientEvents#REASON_LIST_OPT_OUT} so the shared send
+     * path drops it from the relay and the event classifier publishes a Bounce event, matching AWS
+     * ("SES will issue a bounce event for a message that is sent to an unsubscribed contact"). Returns an empty map when no
      * {@code ListManagementOptions} was supplied. The display-name stripping is the facade's shared
      * send helper, injected as {@code addressExtractor} so this service stays free of facade
      * dependencies. Throws when the contact list does not exist, so a
@@ -670,7 +696,7 @@ public class SesContactService {
             }
             Contact contact = getOrAutoCreateContact(list, email, region);
             if (isListManagementOptedOut(contact, list, effectiveTopic)) {
-                optOuts.put(address, "BOUNCE");
+                optOuts.put(address, SesRecipientEvents.REASON_LIST_OPT_OUT);
             }
         }
         return optOuts;

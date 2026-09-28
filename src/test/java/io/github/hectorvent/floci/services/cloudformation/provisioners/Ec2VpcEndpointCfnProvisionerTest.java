@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpointDnsEntry;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -125,6 +126,26 @@ class Ec2VpcEndpointCfnProvisionerTest {
         assertEquals("vpce-123", r.getPhysicalId());
         assertEquals("vpce-123", r.getAttributes().get("Id"));
         assertEquals("2026-08-13T10:15:30.000Z", r.getAttributes().get("CreationTimestamp"));
+        assertEquals("", r.getAttributes().get("DnsEntries"));
+    }
+
+    @Test
+    void dnsEntriesPairTheZoneWithTheNameAndJoinOnCommas() {
+        when(ec2.createVpcEndpoint(anyString(), anyString(), anyString(), anyString(),
+                anyList(), anyList(), anyList(), any(), any(), anyList()))
+                .thenReturn(endpoint("vpce-entries"));
+        when(ec2.endpointDnsEntries(any())).thenReturn(List.of(
+                new VpcEndpointDnsEntry("vpce-entries-ab12cd34.s3.us-east-1.vpce.amazonaws.com", "ZREGIONAL"),
+                new VpcEndpointDnsEntry("s3.us-east-1.amazonaws.com", "ZPRIVATE")));
+        StackResource r = resource();
+
+        provisioner.provision(r, mapper.createObjectNode()
+                .put("VpcId", "vpc-1")
+                .put("ServiceName", "com.amazonaws.us-east-1.s3")
+                .put("VpcEndpointType", "Interface"), ctx());
+
+        assertEquals("ZREGIONAL:vpce-entries-ab12cd34.s3.us-east-1.vpce.amazonaws.com,"
+                + "ZPRIVATE:s3.us-east-1.amazonaws.com", r.getAttributes().get("DnsEntries"));
     }
 
     @Test

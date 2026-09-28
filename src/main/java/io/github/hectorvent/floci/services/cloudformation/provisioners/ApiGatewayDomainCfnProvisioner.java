@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
@@ -102,7 +103,7 @@ public class ApiGatewayDomainCfnProvisioner implements CfnResourceProvisioner {
         }
         r.setPhysicalId(domainName);
         r.getAttributes().put("DomainNameArn",
-                "arn:aws:apigateway:" + ctx.region() + "::/domainnames/" + domainName);
+                AwsArnUtils.Arn.of("apigateway", ctx.region(), "", "/domainnames/" + domainName).toString());
         r.getAttributes().put("RegionalDomainName", orEmpty(provisioned.getRegionalDomainName()));
         r.getAttributes().put("RegionalHostedZoneId", orEmpty(provisioned.getRegionalHostedZoneId()));
         r.getAttributes().put("DistributionDomainName", orEmpty(provisioned.getDistributionDomainName()));

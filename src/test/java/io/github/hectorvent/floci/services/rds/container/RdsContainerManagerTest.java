@@ -12,9 +12,11 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.InOrder;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -24,6 +26,8 @@ import java.util.concurrent.TimeUnit;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.command.PauseContainerCmd;
+import com.github.dockerjava.api.command.UnpauseContainerCmd;
 import com.github.dockerjava.api.model.Bind;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 
@@ -31,14 +35,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -73,6 +80,53 @@ class RdsContainerManagerTest {
                 DatabaseEngine.POSTGRES, "postgres:18").isEmpty());
         assertTrue(RdsContainerManager.buildContainerCmd(
                 DatabaseEngine.MARIADB, "mariadb:11").isEmpty());
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.SQLSERVER, "mcr.microsoft.com/mssql/server:2022-latest").isEmpty());
+    }
+
+    @Test
+    void sqlServerUsesPersistentDataDirectory() {
+        assertEquals("/var/opt/mssql",
+                RdsContainerManager.engineDefaultDataPath(DatabaseEngine.SQLSERVER,
+                        "mcr.microsoft.com/mssql/server:2022-latest"));
+    }
+
+    @Test
+    void sqlServerContainerUsesOfficialImageEnvironmentAndPort() {
+        EmulatorConfig config = config(tempDir.resolve("sqlserver-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "sqlserver-container", Map.of(1433,
+                new ContainerLifecycleManager.EndpointInfo("db1", 1433))));
+        ContainerDetector detector = mock(ContainerDetector.class);
+        when(detector.isRunningInContainer()).thenReturn(false);
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, logStreamer, detector, config,
+                new RegionResolver("us-east-1", "000000000000"), mock(ServiceConfigAccess.class));
+
+        manager.start("db1", "vol1", DatabaseEngine.SQLSERVER,
+                "mcr.microsoft.com/mssql/server:2022-latest", "sa", "Password123!", null);
+
+        org.mockito.ArgumentCaptor<ContainerSpec> spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(spec.capture());
+        assertEquals("mcr.microsoft.com/mssql/server:2022-latest", spec.getValue().image());
+        assertTrue(spec.getValue().env().contains("ACCEPT_EULA=Y"));
+        assertTrue(spec.getValue().env().contains("MSSQL_SA_PASSWORD=Password123!"));
+        assertEquals(1433, spec.getValue().portBindings().keySet().iterator().next());
+        assertEquals("/var/opt/mssql", spec.getValue().binds().getFirst().getVolume().getPath());
+    }
+
+    @Test
+    void sqlServerMasterLoginDoesNotCreateDatabaseOrGrantSysadmin() {
+        String sql = RdsContainerManager.sqlServerMasterLoginSql("admin", "Password123!");
+
+        assertTrue(sql.contains("CREATE LOGIN [admin]"));
+        assertFalse(sql.contains("CREATE DATABASE"));
+        assertFalse(sql.contains("sysadmin"));
     }
 
     @Test
@@ -128,6 +182,12 @@ class RdsContainerManagerTest {
                 DatabaseEngine.POSTGRES, "admin", "old-pass", "new-pass");
         assertEquals("psql", postgres[0]);
         assertEquals("ALTER ROLE \"admin\" WITH PASSWORD 'new-pass';", postgres[postgres.length - 1]);
+
+        String[] sqlServer = RdsContainerManager.passwordRotationCommand(
+                DatabaseEngine.SQLSERVER, "admin", "old-pass", "new-pass");
+        assertEquals("admin", sqlServer[5]);
+        assertEquals("old-pass", sqlServer[7]);
+        assertTrue(sqlServer[9].contains("ALTER LOGIN [admin]"));
     }
 
     @Test
@@ -296,7 +356,7 @@ class RdsContainerManagerTest {
         var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).create(spec.capture());
         assertEquals(dbPath.toString(), spec.getValue().binds().getFirst().getPath());
-        assertEquals("floci-rds-db1", spec.getValue().name());
+        assertEquals("floci-aws-rds-db1", spec.getValue().name());
         verify(logStreamer).attachForAccount(
                 "222222222222", "container-id", "/aws/rds/instance/db1/error",
                 "log-stream", "us-west-2", "rds:" + runtimeId);
@@ -852,7 +912,7 @@ class RdsContainerManagerTest {
                 runtimeId, "legacy", "legacy", "floci-rds-legacy-volume",
                 DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
 
-        assertEquals("floci-rds-legacy-volume",
+        assertEquals("floci-aws-rds-legacy-volume",
                 manager.getActiveHandle(runtimeId).getContainerId());
         verify(lifecycleManager, never()).create(any());
         assertThrows(IllegalStateException.class, () -> manager.start(
@@ -1035,7 +1095,44 @@ class RdsContainerManagerTest {
         var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).removeIfExistsStrict("floci-rds-volume-a");
         verify(lifecycleManager).create(spec.capture());
-        assertEquals("floci-rds-volume-a", spec.getValue().name());
+        assertEquals("floci-aws-rds-volume-a", spec.getValue().name());
+    }
+
+    @Test
+    void aLegacyVolumeIsMountedAsIsWhileItsContainerTakesTheCurrentName() {
+        // The central asymmetry of the prefix migration. The volume holds the data, so it keeps
+        // whatever name it was persisted under; the container is disposable, so it is always
+        // normalised. Mounting the current name here would start an empty database.
+        EmulatorConfig config = config(Path.of("data"));
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "container-id", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager,
+                logStreamer,
+                containerDetector,
+                config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+
+        manager.start(null, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+
+        var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(spec.capture());
+        assertEquals("floci-aws-rds-db1", spec.getValue().name(),
+                "the container is renamed to the current prefix");
+        verify(lifecycleManager).ensureVolume("floci-rds-db1");
+        verify(lifecycleManager, org.mockito.Mockito.never()).ensureVolume("floci-aws-rds-db1");
+        // A pre-migration container under the old name holds the volume's engine lock, so it is
+        // cleared too before the new one starts.
+        verify(lifecycleManager).removeIfExistsStrict("floci-rds-db1");
+        verify(lifecycleManager).removeIfExistsStrict("floci-aws-rds-db1");
     }
 
     @Test
@@ -1064,7 +1161,7 @@ class RdsContainerManagerTest {
         var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).removeIfExistsStrict("floci-rds-db1");
         verify(lifecycleManager).create(spec.capture());
-        assertEquals("floci-rds-db1", spec.getValue().name());
+        assertEquals("floci-aws-rds-db1", spec.getValue().name());
         assertEquals("db1", handle.getRuntimeId());
         manager.stop(handle);
         verify(lifecycleManager).stopAndRemoveStrict(
@@ -1100,6 +1197,118 @@ class RdsContainerManagerTest {
 
         assertTrue(script.contains("USER=\"$1\""),
                 "Script must assign the first argument to the USER variable");
+    }
+
+    @Test
+    void autoPausedContainerResumesForItsNextClientAndIsThawedBeforeItStops() throws Exception {
+        EmulatorConfig config = config(tempDir.resolve("auto-pause-root"));
+        when(config.services().rds().auroraAutoPauseEnabled()).thenReturn(true);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "cluster-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = mock(DockerClient.class);
+        PauseContainerCmd pause = mock(PauseContainerCmd.class);
+        UnpauseContainerCmd unpause = mock(UnpauseContainerCmd.class);
+        when(dockerClient.pauseContainerCmd("cluster-container")).thenReturn(pause);
+        when(dockerClient.unpauseContainerCmd("cluster-container")).thenReturn(unpause);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        RdsContainerManager manager = autoPauseManager(config, lifecycleManager);
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:cluster:paused";
+        RdsContainerHandle handle = manager.start(runtimeId, "paused", null,
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+        manager.configureAutoPause(runtimeId, 300, alwaysMayPause());
+
+        try (RdsBackendGate.Lease client = manager.enter("db1", 3306)) {
+            assertFalse(manager.pauseIfIdle(runtimeId), "a client is connected");
+        }
+        assertTrue(manager.pauseIfIdle(runtimeId));
+        verify(pause).exec();
+
+        manager.enter("db1", 3306).close();
+        verify(unpause).exec();
+
+        assertTrue(manager.pauseIfIdle(runtimeId));
+        manager.stop(handle);
+        InOrder order = inOrder(unpause, lifecycleManager);
+        order.verify(unpause, times(2)).exec();
+        order.verify(lifecycleManager).stopAndRemoveStrict(eq("cluster-container"), any());
+        assertSame(RdsBackendGate.Lease.NONE, manager.enter("db1", 3306));
+    }
+
+    @Test
+    void resetThawsAPausedContainerAndEndsItsAutoPause() throws Exception {
+        EmulatorConfig config = config(tempDir.resolve("auto-pause-root"));
+        when(config.services().rds().auroraAutoPauseEnabled()).thenReturn(true);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "cluster-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = mock(DockerClient.class);
+        UnpauseContainerCmd unpause = mock(UnpauseContainerCmd.class);
+        when(dockerClient.pauseContainerCmd("cluster-container")).thenReturn(mock(PauseContainerCmd.class));
+        when(dockerClient.unpauseContainerCmd("cluster-container")).thenReturn(unpause);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        RdsContainerManager manager = autoPauseManager(config, lifecycleManager);
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:cluster:paused";
+        manager.start(runtimeId, "paused", null, DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+        manager.configureAutoPause(runtimeId, 300, alwaysMayPause());
+        assertTrue(manager.pauseIfIdle(runtimeId));
+
+        manager.clear();
+
+        verify(unpause).exec();
+        assertSame(RdsBackendGate.Lease.NONE, manager.enter("db1", 3306));
+        assertFalse(manager.pauseIfIdle(runtimeId));
+    }
+
+    @Test
+    void containerStartedOnAnAddressTakesItOverFromOneDockerRemoved() throws Exception {
+        EmulatorConfig config = config(tempDir.resolve("auto-pause-root"));
+        when(config.services().rds().auroraAutoPauseEnabled()).thenReturn(true);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        ContainerLifecycleManager.EndpointInfo address = new ContainerLifecycleManager.EndpointInfo("db1", 3306);
+        stubStarts(lifecycleManager,
+                new ContainerLifecycleManager.ContainerInfo("removed-container", Map.of(3306, address)),
+                new ContainerLifecycleManager.ContainerInfo("new-container", Map.of(3306, address)));
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(dockerClient.pauseContainerCmd(any())).thenReturn(mock(PauseContainerCmd.class));
+        when(dockerClient.unpauseContainerCmd(any())).thenReturn(mock(UnpauseContainerCmd.class));
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        RdsContainerManager manager = autoPauseManager(config, lifecycleManager);
+        String removedRuntime = "arn:aws:rds:us-east-1:000000000000:cluster:removed";
+        manager.start(removedRuntime, "removed", null,
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+        manager.configureAutoPause(removedRuntime, 300, alwaysMayPause());
+        assertTrue(manager.pauseIfIdle(removedRuntime));
+
+        manager.start("arn:aws:rds:us-east-1:000000000000:cluster:new", "new", null,
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+        manager.enter("db1", 3306).close();
+
+        verify(dockerClient, never()).unpauseContainerCmd("new-container");
+        assertFalse(manager.pauseIfIdle(removedRuntime), "the removed container's auto-pause is gone");
+    }
+
+    private RdsContainerManager autoPauseManager(EmulatorConfig config, ContainerLifecycleManager lifecycleManager) {
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+        return new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, logStreamer, mock(ContainerDetector.class), config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+    }
+
+    private static AutoPauseListener alwaysMayPause() {
+        return new AutoPauseListener() {
+            @Override
+            public boolean mayPause() {
+                return true;
+            }
+
+            @Override
+            public void onAutoPause(Event event, Instant at) {
+            }
+        };
     }
 
     private static EmulatorConfig config(Path hostRoot) {

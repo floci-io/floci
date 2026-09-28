@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.AfterEach;
@@ -34,6 +35,7 @@ class ExtendedS3ExchangeTest {
     private Socket testClient;
     private Socket testBackend;
     private S3Service s3;
+    private IamService iamService;
     private final AtomicReference<Throwable> backendFailure = new AtomicReference<>();
 
     @BeforeEach
@@ -48,6 +50,7 @@ class ExtendedS3ExchangeTest {
         testBackend = backendListener.accept();
         backendListener.close();
         s3 = mock(S3Service.class);
+        iamService = mock(IamService.class);
     }
 
     @AfterEach
@@ -65,7 +68,7 @@ class ExtendedS3ExchangeTest {
         when(s3.getObject("b", "in/data")).thenReturn(
                 new S3Object("b", "in/data", "1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
         CopyStatementParser.S3CopyFrom copy = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "b", "in/data", "|", 0, false, false, null);
+                "t", List.of(), "b", "in/data", "|", 0, false, false, null, null);
         BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);
@@ -73,7 +76,7 @@ class ExtendedS3ExchangeTest {
         writeSync();
         Thread backend = backendThread(() -> playCopyIn(copied));
 
-        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, coordinator, ticket);
+        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, iamService, coordinator, ticket);
         joinBackend(backend);
 
         PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClient.getInputStream());
@@ -94,14 +97,14 @@ class ExtendedS3ExchangeTest {
         });
         CopyStatementParser.S3Unload unload = new CopyStatementParser.S3Unload(
                 "select a from t", "b", "out/", "|", false, false, false,
-                false, null, false, true, false, 0);
+                false, null, false, true, false, 0, null);
         BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);
         writeSync();
         Thread backend = backendThread(this::playCopyOut);
 
-        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), unload, s3, coordinator, ticket);
+        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), unload, s3, iamService, coordinator, ticket);
         joinBackend(backend);
 
         assertEquals("1\n2\n", new String(written.get("out/000"), StandardCharsets.US_ASCII));
@@ -116,7 +119,7 @@ class ExtendedS3ExchangeTest {
     @Test
     void missingCopyInputSendsCopyFailAndWaitsForSyncRecovery() throws Exception {
         CopyStatementParser.S3CopyFrom copy = new CopyStatementParser.S3CopyFrom(
-                "t", List.of(), "b", "missing", "|", 0, false, false, null);
+                "t", List.of(), "b", "missing", "|", 0, false, false, null, null);
         BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);
@@ -134,7 +137,7 @@ class ExtendedS3ExchangeTest {
             testBackend.getOutputStream().flush();
         });
 
-        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, coordinator, ticket);
+        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, iamService, coordinator, ticket);
         joinBackend(backend);
 
         testClient.setSoTimeout(1_000);

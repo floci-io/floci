@@ -24,15 +24,14 @@ import java.util.function.Function;
  * Provisions {@code AWS::AutoScaling::AutoScalingGroup} and
  * {@code AWS::AutoScaling::LaunchConfiguration}.
  *
- * <p>Extracted from {@code CloudFormationResourceProvisioner}. The two types share a provisioner
+ * <p>Extracted from the former CloudFormation monolith. The two types share a provisioner
  * because they share {@code AutoScalingService} and because a group names a launch configuration:
  * splitting them would put the same service behind two classes for no gain. The per-type
  * siblings {@link AutoScalingLifecycleHookCfnProvisioner} and
  * {@link AutoScalingScalingPolicyCfnProvisioner} stay separate: they attach to a group rather
  * than being one.
  *
- * <p>Both types delete by physical id alone, so the id-only delete override serves them and
- * neither is in the engine's {@code DELETE_NEEDS_STACK_RESOURCE} set.
+ * <p>Both types delete by physical id alone, so the id-only delete override serves them.
  */
 @ApplicationScoped
 public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {

@@ -141,6 +141,25 @@ class IamManagedPolicyCatalogTest {
         assertTrue(fetched.isDefaultVersion());
     }
 
+    @Test
+    void managedPolicySnapshotsDoNotShareMutableCatalogState() {
+        String arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess";
+        IamPolicy fetched = iamService.getPolicy(arn);
+        String originalDocument = fetched.getDefaultDocument();
+
+        fetched.getTags().put("tampered", "true");
+        fetched.getVersions().get("v3").setDocument("{}");
+        fetched.getVersions().put("v99", new PolicyVersion("v99", "{}", false));
+
+        IamPolicy listed = iamService.listPolicies("AWS", null).stream()
+                .filter(policy -> arn.equals(policy.getArn()))
+                .findFirst()
+                .orElseThrow();
+        assertFalse(listed.getTags().containsKey("tampered"));
+        assertEquals(1, listed.getVersions().size());
+        assertEquals(originalDocument, listed.getVersions().get("v3").getDocument());
+    }
+
     /**
      * The dataset only carries each policy's current document, so a superseded version cannot
      * be served. Answering {@code NoSuchEntity} matches what AWS returns for a version it has

@@ -39,6 +39,12 @@ cd floci
 
 If you prefer to use your own Maven installation (3.9+), you can use `mvn` instead of `./mvnw`.
 
+`make help` lists the repository's shortcuts: `make dev`, `make test T=SsmIntegrationTest`,
+`make native` and `make native-image` for the native binary and its Docker image with the flags CI
+uses, `make native-host` and `make run-native` for a binary built and run on your machine without
+Docker, `make native-up` to run the image, and `make compat SUITES="sdk-test-java"` to run compatibility
+suites in Docker against it.
+
 ### Run Tests
 
 ```bash
@@ -166,21 +172,29 @@ you add or change; leave unrelated cleanups for their own PR.
 6. Add `floci.services.<key>.enabled` to both `src/main/resources/application.yml` and `src/test/resources/application.yml`
 7. Wire controller/handler dispatch for the service (JSON 1.1 handlers are injected into `AwsJson11Controller`)
 8. Obtain storage through `StorageFactory` and implement `Resettable`; list any static `Random` or `SecureRandom` field under `--initialize-at-run-time` in `application.yml`
-9. Add `*ServiceTest.java` and `*IntegrationTest.java` tests
-10. Document it: `docs/services/<service>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in `docs/services/index.md`, and a row in the README category table
-11. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and `make docs-check`
-12. Add a client factory in the compat suite's `TestFixtures` and a `<Svc>Test` under `compatibility-tests/sdk-test-java`
+9. Check every timestamp member you emit for a `TimestampFormatTrait` before reaching for the
+   epoch-seconds idiom. It is the awsJson1.1 default, but a model can override it per member,
+   and a mismatch is invisible to the AWS CLI because botocore coerces the value, while strict
+   SDKs (Go, Java) reject the whole response. `javap -c` on the SDK model class shows the
+   traits attached to each `SdkField`. In Redshift Serverless, for instance,
+   `Namespace.creationDate` is `ISO_8601` while roughly half the model's other timestamp
+   members carry no trait and use the epoch default. The trait is per member, so check each
+   one you emit
+10. Add `*ServiceTest.java` and `*IntegrationTest.java` tests
+11. Document it: `docs/services/<service>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in `docs/services/index.md`, and a row in the README category table
+12. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and `make docs-check`
+13. Add a client factory in the compat suite's `TestFixtures` and a `<Svc>Test` under `compatibility-tests/sdk-test-java`
 
-`ServiceRegistry`, `ServiceEnabledFilter`, and `StorageFactory` resolve service metadata from the descriptor catalog. Adding a service should not require new service-keyed switch statements in those consumers. `make docs-check` gates steps 10 and 11: a registered service with no matrix row, a `docs/services` page with no matrix row, and a stale action table all fail CI.
+`ServiceRegistry`, `ServiceEnabledFilter`, and `StorageFactory` resolve service metadata from the descriptor catalog. Adding a service should not require new service-keyed switch statements in those consumers. `make docs-check` gates steps 11 and 12: a registered service with no matrix row, a `docs/services` page with no matrix row, and a stale action table all fail CI.
 
 Always implement the **real AWS wire protocol**. Never invent custom endpoints. The AWS SDK must work against Floci without modification.
 
 ## Adding a CloudFormation Resource Type
 
-CloudFormation resource types live in **per-service provisioner classes**, not in
-`CloudFormationResourceProvisioner`. That class is a legacy monolith being dismantled, so please do
-not add cases to it. If the service you need already has a `*CfnProvisioner`, add your type there;
-otherwise create one.
+CloudFormation resource types live in **per-service provisioner classes** under
+`services/cloudformation/provisioners/`; `CfnResourceDispatcher` only routes a resource to the
+registry and stubs what nothing serves, so please do not add type-specific code to it. If the
+service you need already has a `*CfnProvisioner`, add your type there; otherwise create one.
 
 1. Create `services/cloudformation/provisioners/<Service>CfnProvisioner.java`, annotate it
    `@ApplicationScoped`, and inject **only** the service it wraps. Registration is automatic:
@@ -302,6 +316,24 @@ hand-written and preserved across regeneration, keyed by action name.
 - `make docs-test` runs the tooling's unit tests.
 
 Registering a new service's action table is one entry in `tools/docs/services.yaml`.
+
+### Partition literals
+
+Floci serves every AWS partition, so `src/main/java` must not bake the commercial one in.
+`make partition-check` (run in CI) inventories `arn:aws:` prefixes, `amazonaws.com` hosts,
+Route 53 hosted-zone ids and hand-rolled partition regexes per file against
+`tools/partition/baseline.tsv`: a literal in a new file fails, growth fails, and a drop
+fails until you run `make partition-baseline` and commit the smaller baseline.
+`make partition-audit` prints what is left per package; `make partition-test` runs the
+tooling's unit tests. Mint ARNs through `AwsArnUtils` and derive hosts from the region's
+DNS suffix; a literal that really is partition-invariant goes in
+`tools/partition/allowlist.yaml` with a reason, or ends its line with
+`// partition-literal: <reason>`.
+
+The partition catalog itself (`src/main/resources/aws/partitions.json`: ids, DNS suffixes,
+regions, opt-in flags, global endpoints) is generated from botocore's published data by
+`make aws-data-sync` and checked by `make aws-data-check` in CI; never hand-edit it. Bump
+`tools/aws/requirements.txt` when regenerating from a newer botocore.
 
 ## Reporting Security Issues
 

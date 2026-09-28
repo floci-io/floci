@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.core.common;
 
+import java.io.IOException;
 import java.net.InetAddress;
+import java.util.Arrays;
 
 /**
  * SSRF protection for any code that resolves a caller-supplied hostname and fetches from the
@@ -12,6 +14,46 @@ import java.net.InetAddress;
 public final class SsrfProtection {
 
     private SsrfProtection() {
+    }
+
+    /**
+     * Narrower than {@link #isBlockedAddress}: only the addresses cloud instance-metadata
+     * services listen on, i.e. IPv4 and IPv6 link-local ({@code 169.254.0.0/16}, {@code fe80::/10})
+     * and the AWS IPv6 metadata address {@code fd00:ec2::254}. For callers that must still reach
+     * loopback and private networks, such as a local emulator proxying to a neighbouring container.
+     */
+    public static boolean isMetadataAddress(InetAddress address) {
+        if (address.isLinkLocalAddress()) {
+            return true;
+        }
+        byte[] bytes = address.getAddress();
+        if (bytes.length == 16) {
+            if (isIpv4MappedAddress(bytes)) {
+                return Byte.toUnsignedInt(bytes[12]) == 169 && Byte.toUnsignedInt(bytes[13]) == 254;
+            }
+            return isAwsIpv6Metadata(bytes);
+        }
+        return false;
+    }
+
+    /**
+     * Returns {@code addresses} unchanged, or throws when any of them is a metadata address per
+     * {@link #isMetadataAddress}. Callers that connect to the returned addresses, instead of
+     * resolving {@code host} again, are not exposed to a hostname that answers differently the
+     * second time.
+     */
+    public static InetAddress[] rejectMetadataAddresses(InetAddress[] addresses, String host) throws IOException {
+        for (InetAddress address : addresses) {
+            if (isMetadataAddress(address)) {
+                throw new IOException("integration URI resolves to a link-local or metadata address: " + host);
+            }
+        }
+        return addresses;
+    }
+
+    private static boolean isAwsIpv6Metadata(byte[] bytes) {
+        byte[] metadata = {(byte) 0xfd, 0x00, 0x0e, (byte) 0xc2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x54};
+        return Arrays.equals(bytes, metadata);
     }
 
     public static boolean isBlockedAddress(InetAddress address) {

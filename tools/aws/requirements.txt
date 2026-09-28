@@ -1,0 +1,2 @@
+botocore==1.43.98
+pytest>=7.0

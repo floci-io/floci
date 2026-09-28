@@ -201,11 +201,11 @@ class RuleSqlParserTest {
     }
 
     @Test
-    void rejectsANumberTooLargeToRepresent() {
+    void rejectsANumberWhoseExponentIsTooLargeToRepresent() {
         RuleSqlParseException failure = assertThrows(RuleSqlParseException.class,
-                () -> RuleSqlParser.parse("SELECT * FROM 'a/b' WHERE level = 99999999999999999999999"));
+                () -> RuleSqlParser.parse("SELECT * FROM 'a/b' WHERE level = 1e99999999999"));
 
-        assertEquals("99999999999999999999999", failure.token());
+        assertEquals("1e99999999999", failure.token());
     }
 
     @Test

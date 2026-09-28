@@ -21,6 +21,15 @@ class CloudTrailSelectorMatchingTest {
     }
 
     @Test
+    void chinaAndGovCloudArns_matchLikeCommercialOnes() {
+        assertTrue(CloudTrailService.matchesS3DataResourceArn("arn:aws-cn:s3", "any-bucket", "any/key.txt"));
+        assertTrue(CloudTrailService.matchesS3DataResourceArn("arn:aws-cn:s3:::", "any-bucket", null));
+        assertTrue(CloudTrailService.matchesS3DataResourceArn("arn:aws-cn:s3:::b/logs/", "b", "logs/1.txt"));
+        assertFalse(CloudTrailService.matchesS3DataResourceArn("arn:aws-us-gov:s3:::b/logs/", "b", "other/1.txt"));
+        assertFalse(CloudTrailService.matchesS3DataResourceArn("arn:aws-us-gov:s3:::other/", "b", "logs/1.txt"));
+    }
+
+    @Test
     void allBucketsArnWithSlash_matchesEverything() {
         assertTrue(CloudTrailService.matchesS3DataResourceArn("arn:aws:s3:::/", "any-bucket", "any/key.txt"));
     }

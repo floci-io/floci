@@ -2,8 +2,8 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -17,6 +17,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -52,7 +53,7 @@ class AslExecutorFailStateErrorCauseTest {
         executor = new AslExecutor(
                 mock(LambdaExecutorService.class),
                 mock(LambdaFunctionStore.class),
-                mock(DynamoDbService.class),
+                mock(DynamoDbFacade.class),
                 mock(DynamoDbJsonHandler.class),
                 mock(SqsJsonHandler.class),
                 mock(io.github.hectorvent.floci.services.sns.SnsJsonHandler.class),
@@ -174,6 +175,6 @@ class AslExecutorFailStateErrorCauseTest {
     }
 
     private static <T> T mock(Class<T> type) {
-        return org.mockito.Mockito.mock(type);
+        return Mockito.mock(type);
     }
 }

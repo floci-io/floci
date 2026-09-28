@@ -385,16 +385,15 @@ public class AwsJsonCborController {
             byte[] body) {
 
         if (target == null) {
-            return null;
+            return cborUnknownOperationError("Missing X-Amz-Target header.", httpHeaders);
         }
 
-        // Upstream CBOR behavior is to return null for targets this controller
-        // does not dispatch (JAX-RS then serves 204). The JSON 1.0/1.1
-        // controllers return UnknownOperationException instead; CBOR stays on
-        // null here to preserve pre-refactor semantics.
+        // Symmetric with the JSON 1.0/1.1 controllers: a target this controller cannot
+        // resolve is an unknown operation, not an empty 204. The 204 fallback now applies
+        // only to a resolved service whose action this handler does not dispatch.
         ServiceCatalog.TargetMatch targetMatch = catalog.matchTarget(target).orElse(null);
         if (targetMatch == null) {
-            return null;
+            return cborUnknownOperationError("Unknown operation: " + target, httpHeaders);
         }
 
         String serviceKey = targetMatch.descriptor().externalKey();
@@ -491,20 +490,14 @@ public class AwsJsonCborController {
         };
     }
 
+    private Response cborUnknownOperationError(String message, HttpHeaders httpHeaders) {
+        return cborErrorResponse(
+                new AwsException("UnknownOperationException", message, 404),
+                "smithy-protocol", responseContentType(httpHeaders));
+    }
+
     private Response cborErrorResponse(AwsException e, String protocolHeader, String mediaType) {
-        try {
-            byte[] errBytes = CBOR_MAPPER.writeValueAsBytes(
-                    new AwsErrorResponse(e.jsonType(), e.getMessage()));
-            String queryErrorFault = (e.getHttpStatus() < 500) ? "Sender" : "Receiver";
-            return Response.status(e.getHttpStatus())
-                    .header(protocolHeader, "rpc-v2-cbor")
-                    .header("x-amzn-query-error", e.getErrorCode() + ";" + queryErrorFault)
-                    .type(mediaType)
-                    .entity(errBytes)
-                    .build();
-        } catch (Exception ex) {
-            return Response.status(e.getHttpStatus()).build();
-        }
+        return CborErrorResponses.of(e, mediaType);
     }
 
     private String responseContentType(HttpHeaders httpHeaders) {

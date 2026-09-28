@@ -219,4 +219,23 @@ class TransferServiceTest {
         assertEquals(Map.of("current", "tag"), service.listTagsForResource(server.getArn()));
         assertTrue(tagDelegate.get(legacyKey).isEmpty());
     }
+
+    @Test
+    void updateServerPreservesOmittedDetailsAndClearsExplicitEmptyMaps() {
+        Server server = service.createServer("us-east-1", null, null, "VPC",
+                Map.of("VpcId", "vpc-123"), "API_GATEWAY",
+                Map.of("Url", "https://idp.example.com"), null, null, null);
+
+        Server preserved = service.updateServer(server.getServerId(), null, null, null,
+                null, null, null);
+
+        assertEquals(Map.of("VpcId", "vpc-123"), preserved.getEndpointDetails());
+        assertEquals(Map.of("Url", "https://idp.example.com"), preserved.getIdentityProviderDetails());
+
+        Server cleared = service.updateServer(server.getServerId(), null, null, Map.of(),
+                Map.of(), null, null);
+
+        assertTrue(cleared.getEndpointDetails().isEmpty());
+        assertTrue(cleared.getIdentityProviderDetails().isEmpty());
+    }
 }

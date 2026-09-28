@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.controltower;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -52,7 +53,7 @@ public class ControlTowerControlService {
         }
 
         String operationId = UUID.randomUUID().toString();
-        String arn = "arn:aws:controltower:" + region + ":" + accountId + ":enabledcontrol/" + shortId();
+        String arn = AwsArnUtils.Arn.of("controltower", region, accountId, "enabledcontrol/" + shortId()).toString();
         EnabledControl control = new EnabledControl(arn, controlIdentifier, targetIdentifier,
                 SUCCEEDED, IN_SYNC, operationId, parameters, tags);
         controls.put(key, control);
@@ -186,7 +187,7 @@ public class ControlTowerControlService {
     }
 
     private static String requireArnValue(String value, String field) {
-        if (value == null || value.length() < 20 || value.length() > 2048 || !value.matches("^arn:aws[0-9a-zA-Z_\\-:\\/]+$")) {
+        if (value == null || value.length() < 20 || value.length() > 2048 || !value.matches("^arn:" + AwsArnUtils.PARTITION_REGEX + "[0-9a-zA-Z_\\-:\\/]+$")) {
             throw validation(field + " must be a valid ARN.");
         }
         return value;

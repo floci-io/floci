@@ -30,6 +30,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -101,12 +102,8 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     // expression there and the deny list above stops applying once the walk enters one.
     private static final Set<String> JSONATA_PAYLOAD_FIELDS = Set.of(
             "Output", "Assign", "Arguments", "ItemSelector", "BatchInput");
-    private static final Set<String> ITEM_READER_RESOURCES = Set.of(
-            "arn:aws:states:::s3:getObject",
-            "arn:aws:states:::s3:listObjectsV2");
     private static final Set<String> ITEM_READER_INPUT_TYPES = Set.of(
             "MANIFEST", "JSON", "CSV", "JSONL", "PARQUET");
-    private static final String RESULT_WRITER_RESOURCE = "arn:aws:states:::s3:putObject";
     private static final Set<String> RESULT_WRITER_TRANSFORMATIONS = Set.of("NONE", "COMPACT", "FLATTEN");
     private static final Set<String> RESULT_WRITER_OUTPUT_TYPES = Set.of("JSON", "JSONL");
     // Measured against real AWS: TimeoutSeconds is accepted on Task only, Catch and Retry are
@@ -2397,7 +2394,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         if ("Map".equals(stateType)) {
             validateMapConcurrency(statePath, stateDef, stateIsJsonata, errors);
             if (stateDef.has("ItemReader")) {
-                validateItemReader(statePath, stateDef, errors);
+                validateItemReader(statePath, stateDef, stateIsJsonata, errors);
             }
             if (stateDef.has("ResultWriter")) {
                 validateResultWriter(statePath, stateDef.get("ResultWriter"), stateIsJsonata, errors);
@@ -2605,11 +2602,87 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
                         + " at " + statePath);
             }
         }
+
+        JsonNode itemBatcher = stateDef.path("ItemBatcher");
+        if (itemBatcher.isObject()) {
+            validateMapNumberField(statePath + "/ItemBatcher", itemBatcher, jsonata,
+                    statePath, "MaxItemsPerBatch", "MaxItemsPerBatchPath", false, null, errors);
+            validateMapNumberField(statePath + "/ItemBatcher", itemBatcher, jsonata,
+                    statePath, "MaxInputBytesPerBatch", "MaxInputBytesPerBatchPath", false, 262_144, errors);
+        }
+
+        validateMapNumberField(statePath, stateDef, jsonata,
+                statePath, "ToleratedFailureCount", "ToleratedFailureCountPath", false, null, errors);
+        validateMapNumberField(statePath, stateDef, jsonata,
+                statePath, "ToleratedFailurePercentage", "ToleratedFailurePercentagePath", true, 100, errors);
     }
 
+    /**
+     * Validates one Map numeric field and its mutually-exclusive JSONPath spelling. AWS treats
+     * these fields as JSONPath-only when the effective language is JSONata, while JSONata numeric
+     * expressions are accepted in the literal spelling. The explicit markers preserve the exact
+     * diagnostic location for nested ItemBatcher fields and messages that do not name a field.
+     */
+    private static void validateMapNumberField(String containerPath, JsonNode container,
+                                               boolean jsonata, String languageLocation,
+                                               String literalField,
+                                               String pathField, boolean decimal, Integer maximum,
+                                               List<String> errors) {
+        boolean hasLiteral = container.has(literalField);
+        boolean hasPath = container.has(pathField);
+        if (hasLiteral && hasPath) {
+            errors.add(EXPLICIT_LOCATION_MARKER
+                    + "There should only be one of the following fields: [" + literalField + ", "
+                    + pathField + "]" + MARKER_PAYLOAD_SEPARATOR + containerPath + "/" + literalField);
+        }
+
+        if (jsonata && hasPath) {
+            errors.add(EXPLICIT_LOCATION_MARKER + "The QueryLanguage is set to 'JSONata', but field '"
+                    + pathField + "' is only supported for the 'JSONPath' QueryLanguage"
+                    + MARKER_PAYLOAD_SEPARATOR + languageLocation);
+        }
+
+        if (hasLiteral) {
+            JsonNode value = container.get(literalField);
+            boolean expression = jsonata && value.isTextual()
+                    && JsonataEvaluator.isExpression(value.asText());
+            boolean numeric = decimal ? value.isNumber() : value.isIntegralNumber();
+            if (!numeric && !expression) {
+                errors.add(EXPLICIT_LOCATION_MARKER + "Expected value of type ["
+                        + (decimal ? "NUMBER" : "INTEGER") + "]"
+                        + MARKER_PAYLOAD_SEPARATOR + containerPath + "/" + literalField);
+            } else if (numeric && value.decimalValue().signum() < 0) {
+                errors.add(EXPLICIT_LOCATION_MARKER + "Minimum value is "
+                        + (decimal ? "0.0" : "0") + MARKER_PAYLOAD_SEPARATOR
+                        + containerPath + "/" + literalField);
+            } else if (numeric && maximum != null
+                    && value.decimalValue().compareTo(BigDecimal.valueOf(maximum)) > 0) {
+                errors.add(EXPLICIT_LOCATION_MARKER + "Maximum value is " + maximum
+                        + MARKER_PAYLOAD_SEPARATOR + containerPath + "/" + literalField);
+            }
+        }
+
+        if (!jsonata && hasPath) {
+            JsonNode value = container.get(pathField);
+            if (!value.isTextual() || !isReferencePath(value.asText())) {
+                errors.add(EXPLICIT_LOCATION_MARKER + "Value is not a Reference Path"
+                        + MARKER_PAYLOAD_SEPARATOR + containerPath + "/" + pathField);
+            }
+        }
+    }
+
+    /**
+     * A Reference Path selects a single node, so wildcards, filters and slices are rejected. The
+     * root is either the state input ({@code $}) or the Context Object ({@code $$}): ASL takes a
+     * {@code string_sampler} wherever it takes a Reference Path, and a context path is one of its
+     * spellings, so {@code "$$.Execution.Input.count"} is as valid as {@code "$.count"}.
+     */
     private static boolean isReferencePath(String path) {
         if (path == null || path.isEmpty() || path.charAt(0) != '$') {
             return false;
+        }
+        if (path.startsWith("$$")) {
+            path = path.substring(1);
         }
         int index = 1;
         while (index < path.length()) {
@@ -2672,10 +2745,21 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         return true;
     }
 
-    private void validateItemReader(String statePath, JsonNode stateDef, List<String> errors) {
+    private static boolean isItemReaderResource(String resource) {
+        return StatesIntegration.parse(resource)
+                .filter(integration -> integration.is("s3", "getObject") || integration.is("s3", "listObjectsV2"))
+                .isPresent();
+    }
+
+    private static boolean isResultWriterResource(String resource) {
+        return StatesIntegration.parse(resource).filter(integration -> integration.is("s3", "putObject")).isPresent();
+    }
+
+    private void validateItemReader(String statePath, JsonNode stateDef, boolean jsonata,
+                                    List<String> errors) {
         JsonNode itemReader = stateDef.get("ItemReader");
         String resource = itemReader.path("Resource").asText(null);
-        if (resource != null && !ITEM_READER_RESOURCES.contains(resource)) {
+        if (resource != null && !isItemReaderResource(resource)) {
             errors.add("The field 'Resource' does not match any of the allowed values. Examples: "
                     + "[arn:<partition>:states:::s3:getObject, arn:<partition>:states:::s3:listObjectsV2]"
                     + " at " + statePath + "/ItemReader/Resource");
@@ -2686,6 +2770,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             errors.add("The field 'InputType' should have one of these values: "
                     + "[MANIFEST, JSON, CSV, JSONL, PARQUET]"
                     + " at " + statePath + "/ItemReader/ReaderConfig/InputType");
+        }
+
+        JsonNode readerConfig = itemReader.path("ReaderConfig");
+        if (readerConfig.isObject()) {
+            validateMapNumberField(statePath + "/ItemReader/ReaderConfig", readerConfig, jsonata,
+                    statePath, "MaxItems", "MaxItemsPath", false, 100_000_000, errors);
         }
     }
 
@@ -2726,9 +2816,9 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         }
 
         if (hasResource && (!writer.get("Resource").isTextual()
-                || !RESULT_WRITER_RESOURCE.equals(writer.get("Resource").asText()))) {
+                || !isResultWriterResource(writer.get("Resource").asText()))) {
             errors.add("The field 'Resource' does not match the allowed value "
-                    + RESULT_WRITER_RESOURCE + " at " + writerPath);
+                    + "arn:<partition>:states:::s3:putObject at " + writerPath);
         }
 
         if (hasDestination && !destinationIsExpression) {

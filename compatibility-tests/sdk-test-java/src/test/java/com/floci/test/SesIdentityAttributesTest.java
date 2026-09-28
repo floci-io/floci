@@ -40,8 +40,10 @@ import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityResponse;
 import software.amazon.awssdk.services.sesv2.model.IdentityInfo;
 import software.amazon.awssdk.services.sesv2.model.ListEmailIdentitiesRequest;
 import software.amazon.awssdk.services.sesv2.model.NotFoundException;
+import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityDkimAttributesRequest;
 import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityDkimSigningAttributesRequest;
 import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityDkimSigningAttributesResponse;
+import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityFeedbackAttributesRequest;
 import software.amazon.awssdk.services.sesv2.model.PutEmailIdentityMailFromAttributesRequest;
 import software.amazon.awssdk.services.sesv2.model.VerificationStatus;
 
@@ -66,6 +68,9 @@ class SesIdentityAttributesTest {
     // that an email inherits its parent domain's *verified* DKIM.
     private static String verifiedDkimDomain;
     private static String verifiedDkimEmail;
+    // The DKIM-enabled and feedback-forwarding toggles get their own identity so flipping them does
+    // not disturb the ordered DKIM tests above.
+    private static String dkimToggleDomain;
 
     @BeforeAll
     static void setup() {
@@ -77,6 +82,11 @@ class SesIdentityAttributesTest {
         dkimDomain = suffix + ".dkim-attrs.example.com";
         verifiedDkimDomain = suffix + ".dkim-verified.example.com";
         verifiedDkimEmail = "user@" + verifiedDkimDomain;
+        dkimToggleDomain = suffix + ".dkim-toggle.example.com";
+        // The toggle tests below flip DKIM signing and feedback forwarding on this identity;
+        // create it here so neither test depends on the other having run.
+        sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder()
+                .emailIdentity(dkimToggleDomain).build());
     }
 
     @AfterAll
@@ -91,10 +101,14 @@ class SesIdentityAttributesTest {
             sesV1.close();
         }
         if (sesV2 != null) {
-            for (String id : new String[] {v2Domain, verifiedDkimEmail, verifiedDkimDomain}) {
+            for (String id : new String[] {v2Domain, verifiedDkimEmail, verifiedDkimDomain,
+                    dkimToggleDomain}) {
                 try {
                     sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(id).build());
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                    // Best-effort cleanup: an identity a test never created, or already deleted, is
+                    // fine to skip, and failing here would mask the actual test result.
+                }
             }
             sesV2.close();
         }
@@ -342,5 +356,35 @@ class SesIdentityAttributesTest {
         assertThat(emailDkim.signingEnabled()).isTrue();
         assertThat(emailDkim.status()).isEqualTo(DkimStatus.SUCCESS);
         assertThat(emailDkim.tokens()).isEqualTo(domainDkim.tokens());
+    }
+
+    @Test
+    @Order(26)
+    void putEmailIdentityDkimAttributes_togglesSigningEnabled() {
+        sesV2.putEmailIdentityDkimAttributes(PutEmailIdentityDkimAttributesRequest.builder()
+                .emailIdentity(dkimToggleDomain).signingEnabled(false).build());
+        assertThat(sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                .emailIdentity(dkimToggleDomain).build())
+                .dkimAttributes().signingEnabled()).isFalse();
+
+        sesV2.putEmailIdentityDkimAttributes(PutEmailIdentityDkimAttributesRequest.builder()
+                .emailIdentity(dkimToggleDomain).signingEnabled(true).build());
+        assertThat(sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                .emailIdentity(dkimToggleDomain).build())
+                .dkimAttributes().signingEnabled()).isTrue();
+    }
+
+    @Test
+    @Order(27)
+    void putEmailIdentityFeedbackAttributes_togglesEmailForwarding() {
+        sesV2.putEmailIdentityFeedbackAttributes(PutEmailIdentityFeedbackAttributesRequest.builder()
+                .emailIdentity(dkimToggleDomain).emailForwardingEnabled(false).build());
+        assertThat(sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                .emailIdentity(dkimToggleDomain).build()).feedbackForwardingStatus()).isFalse();
+
+        sesV2.putEmailIdentityFeedbackAttributes(PutEmailIdentityFeedbackAttributesRequest.builder()
+                .emailIdentity(dkimToggleDomain).emailForwardingEnabled(true).build());
+        assertThat(sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                .emailIdentity(dkimToggleDomain).build()).feedbackForwardingStatus()).isTrue();
     }
 }

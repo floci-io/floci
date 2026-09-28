@@ -11,8 +11,13 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -708,13 +713,11 @@ class HttpApiRequestAuthorizerTest {
 
     @Test
     @Order(999)
-    void cleanup() {
+    void cleanup() throws Exception {
         if (routeId != null) given().when().delete("/v2/apis/" + httpApiId + "/routes/" + routeId);
         if (httpApiId != null) given().when().delete("/v2/apis/" + httpApiId);
-        for (String fn : new String[]{BACKEND_FN, ALLOW_FN, DENY_FN, ERROR_FN, SIMPLE_ALLOW_FN,
-                SIMPLE_DENY_FN, ECHO_FN, NESTED_CTX_FN, CONTEXTLESS_FN}) {
-            deleteFunction(fn);
-        }
+        deleteFunctions(BACKEND_FN, ALLOW_FN, DENY_FN, ERROR_FN, SIMPLE_ALLOW_FN,
+                SIMPLE_DENY_FN, ECHO_FN, NESTED_CTX_FN, CONTEXTLESS_FN);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
@@ -740,6 +743,18 @@ class HttpApiRequestAuthorizerTest {
             }
         }
         return baos.toByteArray();
+    }
+
+    private static void deleteFunctions(String... functionNames) throws Exception {
+        try (ExecutorService executor = Executors.newFixedThreadPool(functionNames.length)) {
+            List<Future<?>> deletions = new ArrayList<>();
+            for (String functionName : functionNames) {
+                deletions.add(executor.submit(() -> deleteFunction(functionName)));
+            }
+            for (Future<?> deletion : deletions) {
+                deletion.get();
+            }
+        }
     }
 
     private static void deleteFunction(String functionName) {

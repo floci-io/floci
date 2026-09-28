@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.marketplace;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.marketplace.model.MarketplaceBuyerDashboard;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,7 +19,7 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class MarketplaceReportingService {
     private static final Pattern DASHBOARD = Pattern.compile(
-            "arn:aws:aws-marketplace::[0-9]{12}:AWSMarketplace/ReportingData/(Agreement_V1/Dashboard/AgreementSummary_V1|BillingEvent_V1/Dashboard/CostAnalysis_V1)");
+            "arn:" + AwsArnUtils.PARTITION_REGEX + ":aws-marketplace::[0-9]{12}:AWSMarketplace/ReportingData/(Agreement_V1/Dashboard/AgreementSummary_V1|BillingEvent_V1/Dashboard/CostAnalysis_V1)");
     private static final Pattern DOMAIN = Pattern.compile(
             "(https://[a-zA-Z.*0-9_-]+[.][a-zA-Z]+[a-zA-Z0-9&?/_=-]*[a-zA-Z*0-9/]+|https?://localhost(:[0-9]{1,5})?)");
     private final ObjectMapper mapper;

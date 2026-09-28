@@ -267,6 +267,14 @@ class ExpressionEvaluatorTest {
             return mapper.readTree(json);
         }
 
+        @Test
+        void orderingAgainstAnotherTypeMatchesNothing() throws Exception {
+            JsonNode i = item("{\"a\": {\"S\": \"5\"}}");
+            JsonNode v = values("{\":low\": {\"N\": \"1\"}, \":high\": {\"N\": \"9\"}}");
+            assertFalse(ExpressionEvaluator.matches("a > :low", i, null, v));
+            assertFalse(ExpressionEvaluator.matches("a BETWEEN :low AND :high", i, null, v));
+        }
+
         // AND, OR, NOT logic
 
         @Test

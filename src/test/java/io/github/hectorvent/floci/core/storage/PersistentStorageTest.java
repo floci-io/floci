@@ -44,6 +44,22 @@ class PersistentStorageTest {
     }
 
     @Test
+    void putAllPersistsEveryEntry() {
+        Path filePath = tempDir.resolve("batch-persist-test.json");
+        PersistentStorage<String, String> writer = new PersistentStorage<>(
+                filePath, new TypeReference<Map<String, String>>() {});
+        writer.putAll(Map.of("key1", "value1", "key2", "value2", "key3", "value3"));
+
+        PersistentStorage<String, String> reader = new PersistentStorage<>(
+                filePath, new TypeReference<Map<String, String>>() {});
+        reader.load();
+
+        assertEquals("value1", reader.get("key1").orElseThrow());
+        assertEquals("value2", reader.get("key2").orElseThrow());
+        assertEquals("value3", reader.get("key3").orElseThrow());
+    }
+
+    @Test
     void delete() {
         storage.put("key1", "value1");
         storage.delete("key1");

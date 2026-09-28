@@ -7,8 +7,8 @@ import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.testing.S3EnforceAuthProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -22,7 +22,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
-@TestProfile(CloudFrontS3AuthServingTest.S3AuthProfile.class)
+@TestProfile(S3EnforceAuthProfile.class)
 class CloudFrontS3AuthServingTest {
 
     @Inject
@@ -224,12 +224,5 @@ class CloudFrontS3AuthServingTest {
         return "AWS4-HMAC-SHA256 Credential=" + accessKeyId
                 + "/20260730/us-east-1/s3/aws4_request, "
                 + "SignedHeaders=host;x-amz-date, Signature=abc123";
-    }
-
-    public static final class S3AuthProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.s3.enforce-auth", "true");
-        }
     }
 }

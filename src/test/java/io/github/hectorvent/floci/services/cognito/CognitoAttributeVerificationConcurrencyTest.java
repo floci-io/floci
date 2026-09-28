@@ -441,7 +441,9 @@ class CognitoAttributeVerificationConcurrencyTest {
                         "AttributesRequireVerificationBeforeUpdate", List.of("email"))),
                 "us-east-1");
         UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "concurrency-client", false, false, List.of(), List.of());
+                pool.getId(), "concurrency-client", false, false, List.of(), List.of(),
+                null, List.of(), null, List.of("ALLOW_USER_PASSWORD_AUTH"), null, null, List.of(), null,
+                List.of(), null, null, null, List.of(), null, null);
         service.adminCreateUser(pool.getId(), "alice", Map.of(
                 "email", OLD_EMAIL,
                 "email_verified", "true"), "TempPass1!");

@@ -5,7 +5,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -15,8 +18,13 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -86,16 +94,16 @@ public class Route53ResolverService {
     @Inject
     public Route53ResolverService(StorageFactory storageFactory, ObjectMapper objectMapper) {
         this.domainListStore = storageFactory.create("route53resolver", "route53resolver-domain-lists.json",
-                new TypeReference<java.util.Map<String, ObjectNode>>() {});
+                new TypeReference<Map<String, ObjectNode>>() {});
         this.endpointStore = storageFactory.create("route53resolver", "route53resolver-endpoints.json",
-                new TypeReference<java.util.Map<String, ObjectNode>>() {});
+                new TypeReference<Map<String, ObjectNode>>() {});
         this.ruleStore = storageFactory.create("route53resolver", "route53resolver-rules.json",
-                new TypeReference<java.util.Map<String, ObjectNode>>() {});
+                new TypeReference<Map<String, ObjectNode>>() {});
         this.ruleAssociationStore = storageFactory.create("route53resolver",
-                "route53resolver-rule-associations.json", new TypeReference<java.util.Map<String, ObjectNode>>() {});
+                "route53resolver-rule-associations.json", new TypeReference<Map<String, ObjectNode>>() {});
         this.endpointIpRequestStore = storageFactory.create("route53resolver",
                 "route53resolver-endpoint-ip-requests.json",
-                new TypeReference<java.util.Map<String, ObjectNode>>() {});
+                new TypeReference<Map<String, ObjectNode>>() {});
         this.objectMapper = objectMapper;
     }
 
@@ -135,14 +143,14 @@ public class Route53ResolverService {
 
     public synchronized ObjectNode createFirewallDomainList(JsonNode request, String region, String accountId) {
         String name = requireText(request, "Name", VALIDATION);
-        java.util.Optional<ObjectNode> replay = replayOf(domainListStore, request, region);
+        Optional<ObjectNode> replay = replayOf(domainListStore, request, region);
         if (replay.isPresent()) {
             return replay.get();
         }
         String id = id("rslvr-fdl");
         ObjectNode list = objectMapper.createObjectNode();
         list.put("Id", id);
-        list.put("Arn", "arn:aws:route53resolver:" + region + ":" + accountId + ":firewall-domain-list/" + id);
+        list.put("Arn", AwsArnUtils.Arn.of("route53resolver", region, accountId, "firewall-domain-list/" + id).toString());
         list.put("Name", name);
         list.put("DomainCount", 0);
         list.put("Status", "COMPLETE");
@@ -166,7 +174,7 @@ public class Route53ResolverService {
         return domainListStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
     }
 
-    public java.util.Optional<ObjectNode> getCustomFirewallDomainList(String id) {
+    public Optional<ObjectNode> getCustomFirewallDomainList(String id) {
         return domainListStore.get(id).map(ObjectNode::deepCopy);
     }
 
@@ -176,11 +184,11 @@ public class Route53ResolverService {
         requireText(request, "Name", INVALID_PARAMETER);
         String direction = requireText(request, "Direction", INVALID_PARAMETER);
         String idPrefix = endpointIdPrefix(direction);
-        JsonNode ipAddresses = request.path("IpAddressRequests");
+        JsonNode ipAddresses = ipAddressesOf(request);
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
-            throw new AwsException(INVALID_PARAMETER, "IpAddressRequests is required", 400);
+            throw new AwsException(INVALID_PARAMETER, "IpAddresses is required", 400);
         }
-        java.util.Optional<ObjectNode> replay = replayOf(endpointStore, request, region);
+        Optional<ObjectNode> replay = replayOf(endpointStore, request, region);
         if (replay.isPresent()) {
             ObjectNode existing = replay.get();
             requireReplayMatches(existing, request, "Name", "Direction", "SecurityGroupIds");
@@ -190,7 +198,7 @@ public class Route53ResolverService {
         String id = id(idPrefix);
         ObjectNode endpoint = objectMapper.createObjectNode();
         endpoint.put("Id", id);
-        endpoint.put("Arn", "arn:aws:route53resolver:" + region + ":" + accountId + ":resolver-endpoint/" + id);
+        endpoint.put("Arn", AwsArnUtils.Arn.of("route53resolver", region, accountId, "resolver-endpoint/" + id).toString());
         endpoint.put("Name", text(request, "Name"));
         endpoint.put("Direction", direction);
         endpoint.set("SecurityGroupIds", request.path("SecurityGroupIds").deepCopy());
@@ -248,7 +256,7 @@ public class Route53ResolverService {
                     "TargetIps must contain at least one target address.", 400);
         }
         String domainName = text(request, "DomainName");
-        java.util.Optional<ObjectNode> replay = replayOf(ruleStore, request, region);
+        Optional<ObjectNode> replay = replayOf(ruleStore, request, region);
         if (replay.isPresent()) {
             requireReplayMatches(replay.get(), request,
                     "Name", "RuleType", "DomainName", "TargetIps", "ResolverEndpointId");
@@ -257,7 +265,7 @@ public class Route53ResolverService {
         String id = id("rslvr-rr");
         ObjectNode rule = objectMapper.createObjectNode();
         rule.put("Id", id);
-        rule.put("Arn", "arn:aws:route53resolver:" + region + ":" + accountId + ":resolver-rule/" + id);
+        rule.put("Arn", AwsArnUtils.Arn.of("route53resolver", region, accountId, "resolver-rule/" + id).toString());
         rule.put("DomainName", domainName);
         rule.put("Status", "COMPLETE");
         rule.put("RuleType", text(request, "RuleType"));
@@ -337,6 +345,75 @@ public class Route53ResolverService {
     }
 
     /**
+     * The ids of the rules {@code accountId} has associated with {@code vpcId}. The DNS server reads
+     * these off the packet path, where there is no caller, so the account comes from the resource the
+     * query originated on rather than from a request context.
+     *
+     * <p>Scoped to that one account deliberately. A {@code VPCId} is not proof of ownership:
+     * {@code AssociateResolverRule} stores whatever VPC id the caller names, so an association made
+     * by another account naming this account's VPC must not steer its queries. Restricting the
+     * lookup to the querying account's partition is the boundary, and it costs nothing because
+     * {@code AssociateResolverRule} can only reference a rule that exists in the caller's own
+     * partition, so an association and its rule always share an account.
+     *
+     * <p>Returns ids rather than the association nodes so the DNS path does not copy a record per
+     * association on every query when all it needs is which rules to look at.
+     */
+    public List<String> resolverRuleIdsAssociatedWith(String accountId, String vpcId) {
+        if (accountId == null || accountId.isBlank() || vpcId == null || vpcId.isBlank()) {
+            return List.of();
+        }
+        List<String> ruleIds = new ArrayList<>();
+        for (ObjectNode association : associationsForAccount(accountId)) {
+            String ruleId = text(association, "ResolverRuleId");
+            if (ruleId != null && !ruleIds.contains(ruleId) && vpcId.equals(text(association, "VPCId"))) {
+                ruleIds.add(ruleId);
+            }
+        }
+        return List.copyOf(ruleIds);
+    }
+
+    private List<ObjectNode> associationsForAccount(String accountId) {
+        if (ruleAssociationStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<ObjectNode> accountAware =
+                    (AccountAwareStorageBackend<ObjectNode>) rawAccountAware;
+            return accountAware.scanForAccount(accountId, key -> true);
+        }
+        return ruleAssociationStore.scan(key -> true);
+    }
+
+    /**
+     * One of an account's resolver rules by id, but only if it belongs to {@code region}. Fetched
+     * rather than scanned for, so the DNS path reads only the rules an association actually named.
+     *
+     * <p>Route 53 Resolver is regional: a rule created in one region governs nothing in another. The
+     * stores carry no region in their keys, so the rule's own region comes from the ARN this service
+     * minted for it, the same place {@link #replayOf} reads it from. A stored rule with no parseable
+     * ARN has no region to claim and is treated as belonging to the region asking, which no create
+     * path can produce and which cannot leak another region's rule.
+     */
+    public Optional<ObjectNode> resolverRuleIn(String accountId, String region, String ruleId) {
+        if (accountId == null || accountId.isBlank() || region == null || region.isBlank()
+                || ruleId == null || ruleId.isBlank()) {
+            return Optional.empty();
+        }
+        return storedRule(accountId, ruleId)
+                .filter(rule -> region.equals(AwsArnUtils.regionOrDefault(text(rule, "Arn"), region)))
+                .map(ObjectNode::deepCopy);
+    }
+
+    private Optional<ObjectNode> storedRule(String accountId, String ruleId) {
+        if (ruleStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<ObjectNode> accountAware =
+                    (AccountAwareStorageBackend<ObjectNode>) rawAccountAware;
+            return accountAware.getForAccount(accountId, ruleId);
+        }
+        return ruleStore.get(ruleId);
+    }
+
+    /**
      * AWS gives a resolver endpoint a direction-specific id prefix: {@code rslvr-in-} for
      * inbound endpoints, {@code rslvr-out-} for outbound. {@code INBOUND_DELEGATION} is an
      * inbound variant and shares the inbound prefix. Anything outside
@@ -371,13 +448,13 @@ public class Route53ResolverService {
      * shapes have no field for. Same intent as {@code FisService.idempotencyKey} and
      * {@code BedrockAgentCoreControlService.tokenKey}, which fold the region into the key.</p>
      */
-    private java.util.Optional<ObjectNode> replayOf(StorageBackend<String, ObjectNode> store, JsonNode request,
+    private Optional<ObjectNode> replayOf(StorageBackend<String, ObjectNode> store, JsonNode request,
                                                     String region) {
         String creatorRequestId = text(request, "CreatorRequestId");
         if (creatorRequestId == null || creatorRequestId.isBlank()) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
-        String regionPrefix = "arn:aws:route53resolver:" + region + ":";
+        String regionPrefix = "arn:" + AwsRegions.partitionFor(region) + ":route53resolver:" + region + ":";
         return store.scan(key -> true).stream()
                 .filter(existing -> creatorRequestId.equals(text(existing, "CreatorRequestId")))
                 .filter(existing -> {
@@ -438,6 +515,9 @@ public class Route53ResolverService {
      * of this branch.</p>
      */
     private void requireSameIpRequests(ObjectNode existing, JsonNode request, JsonNode ipAddresses) {
+        // The store's member name is deliberately left as IpAddressRequests: it is internal
+        // state, and renaming it would make every record written by an earlier build read as
+        // absent, which this method reports as a replay conflict.
         JsonNode recorded = endpointIpRequestStore.get(text(existing, "Id"))
                 .map(node -> node.get("IpAddressRequests"))
                 .orElse(null);
@@ -445,8 +525,22 @@ public class Route53ResolverService {
         // written before the ordering was corrected still compares as equal.
         if (recorded == null
                 || !normalizedIpRequests(recorded).equals(normalizedIpRequests(ipAddresses))) {
-            throw replayConflict(request, existing, "IpAddressRequests");
+            throw replayConflict(request, existing, "IpAddresses");
         }
+    }
+
+    /**
+     * The IP addresses a {@code CreateResolverEndpoint} request carries.
+     *
+     * <p>AWS names this member {@code IpAddresses}; its list shape is
+     * {@code IpAddressesRequest} and each element is an {@code IpAddressRequest}, which
+     * is the name the wrong wire spelling came from. {@code IpAddressRequests} is still
+     * accepted so anything written against the emulator's earlier behaviour keeps
+     * working, but it is undocumented and the error message names only the AWS member.</p>
+     */
+    private static JsonNode ipAddressesOf(JsonNode request) {
+        JsonNode aws = request.path("IpAddresses");
+        return aws.isMissingNode() || aws.isNull() ? request.path("IpAddressRequests") : aws;
     }
 
     /**
@@ -459,9 +553,9 @@ public class Route53ResolverService {
      * key must not depend on it.</p>
      */
     private ArrayNode normalizedIpRequests(JsonNode ipAddresses) {
-        List<JsonNode> entries = new java.util.ArrayList<>();
+        List<JsonNode> entries = new ArrayList<>();
         ipAddresses.forEach(entries::add);
-        entries.sort(java.util.Comparator.comparing(Route53ResolverService::canonicalKey));
+        entries.sort(Comparator.comparing(Route53ResolverService::canonicalKey));
         ArrayNode normalized = objectMapper.createArrayNode();
         entries.forEach(normalized::add);
         return normalized;
@@ -470,9 +564,9 @@ public class Route53ResolverService {
     /** A node's contents as a string that does not depend on the order its members were written in. */
     private static String canonicalKey(JsonNode node) {
         if (node.isObject()) {
-            List<String> names = new java.util.ArrayList<>();
+            List<String> names = new ArrayList<>();
             node.fieldNames().forEachRemaining(names::add);
-            java.util.Collections.sort(names);
+            Collections.sort(names);
             StringBuilder key = new StringBuilder("{");
             for (String name : names) {
                 key.append(name).append('=').append(canonicalKey(node.get(name))).append(';');
@@ -542,7 +636,7 @@ public class Route53ResolverService {
     private static FirewallDomainList managedList(String region, String name) {
         String id = "rslvr-fdl-" + deterministicHex(region + "|" + name, 17);
         // Managed lists are AWS-owned: their ARNs carry no account id.
-        String arn = "arn:aws:route53resolver:" + region + "::firewall-domain-list/" + id;
+        String arn = AwsArnUtils.Arn.of("route53resolver", region, "", "firewall-domain-list/" + id).toString();
         return new FirewallDomainList(id, arn, name, MANAGED_OWNER_NAME);
     }
 

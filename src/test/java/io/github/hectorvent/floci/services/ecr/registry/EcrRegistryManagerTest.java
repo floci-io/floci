@@ -26,6 +26,8 @@ import com.github.dockerjava.api.model.ContainerPort;
 import com.github.dockerjava.api.model.Frame;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
@@ -42,6 +44,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -54,7 +57,7 @@ class EcrRegistryManagerTest {
 
     private static final int BASE_PORT = 6100;
     private static final int MAX_PORT = 6101; // pool of exactly two ports
-    private static final String REGISTRY_NAME = "floci-test-ecr-registry";
+    private static final String REGISTRY_NAME = "floci-aws-test-ecr-registry";
     private static final String AWS_ECR_IMAGE = "123456789012.dkr.ecr.us-east-1.amazonaws.com/backend-user:1";
 
     private PortAllocator portAllocator;
@@ -62,6 +65,7 @@ class EcrRegistryManagerTest {
     private ContainerLogStreamer logStreamer;
     private ContainerDetector containerDetector;
     private CurrentContainerNetworkResolver currentContainerNetworkResolver;
+    private EmulatorConfig config;
     private EmulatorConfig.DockerConfig docker;
     private EmulatorConfig.EcrServiceConfig ecr;
     private EmulatorConfig.StorageConfig storage;
@@ -69,6 +73,7 @@ class EcrRegistryManagerTest {
     private ContainerBuilder.Builder builder;
     private DockerClient dockerClient;
     private InspectImageCmd inspectImage;
+    private RegionResolver regionResolver;
     private EcrRegistryManager manager;
 
     @BeforeEach
@@ -94,9 +99,9 @@ class EcrRegistryManagerTest {
         when(logStreamer.generateLogStreamName(anyString())).thenReturn("registry-log-stream");
         containerDetector = Mockito.mock(ContainerDetector.class);
         currentContainerNetworkResolver = Mockito.mock(CurrentContainerNetworkResolver.class);
-        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        regionResolver = Mockito.spy(new RegionResolver("us-east-1", "000000000000"));
 
-        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+        config = Mockito.mock(EmulatorConfig.class);
         ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
         docker = Mockito.mock(EmulatorConfig.DockerConfig.class);
         storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
@@ -249,6 +254,36 @@ class EcrRegistryManagerTest {
     }
 
     @Test
+    void freshlyCreatedRegistryStreamsItsCompleteLog() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        manager.ensureStarted();
+
+        verify(logStreamer).attach(eq("container-id"), eq("/aws/ecr/registry"), any(), eq("us-east-1"), eq("ecr:registry"));
+        verify(logStreamer, never()).attachFromNow(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void adoptedRegistryStreamsOnlyNewLinesInsteadOfReplayingItsHistory() {
+        Container existing = Mockito.mock(Container.class);
+        when(existing.getId()).thenReturn("0123456789abcdef");
+        when(existing.getPorts()).thenReturn(new ContainerPort[] {
+                new ContainerPort().withIp("127.0.0.1").withPrivatePort(5000).withPublicPort(BASE_PORT + 1)
+        });
+        when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(existing));
+        when(lifecycleManager.adopt("0123456789abcdef", List.of(5000)))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef",
+                        Map.of(5000, new ContainerLifecycleManager.EndpointInfo("172.17.0.5", 5000)),
+                        Map.of(5000, BASE_PORT + 1)));
+
+        manager.ensureStarted();
+
+        verify(logStreamer).attachFromNow(eq("0123456789abcdef"), eq("/aws/ecr/registry"), any(), eq("us-east-1"), eq("ecr:registry"));
+        verify(logStreamer, never()).attach(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void adoptTracksPrivateBackingPortWhenRunningInsideDocker() {
         // In container mode httpClient() uses the registry's in-network port. The adopted
         // published binding remains the host-mode fallback for control-plane image operations.
@@ -308,7 +343,17 @@ class EcrRegistryManagerTest {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
         when(docker.resourceNamespace()).thenReturn(Optional.of("run/one"));
 
-        assertEquals("http://floci-run-one-test-ecr-registry:5000", manager.httpClient().baseUrl());
+        assertEquals("http://floci-aws-run-one-test-ecr-registry:5000", manager.httpClient().baseUrl());
+    }
+
+    @Test
+    void rewriteImageUri_matchesAChinaEcrUri_rewritesToLocalRegistry() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        String rewritten = manager.rewriteImageUri("123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn/backend-user:1");
+
+        assertEquals("123456789012.dkr.ecr.cn-north-1.localhost:4566/backend-user:1", rewritten);
     }
 
     @Test
@@ -320,6 +365,80 @@ class EcrRegistryManagerTest {
 
         assertEquals("123456789012.dkr.ecr.us-east-1.localhost:4566/backend-user:1", rewritten);
         verify(lifecycleManager).createAndStart(any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "hostname, false, false, 000000000000.dkr.ecr.us-east-1.localhost:4566/app, http://000000000000.dkr.ecr.us-east-1.localhost:4566",
+            "hostname, true, false, 000000000000.dkr.ecr.us-east-1.localhost:4566/app, http://000000000000.dkr.ecr.us-east-1.localhost:4566",
+            "hostname, false, true, 000000000000.dkr.ecr.us-east-1.localhost:4566/app, http://000000000000.dkr.ecr.us-east-1.localhost:4566",
+            "hostname, true, true, 000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566/app, https://000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566",
+            "path, false, false, localhost:4566/000000000000/us-east-1/app, http://000000000000.dkr.ecr.us-east-1.localhost:4566",
+            "path, true, false, localhost:4566/000000000000/us-east-1/app, http://000000000000.dkr.ecr.us-east-1.localhost:4566",
+            "path, false, true, localhost:4566/000000000000/us-east-1/app, http://000000000000.dkr.ecr.us-east-1.localhost:4566",
+            "path, true, true, localhost.floci.io:4566/000000000000/us-east-1/app, https://localhost.floci.io:4566"
+    })
+    void advertisedUrisRequireBothTlsAndOptIn(String style, boolean globalTls, boolean tlsUris,
+                                             String repositoryUri, String proxyEndpoint) {
+        EmulatorConfig.TlsConfig tls = Mockito.mock(EmulatorConfig.TlsConfig.class);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(globalTls);
+        when(ecr.uriStyle()).thenReturn(style);
+        when(ecr.tlsUri()).thenReturn(tlsUris);
+
+        assertEquals(repositoryUri, manager.getRepositoryUri("000000000000", "us-east-1", "app"));
+        assertEquals(proxyEndpoint, manager.getProxyEndpoint());
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "hostname, 123456789012.dkr.ecr.us-east-1.localhost:4566/backend-user:1",
+            "path, localhost:4566/123456789012/us-east-1/backend-user:1"
+    })
+    void automaticImageRewritesKeepLoopbackWhenTlsUrisAreAdvertised(String style, String expectedImage) {
+        EmulatorConfig.TlsConfig tls = Mockito.mock(EmulatorConfig.TlsConfig.class);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(true);
+        when(ecr.uriStyle()).thenReturn(style);
+        when(ecr.tlsUri()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        assertTrue(manager.getRepositoryUri("123456789012", "us-east-1", "backend-user")
+                .contains("localhost.floci.io:"));
+        assertEquals(expectedImage, manager.rewriteImageUri(AWS_ECR_IMAGE));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "false, http://000000000000.dkr.ecr.eu-central-1.localhost:4566",
+            "true, https://000000000000.dkr.ecr.eu-central-1.localhost.floci.io:4566"
+    })
+    void getProxyEndpoint_nonDefaultRequestRegion_followsTheRequestRegion(boolean tlsUris,
+                                                                         String proxyEndpoint) {
+        EmulatorConfig.TlsConfig tls = Mockito.mock(EmulatorConfig.TlsConfig.class);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(tlsUris);
+        when(ecr.uriStyle()).thenReturn("hostname");
+        when(ecr.tlsUri()).thenReturn(tlsUris);
+        Mockito.doReturn("eu-central-1").when(regionResolver).getRegion();
+
+        // A docker login target that named another region than the push target would be unusable.
+        assertEquals(proxyEndpoint, manager.getProxyEndpoint());
+        assertTrue(manager.getRepositoryUri("000000000000", "eu-central-1", "app")
+                .startsWith(proxyEndpoint.substring(proxyEndpoint.indexOf("://") + 3) + "/"));
+        verify(regionResolver, never()).getDefaultRegion();
+    }
+
+    @Test
+    void tlsUriOptInDoesNotReplaceTheLegacyEcrTlsSetting() {
+        when(ecr.tlsEnabled()).thenReturn(true);
+
+        assertEquals("http://" + REGISTRY_NAME + ":5000", manager.internalEndpoint());
+        assertEquals("000000000000.dkr.ecr.us-east-1.localhost:4566/app",
+                manager.getRepositoryUri("000000000000", "us-east-1", "app"));
+        assertEquals("https://000000000000.dkr.ecr.us-east-1.localhost:4566", manager.getProxyEndpoint());
     }
 
     @Test
@@ -423,7 +542,7 @@ class EcrRegistryManagerTest {
         manager.pruneStorage();
 
         verify(lifecycleManager).stopAndRemove(Mockito.eq("container-id"), Mockito.isNull());
-        verify(lifecycleManager).removeVolume("floci-ecr-registry-data");
+        verify(lifecycleManager).removeVolume("floci-aws-ecr-registry-data");
     }
 
     @Test
@@ -448,7 +567,7 @@ class EcrRegistryManagerTest {
         manager.shutdown();
 
         verify(lifecycleManager).stopAndRemove(Mockito.eq("container-id"), Mockito.isNull());
-        verify(lifecycleManager).removeVolume("floci-ecr-registry-data");
+        verify(lifecycleManager).removeVolume("floci-aws-ecr-registry-data");
     }
 
     @Test

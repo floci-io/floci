@@ -18,8 +18,8 @@ import java.util.Set;
 /**
  * CloudFormation provisioning for {@code AWS::Lambda::Version} and {@code AWS::Lambda::Alias}.
  *
- * <p>Covers only these two types, not {@code AWS::Lambda::Function} — that one still lives in
- * {@code CloudFormationResourceProvisioner}'s switch, which the registry falls through to. The
+ * <p>Covers only these two types, not {@code AWS::Lambda::Function}, which
+ * {@code LambdaCfnProvisioner} owns. The
  * two types are what SAM's {@code AutoPublishAlias} expands into, and without them an
  * alias-qualified invoke ({@code <function>:production}) fails with "Alias not found" even though
  * the template declared the alias and the stack reported CREATE_COMPLETE.

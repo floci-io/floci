@@ -11,13 +11,12 @@ import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.Memory;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /** CRUD for AgentCore memory resources. Metadata registry only. */
@@ -32,17 +31,25 @@ public class BedrockAgentCoreMemoryService {
 
     private final StorageBackend<String, Memory> storage;
     private final RegionResolver regionResolver;
-    private final Set<String> deletedTokens = ConcurrentHashMap.newKeySet();
+    // clientToken idempotency: tokens of completed deletes, so a replayed delete succeeds
+    // instead of 404ing. In-memory only (reset on restart), and each entry expires after
+    // DeletedTokenLedger.TTL, after which a replay 404s like an unknown token.
+    private final DeletedTokenLedger deletedTokens;
 
     @Inject
-    public BedrockAgentCoreMemoryService(StorageFactory storageFactory, RegionResolver regionResolver) {
+    public BedrockAgentCoreMemoryService(StorageFactory storageFactory, RegionResolver regionResolver, Clock clock) {
         this(storageFactory.create("bedrockagentcore", "bedrock-agentcore-memories.json",
-                new TypeReference<Map<String, Memory>>() {}), regionResolver);
+                new TypeReference<Map<String, Memory>>() {}), regionResolver, clock);
     }
 
     BedrockAgentCoreMemoryService(StorageBackend<String, Memory> storage, RegionResolver regionResolver) {
+        this(storage, regionResolver, Clock.systemUTC());
+    }
+
+    BedrockAgentCoreMemoryService(StorageBackend<String, Memory> storage, RegionResolver regionResolver, Clock clock) {
         this.storage = storage;
         this.regionResolver = regionResolver;
+        this.deletedTokens = new DeletedTokenLedger(clock);
     }
 
     public Memory create(String name, Integer eventExpiryDuration, String description,
@@ -132,7 +139,7 @@ public class BedrockAgentCoreMemoryService {
         Memory memory = found.get();
         storage.delete(key(region, id));
         if (clientToken != null) {
-            deletedTokens.add(region + " " + clientToken);
+            deletedTokens.record(region + " " + clientToken);
         }
         memory.setStatus(STATUS_DELETING);
         return memory;

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.rds.proxy;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -13,7 +14,9 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -98,6 +101,37 @@ class RdsAuthProxyBoundsTest {
         } finally {
             permits.release();
         }
+    }
+
+    @Test
+    void holdsTheClientUntilTheBackendGateAdmitsItAndReleasesTheLeaseWhenItLeaves() throws Exception {
+        fakeBackend = new ServerSocket(0);
+        fakeBackend.setSoTimeout(300);
+        CountDownLatch admit = new CountDownLatch(1);
+        CountDownLatch released = new CountDownLatch(1);
+        RdsBackendGate gate = (host, port) -> {
+            admit.await();
+            return released::countDown;
+        };
+        int proxyPort = freePort();
+        proxy = new RdsAuthProxy("db-1", "localhost", fakeBackend.getLocalPort(),
+                DatabaseEngine.SQLSERVER, false, "sa", "Secret123", null,
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
+                5000, 5000, 100, null, gate);
+        proxy.start(proxyPort);
+
+        try (Socket client = new Socket("localhost", proxyPort)) {
+            client.setSoTimeout(5000);
+            assertThrows(SocketTimeoutException.class, fakeBackend::accept,
+                    "the proxy reached the backend before the gate admitted the client");
+            admit.countDown();
+            fakeBackend.setSoTimeout(5000);
+            try (Socket backendSide = fakeBackend.accept()) {
+                backendSide.getOutputStream().write('x');
+                assertEquals('x', client.getInputStream().read(), "the held client is served once admitted");
+            }
+        }
+        assertTrue(released.await(5, TimeUnit.SECONDS), "the lease is released when the connection ends");
     }
 
     private RdsAuthProxy newProxy(int handshakeTimeoutMillis, int backendConnectTimeoutMillis,

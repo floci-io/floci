@@ -52,10 +52,14 @@ final class SesServiceTestBuilder {
     private Route53Service route53Service = null;
     private ObjectMapper objectMapper = new ObjectMapper();
     private Clock clock = Clock.systemUTC();
-    // Built by build(); exposed so tests can seed contacts and account suppression through the domain
-    // services now that the facade no longer forwards those operations.
+    // Built by build(); exposed so tests can reach the domain services directly now that the facade
+    // no longer forwards their operations.
     private SesContactService contactService;
     private SesSuppressionService suppressionService;
+    private SesConfigurationSetService configSetService;
+    private SesIdentityService identityService;
+    private SesCvetService cvetService;
+    private SesSentEmailService sentEmailService;
 
     static SesServiceTestBuilder create() {
         return new SesServiceTestBuilder();
@@ -125,20 +129,52 @@ final class SesServiceTestBuilder {
         return suppressionService;
     }
 
+    SesConfigurationSetService configSetService() {
+        if (configSetService == null) {
+            throw new IllegalStateException("call build() first");
+        }
+        return configSetService;
+    }
+
+    SesSentEmailService sentEmailService() {
+        if (sentEmailService == null) {
+            throw new IllegalStateException("call build() first");
+        }
+        return sentEmailService;
+    }
+
+    SesCvetService cvetService() {
+        if (cvetService == null) {
+            throw new IllegalStateException("call build() first");
+        }
+        return cvetService;
+    }
+
+    SesIdentityService identityService() {
+        if (identityService == null) {
+            throw new IllegalStateException("call build() first");
+        }
+        return identityService;
+    }
+
     SesService build() {
         contactService = new SesContactService(contactListStore, contactStore, clock);
         suppressionService = new SesSuppressionService(suppressionStore, accountSuppressionStore,
                 new InMemoryStorage<>());
+        configSetService = new SesConfigurationSetService(configSetStore);
+        identityService = new SesIdentityService(identityStore, route53Service, clock);
+        sentEmailService = new SesSentEmailService(emailStore);
+        cvetService = new SesCvetService(cvetStore);
         return new SesService(
-                new SesIdentityService(identityStore, route53Service, clock),
-                new SesSentEmailService(emailStore),
-                new SesTemplateService(templateStore, objectMapper, new SecureRandom()),
-                new SesConfigurationSetService(configSetStore),
+                identityService,
+                sentEmailService,
+                new SesTemplateService(templateStore, objectMapper, new SecureRandom(), clock),
+                configSetService,
                 suppressionService,
                 new SesDedicatedIpService(dedicatedIpPoolStore),
                 contactService,
                 new SesPolicyService(policyStore, objectMapper),
-                new SesCvetService(cvetStore),
+                cvetService,
                 new SesTenantService(tenantStore, tenantAssociationStore, clock, new SecureRandom()),
                 smtpRelay);
     }

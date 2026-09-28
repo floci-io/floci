@@ -28,7 +28,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * End-to-end integration test provisioning AWS::Redshift::Cluster,
@@ -68,7 +67,7 @@ class RedshiftClusterCfnIntegrationTest {
         for (String stack : stacksToCleanup) {
             try {
                 cloudFormation(stack, "DeleteStack", null);
-                awaitStackDeleted(stack);
+                CfnStackWaits.awaitStackDeleted(stack);
             } catch (Exception e) {
                 LOG.warnv("Failed to clean up stack {0}: {1}", stack, e.getMessage());
             }
@@ -130,7 +129,7 @@ class RedshiftClusterCfnIntegrationTest {
         }
 
         cloudFormation(stackName, "DeleteStack", null);
-        awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
         stacksToCleanup.remove(stackName);
 
         assertClusterNotFound(clusterId);
@@ -190,7 +189,7 @@ class RedshiftClusterCfnIntegrationTest {
         assertSubnetGroupExists(sgName);
 
         cloudFormation(stackName, "DeleteStack", null);
-        awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
         stacksToCleanup.remove(stackName);
 
         assertParameterGroupNotFound(pgName);
@@ -230,25 +229,6 @@ class RedshiftClusterCfnIntegrationTest {
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();
-    }
-
-    private static void awaitStackDeleted(String stack) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stack)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("Stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("Stack " + stack + " was not deleted within the timeout");
     }
 
     private static void assertClusterNotFound(String clusterId) {
@@ -303,8 +283,8 @@ class RedshiftClusterCfnIntegrationTest {
             .formParam("Action", "DescribeClusterSubnetGroups")
             .formParam("ClusterSubnetGroupName", sgName)
         .when().post("/").then()
-            .statusCode(404)
-            .body(containsString("<Code>ClusterSubnetGroupNotFound</Code>"));
+            .statusCode(400)
+            .body(containsString("<Code>ClusterSubnetGroupNotFoundFault</Code>"));
     }
 
     private static String outputValue(String xml, String key) {

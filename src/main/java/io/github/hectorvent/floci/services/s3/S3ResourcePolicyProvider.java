@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -34,11 +35,28 @@ public class S3ResourcePolicyProvider implements ResourcePolicyProvider {
                 .orElseGet(List::of);
     }
 
-    private static String extractBucketName(String resourceArn) {
-        if (!resourceArn.startsWith("arn:aws:s3:::")) {
+    @Override
+    public String resolveResourceArn(String credentialScope, String resourceArn) {
+        if (!"s3".equalsIgnoreCase(credentialScope) || resourceArn == null) {
+            return resourceArn;
+        }
+        String bucketName = extractBucketName(resourceArn);
+        if (bucketName == null || bucketName.isEmpty() || "*".equals(bucketName)) {
+            return resourceArn;
+        }
+        String resource = AwsArnUtils.resourceIfArnFor(resourceArn, "s3").orElseThrow();
+        return AwsArnUtils.Arn.global(s3Service.bucketPartition(bucketName), "s3", "", resource).toString();
+    }
+
+    /**
+     * The bucket of an S3 ARN in any partition. Keyed on a literal {@code arn:aws:} this found
+     * no policy for a China or GovCloud bucket, which silently changed the access decision.
+     */
+    static String extractBucketName(String resourceArn) {
+        String tail = AwsArnUtils.resourceIfArnFor(resourceArn, "s3").orElse(null);
+        if (tail == null) {
             return null;
         }
-        String tail = resourceArn.substring("arn:aws:s3:::".length());
         int slash = tail.indexOf('/');
         return slash < 0 ? tail : tail.substring(0, slash);
     }

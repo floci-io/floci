@@ -332,7 +332,7 @@ public class ExecuteApiSigV4Authorizer {
         String accountId = iamService.resolveAccountId(accessKeyId)
                 .orElseGet(regionResolver::getAccountId);
         String userArn = iamService.resolveCallerArn(accessKeyId)
-                .orElseGet(() -> "arn:aws:iam::" + accountId + ":root");
+                .orElseGet(() -> regionResolver.buildGlobalArn("iam", accountId, "root"));
         String userId = iamService.findAccessKey(accessKeyId)
                 .map(AccessKey::getUserName)
                 .flatMap(iamService::findUser)

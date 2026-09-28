@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.acm;
 
+import io.github.hectorvent.floci.services.acm.CertificateGenerator.GeneratedCertificate;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator.Issuer;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator.LeafUsage;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
@@ -7,14 +10,17 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
 import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.Security;
 import java.security.cert.X509Certificate;
+import java.security.spec.ECGenParameterSpec;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -33,15 +39,15 @@ class CertificateGeneratorIssuerTest {
         generator = new CertificateGenerator();
     }
 
-    private static CertificateGenerator.Issuer newIssuer() {
-        var ca = generator.generateCaCertificate("Floci Local CA");
-        return new CertificateGenerator.Issuer(
+    private static Issuer newIssuer() {
+        GeneratedCertificate ca = generator.generateCaCertificate("Floci Local CA");
+        return new Issuer(
                 generator.parseCertificate(ca.certificatePem()), generator.parsePrivateKey(ca.privateKeyPem()));
     }
 
     @Test
     void caCertificateIsSelfSignedAndCanSign() throws Exception {
-        var ca = generator.generateCaCertificate("Floci Local CA");
+        GeneratedCertificate ca = generator.generateCaCertificate("Floci Local CA");
         X509Certificate cert = generator.parseCertificate(ca.certificatePem());
 
         assertEquals(cert.getSubjectX500Principal(), cert.getIssuerX500Principal());
@@ -57,10 +63,10 @@ class CertificateGeneratorIssuerTest {
 
     @Test
     void issuedLeafVerifiesAgainstIssuerAndCarriesServerAuth() throws Exception {
-        var issuer = newIssuer();
+        Issuer issuer = newIssuer();
 
-        var leaf = generator.generateIssuedCertificate("api.example.test", List.of("*.example.test"),
-                KeyAlgorithm.RSA_2048, null, issuer, CertificateGenerator.LeafUsage.SERVER);
+        GeneratedCertificate leaf = generator.generateIssuedCertificate("api.example.test", List.of("*.example.test"),
+                KeyAlgorithm.RSA_2048, null, issuer, LeafUsage.SERVER);
         X509Certificate cert = generator.parseCertificate(leaf.certificatePem());
 
         assertEquals(issuer.certificate().getSubjectX500Principal(), cert.getIssuerX500Principal());
@@ -87,15 +93,15 @@ class CertificateGeneratorIssuerTest {
 
     @Test
     void issuedLeafReusesSuppliedKeyPairAndClientUsage() throws Exception {
-        var issuer = newIssuer();
-        var first = generator.generateIssuedCertificate("device-1", List.of(), KeyAlgorithm.RSA_2048, null, issuer,
-                CertificateGenerator.LeafUsage.CLIENT);
-        var keyPair = new KeyPair(
+        Issuer issuer = newIssuer();
+        GeneratedCertificate first = generator.generateIssuedCertificate("device-1", List.of(), KeyAlgorithm.RSA_2048, null, issuer,
+                LeafUsage.CLIENT);
+        KeyPair keyPair = new KeyPair(
                 generator.parseCertificate(first.certificatePem()).getPublicKey(),
                 generator.parsePrivateKey(first.privateKeyPem()));
 
-        var second = generator.generateIssuedCertificate("device-1", List.of(), KeyAlgorithm.RSA_2048, keyPair, issuer,
-                CertificateGenerator.LeafUsage.CLIENT);
+        GeneratedCertificate second = generator.generateIssuedCertificate("device-1", List.of(), KeyAlgorithm.RSA_2048, keyPair, issuer,
+                LeafUsage.CLIENT);
         X509Certificate cert = generator.parseCertificate(second.certificatePem());
 
         assertEquals(keyPair.getPublic(), cert.getPublicKey(), "supplied key pair must be reused");
@@ -107,10 +113,10 @@ class CertificateGeneratorIssuerTest {
 
     @Test
     void ecLeafSignedByRsaCaReportsTheIssuerAlgorithmAndNoKeyEncipherment() throws Exception {
-        var issuer = newIssuer();
+        Issuer issuer = newIssuer();
 
-        var leaf = generator.generateIssuedCertificate("ec.example.test", null, KeyAlgorithm.EC_prime256v1, null,
-                issuer, CertificateGenerator.LeafUsage.SERVER);
+        GeneratedCertificate leaf = generator.generateIssuedCertificate("ec.example.test", null, KeyAlgorithm.EC_prime256v1, null,
+                issuer, LeafUsage.SERVER);
         X509Certificate cert = generator.parseCertificate(leaf.certificatePem());
 
         assertEquals("EC", cert.getPublicKey().getAlgorithm());
@@ -123,69 +129,72 @@ class CertificateGeneratorIssuerTest {
 
     @Test
     void anIssuerWhoseKeyDoesNotMatchItsCertificateIsRefused() {
-        var one = generator.generateCaCertificate("One");
-        var other = generator.generateCaCertificate("Other");
-        var mismatched = new CertificateGenerator.Issuer(
+        GeneratedCertificate one = generator.generateCaCertificate("One");
+        GeneratedCertificate other = generator.generateCaCertificate("Other");
+        Issuer mismatched = new Issuer(
                 generator.parseCertificate(one.certificatePem()), generator.parsePrivateKey(other.privateKeyPem()));
 
-        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+        CertificateGenerationException refused = assertThrows(CertificateGenerationException.class,
                 () -> generator.generateIssuedCertificate("x.example.test", List.of(), KeyAlgorithm.RSA_2048, null,
-                        mismatched, CertificateGenerator.LeafUsage.SERVER));
+                        mismatched, LeafUsage.SERVER));
         assertTrue(refused.getMessage().contains("Signature"), refused.getMessage());
     }
 
     @Test
     void aSuppliedKeyPairThatIsNotAPairIsRefused() {
-        var issuer = newIssuer();
-        var a = generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.RSA_2048, null, issuer,
-                CertificateGenerator.LeafUsage.CLIENT);
-        var b = generator.generateIssuedCertificate("b", List.of(), KeyAlgorithm.RSA_2048, null, issuer,
-                CertificateGenerator.LeafUsage.CLIENT);
-        var notAPair = new KeyPair(generator.parseCertificate(a.certificatePem()).getPublicKey(),
+        Issuer issuer = newIssuer();
+        GeneratedCertificate a = generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.RSA_2048, null, issuer,
+                LeafUsage.CLIENT);
+        GeneratedCertificate b = generator.generateIssuedCertificate("b", List.of(), KeyAlgorithm.RSA_2048, null, issuer,
+                LeafUsage.CLIENT);
+        KeyPair notAPair = new KeyPair(generator.parseCertificate(a.certificatePem()).getPublicKey(),
                 generator.parsePrivateKey(b.privateKeyPem()));
 
-        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+        CertificateGenerationException refused = assertThrows(CertificateGenerationException.class,
                 () -> generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.RSA_2048, notAPair, issuer,
-                        CertificateGenerator.LeafUsage.CLIENT));
+                        LeafUsage.CLIENT));
         assertTrue(refused.getMessage().contains("does not match"), refused.getMessage());
     }
 
     @Test
     void aSuppliedKeyPairOfAnotherAlgorithmIsRefused() {
-        var issuer = newIssuer();
-        var rsa = generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.RSA_2048, null, issuer,
-                CertificateGenerator.LeafUsage.CLIENT);
-        var rsaPair = new KeyPair(generator.parseCertificate(rsa.certificatePem()).getPublicKey(),
+        Issuer issuer = newIssuer();
+        GeneratedCertificate rsa = generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.RSA_2048, null, issuer,
+                LeafUsage.CLIENT);
+        KeyPair rsaPair = new KeyPair(generator.parseCertificate(rsa.certificatePem()).getPublicKey(),
                 generator.parsePrivateKey(rsa.privateKeyPem()));
 
-        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+        CertificateGenerationException refused = assertThrows(CertificateGenerationException.class,
                 () -> generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.EC_prime256v1, rsaPair, issuer,
-                        CertificateGenerator.LeafUsage.CLIENT));
+                        LeafUsage.CLIENT));
         assertTrue(refused.getMessage().contains("not the requested EC_prime256v1"), refused.getMessage());
     }
 
     @Test
     void aSuppliedEcKeyPairOnACurveOfTheSameSizeIsRefused() throws Exception {
-        var issuer = newIssuer();
-        java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("EC", "BC");
-        kpg.initialize(new java.security.spec.ECGenParameterSpec("secp256k1"));
+        // secp256k1 is an EC curve, but not the NIST P-256 prime256v1 ACM specifies: handing a
+        // k1 key to an EC_prime256v1 request must be rejected rather than issuing a certificate
+        // with the wrong curve.
+        Issuer issuer = newIssuer();
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC", "BC");
+        kpg.initialize(new ECGenParameterSpec("secp256k1"));
         KeyPair k1 = kpg.generateKeyPair();
-        kpg.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+        kpg.initialize(new ECGenParameterSpec("secp256r1"));
         KeyPair p256 = kpg.generateKeyPair();
 
-        var refused = org.junit.jupiter.api.Assertions.assertThrows(CertificateGenerationException.class,
+        CertificateGenerationException refused = assertThrows(CertificateGenerationException.class,
                 () -> generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.EC_prime256v1, k1, issuer,
-                        CertificateGenerator.LeafUsage.CLIENT));
+                        LeafUsage.CLIENT));
         assertTrue(refused.getMessage().contains("not the requested EC_prime256v1"), refused.getMessage());
-        var accepted = generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.EC_prime256v1, p256, issuer,
-                CertificateGenerator.LeafUsage.CLIENT);
+        GeneratedCertificate accepted = generator.generateIssuedCertificate("a", List.of(), KeyAlgorithm.EC_prime256v1, p256, issuer,
+                LeafUsage.CLIENT);
         assertEquals(p256.getPublic(), generator.parseCertificate(accepted.certificatePem()).getPublicKey());
     }
 
     @Test
     void duplicateSansAreWrittenOnce() throws Exception {
-        var leaf = generator.generateIssuedCertificate("dup.example.test", List.of("dup.example.test", "other.example.test",
-                "other.example.test"), KeyAlgorithm.RSA_2048, null, newIssuer(), CertificateGenerator.LeafUsage.SERVER);
+        GeneratedCertificate leaf = generator.generateIssuedCertificate("dup.example.test", List.of("dup.example.test", "other.example.test",
+                "other.example.test"), KeyAlgorithm.RSA_2048, null, newIssuer(), LeafUsage.SERVER);
         X509Certificate cert = generator.parseCertificate(leaf.certificatePem());
 
         assertEquals(List.of("dup.example.test", "other.example.test"),
@@ -194,7 +203,7 @@ class CertificateGeneratorIssuerTest {
 
     @Test
     void existingSelfSignedPathIsUnchanged() throws Exception {
-        var selfSigned = generator.generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
+        GeneratedCertificate selfSigned = generator.generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
         X509Certificate ss = generator.parseCertificate(selfSigned.certificatePem());
         assertEquals(ss.getSubjectX500Principal(), ss.getIssuerX500Principal());
         assertTrue(ss.getBasicConstraints() >= 0);
@@ -206,10 +215,10 @@ class CertificateGeneratorIssuerTest {
 
     @Test
     void ecPrivateKeysAreWrittenAsPkcs8AndReadBack() throws Exception {
-        var ec = generator.generateIssuedCertificate("ec.example.test", List.of(), KeyAlgorithm.EC_secp384r1, null,
-                newIssuer(), CertificateGenerator.LeafUsage.SERVER);
-        var rsa = generator.generateIssuedCertificate("rsa.example.test", List.of(), KeyAlgorithm.RSA_2048, null,
-                newIssuer(), CertificateGenerator.LeafUsage.CLIENT);
+        GeneratedCertificate ec = generator.generateIssuedCertificate("ec.example.test", List.of(), KeyAlgorithm.EC_secp384r1, null,
+                newIssuer(), LeafUsage.SERVER);
+        GeneratedCertificate rsa = generator.generateIssuedCertificate("rsa.example.test", List.of(), KeyAlgorithm.RSA_2048, null,
+                newIssuer(), LeafUsage.CLIENT);
 
         assertTrue(ec.privateKeyPem().startsWith("-----BEGIN PRIVATE KEY-----"), "PKCS#8 carries the curve");
         assertTrue(rsa.privateKeyPem().startsWith("-----BEGIN RSA PRIVATE KEY-----"), "RSA stays PKCS#1, as AWS IoT hands out");

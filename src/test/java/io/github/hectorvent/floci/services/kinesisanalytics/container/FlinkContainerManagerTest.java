@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.kinesisanalytics.container;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.model.MountType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -27,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -87,10 +89,13 @@ class FlinkContainerManagerTest {
         EmulatorConfig.DnsConfig dnsConfig = mock(EmulatorConfig.DnsConfig.class);
         when(dnsConfig.containerFallbackEnabled()).thenReturn(false);
 
+        EmulatorConfig.StorageConfig storageConfig = storageWithInitImage("busybox:stable");
+
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.docker()).thenReturn(dockerConfig);
         when(config.services()).thenReturn(servicesConfig);
         when(config.dns()).thenReturn(dnsConfig);
+        when(config.storage()).thenReturn(storageConfig);
         when(config.defaultRegion()).thenReturn("us-west-2");
 
         DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
@@ -125,6 +130,14 @@ class FlinkContainerManagerTest {
                 MAPPER);
     }
 
+    private static EmulatorConfig.StorageConfig storageWithInitImage(String initImage) {
+        EmulatorConfig.EfsSharingConfig efs = mock(EmulatorConfig.EfsSharingConfig.class);
+        when(efs.initImage()).thenReturn(initImage);
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        when(storage.efs()).thenReturn(efs);
+        return storage;
+    }
+
     private FlinkApplication application(String name) {
         return new FlinkApplication(name,
                 "arn:aws:kinesisanalytics:us-west-2:000000000000:application/" + name,
@@ -145,7 +158,7 @@ class FlinkContainerManagerTest {
         when(config.docker()).thenReturn(docker);
         when(docker.logMaxSize()).thenReturn("10m");
         when(docker.logMaxFile()).thenReturn("3");
-        EmulatorConfig.StorageConfig storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
+        EmulatorConfig.StorageConfig storage = storageWithInitImage("busybox:stable");
         when(config.storage()).thenReturn(storage);
         when(storage.hostPersistentPath()).thenReturn("floci-data");
 
@@ -281,6 +294,24 @@ class FlinkContainerManagerTest {
     }
 
     @Test
+    void startCluster_savepointsVolume_isChownedToFlinkUser() {
+        FlinkApplication app = application("snap");
+        when(lifecycleManager.create(any())).thenReturn("jm-id");
+        when(lifecycleManager.startCreated(any(), any())).thenReturn(new ContainerInfo(
+                "jm-id", Map.of(8081, new EndpointInfo("localhost", 49152))));
+
+        manager.startCluster(app);
+
+        String volumeName = app.getDockerVolumeName();
+        verify(lifecycleManager).ensureSharedVolume(volumeName, OptionalInt.of(9999), OptionalInt.of(9999),
+                Optional.empty(), "busybox:stable");
+        ContainerSpec jmSpec = captureCreatedSpecs().getFirst();
+        assertTrue(jmSpec.mounts().stream().anyMatch(mount -> mount.getType() == MountType.VOLUME
+                && volumeName.equals(mount.getSource())
+                && "/opt/flink/savepoints".equals(mount.getTarget())));
+    }
+
+    @Test
     void codeClusterInjectsTheSameAwsSdkEnvironmentIntoBothFlinkProcesses() {
         FlinkApplication app = application("with-code");
         app.setCodeS3Bucket("code-bucket");
@@ -316,8 +347,8 @@ class FlinkContainerManagerTest {
 
         assertThrows(RuntimeException.class, () -> manager.startCluster(app));
 
-        verify(lifecycleManager, times(2)).removeIfExists("floci-kinesisanalytics-jm-failure");
-        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-kinesisanalytics-jm-failure-tm");
+        verify(lifecycleManager, times(2)).removeIfExists("floci-aws-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-jm-failure");
+        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-aws-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-jm-failure-tm");
         assertNull(app.getContainerId());
         assertNull(app.getTaskManagerContainerId());
     }
@@ -337,7 +368,7 @@ class FlinkContainerManagerTest {
         assertThrows(RuntimeException.class, () -> manager.startCluster(app));
 
         verify(lifecycleManager).stopAndRemove("jm-id", null);
-        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-kinesisanalytics-tm-failure-tm");
+        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-aws-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-tm-failure-tm");
         assertNull(app.getContainerId());
         assertNull(app.getRestEndpoint());
         assertNull(app.getTaskManagerContainerId());
@@ -356,8 +387,8 @@ class FlinkContainerManagerTest {
 
         assertThrows(RuntimeException.class, () -> manager.startCluster(app));
 
-        verify(lifecycleManager, times(2)).removeIfExists("floci-kinesisanalytics-log4j-copy-failure");
-        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-kinesisanalytics-log4j-copy-failure-tm");
+        verify(lifecycleManager, times(2)).removeIfExists("floci-aws-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-log4j-copy-failure");
+        verify(lifecycleManager, atLeastOnce()).removeIfExists("floci-aws-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-log4j-copy-failure-tm");
         verify(lifecycleManager, Mockito.never()).startCreated(any(), any());
         assertNull(app.getContainerId());
     }

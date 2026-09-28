@@ -27,13 +27,15 @@ public class CodePipelineExecution {
     private Double lastUpdateTime;
     private List<Map<String, Object>> artifactRevisions = new ArrayList<>();
     private List<Map<String, Object>> sourceRevisions = new ArrayList<>();
+    private List<Map<String, Object>> sourceRevisionOverrides = new ArrayList<>();
     private List<Map<String, String>> variables = new ArrayList<>();
     private Map<String, String> trigger = new LinkedHashMap<>();
     private List<ActionExecution> actionExecutions = new ArrayList<>();
     private Map<String, String> stageExecutionStatuses = new LinkedHashMap<>();
     private String currentStage;
-    private boolean stopRequested;
-    private boolean abandon;
+    private volatile boolean stopRequested;
+    private volatile boolean abandon;
+    private volatile boolean artifactsReleased;
     private String rollbackTargetPipelineExecutionId;
 
     public String getAccountId() {
@@ -140,6 +142,14 @@ public class CodePipelineExecution {
         this.sourceRevisions = sourceRevisions;
     }
 
+    public List<Map<String, Object>> getSourceRevisionOverrides() {
+        return sourceRevisionOverrides;
+    }
+
+    public void setSourceRevisionOverrides(List<Map<String, Object>> sourceRevisionOverrides) {
+        this.sourceRevisionOverrides = sourceRevisionOverrides == null ? new ArrayList<>() : sourceRevisionOverrides;
+    }
+
     public List<Map<String, String>> getVariables() {
         return variables;
     }
@@ -195,6 +205,14 @@ public class CodePipelineExecution {
 
     public void setAbandon(boolean abandon) {
         this.abandon = abandon;
+    }
+
+    public boolean isArtifactsReleased() {
+        return artifactsReleased;
+    }
+
+    public void setArtifactsReleased(boolean artifactsReleased) {
+        this.artifactsReleased = artifactsReleased;
     }
 
     public String getRollbackTargetPipelineExecutionId() {

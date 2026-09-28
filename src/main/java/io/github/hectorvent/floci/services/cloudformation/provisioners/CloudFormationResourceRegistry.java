@@ -12,8 +12,8 @@ import java.util.Set;
 
 /**
  * Maps a CloudFormation resource type to the {@link CfnResourceProvisioner} that serves it.
- * {@code CloudFormationResourceProvisioner} consults this first and falls through to its own
- * switch for types not yet extracted, so the two coexist during the incremental migration.
+ * {@code CfnResourceDispatcher} consults this for every type; a type nothing here serves is stubbed
+ * by the dispatcher, never provisioned.
  */
 @ApplicationScoped
 public class CloudFormationResourceRegistry {
@@ -42,7 +42,14 @@ public class CloudFormationResourceRegistry {
     }
 
     public Optional<CfnResourceProvisioner> forType(String resourceType) {
-        return Optional.ofNullable(byType.get(resourceType));
+        CfnResourceProvisioner provisioner = byType.get(resourceType);
+        if (provisioner == null && resourceType != null && resourceType.startsWith("Custom::")) {
+            // Custom::* is a dynamic, unenumerable prefix, so it cannot be a registered key. An
+            // exact entry still wins (Custom::DynamoDBReplica is registered to DynamoDbCfnProvisioner
+            // above); only otherwise-unmatched Custom:: types fall through to the generic handler.
+            provisioner = byType.get("AWS::CloudFormation::CustomResource");
+        }
+        return Optional.ofNullable(provisioner);
     }
 
     /**

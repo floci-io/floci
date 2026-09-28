@@ -35,7 +35,7 @@ class CloudFormationDeleteIdempotencyIntegrationTest {
     }
 
     @Test
-    void deletingStackWhoseTableWasRemovedOutOfBandStillCompletes() throws InterruptedException {
+    void deletingStackWhoseTableWasRemovedOutOfBandStillCompletes() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String tableName = "idem-delete-table-" + suffix;
         String stackName = "idem-delete-stack-" + suffix;
@@ -86,27 +86,7 @@ class CloudFormationDeleteIdempotencyIntegrationTest {
 
         // DeleteStack runs asynchronously: poll until the stack is gone (a successful delete removes it
         // entirely). A failed delete would instead leave it queryable as DELETE_FAILED — fail fast on that.
-        awaitStackDeleted(stackName);
-    }
-
-    private void awaitStackDeleted(String stackName) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-            .when().post("/").then().extract().asString();
-
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed instead of treating the already-removed table as deleted: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stackName + " was not deleted within the timeout");
+        CfnStackWaits.awaitStackDeleted(stackName);
     }
 
     private void assertStackStatus(String stackName, String status) {

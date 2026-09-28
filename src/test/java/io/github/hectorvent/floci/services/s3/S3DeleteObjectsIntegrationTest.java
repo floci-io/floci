@@ -97,6 +97,35 @@ class S3DeleteObjectsIntegrationTest {
     }
 
     @Test
+    void deleteObjects_withNullVersionId_permanentlyDeletesPreVersioningObject() {
+        String bucket = createBucket();
+        putObject(bucket, "pre-versioned.txt");
+        enableVersioning(bucket);
+
+        given()
+            .contentType("application/xml")
+            .body("<Delete><Object><Key>pre-versioned.txt</Key><VersionId>null</VersionId></Object></Delete>")
+        .when()
+            .post("/" + bucket + "?delete")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Deleted>"))
+            .body(containsString("<Key>pre-versioned.txt</Key>"));
+
+        given()
+        .when()
+            .get("/" + bucket + "/pre-versioned.txt")
+        .then()
+            .statusCode(404);
+
+        given()
+        .when()
+            .delete("/" + bucket)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
     void deleteObjects_governanceRetentionVersionIdHonorsBypassHeader() {
         String bucket = createBucket();
         enableVersioning(bucket);

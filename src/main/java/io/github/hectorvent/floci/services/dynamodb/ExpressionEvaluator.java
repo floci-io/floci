@@ -395,25 +395,41 @@ final class ExpressionEvaluator {
      */
     static void validateExpression(String expression, String exprType,
                                    JsonNode exprAttrNames, JsonNode exprAttrValues) {
-        if (expression == null || expression.isBlank()) return;
-        List<Token> tokens;
-        Expr expr;
+        validateSyntax(expression, exprType);
+        validateSemantics(expression, exprType, exprAttrNames, exprAttrValues);
+    }
+
+    /**
+     * The tokenize/parse/redundant-parentheses half of {@link #validateExpression}, split out so
+     * callers can run an undefined-#name/:value check between this and {@link #validateSemantics}:
+     * DynamoDB reports a syntax or redundant-parentheses error before an undefined placeholder,
+     * but an undefined placeholder before a semantic error like {@code contains(x, x)}.
+     */
+    static void validateSyntax(String expression, String exprType) {
+        if (expression == null || expression.isBlank()) {
+            return;
+        }
         try {
-            tokens = tokenize(expression.trim());
+            List<Token> tokens = tokenize(expression.trim());
             checkRedundantParentheses(tokens, exprType);
-            expr = parse(expression);
+            parse(expression);
         } catch (IllegalArgumentException e) {
             String detail = e.getMessage();
-            
+
             if (detail.startsWith("token:")) {
-                throw new AwsException("ValidationException", 
+                throw new AwsException("ValidationException",
                     "Invalid " + exprType + ": Syntax error; " + detail, 400);
             } else {
-                throw new AwsException("ValidationException", 
+                throw new AwsException("ValidationException",
                     "Invalid " + exprType + ": Syntax error", 400);
             }
         }
-        validateSemantics(expr, exprType, exprAttrNames, exprAttrValues);
+    }
+
+    /** The semantic half of {@link #validateExpression}; see {@link #validateSyntax}. */
+    static void validateSemantics(String expression, String exprType,
+                                   JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        validateSemantics(parse(expression), exprType, exprAttrNames, exprAttrValues);
     }
 
     // A pair of parentheses is redundant when its entire content is itself a single
@@ -711,7 +727,7 @@ final class ExpressionEvaluator {
 
         JsonNode leftNode = resolveAttributeValue(cmp.left(), item, exprAttrNames, exprAttrValues);
         JsonNode rightNode = resolveAttributeValue(cmp.right(), item, exprAttrNames, exprAttrValues);
-        if (leftNode == null || rightNode == null) return false;
+        if (leftNode == null || rightNode == null || !sameType(leftNode, rightNode)) return false;
         int cmpResult = compareAttributeValues(leftNode, rightNode);
         return switch (cmp.op()) {
             case LT -> cmpResult < 0;
@@ -727,8 +743,12 @@ final class ExpressionEvaluator {
         JsonNode val = resolveAttributeValue(bet.value(), item, exprAttrNames, exprAttrValues);
         JsonNode low = resolveAttributeValue(bet.low(), item, exprAttrNames, exprAttrValues);
         JsonNode high = resolveAttributeValue(bet.high(), item, exprAttrNames, exprAttrValues);
-        if (val == null || low == null || high == null) return false;
+        if (val == null || low == null || high == null || !sameType(val, low) || !sameType(val, high)) return false;
         return compareAttributeValues(val, low) >= 0 && compareAttributeValues(val, high) <= 0;
+    }
+
+    private static boolean sameType(JsonNode left, JsonNode right) {
+        return left.fieldNames().next().equals(right.fieldNames().next());
     }
 
     private static boolean evaluateIn(InExpr in, JsonNode item,

@@ -279,7 +279,14 @@ public class OamService {
     }
 
     private static boolean principalValueMatches(String value, String account) {
-        return "*".equals(value) || account.equals(value) || ("arn:aws:iam::" + account + ":root").equals(value);
+        if ("*".equals(value) || account.equals(value)) {
+            return true;
+        }
+        if (!AwsArnUtils.isArnFor(value, "iam")) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(value);
+        return account.equals(parsed.accountId()) && "root".equals(parsed.resource());
     }
 
     private static boolean resourceMatches(JsonNode node, String arn) {

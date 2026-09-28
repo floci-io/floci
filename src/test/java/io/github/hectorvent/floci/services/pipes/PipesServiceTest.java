@@ -541,6 +541,32 @@ class PipesServiceTest {
         assertTrue(ex.getMessage().contains("must be between 1 and 10"), ex.getMessage());
     }
 
+    @Test
+    void dynamoDbStreamRetryOptionsAreAcceptedAndReturned() {
+        String created = """
+                {"StartingPosition":"TRIM_HORIZON","MaximumRetryAttempts":3,"MaximumRecordAgeInSeconds":60,
+                 "OnPartialBatchItemFailure":"AUTOMATIC_BISECT"}""";
+        String updated = """
+                {"MaximumRetryAttempts":10000,"MaximumRecordAgeInSeconds":604800,
+                 "OnPartialBatchItemFailure":"AUTOMATIC_BISECT"}""";
+
+        pipesService.createPipe("ddb-retry-pipe",
+                "arn:aws:dynamodb:us-east-1:000000000000:table/orders/stream/2024-01-01T00:00:00.000",
+                "arn:aws:sqs:us-east-1:000000000000:target", "arn:aws:iam::000000000000:role/role",
+                null, null, null, sourceParameters("{\"DynamoDBStreamParameters\":" + created + "}"),
+                null, null, null, "us-east-1");
+        assertEquals(sourceParameters(created), pipesService.describePipe("ddb-retry-pipe", "us-east-1")
+                .getSourceParameters().path("DynamoDBStreamParameters"));
+
+        pipesService.updatePipe("ddb-retry-pipe", null, null, null, null, null,
+                sourceParameters("{\"DynamoDBStreamParameters\":" + updated + "}"), null, null, "us-east-1");
+        JsonNode stored = pipesService.describePipe("ddb-retry-pipe", "us-east-1")
+                .getSourceParameters().path("DynamoDBStreamParameters");
+        assertEquals(10000, stored.path("MaximumRetryAttempts").asInt());
+        assertEquals(604800, stored.path("MaximumRecordAgeInSeconds").asInt());
+        assertEquals("AUTOMATIC_BISECT", stored.path("OnPartialBatchItemFailure").asText());
+    }
+
     private static JsonNode sourceParameters(String json) {
         try {
             return MAPPER.readTree(json);

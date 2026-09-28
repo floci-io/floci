@@ -176,7 +176,7 @@ public class ElbClassicHealthChecker implements Resettable {
         for (Map.Entry<String, InstanceState> entry : lbStates.entrySet()) {
             String instanceId = entry.getKey();
             InstanceState state = entry.getValue();
-            String host = resolveHost(instanceId);
+            String host = resolveHost(lb.getAccountId(), instanceId);
             vertx.executeBlocking(() -> probe(host, target, timeout))
                     .onSuccess(ok -> {
                         if (Boolean.TRUE.equals(ok)) {
@@ -206,10 +206,16 @@ public class ElbClassicHealthChecker implements Resettable {
     }
 
     private String resolveHost(String instanceId) {
+        return resolveHost(null, instanceId);
+    }
+
+    private String resolveHost(String accountId, String instanceId) {
         if (ec2Service == null) {
             return instanceId;
         }
-        Instance instance = ec2Service.findInstanceById(instanceId);
+        Instance instance = accountId != null
+                ? ec2Service.findInstanceById(accountId, instanceId)
+                : ec2Service.findInstanceById(instanceId);
         if (instance == null) {
             return instanceId;
         }

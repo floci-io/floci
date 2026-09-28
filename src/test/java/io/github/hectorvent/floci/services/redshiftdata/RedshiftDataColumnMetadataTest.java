@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshiftdata;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import org.h2.Driver;
 import org.junit.jupiter.api.Test;
@@ -31,7 +32,7 @@ class RedshiftDataColumnMetadataTest {
             try (ResultSet rs = st.executeQuery("select id as id, name as name from t")) {
                 ArrayNode columns = RedshiftDataColumnMetadata.toColumnMetadata(om, rs.getMetaData());
                 assertEquals(2, columns.size());
-                var id = columns.get(0);
+                JsonNode id = columns.get(0);
                 assertEquals("ID", id.get("name").asText().toUpperCase());
                 assertTrue(id.has("label"));
                 assertTrue(id.has("typeName"));

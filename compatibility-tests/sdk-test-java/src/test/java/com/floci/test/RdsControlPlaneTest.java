@@ -14,7 +14,15 @@ import software.amazon.awssdk.services.rds.model.ConnectionPoolConfigurationInfo
 import software.amazon.awssdk.services.rds.model.CreateDbProxyResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
 import software.amazon.awssdk.services.rds.model.CreateOptionGroupResponse;
+import software.amazon.awssdk.services.rds.model.DBCluster;
+import software.amazon.awssdk.services.rds.model.DBClusterSnapshot;
+import software.amazon.awssdk.services.rds.model.DBInstance;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
+import software.amazon.awssdk.services.rds.model.DBSnapshot;
+import software.amazon.awssdk.services.rds.model.DbClusterSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbSnapshotAlreadyExistsException;
+import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.InvalidDbInstanceStateException;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
@@ -23,6 +31,8 @@ import software.amazon.awssdk.services.rds.model.ModifyOptionGroupResponse;
 import software.amazon.awssdk.services.rds.model.OptionConfiguration;
 import software.amazon.awssdk.services.rds.model.OptionGroupNotFoundException;
 import software.amazon.awssdk.services.rds.model.OptionSetting;
+import software.amazon.awssdk.services.rds.model.RdsException;
+import software.amazon.awssdk.services.rds.model.Tag;
 
 import java.util.List;
 import java.util.logging.Level;
@@ -391,6 +401,203 @@ class RdsControlPlaneTest {
             }
             deleteProxy(rds, targetProxyName);
             deleteDbInstance(rds, targetInstanceName);
+        }
+    }
+
+    @Test
+    void sdkStopsAndStartsAStandaloneInstance() throws Exception {
+        String instanceName = TestFixtures.uniqueName("rds-stop-db");
+        try {
+            createDbInstance(rds, instanceName, "stop-secret");
+            String endpoint = rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0).endpoint().address();
+
+            DBInstance stopping = rds.stopDBInstance(b -> b.dbInstanceIdentifier(instanceName)).dbInstance();
+            assertThat(stopping.dbInstanceStatus()).isEqualTo("stopping");
+            assertThat(rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0).dbInstanceStatus()).isEqualTo("stopped");
+
+            assertThatThrownBy(() -> rds.stopDBInstance(b -> b.dbInstanceIdentifier(instanceName)))
+                    .isInstanceOf(InvalidDbInstanceStateException.class);
+            assertThatThrownBy(() -> rds.modifyDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName).masterUserPassword("changed-secret")))
+                    .isInstanceOf(InvalidDbInstanceStateException.class);
+
+            DBInstance starting = rds.startDBInstance(b -> b.dbInstanceIdentifier(instanceName)).dbInstance();
+            assertThat(starting.dbInstanceStatus()).isEqualTo("starting");
+            DBInstance started = rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0);
+            assertThat(started.dbInstanceStatus()).isEqualTo("available");
+            assertThat(started.endpoint().address()).isEqualTo(endpoint);
+        } finally {
+            deleteDbInstance(rds, instanceName);
+        }
+    }
+
+    @Test
+    @DisplayName("ModifyDBInstance resizes and upgrades an instance, and Describe reports it")
+    void sdkResizesAndUpgradesAStandaloneInstance() {
+        String instanceName = TestFixtures.uniqueName("rds-resize-db");
+        try {
+            createDbInstance(rds, instanceName, "resize-secret");
+
+            DBInstance modified = rds.modifyDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName)
+                    .dbInstanceClass("db.t3.large")
+                    .allocatedStorage(100)
+                    .engineVersion("16.4")).dbInstance();
+
+            assertThat(modified.dbInstanceClass()).isEqualTo("db.t3.large");
+            assertThat(modified.allocatedStorage()).isEqualTo(100);
+            assertThat(modified.engineVersion()).isEqualTo("16.4");
+
+            DBInstance described = rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0);
+            assertThat(described.dbInstanceClass()).isEqualTo("db.t3.large");
+            assertThat(described.allocatedStorage()).isEqualTo(100);
+            assertThat(described.engineVersion()).isEqualTo("16.4");
+
+            assertThatThrownBy(() -> rds.modifyDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName).allocatedStorage(50)))
+                    .isInstanceOfSatisfying(RdsException.class, e -> assertThat(
+                            e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination"));
+
+            assertThatThrownBy(() -> rds.modifyDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName).engineVersion("17.2")))
+                    .isInstanceOfSatisfying(RdsException.class, e -> assertThat(
+                            e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination"));
+
+            DBInstance upgraded = rds.modifyDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName)
+                    .engineVersion("17.2")
+                    .allowMajorVersionUpgrade(true)).dbInstance();
+            assertThat(upgraded.engineVersion()).isEqualTo("17.2");
+        } finally {
+            deleteDbInstance(rds, instanceName);
+        }
+    }
+
+    @Test
+    void sdkCopiesModifiesAndDeletesManualSnapshots() {
+        String instanceName = TestFixtures.uniqueName("rds-snap-db");
+        String snapshotName = TestFixtures.uniqueName("rds-snap");
+        String copyName = snapshotName + "-copy";
+        try {
+            createDbInstance(rds, instanceName, "snap-secret");
+            String sourceArn = rds.createDBSnapshot(b -> b
+                    .dbInstanceIdentifier(instanceName)
+                    .dbSnapshotIdentifier(snapshotName)
+                    .tags(Tag.builder().key("owner").value("platform").build()))
+                    .dbSnapshot().dbSnapshotArn();
+
+            DBSnapshot copy = rds.copyDBSnapshot(b -> b
+                    .sourceDBSnapshotIdentifier(sourceArn)
+                    .targetDBSnapshotIdentifier(copyName)
+                    .copyTags(true)
+                    .tags(Tag.builder().key("stage").value("test").build()))
+                    .dbSnapshot();
+            assertThat(copy.dbSnapshotIdentifier()).isEqualTo(copyName);
+            assertThat(copy.status()).isEqualTo("available");
+            assertThat(copy.snapshotType()).isEqualTo("manual");
+            assertThat(copy.tagList()).extracting(Tag::key).containsExactlyInAnyOrder("owner", "stage");
+
+            assertThatThrownBy(() -> rds.copyDBSnapshot(b -> b
+                    .sourceDBSnapshotIdentifier(snapshotName)
+                    .targetDBSnapshotIdentifier(copyName)))
+                    .isInstanceOf(DbSnapshotAlreadyExistsException.class);
+
+            DBSnapshot modified = rds.modifyDBSnapshot(b -> b
+                    .dbSnapshotIdentifier(snapshotName)
+                    .engineVersion("16.4"))
+                    .dbSnapshot();
+            assertThat(modified.engineVersion()).isEqualTo("16.4");
+
+            DBSnapshot deleted = rds.deleteDBSnapshot(b -> b.dbSnapshotIdentifier(snapshotName)).dbSnapshot();
+            assertThat(deleted.status()).isEqualTo("deleted");
+            assertThatThrownBy(() -> rds.describeDBSnapshots(b -> b.dbSnapshotIdentifier(snapshotName)))
+                    .isInstanceOf(DbSnapshotNotFoundException.class);
+            assertThat(rds.describeDBSnapshots(b -> b.dbInstanceIdentifier(instanceName)).dbSnapshots())
+                    .extracting(DBSnapshot::dbSnapshotIdentifier)
+                    .containsExactly(copyName);
+        } finally {
+            try {
+                rds.deleteDBSnapshot(b -> b.dbSnapshotIdentifier(copyName));
+            } catch (Exception ignored) {}
+            deleteDbInstance(rds, instanceName);
+        }
+    }
+
+    @Test
+    void sdkCreatesCopiesRestoresAndDeletesClusterSnapshots() {
+        String clusterName = TestFixtures.uniqueName("rds-csnap-cluster");
+        String snapshotName = TestFixtures.uniqueName("rds-csnap");
+        String copyName = snapshotName + "-copy";
+        String restoredName = clusterName + "-restored";
+        try {
+            rds.createDBCluster(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .engine("aurora-postgresql")
+                    .engineVersion("16.3")
+                    .masterUsername("admin")
+                    .masterUserPassword("csnap-secret")
+                    .databaseName("app"));
+
+            DBClusterSnapshot snapshot = rds.createDBClusterSnapshot(b -> b
+                    .dbClusterSnapshotIdentifier(snapshotName)
+                    .dbClusterIdentifier(clusterName)
+                    .tags(Tag.builder().key("owner").value("platform").build()))
+                    .dbClusterSnapshot();
+            assertThat(snapshot.status()).isEqualTo("available");
+            assertThat(snapshot.snapshotType()).isEqualTo("manual");
+            assertThat(snapshot.percentProgress()).isEqualTo(100);
+            assertThat(snapshot.engine()).isEqualTo("aurora-postgresql");
+            assertThat(snapshot.dbClusterSnapshotArn()).contains(":cluster-snapshot:" + snapshotName);
+
+            assertThat(rds.describeDBClusterSnapshots(b -> b.dbClusterIdentifier(clusterName)).dbClusterSnapshots())
+                    .extracting(DBClusterSnapshot::dbClusterSnapshotIdentifier)
+                    .containsExactly(snapshotName);
+
+            DBClusterSnapshot copy = rds.copyDBClusterSnapshot(b -> b
+                    .sourceDBClusterSnapshotIdentifier(snapshot.dbClusterSnapshotArn())
+                    .targetDBClusterSnapshotIdentifier(copyName)
+                    .copyTags(true))
+                    .dbClusterSnapshot();
+            assertThat(copy.sourceDBClusterSnapshotArn()).isEqualTo(snapshot.dbClusterSnapshotArn());
+            assertThat(copy.tagList()).extracting(Tag::key).containsExactly("owner");
+
+            rds.modifyDBClusterSnapshotAttribute(b -> b
+                    .dbClusterSnapshotIdentifier(copyName)
+                    .attributeName("restore")
+                    .valuesToAdd("all"));
+            assertThat(rds.describeDBClusterSnapshotAttributes(b -> b.dbClusterSnapshotIdentifier(copyName))
+                    .dbClusterSnapshotAttributesResult().dbClusterSnapshotAttributes())
+                    .singleElement()
+                    .satisfies(attribute -> assertThat(attribute.attributeValues()).containsExactly("all"));
+
+            assertThat(rds.deleteDBClusterSnapshot(b -> b.dbClusterSnapshotIdentifier(snapshotName))
+                    .dbClusterSnapshot().status()).isEqualTo("deleted");
+            assertThatThrownBy(() -> rds.describeDBClusterSnapshots(b -> b.dbClusterSnapshotIdentifier(snapshotName)))
+                    .isInstanceOf(DbClusterSnapshotNotFoundException.class);
+
+            DBCluster restored = rds.restoreDBClusterFromSnapshot(b -> b
+                    .dbClusterIdentifier(restoredName)
+                    .snapshotIdentifier(copy.dbClusterSnapshotArn())
+                    .engine("aurora-postgresql"))
+                    .dbCluster();
+            assertThat(restored.dbClusterIdentifier()).isEqualTo(restoredName);
+            assertThat(restored.masterUsername()).isEqualTo("admin");
+            assertThat(restored.databaseName()).isEqualTo("app");
+        } finally {
+            for (String name : List.of(snapshotName, copyName)) {
+                try {
+                    rds.deleteDBClusterSnapshot(b -> b.dbClusterSnapshotIdentifier(name));
+                } catch (Exception ignored) {}
+            }
+            for (String name : List.of(restoredName, clusterName)) {
+                try {
+                    rds.deleteDBCluster(b -> b.dbClusterIdentifier(name).skipFinalSnapshot(true));
+                } catch (Exception ignored) {}
+            }
         }
     }
 

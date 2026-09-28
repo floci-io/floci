@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -86,9 +87,14 @@ class CloudFormationIntegrationTest {
      * or after ten seconds, so a test can assert on the deleted resources afterwards.
      */
     private static void awaitStackDeleted(String stackNameOrArn) {
+        awaitStackStatus(stackNameOrArn, "DELETE_COMPLETE");
+    }
+
+    private static void awaitStackStatus(String stackNameOrArn, String expectedStatus) {
         long deadline = System.currentTimeMillis() + 10_000;
+        String statusXml = "";
         while (System.currentTimeMillis() < deadline) {
-            String statusXml = given()
+            statusXml = given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DescribeStacks")
                 .formParam("StackName", stackNameOrArn)
@@ -96,18 +102,23 @@ class CloudFormationIntegrationTest {
                 .post("/")
             .then()
                 .extract().body().asString();
-            assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
-            if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>") || statusXml.contains("does not exist")) {
+            if ("DELETE_COMPLETE".equals(expectedStatus)) {
+                assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
+                if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")
+                        || statusXml.contains("does not exist")) {
+                    return;
+                }
+            } else if (statusXml.contains("<StackStatus>" + expectedStatus + "</StackStatus>")) {
                 return;
             }
             try {
-                Thread.sleep(200);
+                Thread.sleep(50);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new AssertionError("Interrupted while waiting for stack " + stackNameOrArn + " to be deleted", e);
+                throw new AssertionError("Interrupted while waiting for stack " + stackNameOrArn + " to reach " + expectedStatus, e);
             }
         }
-        throw new AssertionError("Stack " + stackNameOrArn + " did not reach DELETE_COMPLETE within timeout");
+        assertThat(statusXml, containsString("<StackStatus>" + expectedStatus + "</StackStatus>"));
     }
 
     private static String firstPhysicalResourceId(String xml) {
@@ -200,7 +211,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("cf-test-queue"));
-        
+
         // 4. Describe Stacks
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -2204,6 +2215,179 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void describeDeletedStack_byArn_reportsItsDeletionTime() throws Exception {
+        String stackArn = createAndDeleteStack("deleted-deletion-time-stack",
+                "deleted-deletion-time-test-bucket");
+
+        String xml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        assertThat(xml, containsString("<StackStatus>DELETE_COMPLETE</StackStatus>"));
+        // The service clock, not the wall clock: the test clock starts the run at 2026-01-01.
+        assertThat(xml, containsString("<DeletionTime>2026-01-01T"));
+    }
+
+    @Test
+    void describeLiveStack_reportsNoDeletionTime() {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "live-no-deletion-time-test-bucket" }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "live-no-deletion-time-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "live-no-deletion-time-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<DeletionTime>")));
+    }
+
+    @Test
+    void listStacks_includesADeletedStackAsDeleteComplete() throws Exception {
+        String stackArn = createAndDeleteStack("listed-deleted-stack",
+                "listed-deleted-test-bucket");
+
+        String member = listStacksMemberFor(listStacksXml(null), stackArn);
+
+        assertThat(member, containsString("<StackName>listed-deleted-stack</StackName>"));
+        assertThat(member, containsString("<StackStatus>DELETE_COMPLETE</StackStatus>"));
+        assertThat(member, containsString("<DeletionTime>2026-01-01T"));
+    }
+
+    @Test
+    void listStacks_filteredToDeleteComplete_returnsTheDeletedStackAndNoLiveOne() throws Exception {
+        String stackArn = createAndDeleteStack("listed-filtered-deleted-stack",
+                "listed-filtered-deleted-test-bucket");
+
+        String xml = listStacksXml("DELETE_COMPLETE");
+
+        assertThat(xml, containsString("<StackId>" + stackArn + "</StackId>"));
+        assertThat(xml, not(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>")));
+    }
+
+    @Test
+    void listStacks_afterTheRetentionWindow_dropsTheDeletedStack() throws Exception {
+        String stackArn = createAndDeleteStack("listed-expiring-deleted-stack",
+                "listed-expiring-deleted-test-bucket");
+
+        assertThat(listStacksXml(null), containsString("<StackId>" + stackArn + "</StackId>"));
+
+        clock.advance(Duration.ofSeconds(31));
+
+        assertThat(listStacksXml(null), not(containsString("<StackId>" + stackArn + "</StackId>")));
+    }
+
+    /**
+     * Creates a single-bucket stack, deletes it, and answers its stack ARN once the delete has
+     * reached DELETE_COMPLETE. DeleteStack hands the work to a background executor, so the
+     * DELETE_COMPLETE event is what says the retained record is in place.
+     */
+    private String createAndDeleteStack(String stackName, String bucketName) throws Exception {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                }
+              }
+            }
+            """.formatted(bucketName);
+
+        String createResponse = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"))
+            .extract().asString();
+
+        String stackArn = createResponse.substring(
+                createResponse.indexOf("<StackId>") + "<StackId>".length(),
+                createResponse.indexOf("</StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            String events = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackEvents")
+                .formParam("StackName", stackArn)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+
+            if (events.contains("<ResourceStatus>DELETE_COMPLETE</ResourceStatus>")) {
+                return stackArn;
+            }
+            Thread.sleep(200);
+        }
+        throw new AssertionError("stack " + stackName + " never reached DELETE_COMPLETE");
+    }
+
+    private String listStacksXml(String statusFilter) {
+        RequestSpecification request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListStacks");
+        if (statusFilter != null) {
+            request = request.formParam("StackStatusFilter.member.1", statusFilter);
+        }
+        return request
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+    }
+
+    /** The one ListStacks summary carrying this stack id, so an assertion cannot match another. */
+    private static String listStacksMemberFor(String xml, String stackArn) {
+        int idAt = xml.indexOf("<StackId>" + stackArn + "</StackId>");
+        assertTrue(idAt >= 0, "stack " + stackArn + " is not listed:\n" + xml);
+        return xml.substring(xml.lastIndexOf("<member>", idAt), xml.indexOf("</member>", idAt));
+    }
+
+    @Test
     void deleteChangeSet_nonExistentChangeSet_returnsError() {
         String template = """
             {
@@ -4165,15 +4349,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200);
 
         // 4. Stack should reach CREATE_COMPLETE
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "cfn-cs-arn-stack")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        awaitStackStatus("cfn-cs-arn-stack", "CREATE_COMPLETE");
     }
 
     @Test
@@ -6708,6 +6884,97 @@ class CloudFormationIntegrationTest {
             .body(containsString("nested-stack-child-queue"));
     }
 
+    /**
+     * Pins the actual root cause behind issue #3854 (a parent stack output resolving to the raw
+     * {@code LogicalId.Outputs.Key} literal instead of a nested stack's value), which turned out
+     * to have nothing to do with cross-thread visibility.
+     *
+     * <p>{@code executeNestedStack} copies {@code childStack.getOutputs()} into the parent
+     * resource's {@code Outputs.*} attributes right after the child's (synchronous, same-thread)
+     * {@code executeTemplate} call returns. When the child's own resource loop fails, {@code
+     * executeTemplate} never reaches its Outputs block at all: {@code rollbackFailedExecution}
+     * rewrites the child's status straight from {@code CREATE_FAILED} into {@code
+     * ROLLBACK_COMPLETE} before returning. {@code executeNestedStack} used to detect a failed
+     * child only by checking for the literal strings {@code CREATE_FAILED}/{@code UPDATE_FAILED},
+     * which a rolled-back create can never match, so the parent kept going and reported
+     * {@code CREATE_COMPLETE} with its {@code Fn::GetAtt} on the child's outputs left unresolved:
+     * exactly the symptom in #3854. That matching bug was already fixed by allow-listing the
+     * success statuses instead (commit 700d403, PR #3609) before #3854 was even filed; this test
+     * only adds the missing regression coverage tying it to this issue.
+     */
+    @Test
+    void createStack_failingNestedStackResource_rollsBackParentInsteadOfReportingUnresolvedOutput() {
+        String childTemplate = """
+            {
+              "Resources": {
+                "ConflictingSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "Properties": {
+                    "Name": "cfn-3854-nested-conflict-secret",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": { "PasswordLength": 32 }
+                  }
+                }
+              },
+              "Outputs": {
+                "SecretArn": { "Value": { "Ref": "ConflictingSecret" } }
+              }
+            }
+            """;
+
+        given().when().put("/issue-3854-templates").then();
+        given().contentType("application/json").body(childTemplate)
+                .when().put("/issue-3854-templates/failing-child.json")
+                .then().statusCode(200);
+
+        String parentTemplate = """
+            {
+              "Resources": {
+                "FailingNestedStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": {
+                    "TemplateURL": "http://localhost/issue-3854-templates/failing-child.json"
+                  }
+                }
+              },
+              "Outputs": {
+                "childSecretArn": {
+                  "Value": { "Fn::GetAtt": ["FailingNestedStack", "Outputs.SecretArn"] }
+                }
+              }
+            }
+            """;
+
+        String stackName = "issue-3854-failing-nested-parent";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", parentTemplate)
+        .when().post("/").then().statusCode(200);
+
+        String xml = null;
+        long deadline = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < deadline) {
+            xml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when().post("/")
+            .then().statusCode(200)
+            .extract().asString();
+            if (xml.contains("<StackStatus>ROLLBACK_COMPLETE</StackStatus>")
+                    || xml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>")) {
+                break;
+            }
+        }
+
+        assertThat(xml, containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+        assertThat(xml, not(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>")));
+        assertThat(xml, not(containsString("FailingNestedStack.Outputs")));
+    }
+
     // ── Issue #1072: AWS::ApiGatewayV2::Api WEBSOCKET drops RouteSelectionExpression ───
 
     @Test
@@ -7100,7 +7367,7 @@ class CloudFormationIntegrationTest {
             .body("services[0].taskDefinition",
                     equalTo("arn:aws:ecs:us-east-1:000000000000:task-definition/cfn-ecs-update-taskdef:2"));
     }
-    
+
     @Test
     void deleteStack_ec2SecurityGroup_leavesNoOrphans() {
         String stackName = "sg-delete-cleanup-stack";
@@ -8030,6 +8297,55 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_apiGatewayV2AuthorizerRejectsOutOfRangeResultTtl() {
+        String template = """
+            {
+              "Resources": {
+                "HttpApi": {
+                  "Type": "AWS::ApiGatewayV2::Api",
+                  "Properties": { "Name": "cfn-apigwv2-authz-ttl-api", "ProtocolType": "HTTP" }
+                },
+                "Authorizer": {
+                  "Type": "AWS::ApiGatewayV2::Authorizer",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "Name": "cfn-request-authorizer-ttl",
+                    "AuthorizerType": "REQUEST",
+                    "AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:auth/invocations",
+                    "AuthorizerPayloadFormatVersion": "2.0",
+                    "IdentitySource": ["$request.header.Authorization"],
+                    "AuthorizerResultTtlInSeconds": 3601
+                  }
+                }
+              }
+            }
+            """;
+
+        String stackName = "cfn-apigwv2-authorizer-ttl-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("ROLLBACK_COMPLETE"))
+            .body(containsString("authorizerResultTtlInSeconds must be an integer between 0 and 3600"));
+    }
+
+    @Test
     void createStack_apiGatewayV2RouteResolvesAuthorizerIdViaGetAtt() {
         // Ref already resolved AuthorizerId via the physical id (covered above); Fn::GetAtt reads
         // a separate attributes map that provisionApiGatewayV2Authorizer must also populate, or
@@ -8174,7 +8490,7 @@ class CloudFormationIntegrationTest {
 
     @Test
     void createStack_samFunctionWithPackageTypeImageDeploysAsImageFunction() {
-        // Without PackageType carried through by the SAM transform, CloudFormationResourceProvisioner
+        // Without PackageType carried through by the SAM transform, the Lambda provisioner
         // defaults PackageType to "Zip" (buildLambdaDesiredState's resolveOrDefault), which then also
         // forces Runtime/Handler defaults onto a function that declared neither — the function is
         // created as a broken Zip function instead of running the real container image.
@@ -8228,7 +8544,7 @@ class CloudFormationIntegrationTest {
 
     @Test
     void createStack_samFunctionWithImageConfigDeploysWithOverrides() {
-        // ImageConfig must also be carried through the SAM transform to CloudFormationResourceProvisioner,
+        // ImageConfig must also be carried through the SAM transform to the Lambda provisioner,
         // which already reads it (provisionLambda's putResolvedMapIfPresent(configRequest, props,
         // "ImageConfig", ...)) — without the transform copying it, a PackageType: Image SAM function's
         // EntryPoint/Command/WorkingDirectory override silently never reaches the deployed function.
@@ -8393,7 +8709,7 @@ class CloudFormationIntegrationTest {
     void createStack_samHttpApiAuthorizerHonorsCustomIdentitySource() {
         // SAM's Authorizers.<Name>.IdentitySource lets a JWT authorizer read the token from
         // somewhere other than the default Authorization header — e.g. a query-string token,
-        // the same case CloudFormationResourceProvisioner/ApiGatewayExecuteController already
+        // the same case the API Gateway provisioner/ApiGatewayExecuteController already
         // support end-to-end for raw (non-SAM) templates. The SAM transform must forward it
         // rather than always emitting the header default.
         String template = """
@@ -10881,12 +11197,7 @@ class CloudFormationIntegrationTest {
             .formParam("ChangeSetName", "deploy-attempt-2")
         .when().post("/").then().statusCode(200);
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when().post("/")
-        .then().statusCode(200).body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
     }
 
     @Test

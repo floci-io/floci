@@ -26,6 +26,8 @@ public class CognitoUser {
     private String srpSalt;
     private String srpVerifier;
     private EmailMfaSettings emailMfaSettings;
+    private String federatedProviderName;
+    private String federatedSubject;
 
     public CognitoUser() {
         long now = System.currentTimeMillis() / 1000L;
@@ -88,5 +90,21 @@ public class CognitoUser {
 
     public void setEmailMfaSettings(EmailMfaSettings emailMfaSettings) {
         this.emailMfaSettings = emailMfaSettings;
+    }
+
+    public String getFederatedProviderName() {
+        return federatedProviderName;
+    }
+
+    public void setFederatedProviderName(String federatedProviderName) {
+        this.federatedProviderName = federatedProviderName;
+    }
+
+    public String getFederatedSubject() {
+        return federatedSubject;
+    }
+
+    public void setFederatedSubject(String federatedSubject) {
+        this.federatedSubject = federatedSubject;
     }
 }

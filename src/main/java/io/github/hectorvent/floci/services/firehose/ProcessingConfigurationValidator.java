@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.firehose;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessingConfiguration;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Processor;
@@ -29,7 +30,7 @@ final class ProcessingConfigurationValidator {
      * which a looser pattern would have stored.
      */
     private static final Pattern LAMBDA_ARN = Pattern.compile(
-            "arn:aws[a-zA-Z-]*:lambda:[a-z0-9-]+:\\d{12}:function:[a-zA-Z0-9_-]{1,64}"
+            "arn:" + AwsArnUtils.PARTITION_REGEX + ":lambda:[a-z0-9-]+:\\d{12}:function:[a-zA-Z0-9_-]{1,64}"
                     + "(:(\\$LATEST|[a-zA-Z0-9_-]{1,128}))?");
 
     private ProcessingConfigurationValidator() {}

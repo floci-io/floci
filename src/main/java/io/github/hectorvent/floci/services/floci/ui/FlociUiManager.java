@@ -174,10 +174,20 @@ public class FlociUiManager {
         this.lastError = null;
         String image = config.services().ui().image();
         try {
+            // Before the image pull: a rejected bind address is a configuration error, and
+            // downloading a console that is not going to be published is wasted work.
+            String bindAddress = resolveBindAddress(config.services().ui().bindAddress());
             this.profile = resolveProfile(image);
             String name = ContainerStorageHelper.dockerName(config, config.services().ui().containerName());
 
+            // The UI container survives shutdown by design and is adopted BY NAME, so look up the
+            // pre-migration name too. Otherwise an upgraded emulator orphans the old container
+            // while it still holds the fixed UI host port, and the new one cannot bind.
             Optional<Container> existing = lifecycleManager.findByName(name);
+            if (existing.isEmpty()) {
+                existing = lifecycleManager.findByName(ContainerStorageHelper.legacyDockerName(
+                        config, config.services().ui().containerName()));
+            }
             if (existing.isPresent()
                     && !replaceIfNotRunning(existing.get())
                     && !replaceIfEndpointDrifted(existing.get())) {
@@ -190,7 +200,7 @@ public class FlociUiManager {
             ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                     .withName(name)
                     .withEnv(injectedEnv(profile))
-                    .withPortBinding(internalPort, chosenPort)
+                    .withPortBinding(internalPort, chosenPort, bindAddress)
                     .withDockerNetwork(resolveDockerNetwork())
                     .withLogRotation();
             if (!containerDetector.isRunningInContainer()) {
@@ -205,9 +215,14 @@ public class FlociUiManager {
             this.probeUrl = resolveProbeUrl(profile, endpoint, hostPort);
             this.started = true;
             this.lastError = null;
-            LOG.infov("Started web console sidecar {0} from {1} on host port {2}",
-                    name, image, String.valueOf(hostPort));
-            attachLogStream();
+            if (bindAddress == null) {
+                LOG.infov("Started web console sidecar {0} from {1} on host port {2}",
+                        name, image, String.valueOf(hostPort));
+            } else {
+                LOG.infov("Started web console sidecar {0} from {1} on {2}:{3}",
+                        name, image, bindAddress, String.valueOf(hostPort));
+            }
+            attachLogStream(false);
         } catch (IllegalStateException e) {
             // replaceIfEndpointDrifted() records its own specific message for a container with an
             // existing sidecar to adopt, but a fresh start (no existing container) reaches this
@@ -500,6 +515,31 @@ public class FlociUiManager {
     }
 
     /**
+     * The host interface the console is published on, or null to publish on every interface.
+     *
+     * <p>Unset is the default and is Docker's own behaviour, which is what the console has always
+     * had. Setting it is how an operator who keeps Floci's own port on loopback keeps the console
+     * there too: the console is unauthenticated and drives every emulated service, so a wildcard
+     * publish would hand out an authority the API mapping deliberately withholds.
+     *
+     * <p>A blank value is an error rather than a silent fall back to the wildcard: an operator who
+     * set the key meant to choose an address, and substituting a different one is how a binding
+     * ends up somewhere nobody intended.
+     */
+    static String resolveBindAddress(Optional<String> configured) {
+        if (configured.isEmpty()) {
+            return null;
+        }
+        String value = configured.get().trim();
+        if (value.isEmpty()) {
+            throw new IllegalStateException(
+                    "floci.services.ui.bind-address is set but blank: remove it to publish the "
+                            + "console on every interface, or give it a host address to bind.");
+        }
+        return value;
+    }
+
+    /**
      * Whether an adoption candidate must be destroyed and recreated rather than adopted.
      *
      * <p>Separate from {@link #endpointDrifted} because the two "no endpoint here" cases are not
@@ -746,20 +786,23 @@ public class FlociUiManager {
             this.lastError = null;
             LOG.infov("Adopted existing web console sidecar {0} on host port {1}",
                     containerId, String.valueOf(hostPort));
-            attachLogStream();
+            attachLogStream(true);
         } catch (Exception e) {
             LOG.warnv("Failed to adopt the existing web console sidecar: {0}", e.getMessage());
             this.containerId = null;
         }
     }
 
-    private void attachLogStream() {
+    // An adopted container carries history from before this process; only its new lines are wanted.
+    private void attachLogStream(boolean adopted) {
         closeLogStream();
         String shortId = containerId.length() >= 8 ? containerId.substring(0, 8) : containerId;
         String logGroup = "/floci/ui";
         String logStreamName = logStreamer.generateLogStreamName(shortId);
         String region = regionResolver.getDefaultRegion();
-        this.logStream = logStreamer.attach(containerId, logGroup, logStreamName, region, "floci:ui");
+        this.logStream = adopted
+                ? logStreamer.attachFromNow(containerId, logGroup, logStreamName, region, "floci:ui")
+                : logStreamer.attach(containerId, logGroup, logStreamName, region, "floci:ui");
     }
 
     /** Releases the previous follower, so a restarted sidecar does not leave one behind. */

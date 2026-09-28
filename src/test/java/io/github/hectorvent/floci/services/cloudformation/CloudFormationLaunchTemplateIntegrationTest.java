@@ -165,6 +165,7 @@ class CloudFormationLaunchTemplateIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStackDeleted(stackName);
 
         given()
             .contentType("application/x-www-form-urlencoded")

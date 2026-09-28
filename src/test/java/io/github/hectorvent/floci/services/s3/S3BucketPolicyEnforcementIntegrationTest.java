@@ -1,14 +1,13 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.testing.S3IamEnforcementProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -17,7 +16,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 @QuarkusTest
-@TestProfile(S3BucketPolicyEnforcementIntegrationTest.EnforcementProfile.class)
+@TestProfile(S3IamEnforcementProfile.class)
 class S3BucketPolicyEnforcementIntegrationTest {
 
     private static final String REGION = "us-east-1";
@@ -28,17 +27,6 @@ class S3BucketPolicyEnforcementIntegrationTest {
     record Credentials(String accessKeyId, String secretAccessKey, String userArn) {
         S3RequestSigner signer() {
             return S3RequestSigner.signedAs(accessKeyId, secretAccessKey);
-        }
-    }
-
-    public static final class EnforcementProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.s3.enforce-auth", "true",
-                    "floci.services.iam.enforcement-enabled", "true",
-                    "floci.services.s3.global-bucket-namespace", "true"
-            );
         }
     }
 
@@ -416,5 +404,114 @@ class S3BucketPolicyEnforcementIntegrationTest {
                 .statusCode(200)
                 .body(equalTo(content));
     }
-}
 
+    @Test
+    void sameAccountPrimaryRequestNeedsOnlyOneAllowAcrossBothPolicies() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "bp-either-" + suffix;
+
+        createBucket(bucket);
+
+        String developerName = "dev-" + suffix;
+        Credentials developer = createUserWithCredentials(developerName);
+        String writerName = "writer-" + suffix;
+        Credentials writer = createUserWithCredentials(writerName);
+        putUserPolicy(writerName, "WriteBucket", """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Allow",
+                      "Action": "s3:PutObject",
+                      "Resource": "arn:aws:s3:::%s/*"
+                    }
+                  ]
+                }""".formatted(bucket), "000000000000");
+
+        putBucketPolicy(bucket, """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Allow",
+                      "Principal": {"AWS": "%s"},
+                      "Action": ["s3:GetObject", "s3:PutObject"],
+                      "Resource": "arn:aws:s3:::%s/*"
+                    }
+                  ]
+                }""".formatted(developer.userArn(), bucket));
+
+        // 1. Bucket policy alone grants the developer, who has no identity policy at all
+        given()
+                .filter(developer.signer())
+                .contentType("text/plain")
+                .body("bucket policy only")
+        .when()
+                .put("/" + bucket + "/from-bucket-policy.txt")
+        .then()
+                .statusCode(200);
+
+        // 2. Identity policy alone grants the writer, whom the bucket policy never names
+        given()
+                .filter(writer.signer())
+                .contentType("text/plain")
+                .body("identity policy only")
+        .when()
+                .put("/" + bucket + "/from-identity-policy.txt")
+        .then()
+                .statusCode(200);
+
+        // 3. An explicit deny in the bucket policy overrides the writer's identity allow
+        putBucketPolicy(bucket, """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Allow",
+                      "Principal": {"AWS": "%s"},
+                      "Action": ["s3:GetObject", "s3:PutObject"],
+                      "Resource": "arn:aws:s3:::%s/*"
+                    },
+                    {
+                      "Effect": "Deny",
+                      "Principal": {"AWS": "%s"},
+                      "Action": "s3:PutObject",
+                      "Resource": "arn:aws:s3:::%s/*"
+                    }
+                  ]
+                }""".formatted(developer.userArn(), bucket, writer.userArn(), bucket));
+
+        given()
+                .filter(writer.signer())
+                .contentType("text/plain")
+                .body("denied by bucket policy")
+        .when()
+                .put("/" + bucket + "/denied-by-bucket-policy.txt")
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+
+        // 4. An explicit deny in the identity policy overrides the developer's bucket-policy allow
+        putUserPolicy(developerName, "DenyWrite", """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Deny",
+                      "Action": "s3:PutObject",
+                      "Resource": "arn:aws:s3:::%s/*"
+                    }
+                  ]
+                }""".formatted(bucket), "000000000000");
+
+        given()
+                .filter(developer.signer())
+                .contentType("text/plain")
+                .body("denied by identity policy")
+        .when()
+                .put("/" + bucket + "/denied-by-identity-policy.txt")
+        .then()
+                .statusCode(403)
+                .body(containsString("<Code>AccessDenied</Code>"));
+    }
+}

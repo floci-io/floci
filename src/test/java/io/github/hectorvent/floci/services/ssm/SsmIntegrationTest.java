@@ -1307,6 +1307,24 @@ class SsmIntegrationTest {
             .body("Parameter.Version", equalTo(1))
             .body("Parameter.ARN", equalTo("arn:aws:ssm:us-east-1::parameter" + al2023));
 
+        String al2023Arm64 = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64";
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "%s" }
+                """.formatted(al2023Arm64))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Name", equalTo(al2023Arm64))
+            .body("Parameter.Value", equalTo("ami-amazonlinux2023-arm64"))
+            .body("Parameter.Type", equalTo("String"))
+            .body("Parameter.Version", equalTo(1))
+            .body("Parameter.ARN", equalTo("arn:aws:ssm:us-east-1::parameter" + al2023Arm64));
+
         given()
             .header("X-Amz-Target", "AmazonSSM.GetParameters")
             .contentType(SSM_CONTENT_TYPE)
@@ -1320,6 +1338,24 @@ class SsmIntegrationTest {
             .body("Parameters.Name", contains(al2023))
             .body("InvalidParameters", contains("/aws/service/ami-amazon-linux-latest/no-such-variant"));
 
+        String eksOptimizedAmi = "/aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id";
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "%s" }
+                """.formatted(eksOptimizedAmi))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Name", equalTo(eksOptimizedAmi))
+            .body("Parameter.Value", equalTo("ami-0abcdef1234567891"))
+            .body("Parameter.Type", equalTo("String"))
+            .body("Parameter.Version", equalTo(1))
+            .body("Parameter.ARN", equalTo("arn:aws:ssm:us-east-1::parameter" + eksOptimizedAmi));
+
         given()
             .header("X-Amz-Target", "AmazonSSM.GetParametersByPath")
             .contentType(SSM_CONTENT_TYPE)
@@ -1330,7 +1366,7 @@ class SsmIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Parameters.Name", hasItems(al2023,
+            .body("Parameters.Name", hasItems(al2023, al2023Arm64,
                     "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"));
 
         given()

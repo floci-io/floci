@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
@@ -38,6 +39,21 @@ public class CloudFormationTemplateEngine {
     private final ObjectMapper objectMapper;
     private final Function<String, String> importValueResolver;
     private final UnaryOperator<String> dynamicReferenceResolver;
+    private final List<String> unresolvedIntrinsics = new ArrayList<>();
+
+    /**
+     * A minimal engine for a resource provisioned outside any stack (Cloud Control CreateResource).
+     * Desired state carries resolved values, so it needs no parameters, mappings, conditions or
+     * sibling resources: only intrinsics and dynamic references. The constructors stay
+     * package-private so tests in {@code provisioners/} keep mocking the engine.
+     */
+    public static CloudFormationTemplateEngine standalone(String accountId, String region, String stackName,
+                                                          ObjectMapper objectMapper,
+                                                          UnaryOperator<String> dynamicReferenceResolver) {
+        return new CloudFormationTemplateEngine(accountId, region, stackName, stackName,
+                Map.of(), new HashMap<>(), new HashMap<>(), Map.of(), Map.of(), objectMapper,
+                name -> null, dynamicReferenceResolver);
+    }
 
     CloudFormationTemplateEngine(String accountId, String region, String stackName, String stackId,
                                  Map<String, String> parameters,
@@ -244,6 +260,19 @@ public class CloudFormationTemplateEngine {
         return resolved.isTextual() ? resolved.asText() : resolved.toString();
     }
 
+    public String resolveJsonAttributeStrict(JsonNode node) {
+        int before = unresolvedIntrinsics.size();
+        String resolved = resolveJsonAttribute(node);
+        if (unresolvedIntrinsics.size() > before) {
+            List<String> raised = unresolvedIntrinsics.subList(before, unresolvedIntrinsics.size());
+            throw new AwsException("ValidationError",
+                    "Policy document contains unresolved CloudFormation intrinsics: "
+                            + String.join(", ", raised)
+                            + ". Storing them would silently void the statements that use them.", 400);
+        }
+        return resolved;
+    }
+
     private String resolveRef(String name) {
         // Pseudo-parameters
         return switch (name) {
@@ -251,8 +280,8 @@ public class CloudFormationTemplateEngine {
             case "AWS::Region" -> region;
             case "AWS::StackName" -> stackName;
             case "AWS::StackId" -> stackId;
-            case "AWS::Partition" -> "aws";
-            case "AWS::URLSuffix" -> "amazonaws.com";
+            case "AWS::Partition" -> AwsRegions.partitionFor(region);
+            case "AWS::URLSuffix" -> AwsRegions.dnsSuffixFor(region);
             case "AWS::NoValue" -> "";
             default -> {
                 if (physicalIds.containsKey(name)) {
@@ -262,6 +291,7 @@ public class CloudFormationTemplateEngine {
                     yield parameters.get(name);
                 }
                 LOG.debugv("Unresolved Ref: {0}", name);
+                unresolvedIntrinsics.add("Ref " + name);
                 yield name;
             }
         };
@@ -294,8 +324,13 @@ public class CloudFormationTemplateEngine {
                 String varName = template.substring(i + 2, end);
                 if (vars.containsKey(varName)) {
                     result.append(vars.get(varName));
-                } else if (varName.contains("!")) {
-                    // Fn::GetAtt shorthand: ${LogicalId.Attr}
+                } else if (varName.startsWith("!")) {
+                    // ${!Literal} is Fn::Sub's escape sequence for a literal ${Literal}: emit it
+                    // verbatim with no substitution. It is NOT the Fn::GetAtt shorthand.
+                    result.append("${").append(varName, 1, varName.length()).append('}');
+                } else if (!varName.startsWith("AWS::") && varName.contains(".")) {
+                    // Fn::GetAtt shorthand: ${LogicalId.Attr}. A logical id and a parameter name
+                    // are both alphanumeric, so a dot can only mean an attribute reference.
                     String[] parts = varName.split("\\.", 2);
                     result.append(resolveGetAttParts(parts[0], parts.length > 1 ? parts[1] : ""));
                 } else {
@@ -563,7 +598,8 @@ public class CloudFormationTemplateEngine {
         if (attrs != null && attrs.containsKey(attrName)) {
             return attrs.get(attrName);
         }
-        LOG.debugv("Unresolved GetAtt: {0}.{1}", logicalId, attrName);
+        LOG.warnv("Unresolved GetAtt: {0}.{1}", logicalId, attrName);
+        unresolvedIntrinsics.add("Fn::GetAtt " + logicalId + "." + attrName);
         return logicalId + "." + attrName;
     }
 

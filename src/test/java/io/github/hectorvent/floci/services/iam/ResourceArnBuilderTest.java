@@ -325,10 +325,39 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void s3BuildsArnsInTheRequestRegionsPartition() {
+        when(uriInfo.getPath()).thenReturn("/my-bucket/key.txt");
+        assertEquals("arn:aws-cn:s3:::my-bucket/key.txt",
+                builder.build("s3", ctx, "cn-north-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/");
+        assertEquals("arn:aws-us-gov:s3:::*", builder.build("s3", ctx, "us-gov-west-1", "000000000000"));
+    }
+
+    @Test
     void s3BuildsObjectArn() {
         when(uriInfo.getPath()).thenReturn("/my-bucket/folder/file.json");
         String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
         assertEquals("arn:aws:s3:::my-bucket/folder/file.json", arn);
+    }
+
+    /**
+     * S3VirtualHostFilter rewrites a virtual-hosted bucket-level request (GET /) to
+     * /bucket/. The resource is still the bucket, so the ARN must carry no trailing
+     * slash or a policy naming arn:aws:s3:::bucket stops matching and an allowed
+     * ListBucket is denied for every SDK that defaults to virtual-hosted addressing.
+     */
+    @Test
+    void s3BuildsBucketArnForVirtualHostedRewrittenPath() {
+        when(uriInfo.getPath()).thenReturn("/my-bucket/");
+        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:s3:::my-bucket", arn);
+    }
+
+    @Test
+    void s3KeepsTrailingSlashOfAFolderMarkerKey() {
+        when(uriInfo.getPath()).thenReturn("/my-bucket/folder/");
+        String arn = builder.build("s3", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:s3:::my-bucket/folder/", arn);
     }
 
     // ── Lambda ──────────────────────────────────────────────────────────────────

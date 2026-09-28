@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.PostgresProtocolHandler;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyTlsCertificates;
 import io.github.hectorvent.floci.services.rds.proxy.RdsSigV4Validator;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -12,6 +14,7 @@ import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.List;
 import java.util.concurrent.Semaphore;
 
 /**
@@ -35,6 +38,10 @@ public class RedshiftAuthProxy {
     private final RdsProxyTlsCertificates tlsCertificates;
     private final PasswordValidator passwordValidator;
     private final S3Service s3Service;
+    private final IamService iamService;
+    private final SpectrumInterceptor spectrumInterceptor;
+    private final String clusterAccountId;
+    private volatile List<String> iamRoleArns;
     private final int handshakeTimeoutMillis;
     private final int backendConnectTimeoutMillis;
     private final Semaphore connectionPermits;
@@ -46,9 +53,38 @@ public class RedshiftAuthProxy {
                              String masterUsername, String masterPassword, String dbName,
                              RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
                              PasswordValidator passwordValidator,
-                             S3Service s3Service,
+                             S3Service s3Service, IamService iamService,
                              int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
                              int maxConnections) {
+        this(clusterKey, backendHost, backendPort, masterUsername, masterPassword, dbName, sigV4,
+                tlsCertificates, passwordValidator, s3Service, iamService, null,
+                List.of(),
+                handshakeTimeoutMillis, backendConnectTimeoutMillis, maxConnections, null);
+    }
+
+    public RedshiftAuthProxy(String clusterKey, String backendHost, int backendPort,
+                             String masterUsername, String masterPassword, String dbName,
+                             RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
+                             PasswordValidator passwordValidator,
+                             S3Service s3Service, IamService iamService,
+                             String clusterAccountId,
+                             List<String> iamRoleArns,
+                             int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
+                             int maxConnections) {
+        this(clusterKey, backendHost, backendPort, masterUsername, masterPassword, dbName, sigV4,
+                tlsCertificates, passwordValidator, s3Service, iamService, clusterAccountId, iamRoleArns,
+                handshakeTimeoutMillis, backendConnectTimeoutMillis, maxConnections, null);
+    }
+
+    public RedshiftAuthProxy(String clusterKey, String backendHost, int backendPort,
+                             String masterUsername, String masterPassword, String dbName,
+                             RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
+                             PasswordValidator passwordValidator,
+                             S3Service s3Service, IamService iamService,
+                             String clusterAccountId,
+                             List<String> iamRoleArns,
+                             int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
+                             int maxConnections, SpectrumInterceptor spectrumInterceptor) {
         this.clusterKey = clusterKey;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
@@ -59,6 +95,10 @@ public class RedshiftAuthProxy {
         this.tlsCertificates = tlsCertificates;
         this.passwordValidator = passwordValidator;
         this.s3Service = s3Service;
+        this.iamService = iamService;
+        this.spectrumInterceptor = spectrumInterceptor;
+        this.clusterAccountId = clusterAccountId;
+        this.iamRoleArns = iamRoleArns == null ? List.of() : List.copyOf(iamRoleArns);
         this.handshakeTimeoutMillis = handshakeTimeoutMillis;
         this.backendConnectTimeoutMillis = backendConnectTimeoutMillis;
         this.connectionPermits = new Semaphore(Math.max(1, maxConnections));
@@ -118,6 +158,11 @@ public class RedshiftAuthProxy {
         this.masterPassword = newPassword;
     }
 
+    /** Swap the associated-role snapshot; new connections authorize COPY and UNLOAD against it. */
+    public void updateIamRoles(List<String> newIamRoleArns) {
+        this.iamRoleArns = newIamRoleArns == null ? List.of() : List.copyOf(newIamRoleArns);
+    }
+
     public void stop() {
         running = false;
         try {
@@ -167,15 +212,17 @@ public class RedshiftAuthProxy {
                 backendSocket.setTcpNoDelay(true);
                 return backendSocket;
             };
-            // iamEnabled = false: the SigV4 branch inside authenticate is never taken.
+            // iamEnabled = false: the SigV4 branch inside authenticate is never taken, so no
+            // token binding is needed.
             session = PostgresProtocolHandler.authenticate(
                             client, connector, masterUsername, masterPassword, dbName,
-                            false, sigV4, tlsCertificates, passwordValidator,
+                            false, sigV4, null, tlsCertificates, passwordValidator,
                             handshakeTimeoutMillis);
             if (session != null) {
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
                 // PostgreSQL backend on the way through; every other message is relayed verbatim.
-                new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service).run();
+                new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
+                        clusterAccountId, iamRoleArns, spectrumInterceptor).run();
             }
         } catch (Exception e) {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());

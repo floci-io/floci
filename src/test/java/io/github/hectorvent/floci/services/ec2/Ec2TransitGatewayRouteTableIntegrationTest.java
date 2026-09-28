@@ -10,6 +10,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.not;
 
 /**
@@ -86,6 +87,36 @@ class Ec2TransitGatewayRouteTableIntegrationTest {
                     equalTo("spoke"))
             .extract().path("CreateTransitGatewayRouteTableResponse.transitGatewayRouteTable"
                     + ".transitGatewayRouteTableId");
+    }
+
+    private String routeTablesFilteredBy(String filterName, String value) {
+        return given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", filterName)
+            .formParam("Filter.1.Value.1", value)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+    }
+
+    /** Both listings of what a route table holds take the same three filters. */
+    private String spokeTableMembersFilteredBy(String action, String filterName, String value) {
+        return given()
+            .formParam("Action", action)
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", filterName)
+            .formParam("Filter.1.Value.1", value)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+    }
+
+    private String associationsFilteredBy(String filterName, String value) {
+        return spokeTableMembersFilteredBy("GetTransitGatewayRouteTableAssociations", filterName, value);
+    }
+
+    private String propagationsFilteredBy(String filterName, String value) {
+        return spokeTableMembersFilteredBy("GetTransitGatewayRouteTablePropagations", filterName, value);
     }
 
     private String extract(String body, String element) {
@@ -247,5 +278,178 @@ class Ec2TransitGatewayRouteTableIntegrationTest {
         .when().post("/")
         .then().statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidRouteTableId.Malformed"));
+    }
+
+    @Test
+    @Order(6)
+    void routeTableFiltersNarrowTheListing() {
+        given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", transitGatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeTransitGatewayRouteTablesResponse.transitGatewayRouteTables.item.transitGatewayId",
+                    everyItem(equalTo(transitGatewayId)));
+
+        String otherGateway = given()
+            .formParam("Action", "CreateTransitGateway")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        String otherRouteTableId = extract(otherGateway, "associationDefaultRouteTableId");
+
+        String ours = given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", transitGatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(ours, containsString(defaultRouteTableId));
+        assertThat(ours, not(containsString(otherRouteTableId)));
+
+        String unmatched = given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", "tgw-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(unmatched, not(containsString("<item>")));
+
+        String defaultOnly = given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", transitGatewayId)
+            .formParam("Filter.2.Name", "default-association-route-table")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(defaultOnly, containsString(defaultRouteTableId));
+        assertThat(defaultOnly, not(containsString(routeTableId)));
+
+        String byId = routeTablesFilteredBy("transit-gateway-route-table-id", routeTableId);
+        assertThat(byId, containsString(routeTableId));
+        assertThat(byId, not(containsString(defaultRouteTableId)));
+        assertThat(routeTablesFilteredBy("transit-gateway-route-table-id", "tgw-rtb-0123456789abcdef0"),
+                not(containsString("<item>")));
+
+        assertThat(routeTablesFilteredBy("state", "available"), containsString(routeTableId));
+        assertThat(routeTablesFilteredBy("state", "deleting"), not(containsString("<item>")));
+    }
+
+    @Test
+    @Order(7)
+    void associationFiltersPickOutASingleAttachment() {
+        given()
+            .formParam("Action", "GetTransitGatewayRouteTableAssociations")
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", "transit-gateway-attachment-id")
+            .formParam("Filter.1.Value.1", attachmentId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("GetTransitGatewayRouteTableAssociationsResponse.associations.item.transitGatewayAttachmentId",
+                    equalTo(attachmentId));
+
+        String unmatched = given()
+            .formParam("Action", "GetTransitGatewayRouteTableAssociations")
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", "transit-gateway-attachment-id")
+            .formParam("Filter.1.Value.1", "tgw-attach-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(unmatched, not(containsString("<item>")));
+
+        assertThat(associationsFilteredBy("resource-id", vpcId), containsString(attachmentId));
+        assertThat(associationsFilteredBy("resource-id", "vpc-0123456789abcdef0"),
+                not(containsString("<item>")));
+        assertThat(associationsFilteredBy("resource-type", "vpc"), containsString(attachmentId));
+        assertThat(associationsFilteredBy("resource-type", "vpn"), not(containsString("<item>")));
+    }
+
+    @Test
+    @Order(8)
+    void associationsIgnoreFiltersTheActionDoesNotModel() {
+        String unmodeled = given()
+            .formParam("Action", "GetTransitGatewayRouteTableAssociations")
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", "vpc-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(unmodeled, containsString(attachmentId));
+    }
+
+    @Test
+    @Order(9)
+    void theTwoDefaultTableFiltersReadTheirOwnFlag() {
+        String created = given()
+            .formParam("Action", "CreateTransitGateway")
+            .formParam("Options.DefaultRouteTableAssociation", "enable")
+            .formParam("Options.DefaultRouteTablePropagation", "disable")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        String gatewayId = extract(created, "transitGatewayId");
+        String associationOnlyTable = extract(created, "associationDefaultRouteTableId");
+
+        String byAssociation = given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", gatewayId)
+            .formParam("Filter.2.Name", "default-association-route-table")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(byAssociation, containsString(associationOnlyTable));
+
+        String byPropagation = given()
+            .formParam("Action", "DescribeTransitGatewayRouteTables")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", gatewayId)
+            .formParam("Filter.2.Name", "default-propagation-route-table")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(byPropagation, not(containsString("<item>")));
+    }
+
+    @Test
+    @Order(10)
+    void propagationFiltersPickOutASingleAttachment() {
+        given()
+            .formParam("Action", "GetTransitGatewayRouteTablePropagations")
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", "transit-gateway-attachment-id")
+            .formParam("Filter.1.Value.1", attachmentId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("GetTransitGatewayRouteTablePropagationsResponse.transitGatewayRouteTablePropagations"
+                    + ".item.transitGatewayAttachmentId", equalTo(attachmentId));
+
+        String unmatched = given()
+            .formParam("Action", "GetTransitGatewayRouteTablePropagations")
+            .formParam("TransitGatewayRouteTableId", routeTableId)
+            .formParam("Filter.1.Name", "transit-gateway-attachment-id")
+            .formParam("Filter.1.Value.1", "tgw-attach-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().asString();
+        assertThat(unmatched, not(containsString("<item>")));
+
+        assertThat(propagationsFilteredBy("resource-id", vpcId), containsString(attachmentId));
+        assertThat(propagationsFilteredBy("resource-id", "vpc-0123456789abcdef0"),
+                not(containsString("<item>")));
+        assertThat(propagationsFilteredBy("resource-type", "vpc"), containsString(attachmentId));
+        assertThat(propagationsFilteredBy("resource-type", "vpn"), not(containsString("<item>")));
     }
 }

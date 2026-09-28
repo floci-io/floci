@@ -105,6 +105,7 @@ class CodePipelineCfnIntegrationTest {
             .formParam("Action", "DeleteStack")
             .formParam("StackName", STACK)
         .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStackDeleted(STACK);
 
         given()
             .header("X-Amz-Target", "CodePipeline_20150709.GetPipeline")

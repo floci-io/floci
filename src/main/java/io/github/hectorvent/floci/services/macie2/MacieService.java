@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.macie2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -117,7 +118,7 @@ public class MacieService implements Resettable {
 
         boolean organizationAdministrator = callerAccountId.equals(callerState.getAdminAccountId());
         String now = Instant.now().toString();
-        String arn = "arn:aws:macie2:" + region + ":" + callerAccountId + ":member/" + memberAccountId;
+        String arn = AwsArnUtils.Arn.of("macie2", region, callerAccountId, "member/" + memberAccountId).toString();
         MacieMember member = new MacieMember(
                 memberAccountId,
                 callerAccountId,

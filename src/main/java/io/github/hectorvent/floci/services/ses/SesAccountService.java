@@ -85,6 +85,24 @@ public class SesAccountService {
         LOG.infov("Updated account VDM attributes for region {0}: enabled={1}", region, vdm.vdmEnabled());
     }
 
+    /** The probe-confirmed gate the VDM-only operations check before reading the request. */
+    public void requireVdmEnabled(String region) {
+        requireVdmEnabled(region, "NotFoundException", 404);
+    }
+
+    /**
+     * The same gate with the caller's error shape. Message insights and metric data answer
+     * {@code NotFoundException} 404, while export jobs answer {@code BadRequestException} 400 with
+     * the identical sentence, all probe-confirmed.
+     */
+    public void requireVdmEnabled(String region, String errorCode, int status) {
+        Optional<AccountVdmAttributes> vdm = findAccountVdmAttributes(region);
+        if (vdm.isEmpty() || !vdm.get().vdmEnabled()) {
+            throw new AwsException(errorCode,
+                    "To use this feature you must enable Virtual Deliverability Manager", status);
+        }
+    }
+
     private static String accountVdmKey(String region) {
         return "account-vdm::" + region;
     }

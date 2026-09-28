@@ -21,6 +21,7 @@ import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
+import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.RequestOptions;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -29,6 +30,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -121,8 +123,10 @@ public class ElbV2DataPlane {
         listenerRegions.put(listenerArn, region);
         ListenerBinding binding = binding(listener, region);
         listenerBindings.put(listenerArn, binding);
-        listenersByHostAndPort.computeIfAbsent(binding.port(), ignored -> new ConcurrentHashMap<>())
-                .put(binding.host(), listenerArn);
+        Map<String, String> listenersOnPort =
+                listenersByHostAndPort.computeIfAbsent(binding.port(), ignored -> new ConcurrentHashMap<>());
+        warnOnSharedPort(binding, listenersOnPort);
+        listenersOnPort.put(binding.host(), listenerArn);
         ensureReleaseHandlerRegistered();
         servers.computeIfAbsent(binding.port(), this::startPortServer);
     }
@@ -277,6 +281,29 @@ public class ElbV2DataPlane {
         }
     }
 
+    /**
+     * Warns when a second load balancer takes a port another one already serves. Real AWS gives
+     * every load balancer its own address, so two listeners on port 80 are correct there and a
+     * template that works in AWS is not wrong. Floci serves them all from one socket per port,
+     * which leaves the collision invisible: nothing fails, and every request whose Host header
+     * names neither load balancer answers 502 with perfectly healthy targets behind it.
+     */
+    private void warnOnSharedPort(ListenerBinding binding, Map<String, String> listenersOnPort) {
+        for (String otherArn : listenersOnPort.values()) {
+            ListenerBinding other = listenerBindings.get(otherArn);
+            if (other == null || other.loadBalancerArn().equals(binding.loadBalancerArn())) {
+                continue;
+            }
+            LOG.warnv("ELBv2 port {0} now serves two load balancers, {1} and {2}. Floci runs them "
+                            + "on one socket and dispatches by Host header, so a request must send {3} "
+                            + "or {4}, or a hostname one of their rules declares in a host-header "
+                            + "condition. Any other Host header answers 502.",
+                    String.valueOf(binding.port()), other.loadBalancerArn(), binding.loadBalancerArn(),
+                    other.host(), binding.host());
+            return;
+        }
+    }
+
     private ListenerBinding binding(Listener listener, String region) {
         LoadBalancer loadBalancer = elbV2Service.getLoadBalancer(region, listener.getLoadBalancerArn());
         String host = loadBalancer != null ? normalizeHost(loadBalancer.getDnsName()) : listener.getLoadBalancerArn();
@@ -309,6 +336,20 @@ public class ElbV2DataPlane {
         req.response().setStatusCode(502).end("No matching rule");
     }
 
+    /**
+     * Chooses the listener that serves a request arriving on a shared port.
+     *
+     * <p>Real AWS has no such step. Every load balancer gets its own DNS name and addresses, so
+     * the network picks the load balancer and a {@code host-header} rule only picks a rule inside
+     * one listener. Floci serves every load balancer from a single socket per port, so the Host
+     * header has to carry both decisions.
+     *
+     * <p>The load balancer's own DNS name wins first. Failing that, a listener whose rules already
+     * declare the hostname claims it: a deployment that puts two load balancers on port 80 names
+     * them in host-header conditions anyway, so this reuses what the template already says instead
+     * of inventing a Floci-only knob. A lone listener on the port still answers anything, so a
+     * single load balancer needs no hostname at all.
+     */
     private String resolveListenerArn(int port, String hostHeader) {
         Map<String, String> listenersByHost = listenersByHostAndPort.get(port);
         if (listenersByHost == null || listenersByHost.isEmpty()) {
@@ -319,10 +360,37 @@ public class ElbV2DataPlane {
         if (listenerArn != null) {
             return listenerArn;
         }
+        List<String> declaring = listenersDeclaringHost(listenersByHost, host);
+        if (declaring.size() == 1) {
+            return declaring.get(0);
+        }
+        if (declaring.size() > 1) {
+            LOG.debugv("ELBv2 port {0}: {1} listeners declare Host {2} in a host-header condition, "
+                    + "so none of them can claim it", String.valueOf(port),
+                    String.valueOf(declaring.size()), host);
+            return null;
+        }
         if (listenersByHost.size() == 1) {
             return listenersByHost.values().iterator().next();
         }
         return null;
+    }
+
+    private List<String> listenersDeclaringHost(Map<String, String> listenersByHost, String host) {
+        List<String> declaring = new ArrayList<>();
+        for (String listenerArn : listenersByHost.values()) {
+            AtomicReference<List<CompiledRule>> ref = ruleChains.get(listenerArn);
+            if (ref == null) {
+                continue;
+            }
+            for (CompiledRule compiled : ref.get()) {
+                if (compiled.declaresHost(host)) {
+                    declaring.add(listenerArn);
+                    break;
+                }
+            }
+        }
+        return declaring;
     }
 
     private static String normalizeHost(String host) {
@@ -596,8 +664,29 @@ public class ElbV2DataPlane {
     private void proxyRequest(io.vertx.core.http.HttpServerRequest req, String host, int port,
                               boolean preserveHostHeader) {
         req.pause();
+        if (ElbV2TargetResolver.isIpLiteral(host)) {
+            try {
+                proxyRequestTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port, preserveHostHeader);
+            } catch (IOException e) {
+                rejectTarget(req, host, e);
+            }
+            return;
+        }
+        vertx.<String>executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
+                .onSuccess(address -> proxyRequestTo(req, address, host, port, preserveHostHeader))
+                .onFailure(err -> rejectTarget(req, host, err));
+    }
+
+    private void rejectTarget(HttpServerRequest req, String host, Throwable err) {
+        LOG.warnv("Refusing to proxy to target {0}: {1}", host, err.getMessage());
+        req.resume();
+        req.response().setStatusCode(503).end("Service unavailable");
+    }
+
+    private void proxyRequestTo(HttpServerRequest req, String address, String host, int port,
+                                boolean preserveHostHeader) {
         RequestOptions opts = new RequestOptions()
-                .setHost(host)
+                .setHost(address)
                 .setPort(port)
                 .setURI(req.uri())
                 .setMethod(req.method());
@@ -773,10 +862,38 @@ public class ElbV2DataPlane {
     private class CompiledRule {
         final Rule rule;
         final Action action;
+        final List<String> hostHeaderPatterns;
 
         CompiledRule(Rule rule) {
             this.rule = rule;
             this.action = getRoutingAction(rule);
+            this.hostHeaderPatterns = hostHeaderPatterns(rule);
+        }
+
+        /**
+         * The hostnames this rule declares through its {@code host-header} conditions. Collected
+         * at compile time because listener selection consults them on every request, before any
+         * rule is evaluated. The default rule declares nothing: it matches every Host header, so
+         * counting it would make every listener claim every hostname.
+         */
+        private static List<String> hostHeaderPatterns(Rule rule) {
+            if (rule.isDefault() || rule.getConditions() == null) {
+                return List.of();
+            }
+            List<String> patterns = new ArrayList<>();
+            for (RuleCondition condition : rule.getConditions()) {
+                if (!"host-header".equals(condition.getField())) {
+                    continue;
+                }
+                patterns.addAll(condition.getHostHeaderValues().isEmpty()
+                        ? condition.getValues()
+                        : condition.getHostHeaderValues());
+            }
+            return patterns;
+        }
+
+        boolean declaresHost(String host) {
+            return hostHeaderPatterns.stream().anyMatch(p -> globMatches(p, host));
         }
 
         boolean matches(io.vertx.core.http.HttpServerRequest req) {

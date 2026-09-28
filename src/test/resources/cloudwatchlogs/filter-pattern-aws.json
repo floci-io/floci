@@ -1,0 +1,5242 @@
+{
+  "provenance": {
+    "source": "AWS CloudWatch Logs TestMetricFilter",
+    "capturedAt": "2026-09-16T08:26:23.333750+00:00",
+    "region": "eu-west-1",
+    "endpoint": "https://logs.eu-west-1.amazonaws.com",
+    "inputs": "Synthetic only. No resource writes or user logs.",
+    "eventNumberBase": 1,
+    "reference": "https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_TestMetricFilter.html"
+  },
+  "cases": [
+    {
+      "id": "terms-substring",
+      "request": {
+        "filterPattern": "ERROR",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERRORS",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "xERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "[ERROR]",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "ERROR_code",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "ERROR timeout",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-case",
+      "request": {
+        "filterPattern": "error",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 4,
+            "eventMessage": "error",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-and",
+      "request": {
+        "filterPattern": "ERROR timeout",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 7,
+            "eventMessage": "ERROR timeout",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-negative",
+      "request": {
+        "filterPattern": "ERROR -timeout",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERRORS",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "xERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "[ERROR]",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "ERROR_code",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-negative-only",
+      "request": {
+        "filterPattern": "-ERROR",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 4,
+            "eventMessage": "error",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "INFO timeout",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "WARN",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "two words",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "two  words",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-optional",
+      "request": {
+        "filterPattern": "?ERROR ?WARN",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERRORS",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "xERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "[ERROR]",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "ERROR_code",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "ERROR timeout",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "WARN",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-optional-ignored",
+      "request": {
+        "filterPattern": "?ERROR timeout",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 7,
+            "eventMessage": "ERROR timeout",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "INFO timeout",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-optional-negative",
+      "request": {
+        "filterPattern": "?ERROR -timeout",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERRORS",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "xERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "error",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "[ERROR]",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "ERROR_code",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "WARN",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "two words",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "two  words",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-phrase",
+      "request": {
+        "filterPattern": "\"two words\"",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 10,
+            "eventMessage": "two words",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-negative-phrase",
+      "request": {
+        "filterPattern": "-\"two words\"",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERRORS",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "xERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "error",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "[ERROR]",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "ERROR_code",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "ERROR timeout",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "INFO timeout",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "WARN",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "two  words",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-optional-phrase",
+      "request": {
+        "filterPattern": "?\"two words\" ?WARN",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 9,
+            "eventMessage": "WARN",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "two words",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-wildcard",
+      "request": {
+        "filterPattern": "ERR*",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '*'"
+      }
+    },
+    {
+      "id": "terms-quoted-wildcard",
+      "request": {
+        "filterPattern": "\"ERR*\"",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": []
+      }
+    },
+    {
+      "id": "terms-bare-symbol",
+      "request": {
+        "filterPattern": "ERROR!",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '!'"
+      }
+    },
+    {
+      "id": "terms-bare-colon",
+      "request": {
+        "filterPattern": "ERROR:",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term ':'"
+      }
+    },
+    {
+      "id": "terms-empty",
+      "request": {
+        "filterPattern": "",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERRORS",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "xERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "error",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "[ERROR]",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "ERROR_code",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "ERROR timeout",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "INFO timeout",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "WARN",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "two words",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "two  words",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-blank",
+      "request": {
+        "filterPattern": " ",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERRORS",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "xERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "error",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "[ERROR]",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "ERROR_code",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "ERROR timeout",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "INFO timeout",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "WARN",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "two words",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "two  words",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "terms-quoted-empty",
+      "request": {
+        "filterPattern": "\"\"",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '\"\"'"
+      }
+    },
+    {
+      "id": "terms-missing-quote",
+      "request": {
+        "filterPattern": "\"ERROR",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '\"ERROR'"
+      }
+    },
+    {
+      "id": "terms-adjacent-quote",
+      "request": {
+        "filterPattern": "\"ERROR\"WARN",
+        "logEventMessages": [
+          "ERROR",
+          "ERRORS",
+          "xERROR",
+          "error",
+          "[ERROR]",
+          "ERROR_code",
+          "ERROR timeout",
+          "INFO timeout",
+          "WARN",
+          "two words",
+          "two  words"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid metric filter pattern"
+      }
+    },
+    {
+      "id": "regex-alternation",
+      "request": {
+        "filterPattern": "%ERROR|WARN%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "WARN",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "regex-anchors",
+      "request": {
+        "filterPattern": "%^[hc]at$%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 5,
+            "eventMessage": "cat",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "hat",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "regex-quantifier",
+      "request": {
+        "filterPattern": "%^a{3,5}$%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 3,
+            "eventMessage": "aaaa",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "regex-optional",
+      "request": {
+        "filterPattern": "%colou?r%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 8,
+            "eventMessage": "color",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "colour",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "regex-digits",
+      "request": {
+        "filterPattern": "%\\d+%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 13,
+            "eventMessage": "123",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "regex-word",
+      "request": {
+        "filterPattern": "%\\w+%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "WARN",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "aaaa",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "aa",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "cat",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "a cat",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "hat",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "color",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "colour",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "a-b",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a b",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "a\nb",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "123",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "_",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "caf\u00e9",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "key:value",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "ab",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "back\\slash",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "regex-space",
+      "request": {
+        "filterPattern": "%a\\sb%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 11,
+            "eventMessage": "a b",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "a\nb",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "regex-hex",
+      "request": {
+        "filterPattern": "%\\x3A%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 16,
+            "eventMessage": "key:value",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "regex-dot-newline",
+      "request": {
+        "filterPattern": "%a.b%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 10,
+            "eventMessage": "a-b",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a b",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "regex-escaped-symbol",
+      "request": {
+        "filterPattern": "%a\\-b%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 10,
+            "eventMessage": "a-b",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "regex-group-rejected",
+      "request": {
+        "filterPattern": "%(ab)+%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '%('"
+      }
+    },
+    {
+      "id": "regex-unicode-rejected",
+      "request": {
+        "filterPattern": "%caf\u00e9%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '%caf\u00e9'"
+      }
+    },
+    {
+      "id": "regex-symbol-rejected",
+      "request": {
+        "filterPattern": "%!%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '%!'"
+      }
+    },
+    {
+      "id": "regex-escape-rejected",
+      "request": {
+        "filterPattern": "%\\p%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Failed to compile regular expression."
+      }
+    },
+    {
+      "id": "regex-escaped-group",
+      "request": {
+        "filterPattern": "%\\(ab\\)%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '%\\('"
+      }
+    },
+    {
+      "id": "regex-empty",
+      "request": {
+        "filterPattern": "%%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '%%'"
+      }
+    },
+    {
+      "id": "regex-unclosed",
+      "request": {
+        "filterPattern": "%abc",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "If a filter pattern starts with '%' it must end with '%'"
+      }
+    },
+    {
+      "id": "regex-bad-range",
+      "request": {
+        "filterPattern": "%[z-a]%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Failed to compile regular expression."
+      }
+    },
+    {
+      "id": "regex-lazy",
+      "request": {
+        "filterPattern": "%a+?%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 3,
+            "eventMessage": "aaaa",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "aa",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "cat",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "a cat",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "hat",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "a-b",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a b",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "a\nb",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "caf\u00e9",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "key:value",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "ab",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "back\\slash",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "regex-possessive",
+      "request": {
+        "filterPattern": "%a++%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Failed to compile regular expression."
+      }
+    },
+    {
+      "id": "regex-class-intersection",
+      "request": {
+        "filterPattern": "%[a&&b]%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '%[a&'"
+      }
+    },
+    {
+      "id": "regex-two",
+      "request": {
+        "filterPattern": "%ERROR% %WARN%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term ' '"
+      }
+    },
+    {
+      "id": "regex-three",
+      "request": {
+        "filterPattern": "%ERROR% %WARN% %INFO%",
+        "logEventMessages": [
+          "ERROR",
+          "WARN",
+          "aaaa",
+          "aa",
+          "cat",
+          "a cat",
+          "hat",
+          "color",
+          "colour",
+          "a-b",
+          "a b",
+          "a\nb",
+          "123",
+          "_",
+          "caf\u00e9",
+          "key:value",
+          "ab",
+          "back\\slash",
+          "!"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term ' '"
+      }
+    },
+    {
+      "id": "json-numeric",
+      "request": {
+        "filterPattern": "{ $.a = 1 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":\"1\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":1.0}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-quoted-number",
+      "request": {
+        "filterPattern": "{ $.a = \"1\" }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":\"1\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-numeric-ne",
+      "request": {
+        "filterPattern": "{ $.a != 1 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":\"01\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a\":\"true\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "{\"a\":\"foo\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "{\"a\":\"foobar\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "{\"a\":\"FOO\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "{\"a\":1e3}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "{\"a\":\"1e3\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "{\"a\":\"1e309\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 19,
+            "eventMessage": "{\"a\":1e-999}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 20,
+            "eventMessage": "{\"a\":-0.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 21,
+            "eventMessage": "{\"a\":9007199254740993}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-string-ne",
+      "request": {
+        "filterPattern": "{ $.a != \"foo\" }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":\"1\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":1.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":\"01\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a\":\"true\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "{\"a\":\"foobar\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "{\"a\":\"FOO\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "{\"a\":1e3}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "{\"a\":\"1e3\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "{\"a\":1e309}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "{\"a\":\"1e309\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 19,
+            "eventMessage": "{\"a\":1e-999}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 20,
+            "eventMessage": "{\"a\":-0.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 21,
+            "eventMessage": "{\"a\":9007199254740993}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-ordering",
+      "request": {
+        "filterPattern": "{ $.a > 0 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":1.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "{\"a\":1e3}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 21,
+            "eventMessage": "{\"a\":9007199254740993}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-quoted-order",
+      "request": {
+        "filterPattern": "{ $.a > \"0\" }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '\"0\"'"
+      }
+    },
+    {
+      "id": "json-bare-word",
+      "request": {
+        "filterPattern": "{ $.a = foo }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 12,
+            "eventMessage": "{\"a\":\"foo\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-bare-boolean",
+      "request": {
+        "filterPattern": "{ $.a = true }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a\":\"true\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-quoted-boolean",
+      "request": {
+        "filterPattern": "{ $.a = \"true\" }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a\":\"true\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-is-true",
+      "request": {
+        "filterPattern": "{ $.a IS TRUE }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":true}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-is-false",
+      "request": {
+        "filterPattern": "{ $.a IS FALSE }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 6,
+            "eventMessage": "{\"a\":false}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-null",
+      "request": {
+        "filterPattern": "{ $.a IS NULL }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 8,
+            "eventMessage": "{\"a\":null}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-missing",
+      "request": {
+        "filterPattern": "{ $.a NOT EXISTS }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 9,
+            "eventMessage": "{}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-star",
+      "request": {
+        "filterPattern": "{ $.a = * }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":\"1\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":1.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":\"01\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a\":\"true\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "{\"a\":\"foo\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "{\"a\":\"foobar\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "{\"a\":\"FOO\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "{\"a\":1e3}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "{\"a\":\"1e3\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "{\"a\":1e309}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "{\"a\":\"1e309\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 19,
+            "eventMessage": "{\"a\":1e-999}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 20,
+            "eventMessage": "{\"a\":-0.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 21,
+            "eventMessage": "{\"a\":9007199254740993}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-quoted-star",
+      "request": {
+        "filterPattern": "{ $.a = \"*\" }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":\"1\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":1.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":\"01\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a\":\"true\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "{\"a\":\"foo\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "{\"a\":\"foobar\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "{\"a\":\"FOO\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "{\"a\":1e3}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "{\"a\":\"1e3\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "{\"a\":1e309}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "{\"a\":\"1e309\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 19,
+            "eventMessage": "{\"a\":1e-999}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 20,
+            "eventMessage": "{\"a\":-0.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 21,
+            "eventMessage": "{\"a\":9007199254740993}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-glob",
+      "request": {
+        "filterPattern": "{ $.a = foo* }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 12,
+            "eventMessage": "{\"a\":\"foo\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "{\"a\":\"foobar\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-exponent",
+      "request": {
+        "filterPattern": "{ $.a = 1e3 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 15,
+            "eventMessage": "{\"a\":1e3}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "{\"a\":\"1e3\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-plus",
+      "request": {
+        "filterPattern": "{ $.a = +1 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":1.0}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-overflow",
+      "request": {
+        "filterPattern": "{ $.a = 1e309 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 18,
+            "eventMessage": "{\"a\":\"1e309\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-underflow",
+      "request": {
+        "filterPattern": "{ $.a = 1e-999 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": []
+      }
+    },
+    {
+      "id": "json-precision",
+      "request": {
+        "filterPattern": "{ $.a = 9007199254740992 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": []
+      }
+    },
+    {
+      "id": "json-regex-number",
+      "request": {
+        "filterPattern": "{ $.a = %1% }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":\"1\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":1.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":\"01\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "{\"a\":1e3}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "{\"a\":\"1e3\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "{\"a\":\"1e309\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 21,
+            "eventMessage": "{\"a\":9007199254740993}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "json-keyword-and",
+      "request": {
+        "filterPattern": "{ $.a = 1 AND $.b = 2 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid metric filter pattern"
+      }
+    },
+    {
+      "id": "json-double-equal",
+      "request": {
+        "filterPattern": "{ $.a == 1 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid metric filter pattern"
+      }
+    },
+    {
+      "id": "json-trailing",
+      "request": {
+        "filterPattern": "{ $.a = 1 } x",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1\"}",
+          "{\"a\":1.0}",
+          "{\"a\":\"01\"}",
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{}",
+          "{\"a\":{}}",
+          "{\"a\":[]}",
+          "{\"a\":\"foo\"}",
+          "{\"a\":\"foobar\"}",
+          "{\"a\":\"FOO\"}",
+          "{\"a\":1e3}",
+          "{\"a\":\"1e3\"}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":-0.0}",
+          "{\"a\":9007199254740993}"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "If a filter pattern starts with '{' it must end with '}'"
+      }
+    },
+    {
+      "id": "selector-index",
+      "request": {
+        "filterPattern": "{ $.a[1] = 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":[1,2]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":[null,2]}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "selector-wildcard",
+      "request": {
+        "filterPattern": "{ $.a[*] = 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":[1,2]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":[2,1]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":[null,2]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":{\"x\":1,\"y\":2}}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":{\"x\":2,\"y\":1}}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "selector-object-wildcard",
+      "request": {
+        "filterPattern": "{ $.a.* = 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":[1,2]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":[2,1]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":[null,2]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":{\"x\":1,\"y\":2}}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":{\"x\":2,\"y\":1}}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "selector-wildcard-child",
+      "request": {
+        "filterPattern": "{ $.a[*].b = 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 6,
+            "eventMessage": "{\"a\":[{\"b\":1},{\"b\":2}]}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "selector-quoted-property",
+      "request": {
+        "filterPattern": "{ $.['a.b'] = 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a.b\":2}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "selector-bracket-property",
+      "request": {
+        "filterPattern": "{ $['a.b'] = 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '$['"
+      }
+    },
+    {
+      "id": "selector-double-property",
+      "request": {
+        "filterPattern": "{ $.[\"a.b\"] = 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '$.[\"'"
+      }
+    },
+    {
+      "id": "selector-hyphen",
+      "request": {
+        "filterPattern": "{ $.a-b = 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 8,
+            "eventMessage": "{\"a-b\":2}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "selector-root-index",
+      "request": {
+        "filterPattern": "{ $[1] = 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '$['"
+      }
+    },
+    {
+      "id": "selector-negative-index",
+      "request": {
+        "filterPattern": "{ $.a[-1] = 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '[-'"
+      }
+    },
+    {
+      "id": "selector-null-extraction",
+      "request": {
+        "filterPattern": "{ $.a IS NULL }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":[null,2]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "{\"a\":null}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "selector-or-extraction",
+      "request": {
+        "filterPattern": "{ $.a = 9 || $.missing NOT EXISTS }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":[1,2]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":[2,1]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":[null,2]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":{\"x\":1,\"y\":2}}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":{\"x\":2,\"y\":1}}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "{\"a\":[{\"b\":1},{\"b\":2}]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a.b\":2}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "{\"a-b\":2}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "{\"a\":null}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "{}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "selector-array-ne",
+      "request": {
+        "filterPattern": "{ $.a[*] != 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 6,
+            "eventMessage": "{\"a\":[{\"b\":1},{\"b\":2}]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "{\"a\":null}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "selector-nested-wildcard",
+      "request": {
+        "filterPattern": "{ $.a[*].* = 2 }",
+        "logEventMessages": [
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{\"x\":1,\"y\":2}}",
+          "{\"a\":{\"x\":2,\"y\":1}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a.b\":2}",
+          "{\"a-b\":2}",
+          "{\"a\":null}",
+          "{}",
+          "[1,2]",
+          "{\"a\":2} trailing"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Your filter pattern has a JSON path selector that exceeds the maximum of 1 wildcard allowed per json selector."
+      }
+    },
+    {
+      "id": "space-fields",
+      "request": {
+        "filterPattern": "[a, b, c]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$a": "ERROR",
+              "$b": "one",
+              "$c": "two"
+            }
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "a \"two words\" c",
+            "extractedValues": {
+              "$a": "a",
+              "$b": "two words",
+              "$c": "c"
+            }
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "a [two words] c",
+            "extractedValues": {
+              "$a": "a",
+              "$b": "two words",
+              "$c": "c"
+            }
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "a  b   c ",
+            "extractedValues": {
+              "$a": "a",
+              "$b": "b",
+              "$c": "c"
+            }
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a\tb\tc",
+            "extractedValues": {
+              "$a": "a",
+              "$b": "b",
+              "$c": "c"
+            }
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "a \"b\"c d",
+            "extractedValues": {
+              "$a": "a",
+              "$b": "b",
+              "$c": "c d"
+            }
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "a b c d",
+            "extractedValues": {
+              "$a": "a",
+              "$b": "b",
+              "$c": "c d"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-last-rest",
+      "request": {
+        "filterPattern": "[a, rest]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERROR one",
+            "extractedValues": {
+              "$rest": "one",
+              "$a": "ERROR"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$rest": "one two",
+              "$a": "ERROR"
+            }
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "WARN one",
+            "extractedValues": {
+              "$rest": "one",
+              "$a": "WARN"
+            }
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "INFO one",
+            "extractedValues": {
+              "$rest": "one",
+              "$a": "INFO"
+            }
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "a \"two words\" c",
+            "extractedValues": {
+              "$rest": "\"two words\" c",
+              "$a": "a"
+            }
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "a [two words] c",
+            "extractedValues": {
+              "$rest": "[two words] c",
+              "$a": "a"
+            }
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "a \"two words\"",
+            "extractedValues": {
+              "$rest": "two words",
+              "$a": "a"
+            }
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "a [two words]",
+            "extractedValues": {
+              "$rest": "two words",
+              "$a": "a"
+            }
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "a  b   c ",
+            "extractedValues": {
+              "$rest": "b   c ",
+              "$a": "a"
+            }
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a\tb\tc",
+            "extractedValues": {
+              "$rest": "b\tc",
+              "$a": "a"
+            }
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "a \"unclosed",
+            "extractedValues": {
+              "$rest": "\"unclosed",
+              "$a": "a"
+            }
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "a [unclosed",
+            "extractedValues": {
+              "$rest": "[unclosed",
+              "$a": "a"
+            }
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "a \"b\"c d",
+            "extractedValues": {
+              "$rest": "\"b\"c d",
+              "$a": "a"
+            }
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "1 2",
+            "extractedValues": {
+              "$rest": "2",
+              "$a": "1"
+            }
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "1.0 2",
+            "extractedValues": {
+              "$rest": "2",
+              "$a": "1.0"
+            }
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "a b c d",
+            "extractedValues": {
+              "$rest": "b c d",
+              "$a": "a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-single",
+      "request": {
+        "filterPattern": "[a]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {
+              "$a": "ERROR"
+            }
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERROR one",
+            "extractedValues": {
+              "$a": "ERROR one"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$a": "ERROR one two"
+            }
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "WARN one",
+            "extractedValues": {
+              "$a": "WARN one"
+            }
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "INFO one",
+            "extractedValues": {
+              "$a": "INFO one"
+            }
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "a \"two words\" c",
+            "extractedValues": {
+              "$a": "a \"two words\" c"
+            }
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "a [two words] c",
+            "extractedValues": {
+              "$a": "a [two words] c"
+            }
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "a \"two words\"",
+            "extractedValues": {
+              "$a": "a \"two words\""
+            }
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "a [two words]",
+            "extractedValues": {
+              "$a": "a [two words]"
+            }
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "a  b   c ",
+            "extractedValues": {
+              "$a": "a  b   c "
+            }
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a\tb\tc",
+            "extractedValues": {
+              "$a": "a\tb\tc"
+            }
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "a \"unclosed",
+            "extractedValues": {
+              "$a": "a \"unclosed"
+            }
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "a [unclosed",
+            "extractedValues": {
+              "$a": "a [unclosed"
+            }
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "a \"b\"c d",
+            "extractedValues": {
+              "$a": "a \"b\"c d"
+            }
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "one",
+            "extractedValues": {
+              "$a": "one"
+            }
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "1 2",
+            "extractedValues": {
+              "$a": "1 2"
+            }
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "1.0 2",
+            "extractedValues": {
+              "$a": "1.0 2"
+            }
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "a b c d",
+            "extractedValues": {
+              "$a": "a b c d"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-empty",
+      "request": {
+        "filterPattern": "[]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {
+              "$1": "ERROR"
+            }
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERROR one",
+            "extractedValues": {
+              "$1": "ERROR",
+              "$2": "one"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$1": "ERROR",
+              "$2": "one",
+              "$3": "two"
+            }
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "WARN one",
+            "extractedValues": {
+              "$1": "WARN",
+              "$2": "one"
+            }
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "INFO one",
+            "extractedValues": {
+              "$1": "INFO",
+              "$2": "one"
+            }
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "a \"two words\" c",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "two words",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "a [two words] c",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "two words",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "a \"two words\"",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "two words"
+            }
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "a [two words]",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "two words"
+            }
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "a  b   c ",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "b",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a\tb\tc",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "b",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "a \"unclosed",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "\"unclosed"
+            }
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "a [unclosed",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "[unclosed"
+            }
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "a \"b\"c d",
+            "extractedValues": {
+              "$4": "d",
+              "$1": "a",
+              "$2": "b",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "one",
+            "extractedValues": {
+              "$1": "one"
+            }
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "1 2",
+            "extractedValues": {
+              "$1": "1",
+              "$2": "2"
+            }
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "1.0 2",
+            "extractedValues": {
+              "$1": "1.0",
+              "$2": "2"
+            }
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "a b c d",
+            "extractedValues": {
+              "$4": "d",
+              "$1": "a",
+              "$2": "b",
+              "$3": "c"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-leading-ellipsis",
+      "request": {
+        "filterPattern": "[..., last]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {
+              "$last": "ERROR"
+            }
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERROR one",
+            "extractedValues": {
+              "$1": "ERROR",
+              "$last": "one"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$1": "ERROR",
+              "$2": "one",
+              "$last": "two"
+            }
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "WARN one",
+            "extractedValues": {
+              "$1": "WARN",
+              "$last": "one"
+            }
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "INFO one",
+            "extractedValues": {
+              "$1": "INFO",
+              "$last": "one"
+            }
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "a \"two words\" c",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "two words",
+              "$last": "c"
+            }
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "a [two words] c",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "two words",
+              "$last": "c"
+            }
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "a \"two words\"",
+            "extractedValues": {
+              "$1": "a",
+              "$last": "two words"
+            }
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "a [two words]",
+            "extractedValues": {
+              "$1": "a",
+              "$last": "two words"
+            }
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "a  b   c ",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "b",
+              "$last": "c"
+            }
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a\tb\tc",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "b",
+              "$last": "c"
+            }
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "a \"unclosed",
+            "extractedValues": {
+              "$1": "a",
+              "$last": "\"unclosed"
+            }
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "a [unclosed",
+            "extractedValues": {
+              "$1": "a",
+              "$last": "[unclosed"
+            }
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "a \"b\"c d",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "b",
+              "$last": "d",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "one",
+            "extractedValues": {
+              "$last": "one"
+            }
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "1 2",
+            "extractedValues": {
+              "$1": "1",
+              "$last": "2"
+            }
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "1.0 2",
+            "extractedValues": {
+              "$1": "1.0",
+              "$last": "2"
+            }
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "a b c d",
+            "extractedValues": {
+              "$1": "a",
+              "$2": "b",
+              "$last": "d",
+              "$3": "c"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-middle-ellipsis",
+      "request": {
+        "filterPattern": "[first, ..., last]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERROR one",
+            "extractedValues": {
+              "$first": "ERROR",
+              "$last": "one"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$first": "ERROR",
+              "$2": "one",
+              "$last": "two"
+            }
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "WARN one",
+            "extractedValues": {
+              "$first": "WARN",
+              "$last": "one"
+            }
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "INFO one",
+            "extractedValues": {
+              "$first": "INFO",
+              "$last": "one"
+            }
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "a \"two words\" c",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "two words",
+              "$last": "c"
+            }
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "a [two words] c",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "two words",
+              "$last": "c"
+            }
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "a \"two words\"",
+            "extractedValues": {
+              "$first": "a",
+              "$last": "two words"
+            }
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "a [two words]",
+            "extractedValues": {
+              "$first": "a",
+              "$last": "two words"
+            }
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "a  b   c ",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "b",
+              "$last": "c"
+            }
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a\tb\tc",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "b",
+              "$last": "c"
+            }
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "a \"unclosed",
+            "extractedValues": {
+              "$first": "a",
+              "$last": "\"unclosed"
+            }
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "a [unclosed",
+            "extractedValues": {
+              "$first": "a",
+              "$last": "[unclosed"
+            }
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "a \"b\"c d",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "b",
+              "$last": "d",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "1 2",
+            "extractedValues": {
+              "$first": "1",
+              "$last": "2"
+            }
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "1.0 2",
+            "extractedValues": {
+              "$first": "1.0",
+              "$last": "2"
+            }
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "a b c d",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "b",
+              "$last": "d",
+              "$3": "c"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-trailing-ellipsis",
+      "request": {
+        "filterPattern": "[first, ...]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "ERROR",
+            "extractedValues": {
+              "$first": "ERROR"
+            }
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERROR one",
+            "extractedValues": {
+              "$first": "ERROR",
+              "$2": "one"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$first": "ERROR",
+              "$2": "one",
+              "$3": "two"
+            }
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "WARN one",
+            "extractedValues": {
+              "$first": "WARN",
+              "$2": "one"
+            }
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "INFO one",
+            "extractedValues": {
+              "$first": "INFO",
+              "$2": "one"
+            }
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "a \"two words\" c",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "two words",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "a [two words] c",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "two words",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "a \"two words\"",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "two words"
+            }
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "a [two words]",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "two words"
+            }
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "a  b   c ",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "b",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a\tb\tc",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "b",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "a \"unclosed",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "\"unclosed"
+            }
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "a [unclosed",
+            "extractedValues": {
+              "$first": "a",
+              "$2": "[unclosed"
+            }
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "a \"b\"c d",
+            "extractedValues": {
+              "$4": "d",
+              "$first": "a",
+              "$2": "b",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "one",
+            "extractedValues": {
+              "$first": "one"
+            }
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "1 2",
+            "extractedValues": {
+              "$first": "1",
+              "$2": "2"
+            }
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "1.0 2",
+            "extractedValues": {
+              "$first": "1.0",
+              "$2": "2"
+            }
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "a b c d",
+            "extractedValues": {
+              "$4": "d",
+              "$first": "a",
+              "$2": "b",
+              "$3": "c"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-unnamed",
+      "request": {
+        "filterPattern": "[, b,]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$1": "ERROR",
+              "$b": "one",
+              "$3": "two"
+            }
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "a \"two words\" c",
+            "extractedValues": {
+              "$1": "a",
+              "$b": "two words",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "a [two words] c",
+            "extractedValues": {
+              "$1": "a",
+              "$b": "two words",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "a  b   c ",
+            "extractedValues": {
+              "$1": "a",
+              "$b": "b",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a\tb\tc",
+            "extractedValues": {
+              "$1": "a",
+              "$b": "b",
+              "$3": "c"
+            }
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "a \"b\"c d",
+            "extractedValues": {
+              "$1": "a",
+              "$b": "b",
+              "$3": "c d"
+            }
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "a b c d",
+            "extractedValues": {
+              "$1": "a",
+              "$b": "b",
+              "$3": "c d"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-trailing-comma",
+      "request": {
+        "filterPattern": "[a,]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERROR one",
+            "extractedValues": {
+              "$a": "ERROR",
+              "$2": "one"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$a": "ERROR",
+              "$2": "one two"
+            }
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "WARN one",
+            "extractedValues": {
+              "$a": "WARN",
+              "$2": "one"
+            }
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "INFO one",
+            "extractedValues": {
+              "$a": "INFO",
+              "$2": "one"
+            }
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "a \"two words\" c",
+            "extractedValues": {
+              "$a": "a",
+              "$2": "\"two words\" c"
+            }
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "a [two words] c",
+            "extractedValues": {
+              "$a": "a",
+              "$2": "[two words] c"
+            }
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "a \"two words\"",
+            "extractedValues": {
+              "$a": "a",
+              "$2": "two words"
+            }
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "a [two words]",
+            "extractedValues": {
+              "$a": "a",
+              "$2": "two words"
+            }
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "a  b   c ",
+            "extractedValues": {
+              "$a": "a",
+              "$2": "b   c "
+            }
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "a\tb\tc",
+            "extractedValues": {
+              "$a": "a",
+              "$2": "b\tc"
+            }
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "a \"unclosed",
+            "extractedValues": {
+              "$a": "a",
+              "$2": "\"unclosed"
+            }
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "a [unclosed",
+            "extractedValues": {
+              "$a": "a",
+              "$2": "[unclosed"
+            }
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "a \"b\"c d",
+            "extractedValues": {
+              "$a": "a",
+              "$2": "\"b\"c d"
+            }
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "1 2",
+            "extractedValues": {
+              "$a": "1",
+              "$2": "2"
+            }
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "1.0 2",
+            "extractedValues": {
+              "$a": "1.0",
+              "$2": "2"
+            }
+          },
+          {
+            "eventNumber": 18,
+            "eventMessage": "a b c d",
+            "extractedValues": {
+              "$a": "a",
+              "$2": "b c d"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-constraint",
+      "request": {
+        "filterPattern": "[level=ERROR, rest]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERROR one",
+            "extractedValues": {
+              "$level": "ERROR",
+              "$rest": "one"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$level": "ERROR",
+              "$rest": "one two"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-or",
+      "request": {
+        "filterPattern": "[level=ERROR || level=WARN, rest]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERROR one",
+            "extractedValues": {
+              "$level": "ERROR",
+              "$rest": "one"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$level": "ERROR",
+              "$rest": "one two"
+            }
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "WARN one",
+            "extractedValues": {
+              "$level": "WARN",
+              "$rest": "one"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-numeric",
+      "request": {
+        "filterPattern": "[a=1, rest]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 16,
+            "eventMessage": "1 2",
+            "extractedValues": {
+              "$rest": "2",
+              "$a": "1"
+            }
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "1.0 2",
+            "extractedValues": {
+              "$rest": "2",
+              "$a": "1.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-quoted-numeric",
+      "request": {
+        "filterPattern": "[a=\"1\", rest]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 16,
+            "eventMessage": "1 2",
+            "extractedValues": {
+              "$rest": "2",
+              "$a": "1"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "space-cross-field",
+      "request": {
+        "filterPattern": "[a=ERROR || b=one, b]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Multiple variables used in a single filter. Var1 : a, Var2 : b"
+      }
+    },
+    {
+      "id": "space-duplicate",
+      "request": {
+        "filterPattern": "[a, a]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Duplicate field 'a'"
+      }
+    },
+    {
+      "id": "space-invalid-name",
+      "request": {
+        "filterPattern": "[1a]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '1a'"
+      }
+    },
+    {
+      "id": "space-double-ellipsis",
+      "request": {
+        "filterPattern": "[a, ..., b, ...]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Duplicate field '...'"
+      }
+    },
+    {
+      "id": "space-bad-operator",
+      "request": {
+        "filterPattern": "[a == 1]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid metric filter pattern"
+      }
+    },
+    {
+      "id": "space-regex",
+      "request": {
+        "filterPattern": "[a=%ERR%, rest]",
+        "logEventMessages": [
+          "ERROR",
+          "ERROR one",
+          "ERROR one two",
+          "WARN one",
+          "INFO one",
+          "a \"two words\" c",
+          "a [two words] c",
+          "a \"two words\"",
+          "a [two words]",
+          "a  b   c ",
+          "a\tb\tc",
+          "a \"unclosed",
+          "a [unclosed",
+          "a \"b\"c d",
+          "one",
+          "1 2",
+          "1.0 2",
+          "a b c d"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 2,
+            "eventMessage": "ERROR one",
+            "extractedValues": {
+              "$rest": "one",
+              "$a": "ERROR"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "ERROR one two",
+            "extractedValues": {
+              "$rest": "one two",
+              "$a": "ERROR"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

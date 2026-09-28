@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.securityhub;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -147,8 +148,8 @@ public class SecurityHubService implements Resettable {
         }
         String mode = requireLinkingMode(request);
         JsonNode regions = validateAggregatorRegions(mode, request.get("Regions"));
-        state.setAggregatorArn("arn:aws:securityhub:" + region + ":" + regionResolver.getAccountId()
-                + ":finding-aggregator/" + UUID.randomUUID());
+        state.setAggregatorArn(AwsArnUtils.Arn.of("securityhub", region, regionResolver.getAccountId(),
+                "finding-aggregator/" + UUID.randomUUID()).toString());
         state.setRegionLinkingMode(mode);
         state.setRegions(regions);
         save(region, state);
@@ -498,7 +499,12 @@ public class SecurityHubService implements Resettable {
     }
 
     private void validateResourceArn(String region, String arn) {
-        if (arn == null || !arn.startsWith("arn:aws:securityhub:" + region + ":" + regionResolver.getAccountId() + ":")) {
+        if (!AwsArnUtils.isArnFor(arn, "securityhub")) {
+            throw notFound("The specified Security Hub resource was not found.");
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!regionResolver.getPartition().equals(parsed.partition())
+                || !region.equals(parsed.region()) || !regionResolver.getAccountId().equals(parsed.accountId())) {
             throw notFound("The specified Security Hub resource was not found.");
         }
     }
@@ -512,12 +518,11 @@ public class SecurityHubService implements Resettable {
     }
 
     public String hubArn(String region) {
-        return "arn:aws:securityhub:" + region + ":" + regionResolver.getAccountId() + ":hub/default";
+        return AwsArnUtils.Arn.of("securityhub", region, regionResolver.getAccountId(), "hub/default").toString();
     }
 
     public String policyArn(String region, String id) {
-        return "arn:aws:securityhub:" + region + ":" + regionResolver.getAccountId()
-                + ":configuration-policy/" + id;
+        return AwsArnUtils.Arn.of("securityhub", region, regionResolver.getAccountId(), "configuration-policy/" + id).toString();
     }
 
     private static SecurityHubState copyConfigurationState(SecurityHubState source) {

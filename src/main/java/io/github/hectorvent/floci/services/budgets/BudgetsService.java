@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -31,7 +32,7 @@ import java.util.regex.Pattern;
 public class BudgetsService implements Resettable {
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
     private static final Pattern ACTION_ID = Pattern.compile("^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$");
-    private static final Pattern IAM_POLICY_ARN = Pattern.compile("^arn:aws(?:-eusc|-cn|-us-gov|-iso|-iso-[a-z])?:iam::(?:\\d{12}|aws):policy/.+$");
+    private static final Pattern IAM_POLICY_ARN = Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::(?:\\d{12}|aws):policy/.+$");
     private static final Pattern SCP_POLICY_ID = Pattern.compile("^p-[0-9a-zA-Z_]{8,128}$");
     private static final Pattern SCP_TARGET_ID = Pattern.compile("^(?:ou-[0-9a-z]{4,32}-[a-z0-9]{8,32}|\\d{12})$");
     private static final Pattern SSM_INSTANCE_ID = Pattern.compile("^(?:i-(?:\\w{8}|\\w{17})|[a-zA-Z](?:[\\w-]{0,61}\\w)?)$");
@@ -667,7 +668,7 @@ public class BudgetsService implements Resettable {
         if (create || request.has("ExecutionRoleArn")) {
             String arn = text(request, "ExecutionRoleArn");
             String account = requireAccount(request);
-            if (arn == null || !arn.matches("^arn:aws(?:-eusc|-cn|-us-gov|-iso|-iso-[a-z])?:iam::" + account + ":role/.+$")) {
+            if (arn == null || !arn.matches("^arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::" + account + ":role/.+$")) {
                 throw invalid("ExecutionRoleArn is invalid or belongs to another account.");
             }
         }

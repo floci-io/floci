@@ -16,6 +16,7 @@ import org.apache.hc.client5.http.protocol.HttpClientContext;
 import org.apache.hc.client5.http.ssl.ClientTlsStrategyBuilder;
 import org.apache.hc.core5.http.Header;
 import org.apache.hc.core5.http.HttpVersion;
+import org.apache.hc.core5.http.io.entity.ByteArrayEntity;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.io.support.ClassicRequestBuilder;
 import org.apache.hc.core5.http2.HttpVersionPolicy;
@@ -40,6 +41,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 /**
@@ -119,19 +121,48 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
     HttpResponse<byte[]> send(HttpRequest request, Map<String, String> originHeaders,
                               HttpResponse.BodyHandler<byte[]> bodyHandler)
             throws IOException, InterruptedException {
+        return send(request, List.of(), originHeaders, null, bodyHandler);
+    }
+
+    /**
+     * Sends {@code request} with {@code forwardedHeaders} added and {@code requestBody} as its
+     * entity, or with no entity when it is {@code null}. Each origin header replaces every
+     * same-named request or forwarded header, so a viewer cannot repeat a header to smuggle its own
+     * value past an origin custom header. The request's own body publisher must be empty: the body
+     * travels as bytes so its {@code Content-Length} is exact.
+     */
+    HttpResponse<byte[]> send(HttpRequest request,
+                              List<CloudFrontOriginRequestBuilder.Header> forwardedHeaders,
+                              Map<String, String> originHeaders, byte[] requestBody,
+                              HttpResponse.BodyHandler<byte[]> bodyHandler)
+            throws IOException, InterruptedException {
         if (Thread.currentThread().isInterrupted()) {
             throw new InterruptedException("CloudFront origin request interrupted");
         }
         if (request.bodyPublisher().filter(publisher -> publisher.contentLength() != 0).isPresent()) {
-            throw new IOException("CloudFront origin request bodies are not supported");
+            throw new IOException("CloudFront origin request bodies must be passed as bytes");
         }
 
         ClassicRequestBuilder builder = ClassicRequestBuilder.create(request.method())
                 .setUri(request.uri())
                 .setVersion(HttpVersion.HTTP_1_1);
-        request.headers().map().forEach((name, values) ->
-                values.forEach(value -> builder.addHeader(name, value)));
-        originHeaders.forEach(builder::setHeader);
+        Set<String> replaced = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        replaced.addAll(originHeaders.keySet());
+        request.headers().map().forEach((name, values) -> {
+            if (!replaced.contains(name)) {
+                values.forEach(value -> builder.addHeader(name, value));
+            }
+        });
+        for (CloudFrontOriginRequestBuilder.Header header : forwardedHeaders) {
+            if (!replaced.contains(header.name())) {
+                builder.addHeader(header.name(), header.value());
+            }
+        }
+        originHeaders.forEach(builder::addHeader);
+        if (requestBody != null) {
+            // No entity content type: the caller's Content-Type request header is sent as is.
+            builder.setEntity(new ByteArrayEntity(requestBody, null));
+        }
 
         HttpClientContext context = HttpClientContext.create();
         Duration responseTimeout = request.timeout().orElse(RESPONSE_TIMEOUT);

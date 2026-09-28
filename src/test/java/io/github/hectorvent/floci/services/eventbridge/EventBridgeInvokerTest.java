@@ -1,10 +1,14 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.batch.BatchService;
+import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
+import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
@@ -15,16 +19,18 @@ import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-
-import org.mockito.ArgumentCaptor;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.AdditionalMatchers.aryEq;
@@ -40,6 +46,7 @@ class EventBridgeInvokerTest {
     private FirehoseService firehoseService;
     private EventBridgeService eventBridgeService;
     private EcsService ecsService;
+    private StepFunctionsService stepFunctionsService;
     private RegionResolver regionResolver;
 
     @BeforeEach
@@ -51,13 +58,14 @@ class EventBridgeInvokerTest {
         firehoseService = mock(FirehoseService.class);
         eventBridgeService = mock(EventBridgeService.class);
         ecsService = mock(EcsService.class);
+        stepFunctionsService = mock(StepFunctionsService.class);
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         when(eventBridgeService.putEvents(anyList(), anyString(), any()))
                 .thenReturn(new EventBridgeService.PutEventsResult(0, List.of()));
-        io.github.hectorvent.floci.config.EmulatorConfig emulatorConfig =
-                mock(io.github.hectorvent.floci.config.EmulatorConfig.class,
-                        org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        EmulatorConfig emulatorConfig =
+                mock(EmulatorConfig.class,
+                        Mockito.RETURNS_DEEP_STUBS);
         invoker = new EventBridgeInvoker(
                 lambdaService,
                 sqsService,
@@ -66,12 +74,58 @@ class EventBridgeInvokerTest {
                 firehoseService,
                 eventBridgeService,
                 ecsService,
-                new io.github.hectorvent.floci.services.ecs.EcsJsonHandler(ecsService, new ObjectMapper(),
-                        new io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy(emulatorConfig)),
+                new EcsJsonHandler(ecsService, new ObjectMapper(),
+                        new HostVolumePolicy(emulatorConfig)),
+                stepFunctionsService,
                 regionResolver,
                 new ObjectMapper(),
                 emulatorConfig
         );
+    }
+
+    @Test
+    void invokeTarget_stateMachineTargetStartsExecutionWithDefaultEvent() {
+        String arn = "arn:aws:states:eu-west-1:111122223333:stateMachine:orders";
+        String event = "{\"detail\":{\"orderId\":\"o-42\"}}";
+        Target target = new Target("id1", arn, null, null);
+
+        invoker.invokeTarget(target, event, "us-east-1");
+
+        verify(stepFunctionsService).startExecution(arn, null, event, "eu-west-1");
+    }
+
+    @Test
+    void invokeTarget_stateMachineTargetUsesExplicitInput() {
+        String arn = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
+        Target target = new Target("id1", arn, "{\"source\":\"override\"}", null);
+
+        invoker.invokeTarget(target, "{\"ignored\":true}", "us-east-1");
+
+        verify(stepFunctionsService).startExecution(
+                arn, null, "{\"source\":\"override\"}", "us-east-1");
+    }
+
+    @Test
+    void invokeTarget_qualifiedStateMachineTargetRemainsUnsupported() {
+        String versionArn = "arn:aws:states:us-east-1:000000000000:stateMachine:orders:1";
+        String aliasArn = "arn:aws:states:us-east-1:000000000000:stateMachine:orders:PROD";
+
+        invoker.invokeTarget(new Target("version", versionArn, "{}", null), "{}", "us-east-1");
+        invoker.invokeTarget(new Target("alias", aliasArn, "{}", null), "{}", "us-east-1");
+
+        verifyNoInteractions(stepFunctionsService);
+    }
+
+    @Test
+    void invokeTarget_stateMachineStartFailureDoesNotEscapeDelivery() {
+        String arn = "arn:aws:states:us-east-1:000000000000:stateMachine:missing";
+        when(stepFunctionsService.startExecution(arn, null, "{}", "us-east-1"))
+                .thenThrow(new IllegalStateException("missing state machine"));
+
+        assertDoesNotThrow(() -> invoker.invokeTarget(
+                new Target("id1", arn, "{}", null), "{\"ignored\":true}", "us-east-1"));
+
+        verify(stepFunctionsService).startExecution(arn, null, "{}", "us-east-1");
     }
 
     @Test
@@ -84,7 +138,7 @@ class EventBridgeInvokerTest {
         verify(lambdaService).invokeArn(
                 eq(arn),
                 aryEq("{\"detail\":{\"job\":\"workflow-recovery\"}}".getBytes()),
-                eq(io.github.hectorvent.floci.services.lambda.model.InvocationType.Event));
+                eq(InvocationType.Event));
     }
 
     @Test
@@ -190,6 +244,7 @@ class EventBridgeInvokerTest {
 
         invoker.invokeTarget(target, "{\"detail\":{}}", "us-east-1");
 
+        // Clash with eventbridge.model.NetworkConfiguration
         ArgumentCaptor<io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration> networkCaptor =
                 ArgumentCaptor.forClass(io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration.class);
         verify(ecsService).runTask(
@@ -248,7 +303,7 @@ class EventBridgeInvokerTest {
         invoker.invokeTarget(target, "{\"detail\":{\"orderId\":\"o-42\"}}", "us-east-1");
 
         @SuppressWarnings("unchecked")
-        ArgumentCaptor<List<io.github.hectorvent.floci.services.ecs.model.ContainerOverride>> overridesCaptor =
+        ArgumentCaptor<List<ContainerOverride>> overridesCaptor =
                 ArgumentCaptor.forClass(List.class);
         verify(ecsService).runTask(
                 eq("arn:aws:ecs:us-west-2:000000000000:cluster/my-cluster"),
@@ -261,7 +316,7 @@ class EventBridgeInvokerTest {
                 isNull(),
                 eq("us-west-2")
         );
-        io.github.hectorvent.floci.services.ecs.model.ContainerOverride override = overridesCaptor.getValue().get(0);
+        ContainerOverride override = overridesCaptor.getValue().get(0);
         assertEquals("app", override.getName());
         assertEquals(List.of("process", "o-42"), override.getCommand());
         assertEquals("ORDER_ID", override.getEnvironment().get(0).name());
@@ -412,7 +467,7 @@ class EventBridgeInvokerTest {
     void applyInputTransformer_valuePosition_stringIsQuoted() {
         String event = "{\"detail\":{\"eventName\":\"site.created\"}}";
         InputTransformer t = new InputTransformer(
-                java.util.Map.of("e", "$.detail.eventName"), "{\"e\":<e>}");
+                Map.of("e", "$.detail.eventName"), "{\"e\":<e>}");
         assertEquals("{\"e\":\"site.created\"}", invoker.applyInputTransformer(t, event));
     }
 
@@ -420,7 +475,7 @@ class EventBridgeInvokerTest {
     void applyInputTransformer_valuePosition_objectNumberBoolAsIs() {
         String event = "{\"detail\":{\"count\":42,\"ok\":true,\"payload\":{\"id\":\"abc\"}}}";
         InputTransformer t = new InputTransformer(
-                java.util.Map.of("c", "$.detail.count", "o", "$.detail.ok", "p", "$.detail.payload"),
+                Map.of("c", "$.detail.count", "o", "$.detail.ok", "p", "$.detail.payload"),
                 "{\"c\":<c>,\"o\":<o>,\"p\":<p>}");
         assertEquals("{\"c\":42,\"o\":true,\"p\":{\"id\":\"abc\"}}", invoker.applyInputTransformer(t, event));
     }
@@ -429,7 +484,7 @@ class EventBridgeInvokerTest {
     void applyInputTransformer_valuePosition_missingIsEmpty() {
         String event = "{\"detail\":{}}";
         InputTransformer t = new InputTransformer(
-                java.util.Map.of("e", "$.detail.nope"), "prefix:<e>:suffix");
+                Map.of("e", "$.detail.nope"), "prefix:<e>:suffix");
         assertEquals("prefix::suffix", invoker.applyInputTransformer(t, event));
     }
 
@@ -437,7 +492,7 @@ class EventBridgeInvokerTest {
     void applyInputTransformer_insideString_interpolatesRaw() {
         String event = "{\"detail\":{\"user\":\"alice\",\"eventName\":\"site.created\"}}";
         InputTransformer t = new InputTransformer(
-                java.util.Map.of("user", "$.detail.user", "e", "$.detail.eventName"),
+                Map.of("user", "$.detail.user", "e", "$.detail.eventName"),
                 "\"<user> did <e>\"");
         assertEquals("\"alice did site.created\"", invoker.applyInputTransformer(t, event));
     }
@@ -446,14 +501,14 @@ class EventBridgeInvokerTest {
     void applyInputTransformer_quotedWholeToken_rawBetweenQuotes() {
         String event = "{\"detail\":{\"eventName\":\"site.created\"}}";
         InputTransformer t = new InputTransformer(
-                java.util.Map.of("e", "$.detail.eventName"), "{\"e\":\"<e>\"}");
+                Map.of("e", "$.detail.eventName"), "{\"e\":\"<e>\"}");
         assertEquals("{\"e\":\"site.created\"}", invoker.applyInputTransformer(t, event));
     }
 
     @Test
     void applyInputTransformer_unknownVarLeftLiteral() {
         String event = "{\"detail\":{}}";
-        InputTransformer t = new InputTransformer(java.util.Map.of(), "{\"x\":<unknown>}");
+        InputTransformer t = new InputTransformer(Map.of(), "{\"x\":<unknown>}");
         assertEquals("{\"x\":<unknown>}", invoker.applyInputTransformer(t, event));
     }
 
@@ -562,7 +617,7 @@ class EventBridgeInvokerTest {
                 sqsService,
                 mock(SnsService.class),
                 new ObjectMapper(),
-                mock(io.github.hectorvent.floci.config.EmulatorConfig.class));
+                mock(EmulatorConfig.class));
         Target target = new Target("id1",
                 "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
                 null, null);

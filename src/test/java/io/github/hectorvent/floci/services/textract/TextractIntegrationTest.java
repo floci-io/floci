@@ -114,6 +114,40 @@ class TextractIntegrationTest {
             .body("Blocks", hasSize(3));
     }
     @Test
+    void asyncResultCanBeReadMoreThanOnceWithStableBlocks() {
+        String jobId = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Textract.StartDocumentTextDetection")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"DocumentLocation\":{\"S3Object\":{\"Bucket\":\"my-bucket\",\"Name\":\"test.pdf\"}}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("JobId");
+        String firstBlockId = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Textract.GetDocumentTextDetection")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"JobId\":\"" + jobId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("Blocks[0].Id");
+        String secondBlockId = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Textract.GetDocumentTextDetection")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"JobId\":\"" + jobId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("Blocks[0].Id");
+        assertThat(secondBlockId, equalTo(firstBlockId));
+    }
+    @Test
     void getDocumentTextDetection_unknownJobId_returns400() {
         given()
             .contentType(CONTENT_TYPE)

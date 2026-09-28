@@ -84,9 +84,9 @@ public class LambdaLayerService {
             "ruby2.5", "ruby2.6", "ruby2.7", "ruby3.2", "ruby3.3", "ruby3.4", "ruby4.0",
             "go1.x", "go1.9", "provided", "provided.al2", "provided.al2023",
             "byol", "custom", "nasa",
-            "arn:aws:greengrass:::runtime/function/executable",
-            "arn:aws-cn:greengrass:::runtime/function/executable",
-            "arn:aws-us-gov:greengrass:::runtime/function/executable");
+            "arn:aws:greengrass:::runtime/function/executable", // partition-literal: the Runtime enum lists these three ids verbatim
+            "arn:aws-cn:greengrass:::runtime/function/executable", // partition-literal: the Runtime enum lists these three ids verbatim
+            "arn:aws-us-gov:greengrass:::runtime/function/executable"); // partition-literal: the Runtime enum lists these three ids verbatim
 
     private final LambdaLayerStore layerStore;
     private final ZipExtractor zipExtractor;
@@ -459,9 +459,9 @@ public class LambdaLayerService {
                             + " constraint: Member must satisfy regular expression pattern: "
                             + LAYER_VERSION_ARN_PATTERN, 400);
         }
-        // Floci emulates the aws partition; the live service rejects the others outright, and
-        // with a different error than an unresolvable ARN, so this precedes the lookup.
-        if (AwsArnUtils.isForeignPartition(AwsArnUtils.parse(layerVersionArn))) {
+        // The live service rejects a layer from another partition outright, and with a different
+        // error than an unresolvable ARN, so this precedes the lookup.
+        if (AwsArnUtils.isForeignPartition(AwsArnUtils.parse(layerVersionArn), regionResolver.getPartition())) {
             throw new AwsException("InvalidParameterValueException",
                     "Invalid layer version " + layerVersionArn, 400);
         }
@@ -530,7 +530,7 @@ public class LambdaLayerService {
      * to reject too, or Floci would persist an ARN its own lookup path calls invalid.
      */
     public boolean isForeignPartitionLayerArn(String layerVersionArn) {
-        return AwsArnUtils.isForeignPartition(parseLayerVersionArn(layerVersionArn));
+        return AwsArnUtils.isForeignPartition(parseLayerVersionArn(layerVersionArn), regionResolver.getPartition());
     }
 
     private AwsArnUtils.Arn parseLayerVersionArn(String layerVersionArn) {
@@ -548,7 +548,7 @@ public class LambdaLayerService {
     }
 
     private boolean isForeignLayerArn(AwsArnUtils.Arn arn) {
-        return AwsArnUtils.isForeignPartition(arn)
+        return AwsArnUtils.isForeignPartition(arn, regionResolver.getPartition())
                 || AwsArnUtils.isForeignAccount(arn, regionResolver.getAccountId());
     }
 

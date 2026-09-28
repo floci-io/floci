@@ -217,8 +217,10 @@ class RabbitMqManagerTest {
 
         assertThrows(RuntimeException.class, () -> manager.startContainer(broker("b-1")));
 
-        // Once for the stale-container sweep before create, once for the rollback.
-        verify(lifecycleManager, Mockito.times(2)).removeIfExists("floci-amazonmq-b-1");
+        // Once for the stale-container sweep before create, once for the rollback; the sweep also
+        // clears the pre-migration name so a survivor cannot keep the broker's ports.
+        verify(lifecycleManager, Mockito.times(2)).removeIfExists("floci-aws-amazonmq-b-1");
+        verify(lifecycleManager).removeIfExists("floci-amazonmq-b-1");
         verify(portAllocator).release(5672);
         verify(portAllocator).release(15672);
     }
@@ -242,6 +244,7 @@ class RabbitMqManagerTest {
 
         manager.stopContainer(broker);
 
+        verify(lifecycleManager).removeIfExists("floci-aws-amazonmq-b-2");
         verify(lifecycleManager).removeIfExists("floci-amazonmq-b-2");
         verifyNoMoreInteractions(lifecycleManager);
     }

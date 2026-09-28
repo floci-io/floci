@@ -63,7 +63,7 @@ public class StackSetService {
     private final RegionResolver regionResolver;
 
     StackSetService(CloudFormationService cfnService, StorageFactory storageFactory) {
-        this(cfnService, storageFactory, null, new RegionResolver("us-east-1", "000000000000"));
+        this(cfnService, storageFactory, null, new RegionResolver("us-east-1", "000000000000")); // partition-literal: test-shaped constructor default
     }
 
     @Inject

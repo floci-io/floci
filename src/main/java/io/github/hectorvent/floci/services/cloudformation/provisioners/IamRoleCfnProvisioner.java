@@ -21,7 +21,7 @@ import java.util.Set;
 
 /**
  * CloudFormation provisioning for {@code AWS::IAM::Role}, moved out of the
- * {@code CloudFormationResourceProvisioner} switch. The other IAM types (User, AccessKey, Policy,
+ * former CloudFormation monolith's switch. The other IAM types (User, AccessKey, Policy,
  * ManagedPolicy, InstanceProfile) still live there and share {@link CfnRollback} with this class.
  */
 @ApplicationScoped
@@ -58,14 +58,11 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("ValidationError",
                     "Updating RoleName requires resource replacement, which is not supported.", 400);
         }
-        String assumeDoc = props == null
-                ? null
-                : ctx.engine().resolveJsonAttribute(props.path("AssumeRolePolicyDocument"));
-
-        if (assumeDoc == null) {
-            assumeDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
-        }
-
+        JsonNode assumeDocNode = props != null ? props.get("AssumeRolePolicyDocument") : null;
+        String resolvedAssumeDoc = assumeDocNode != null ? ctx.engine().resolveJsonAttributeStrict(assumeDocNode) : null;
+        String assumeDoc = resolvedAssumeDoc != null
+                ? resolvedAssumeDoc
+                : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
         String path = ctx.resolveOptional(props, "Path");
         if (path == null) {
             path = "/";
@@ -171,7 +168,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                                 + " has no PolicyDocument.", 400);
                     }
                     iamService.putRolePolicy(resolvedRoleName, policyName,
-                            ctx.engine().resolveJsonAttribute(document));
+                            ctx.engine().resolveJsonAttributeStrict(document));
                     inlineWrittenByThisAttempt.add(policyName);
                 }
             }

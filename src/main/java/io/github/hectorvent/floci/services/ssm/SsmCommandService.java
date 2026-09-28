@@ -45,8 +45,8 @@ public class SsmCommandService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SsmCommandService.class);
     private static final int MIN_TIMEOUT_SECONDS = 30;
-    private static final int MAX_STDOUT_CHARS = 24000;
-    private static final int MAX_STDERR_CHARS = 8000;
+    static final int MAX_STDOUT_CHARS = 24000;
+    static final int MAX_STDERR_CHARS = 8000;
 
     private final StorageBackend<String, InstanceInformation> instanceStore;
     private final StorageBackend<String, Command> commandStore;
@@ -199,11 +199,12 @@ public class SsmCommandService implements Resettable {
             inv.setStatusDetails(statusDetails("Pending"));
             inv.setRegion(region);
 
-            if (directCommandExecutor.supports(instanceId, documentName)) {
+            String callerAccountId = regionResolver != null ? regionResolver.getAccountId() : null;
+            if (directCommandExecutor.supports(callerAccountId, instanceId, documentName)) {
                 inv.setStatus("InProgress");
                 inv.setStatusDetails(statusDetails("InProgress"));
                 invocationStore.put(invocationKey(region, commandId, instanceId), inv);
-                directExecutionRequests.add(new DirectExecutionRequest(instanceId, documentName, parameters));
+                directExecutionRequests.add(new DirectExecutionRequest(callerAccountId, instanceId, documentName, parameters));
             }
             else {
                 invocationStore.put(invocationKey(region, commandId, instanceId), inv);
@@ -215,6 +216,7 @@ public class SsmCommandService implements Resettable {
         Command response = copyCommand(command);
         for (DirectExecutionRequest directExecutionRequest : directExecutionRequests) {
             runDirectCommandAsync(
+                    directExecutionRequest.accountId(),
                     commandId,
                     directExecutionRequest.instanceId(),
                     directExecutionRequest.documentName(),
@@ -545,6 +547,7 @@ public class SsmCommandService implements Resettable {
     // ── Internal helpers ────────────────────────────────────────────────────
 
     private void runDirectCommandAsync(
+            String accountId,
             String commandId,
             String instanceId,
             String documentName,
@@ -559,7 +562,7 @@ public class SsmCommandService implements Resettable {
             }
 
             SsmDirectCommandExecutor.ExecutionResult result = directCommandExecutor
-                    .executeIfSupported(instanceId, documentName, parameters, timeoutSeconds)
+                    .executeIfSupported(accountId, instanceId, documentName, parameters, timeoutSeconds)
                     .orElse(null);
             if (result == null) {
                 synchronized (invocation) {
@@ -801,6 +804,7 @@ public class SsmCommandService implements Resettable {
     }
 
     private record DirectExecutionRequest(
+            String accountId,
             String instanceId,
             String documentName,
             Map<String, List<String>> parameters) {}

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ssooidc;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -38,7 +39,7 @@ public class SsoOidcService implements Resettable {
             "urn:ietf:params:oauth:grant-type:device_code",
             "refresh_token");
     private static final Pattern APPLICATION_ARN = Pattern.compile(
-            "arn:aws(?:-[a-z]{1,5}){0,3}:sso::[0-9]{12}:application/(?:sso)?ins-[a-zA-Z0-9-.]{16}/apl-[a-zA-Z0-9]{16}");
+            "arn:" + AwsArnUtils.PARTITION_REGEX + ":sso::[0-9]{12}:application/(?:sso)?ins-[a-zA-Z0-9-.]{16}/apl-[a-zA-Z0-9]{16}");
 
     private final StorageBackend<String, RegisteredClient> clients;
     private final StorageBackend<String, DeviceAuthorization> deviceAuthorizations;

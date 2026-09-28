@@ -7,10 +7,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.ByteArrayOutputStream;
+import java.time.Duration;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -80,17 +82,17 @@ class LambdaReactiveSyncIntegrationTest {
         // 1. Upload V2 to same bucket/key
         given().body(makeZip("v2")).when().put("/" + BUCKET + "/" + KEY).then().statusCode(200);
 
-        // 2. Wait a bit for async event processing and Docker copy
-        Thread.sleep(5000);
-
-        // 3. Invoke again. Should see V2 without calling UpdateFunctionCode
-        given()
-            .body("{}")
-        .when()
-            .post("/2015-03-31/functions/" + FN + "/invocations")
-        .then()
-            .statusCode(200)
-            .body(containsString("v2"));
+        // 2. Invoke again until the async event processing and Docker copy have landed. Should
+        // see V2 without calling UpdateFunctionCode
+        await("the reactive sync to reach the warm container").atMost(Duration.ofSeconds(30))
+                .pollDelay(Duration.ZERO).pollInterval(Duration.ofMillis(250))
+                .untilAsserted(() -> given()
+                        .body("{}")
+                .when()
+                        .post("/2015-03-31/functions/" + FN + "/invocations")
+                .then()
+                        .statusCode(200)
+                        .body(containsString("v2")));
     }
 
     @Test

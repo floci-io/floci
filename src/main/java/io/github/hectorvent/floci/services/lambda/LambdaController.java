@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
@@ -827,13 +828,13 @@ public class LambdaController {
                 .put("RuntimeVersionArn", runtimeVersionArn(fn));
     }
 
-    private static String runtimeVersionArn(LambdaFunction fn) {
-        String region = "us-east-1";
+    private String runtimeVersionArn(LambdaFunction fn) {
+        String region = regionResolver.getDefaultRegion();
         String[] arnParts = fn.getFunctionArn() != null ? fn.getFunctionArn().split(":") : new String[0];
         if (arnParts.length > 3 && !arnParts[3].isBlank()) {
             region = arnParts[3];
         }
-        return "arn:aws:lambda:" + region + "::runtime:" + runtimeVersionId(fn.getRuntime());
+        return AwsArnUtils.Arn.of("lambda", region, "", "runtime:" + runtimeVersionId(fn.getRuntime())).toString();
     }
 
     /**

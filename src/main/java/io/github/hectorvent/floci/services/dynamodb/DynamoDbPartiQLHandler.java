@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.*;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 
 import java.nio.charset.StandardCharsets;
@@ -15,6 +16,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.Base64;
+import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
+import java.util.stream.Collectors;
 
 class DynamoDbPartiQLHandler {
 
@@ -26,19 +30,29 @@ class DynamoDbPartiQLHandler {
         this.mapper = mapper;
     }
 
-    JsonNode execute(Stmt stmt, PartiQLExecuteContext ctx, String region) {
+    record Result(ObjectNode body, DynamoDbWriteCapacity.Cost capacity) {}
+
+    Result execute(Stmt stmt, PartiQLExecuteContext ctx, String region) {
         return switch (stmt) {
             case Stmt.Select s -> executeSelect(s, ctx, region);
             case Stmt.Insert s -> executeInsert(s, region);
             case Stmt.Update s -> executeUpdate(s, region);
             case Stmt.Delete s -> executeDelete(s, region);
+            case Stmt.Exists ignored -> throw new AwsException("ValidationException",
+                    "EXISTS can only be used in ExecuteTransaction write requests.", 400);
         };
     }
 
     // --- SELECT ---
 
-    private JsonNode executeSelect(Stmt.Select stmt, PartiQLExecuteContext ctx, String region) {
+    private Result executeSelect(Stmt.Select stmt, PartiQLExecuteContext ctx, String region) {
         TableDefinition table = service.describeTable(stmt.table(), region);
+        // A vector index is reachable through SearchVectors alone, and PartiQL says so
+        // rather than reporting the index as missing.
+        if (table.findVectorIndex(stmt.index()).isPresent()) {
+            throw new AwsException("ValidationException",
+                    "Scan operation not supported on this index type", 400);
+        }
         // ExecuteStatement omits the index name from the missing-index message,
         // unlike Query/Scan (characterised on real AWS, eu-west-1, 2026-09-02).
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, stmt.index(),
@@ -56,9 +70,11 @@ class DynamoDbPartiQLHandler {
         // projects; the message preserves statement order (characterised on
         // real AWS, eu-west-1, 2026-09-02). An LSI read reaches the co-located
         // base item, so non-projected columns stay legal there.
-        if (accessPath.isGlobalSecondaryIndex() && !"ALL".equals(accessPath.projectionType())) {
+        if (accessPath.isGlobalSecondaryIndex() && !"ALL".equals(accessPath.projectionType())
+                && !stmt.columns().isEmpty()) {
             Set<String> projected = accessPath.projectedAttributeNames(table);
             List<String> unprojected = stmt.columns().stream()
+                    .map(Path::root)
                     .filter(c -> !"*".equals(c))
                     .filter(c -> !projected.contains(c))
                     .toList();
@@ -70,84 +86,27 @@ class DynamoDbPartiQLHandler {
             }
         }
 
-        String pkName = accessPath.partitionKeyName();
-        String skName = accessPath.sortKeyName();
+        DynamoDbPartiQLKeyPlan keys = new DynamoDbPartiQLKeyPlan(stmt.where(), accessPath, table);
+        keys.requireKeyTypesMatchSchema();
+        keys.requireNoOverlap();
+        keys.requireReadsWithinLimit();
+        requireFilterAttributesProjected(keys, accessPath, table);
 
-        Cond.Eq pkEq = null;
-        Cond skCond = null;
-        List<Cond> filterConds = new ArrayList<>();
-
-        for (Cond c : stmt.where()) {
-            String attr = condAttr(c);
-            if (pkName.equals(attr)) {
-                if (c instanceof Cond.Eq eq) {
-                    pkEq = eq;
-                } else {
-                    filterConds.add(c);
-                }
-            } else if (skName != null && skName.equals(attr)) {
-                skCond = c;
-            } else {
-                filterConds.add(c);
-            }
-        }
-
-        List<JsonNode> items;
-        JsonNode lastEvaluatedKey = null;
-
-        if (pkEq == null) {
-            // No equality on the selected source's partition key: AWS performs
-            // a full scan of the table or index and applies the remaining
-            // conditions as a filter (characterised on real AWS, eu-west-1,
-            // 2026-09-02).
-            ExprAttrBuilder eav = new ExprAttrBuilder();
-            ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
-            List<Cond> scanFilters = new ArrayList<>(filterConds);
-            if (skCond != null) {
-                scanFilters.add(skCond);
-            }
-            String fe = buildFe(scanFilters, eav, ean);
-            JsonNode exclusiveStartKey = decodeNextToken(ctx.nextToken(), ctx.tokenBinding());
-            DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, true);
-            DynamoDbService.ScanResult result = service.scan(stmt.table(), fe,
-                    ean.isEmpty() ? null : ean.toNode(mapper),
-                    eav.isEmpty() ? null : eav.toNode(mapper),
-                    null, ctx.limit(), exclusiveStartKey, accessPath.indexName(), region);
-            items = result.items();
-            lastEvaluatedKey = result.lastEvaluatedKey();
-        } else if (accessPath.kind() == DynamoDbAccessPath.Kind.TABLE && skName == null
-                && skCond == null && filterConds.isEmpty()) {
-            ObjectNode key = mapper.createObjectNode();
-            key.set(pkName, toTypedNode(pkEq.val()));
-            JsonNode item = service.getItem(stmt.table(), key, region);
-            items = item != null ? List.of(item) : Collections.emptyList();
-        } else {
-            ExprAttrBuilder eav = new ExprAttrBuilder();
-            ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
-            String kce = buildKce(pkEq, skCond, pkName, skName, eav, ean);
-            String fe = buildFe(filterConds, eav, ean);
-            JsonNode exclusiveStartKey = decodeNextToken(ctx.nextToken(), ctx.tokenBinding());
-            DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
-            DynamoDbService.QueryResult result = service.query(
-                    stmt.table(), null, eav.toNode(mapper), kce, fe,
-                    ctx.limit(), null, accessPath.indexName(), exclusiveStartKey,
-                    ean.isEmpty() ? null : ean.toNode(mapper), region);
-            items = result.items();
-            lastEvaluatedKey = result.lastEvaluatedKey();
-        }
+        Routing routing = routingOf(stmt.where(), keys, accessPath.partitionKeyName(), accessPath.sortKeyName());
+        Supplier<JsonNode> startKey = () -> decodeNextToken(ctx.nextToken(), ctx.tokenBinding());
+        Page page = stmt.orderBy().isEmpty()
+                ? readPage(stmt, table, accessPath, routing, startKey, ctx.limit(), region)
+                : readOrdered(stmt, table, accessPath, routing, startKey.get(), ctx.limit(), region);
+        List<JsonNode> items = page.items();
+        JsonNode lastEvaluatedKey = page.lastEvaluatedKey();
 
         // Apply column projection for non-* SELECT. Projects against the full
         // item: an LSI read can reach attributes outside the index projection
         // (characterised on real AWS, eu-west-1, 2026-09-02).
         if (!stmt.columns().isEmpty()) {
-            ExprAttrNameBuilder projEan = new ExprAttrNameBuilder();
-            String proj = stmt.columns().stream()
-                    .map(projEan::alias)
-                    .reduce((a, b) -> a + "," + b)
-                    .orElse("");
-            ObjectNode eanNode = projEan.isEmpty() ? null : projEan.toNode(mapper);
+            List<SelectedColumn> columns = selectedColumns(stmt);
             items = items.stream()
-                    .map(item -> (JsonNode) ProjectionEvaluator.project(item, proj, eanNode))
+                    .map(item -> (JsonNode) selectColumns(item, columns))
                     .toList();
         }
 
@@ -168,7 +127,265 @@ class DynamoDbPartiQLHandler {
         if (lastEvaluatedKey != null) {
             resp.put("NextToken", encodeNextToken(lastEvaluatedKey, ctx.tokenBinding()));
         }
-        return resp;
+        return new Result(resp, readCapacity(stmt, table, accessPath, page, ctx.consistentRead()));
+    }
+
+    private static DynamoDbWriteCapacity.Cost readCapacity(Stmt.Select stmt, TableDefinition table,
+                                                           DynamoDbAccessPath accessPath, Page page,
+                                                           boolean consistentRead) {
+        double units = NativeDynamoDbJsonHandler.readCapacityUnits(page.scannedBytes(), consistentRead);
+        if (!accessPath.isIndex()) {
+            return new DynamoDbWriteCapacity.Cost(units, Map.of(), Map.of());
+        }
+        double tableUnits = 0;
+        if (fetchesFromTable(stmt, table, accessPath)) {
+            for (JsonNode item : page.scannedItems()) {
+                tableUnits += NativeDynamoDbJsonHandler.readCapacityUnits(
+                        DynamoDbItemSize.calculateItemSize(item), consistentRead);
+            }
+        }
+        Map<String, Double> indexUnits = Map.of(accessPath.indexName(), units);
+        return accessPath.isGlobalSecondaryIndex()
+                ? new DynamoDbWriteCapacity.Cost(tableUnits, indexUnits, Map.of())
+                : new DynamoDbWriteCapacity.Cost(tableUnits, Map.of(), indexUnits);
+    }
+
+    // An LSI read that selects an attribute the index does not project fetches every row it
+    // walks from the base table, and each fetch is charged on its own.
+    private static boolean fetchesFromTable(Stmt.Select stmt, TableDefinition table,
+                                            DynamoDbAccessPath accessPath) {
+        if (accessPath.isGlobalSecondaryIndex() || "ALL".equals(accessPath.projectionType())) {
+            return false;
+        }
+        Set<String> projected = accessPath.projectedAttributeNames(table);
+        return stmt.columns().stream()
+                .map(Path::root)
+                .anyMatch(column -> !projected.contains(column));
+    }
+
+    private record Routing(Cond.Eq pkEq, Cond skCond, List<Cond> filterConds, PVal partition) {}
+
+    private static Routing routingOf(List<Cond> where, DynamoDbPartiQLKeyPlan keys, String pkName, String skName) {
+        Optional<PVal> partition = keys.singlePartition();
+        if (partition.isEmpty()) {
+            return new Routing(null, null, where, null);
+        }
+        Cond.Eq pkEq = null;
+        Cond skCond = null;
+        List<Cond> filterConds = new ArrayList<>();
+        for (Cond c : where) {
+            if (c instanceof Cond.Eq eq && isKeyCondition(eq, pkName)) {
+                pkEq = eq;
+            } else if (skCond == null && DynamoDbPartiQLKeyPlan.isSortKeyRange(c, skName)) {
+                skCond = c;
+            } else if (DynamoDbPartiQLKeyPlan.attributePaths(c).map(Path::root)
+                    .anyMatch(root -> root.equals(pkName) || root.equals(skName))) {
+                return new Routing(null, null, where, partition.get());
+            } else {
+                filterConds.add(c);
+            }
+        }
+        return new Routing(pkEq, skCond, filterConds, null);
+    }
+
+    private record Page(List<JsonNode> items, JsonNode lastEvaluatedKey, long scannedBytes,
+                        List<JsonNode> scannedItems) {}
+
+    private Page readPage(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
+                          Routing routing, Supplier<JsonNode> startKey, Integer limit, String region) {
+        if (routing.partition() != null) {
+            return readPartition(stmt, table, accessPath, routing, startKey, limit, region);
+        }
+        String pkName = accessPath.partitionKeyName();
+        String skName = accessPath.sortKeyName();
+        Cond.Eq pkEq = routing.pkEq();
+        Cond skCond = routing.skCond();
+        List<Cond> filterConds = routing.filterConds();
+
+        if (pkEq == null) {
+            // No equality on the selected source's partition key: AWS performs
+            // a full scan of the table or index and applies the remaining
+            // conditions as a filter (characterised on real AWS, eu-west-1,
+            // 2026-09-02).
+            ExprAttrBuilder eav = new ExprAttrBuilder();
+            ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
+            List<Cond> scanFilters = new ArrayList<>(filterConds);
+            if (skCond != null) {
+                scanFilters.add(skCond);
+            }
+            boolean partialProjection = !"ALL".equals(accessPath.projectionType());
+            String fe = partialProjection ? null : buildFe(scanFilters, eav, ean);
+            JsonNode exclusiveStartKey = startKey.get();
+            DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, true);
+            DynamoDbService.ScanResult result = service.scan(stmt.table(), fe,
+                    ean.isEmpty() ? null : ean.toNode(mapper),
+                    eav.isEmpty() ? null : eav.toNode(mapper),
+                    null, limit, exclusiveStartKey, accessPath.indexName(), region);
+            List<JsonNode> matching = partialProjection
+                    ? matchingIndexView(result.items(), scanFilters, accessPath, table)
+                    : result.items();
+            return new Page(matching, result.lastEvaluatedKey(), result.scannedBytes(), result.scannedItems());
+        }
+        if (accessPath.kind() == DynamoDbAccessPath.Kind.TABLE && skName == null
+                && skCond == null && filterConds.isEmpty()) {
+            ObjectNode key = mapper.createObjectNode();
+            key.set(pkName, toTypedNode(pkEq.val()));
+            JsonNode item = service.getItem(stmt.table(), key, region);
+            if (item == null) {
+                return new Page(Collections.emptyList(), null, 0, List.of());
+            }
+            return new Page(List.of(item), null, DynamoDbItemSize.calculateItemSize(item), List.of(item));
+        }
+        ExprAttrBuilder eav = new ExprAttrBuilder();
+        ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
+        String kce = buildKce(pkEq, skCond, pkName, skName, eav, ean);
+        String fe = buildFe(filterConds, eav, ean);
+        JsonNode exclusiveStartKey = startKey.get();
+        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
+        DynamoDbService.QueryResult result = service.query(
+                stmt.table(), null, eav.toNode(mapper), kce, fe,
+                limit, null, accessPath.indexName(), exclusiveStartKey,
+                ean.isEmpty() ? null : ean.toNode(mapper), region);
+        return new Page(result.items(), result.lastEvaluatedKey(), result.scannedBytes(), result.scannedItems());
+    }
+
+    private Page readPartition(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
+                               Routing routing, Supplier<JsonNode> startKey, Integer limit, String region) {
+        ExprAttrBuilder eav = new ExprAttrBuilder();
+        ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
+        String kce = ean.alias(accessPath.partitionKeyName()) + " = " + eav.add(toTypedNode(routing.partition()));
+        JsonNode exclusiveStartKey = startKey.get();
+        DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath, false);
+        DynamoDbService.QueryResult result = service.query(stmt.table(), null, eav.toNode(mapper), kce, null,
+                limit, null, accessPath.indexName(), exclusiveStartKey, ean.toNode(mapper), region);
+        List<JsonNode> matching = matchingIndexView(result.items(), routing.filterConds(), accessPath, table);
+        return new Page(matching, result.lastEvaluatedKey(), result.scannedBytes(), result.items());
+    }
+
+    // The WHERE clause of an index read sees only what the index stores, so an
+    // attribute it does not project is missing even though the base item has it.
+    private List<JsonNode> matchingIndexView(List<JsonNode> items, List<Cond> conds,
+                                             DynamoDbAccessPath accessPath, TableDefinition table) {
+        ExprAttrBuilder filterValues = new ExprAttrBuilder();
+        ExprAttrNameBuilder filterNames = new ExprAttrNameBuilder();
+        ExpressionEvaluator.Expr filter = ExpressionEvaluator.parse(buildFe(conds, filterValues, filterNames));
+        JsonNode names = filterNames.isEmpty() ? null : filterNames.toNode(mapper);
+        JsonNode values = filterValues.isEmpty() ? null : filterValues.toNode(mapper);
+        UnaryOperator<JsonNode> view = indexView(accessPath, table);
+        return items.stream()
+                .filter(item -> ExpressionEvaluator.evaluate(filter, view.apply(item), names, values))
+                .toList();
+    }
+
+    private static UnaryOperator<JsonNode> indexView(DynamoDbAccessPath accessPath, TableDefinition table) {
+        if ("ALL".equals(accessPath.projectionType())) {
+            return UnaryOperator.identity();
+        }
+        Set<String> projected = accessPath.projectedAttributeNames(table);
+        return item -> ProjectionEvaluator.trimToAttributes((ObjectNode) item, projected);
+    }
+
+    private Page readOrdered(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
+                             Routing routing, JsonNode after, Integer limit, String region) {
+        requireOrderByShape(stmt, accessPath);
+        List<JsonNode> rows = new ArrayList<>();
+        long scannedBytes = 0;
+        List<JsonNode> scannedItems = new ArrayList<>();
+        JsonNode lastKey = null;
+        do {
+            JsonNode from = lastKey;
+            Page page = readPage(stmt, table, accessPath, routing, () -> from, null, region);
+            rows.addAll(page.items());
+            scannedBytes += page.scannedBytes();
+            scannedItems.addAll(page.scannedItems());
+            lastKey = page.lastEvaluatedKey();
+        } while (lastKey != null);
+
+        Comparator<JsonNode> order = orderByComparator(stmt.orderBy(), accessPath, table);
+        rows.sort(order);
+        int start = 0;
+        if (after != null) {
+            while (start < rows.size() && order.compare(rows.get(start), after) <= 0) {
+                start++;
+            }
+        }
+        int end = limit == null ? rows.size() : Math.min(rows.size(), start + limit);
+        JsonNode resumeAfter = start < end && end < rows.size() ? orderingKey(rows.get(end - 1), accessPath, table) : null;
+        return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter, scannedBytes, scannedItems);
+    }
+
+    private static void requireOrderByShape(Stmt.Select stmt, DynamoDbAccessPath accessPath) {
+        if (stmt.where().isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Must have WHERE clause in the statement when using ORDER BY clause.", 400);
+        }
+        Set<String> keys = accessPath.keyAttributeNames();
+        for (OrderTerm term : stmt.orderBy()) {
+            if (!keys.contains(term.attribute())) {
+                throw new AwsException("ValidationException",
+                        "Attribute " + term.attribute() + " in ORDER BY clause must be part of the primary key", 400);
+            }
+        }
+        String pkName = accessPath.partitionKeyName();
+        int hashKeyConditions = stmt.where().stream().mapToInt(c -> hashKeyConditionCount(c, pkName)).sum();
+        if (hashKeyConditions == 0) {
+            throw new AwsException("ValidationException",
+                    "Must have at least one non-optional hash key condition in WHERE clause when using ORDER BY clause.",
+                    400);
+        }
+        boolean ordersByHashKey = stmt.orderBy().stream().anyMatch(term -> term.attribute().equals(pkName));
+        if (hashKeyConditions > 1 && !ordersByHashKey) {
+            throw new AwsException("ValidationException",
+                    "Must have hash key in ORDER BY clause when more than one hash key condition specified in WHERE clause.",
+                    400);
+        }
+    }
+
+    private static int hashKeyConditionCount(Cond cond, String pkName) {
+        return switch (cond) {
+            case Cond.Eq eq when isKeyCondition(eq, pkName) -> 1;
+            case Cond.In in when isKeyCondition(in, pkName) -> in.values().size();
+            case Cond.Or or when or.operands().stream()
+                    .allMatch(o -> o instanceof Cond.Eq && isKeyCondition(o, pkName)) -> or.operands().size();
+            default -> 0;
+        };
+    }
+
+    private static Comparator<JsonNode> orderByComparator(List<OrderTerm> terms, DynamoDbAccessPath accessPath,
+                                                          TableDefinition table) {
+        String pkName = accessPath.partitionKeyName();
+        String skName = accessPath.sortKeyName();
+        boolean pkDescending = directionOf(terms, pkName).orElse(false);
+        Comparator<JsonNode> order = byAttribute(pkName, pkDescending);
+        if (skName != null) {
+            order = order.thenComparing(byAttribute(skName, directionOf(terms, skName).orElse(true)));
+        }
+        for (String tableKey : List.of(table.getPartitionKeyName(), Objects.toString(table.getSortKeyName(), ""))) {
+            if (!tableKey.isEmpty() && !tableKey.equals(pkName) && !tableKey.equals(skName)) {
+                order = order.thenComparing(byAttribute(tableKey, false));
+            }
+        }
+        return order;
+    }
+
+    private static Optional<Boolean> directionOf(List<OrderTerm> terms, String attribute) {
+        return terms.stream().filter(term -> term.attribute().equals(attribute)).findFirst().map(OrderTerm::descending);
+    }
+
+    private static Comparator<JsonNode> byAttribute(String attribute, boolean descending) {
+        Comparator<JsonNode> ascending = (a, b) -> ExpressionEvaluator.compareAttributeValues(a.path(attribute), b.path(attribute));
+        return descending ? ascending.reversed() : ascending;
+    }
+
+    private JsonNode orderingKey(JsonNode row, DynamoDbAccessPath accessPath, TableDefinition table) {
+        ObjectNode key = mapper.createObjectNode();
+        Set<String> names = new LinkedHashSet<>(accessPath.keyAttributeNames());
+        names.add(table.getPartitionKeyName());
+        if (table.getSortKeyName() != null) {
+            names.add(table.getSortKeyName());
+        }
+        names.forEach(name -> key.set(name, row.get(name)));
+        return key;
     }
 
     // NextToken is opaque to the client, so it carries a digest binding it to
@@ -239,86 +456,218 @@ class DynamoDbPartiQLHandler {
 
     private String buildCondExpr(Cond c, ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
         return switch (c) {
-            case Cond.Eq eq   -> ean.alias(eq.attr()) + " = " + eav.add(toTypedNode(eq.val()));
-            case Cond.Cmp cmp -> ean.alias(cmp.attr()) + " " + cmp.op() + " " + eav.add(toTypedNode(cmp.val()));
+            case Cond.Eq eq   -> ean.alias(eq.path()) + " = " + eav.add(toTypedNode(eq.val()));
+            case Cond.Cmp cmp -> ean.alias(cmp.path()) + " " + cmp.op() + " " + eav.add(toTypedNode(cmp.val()));
             case Cond.Between b ->
-                ean.alias(b.attr()) + " BETWEEN " + eav.add(toTypedNode(b.lo())) + " AND " + eav.add(toTypedNode(b.hi()));
+                ean.alias(b.path()) + " BETWEEN " + eav.add(toTypedNode(b.lo())) + " AND " + eav.add(toTypedNode(b.hi()));
             case Cond.BeginsWith bw ->
-                "begins_with(" + ean.alias(bw.attr()) + ", " + eav.add(toTypedNode(bw.prefix())) + ")";
+                "begins_with(" + ean.alias(bw.path()) + ", " + eav.add(toTypedNode(bw.prefix())) + ")";
+            case Cond.In in -> ean.alias(in.path()) + " IN (" + in.values().stream()
+                    .map(v -> eav.add(toTypedNode(v)))
+                    .collect(Collectors.joining(", ")) + ")";
+            case Cond.Missing m ->
+                (m.negated() ? "attribute_exists(" : "attribute_not_exists(") + ean.alias(m.path()) + ")";
+            case Cond.Contains ct ->
+                "contains(" + ean.alias(ct.path()) + ", " + eav.add(toTypedNode(ct.operand())) + ")";
+            case Cond.AttributeType at ->
+                "attribute_type(" + ean.alias(at.path()) + ", " + eav.add(toTypedNode(at.type())) + ")";
+            case Cond.SizeCmp sc ->
+                "size(" + ean.alias(sc.path()) + ") " + sc.op() + " " + eav.add(toTypedNode(sc.val()));
+            case Cond.IsNull isNull -> (isNull.negated() ? "NOT " : "") + "attribute_type(" + ean.alias(isNull.path())
+                    + ", " + eav.add(mapper.createObjectNode().put("S", "NULL")) + ")";
+            case Cond.And and -> joinOperands(and.operands(), " AND ", eav, ean);
+            case Cond.Or or   -> joinOperands(or.operands(), " OR ", eav, ean);
+            case Cond.Not not -> "NOT (" + buildCondExpr(not.operand(), eav, ean) + ")";
         };
     }
 
-    private static String condAttr(Cond c) {
-        return switch (c) {
-            case Cond.Eq eq         -> eq.attr();
-            case Cond.Cmp cmp       -> cmp.attr();
-            case Cond.Between b     -> b.attr();
-            case Cond.BeginsWith bw -> bw.attr();
-        };
+    private String joinOperands(List<Cond> operands, String separator,
+                                ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
+        return "(" + operands.stream()
+                .map(operand -> buildCondExpr(operand, eav, ean))
+                .collect(Collectors.joining(separator)) + ")";
+    }
+
+    private static void requireFilterAttributesProjected(DynamoDbPartiQLKeyPlan keys, DynamoDbAccessPath accessPath,
+                                                         TableDefinition table) {
+        if (!accessPath.isIndex() || "ALL".equals(accessPath.projectionType())) {
+            return;
+        }
+        List<String> unprojected = keys.unprojectedFilterAttributes(accessPath.projectedAttributeNames(table));
+        if (!unprojected.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Secondary index "
+                            + accessPath.indexName()
+                            + " does not project one or more filter attributes: ["
+                            + String.join(", ", unprojected) + "]", 400);
+        }
+    }
+
+    private static boolean isKeyCondition(Cond cond, String keyName) {
+        return cond.bareAttribute().filter(keyName::equals).isPresent();
+    }
+
+    private record SelectedColumn(Path path, String reportedName) {}
+
+    private static List<SelectedColumn> selectedColumns(Stmt.Select stmt) {
+        return stmt.columns().stream()
+                .map(column -> new SelectedColumn(column, column.leafName()))
+                .toList();
+    }
+
+    private ObjectNode selectColumns(JsonNode item, List<SelectedColumn> columns) {
+        ObjectNode projected = mapper.createObjectNode();
+        for (SelectedColumn column : columns) {
+            JsonNode value = resolvePath(item, column.path());
+            if (value != null && !value.isMissingNode()) {
+                projected.set(column.reportedName(), value);
+            }
+        }
+        return projected;
+    }
+
+    private JsonNode resolvePath(JsonNode item, Path path) {
+        List<Seg> segments = path.segments();
+        JsonNode current = item.get(((Seg.Name) segments.getFirst()).value());
+        for (int i = 1; i < segments.size() && current != null; i++) {
+            current = switch (segments.get(i)) {
+                case Seg.Name name -> current.path("M").get(name.value());
+                case Seg.Index index -> {
+                    JsonNode list = current.path("L");
+                    yield index.value() < list.size() ? list.get((int) index.value()) : null;
+                }
+            };
+        }
+        return current;
     }
 
     // --- INSERT ---
 
-    private JsonNode executeInsert(Stmt.Insert stmt, String region) {
+    private Result executeInsert(Stmt.Insert stmt, String region) {
         TableDefinition table = service.describeTable(stmt.table(), region);
         String pkName = table.getPartitionKeyName();
 
         ObjectNode item = mapper.createObjectNode();
         stmt.item().forEach((k, v) -> item.set(k, toTypedNode(v)));
 
+        JsonNode previousItem;
         try {
-            service.putItem(stmt.table(), item, "attribute_not_exists(" + pkName + ")", null, null, region, "NONE");
+            previousItem = service.putItem(stmt.table(), item, "attribute_not_exists(" + pkName + ")",
+                    null, null, region, "NONE");
         } catch (ConditionalCheckFailedException e) {
             throw new AwsException("DuplicateItemException", "Duplicate primary key exists in table", 400);
         }
-        return emptyItemsResponse();
+        return new Result(itemsResponse(null), writeCapacity(table, previousItem, item));
     }
 
     // --- UPDATE ---
 
-    private JsonNode executeUpdate(Stmt.Update stmt, String region) {
+    private Result executeUpdate(Stmt.Update stmt, String region) {
+        requireNoIndexQualifier(stmt.index());
         TableDefinition table = service.describeTable(stmt.table(), region);
+        requireOneValuePerKey(table, stmt.where());
         ObjectNode key = buildKey(table, stmt.where());
 
         ExprAttrBuilder eav = new ExprAttrBuilder();
         ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
-        StringBuilder ue = new StringBuilder();
-        if (!stmt.sets().isEmpty()) {
-            ue.append("SET ");
-            List<String> parts = new ArrayList<>();
-            for (Assign a : stmt.sets()) {
-                parts.add(ean.alias(a.attr()) + " = " + eav.add(toTypedNode(a.val())));
-            }
-            ue.append(String.join(", ", parts));
-        }
-        if (!stmt.removes().isEmpty()) {
-            if (!ue.isEmpty()) ue.append(" ");
-            ue.append("REMOVE ");
-            ue.append(stmt.removes().stream().map(ean::alias).reduce((a, b) -> a + ", " + b).orElse(""));
-        }
+        String ue = buildUpdateExpression(stmt.sets(), stmt.removes(), eav, ean);
+        String ce = updateCondition(table, stmt.where(), eav, ean);
+        String returnValues = stmt.returning().returnValues();
 
-        service.updateItem(stmt.table(), key, null, ue.toString(),
+        DynamoDbService.UpdateResult result = service.updateItem(stmt.table(), key, null, ue,
                 ean.isEmpty() ? null : ean.toNode(mapper),
-                eav.isEmpty() ? null : eav.toNode(mapper), "NONE", region);
-        return emptyItemsResponse();
+                eav.isEmpty() ? null : eav.toNode(mapper), returnValues, ce, region, "NONE",
+                UpdateSizeRule.FINISHED_ITEM);
+        return new Result(itemsResponse(returnedAttributes(stmt.returning(), result)),
+                writeCapacity(table, result.oldItem(), result.newItem()));
+    }
+
+    private static DynamoDbWriteCapacity.Cost writeCapacity(TableDefinition table, JsonNode oldItem,
+                                                            JsonNode newItem) {
+        return DynamoDbWriteCapacity.forWrite(table, oldItem,
+                newItem != null ? DynamoDbNumberUtils.normalizeNumbersInItem(newItem) : null);
+    }
+
+    private static void requireNoIndexQualifier(String index) {
+        if (index != null) {
+            throw new AwsException("ValidationException",
+                    "This operation is not supported on an index", 400);
+        }
+    }
+
+    private static Returning returningOf(Stmt stmt) {
+        return switch (stmt) {
+            case Stmt.Update upd -> upd.returning();
+            case Stmt.Delete del -> del.returning();
+            case Stmt.Select ignored -> Returning.NONE;
+            case Stmt.Insert ignored -> Returning.NONE;
+            case Stmt.Exists ignored -> Returning.NONE;
+        };
+    }
+
+    private JsonNode returnedAttributes(Returning returning, DynamoDbService.UpdateResult result) {
+        return switch (returning) {
+            case NONE -> null;
+            case ALL_OLD -> result.oldItem();
+            case ALL_NEW -> result.newItem();
+            case MODIFIED_OLD -> DynamoDbUpdatedAttributes.collect(result.touched(), false);
+            case MODIFIED_NEW -> DynamoDbUpdatedAttributes.collect(result.touched(), true);
+        };
     }
 
     // --- DELETE ---
 
-    private JsonNode executeDelete(Stmt.Delete stmt, String region) {
+    private Result executeDelete(Stmt.Delete stmt, String region) {
+        requireNoIndexQualifier(stmt.index());
         TableDefinition table = service.describeTable(stmt.table(), region);
+        requireOneValuePerKey(table, stmt.where());
         ObjectNode key = buildKey(table, stmt.where());
-        service.deleteItem(stmt.table(), key, null, null, null, region, "NONE");
-        return emptyItemsResponse();
+
+        ExprAttrBuilder eav = new ExprAttrBuilder();
+        ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
+        String ce = deleteCondition(table, stmt.where(), eav, ean);
+
+        JsonNode oldItem = service.deleteItem(stmt.table(), key, ce,
+                ean.isEmpty() ? null : ean.toNode(mapper),
+                eav.isEmpty() ? null : eav.toNode(mapper), region, "NONE");
+        return new Result(itemsResponse(stmt.returning() == Returning.ALL_OLD ? oldItem : null),
+                writeCapacity(table, oldItem, null));
     }
 
     // --- Transaction item builder ---
 
-    JsonNode toTransactItem(Stmt stmt, String region) {
+    record TransactMember(JsonNode item, TransactionCanceledException.CancellationReason reason) {
+
+        static final TransactMember TABLE_NOT_FOUND = cancels("ResourceNotFound", "Requested resource not found");
+        static final TransactMember KEY_MISMATCH = cancels("ValidationError", "The provided key element does not match the schema");
+
+        static TransactMember cancels(String code, String message) {
+            return new TransactMember(null, new TransactionCanceledException.CancellationReason(code, null, message));
+        }
+    }
+
+    TransactMember toTransactItem(Stmt stmt, String region) {
+        requireNoIndexQualifier(switch (stmt) {
+            case Stmt.Update upd -> upd.index();
+            case Stmt.Delete del -> del.index();
+            default -> null;
+        });
+        Optional<TableDefinition> found = service.findTable(stmt.table(), region);
+        if (found.isEmpty()) {
+            return TransactMember.TABLE_NOT_FOUND;
+        }
+        TableDefinition table = found.get();
+        if (returningOf(stmt) != Returning.NONE) {
+            throw new AwsException("ValidationException",
+                    "RETURNING clause is not supported in ExecuteTransaction.", 400);
+        }
+        Optional<TransactMember> keyProblem = keyProblemOf(stmt, table);
+        if (keyProblem.isPresent()) {
+            return keyProblem.get();
+        }
         ObjectNode txItem = mapper.createObjectNode();
         switch (stmt) {
             case Stmt.Insert ins -> {
-                TableDefinition table = service.describeTable(ins.table(), region);
                 String pkName = table.getPartitionKeyName();
                 ObjectNode item = mapper.createObjectNode();
                 ins.item().forEach((k, v) -> item.set(k, toTypedNode(v)));
@@ -329,65 +678,263 @@ class DynamoDbPartiQLHandler {
                 txItem.set("Put", put);
             }
             case Stmt.Update upd -> {
-                TableDefinition table = service.describeTable(upd.table(), region);
                 ObjectNode key = buildKey(table, upd.where());
                 ExprAttrBuilder eav = new ExprAttrBuilder();
                 ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
-                StringBuilder ue = new StringBuilder();
-                if (!upd.sets().isEmpty()) {
-                    ue.append("SET ");
-                    List<String> parts = new ArrayList<>();
-                    for (Assign a : upd.sets()) {
-                        parts.add(ean.alias(a.attr()) + " = " + eav.add(toTypedNode(a.val())));
-                    }
-                    ue.append(String.join(", ", parts));
-                }
-                if (!upd.removes().isEmpty()) {
-                    if (!ue.isEmpty()) ue.append(" ");
-                    ue.append("REMOVE ");
-                    ue.append(upd.removes().stream().map(ean::alias).reduce((a, b) -> a + ", " + b).orElse(""));
-                }
+                String ue = buildUpdateExpression(upd.sets(), upd.removes(), eav, ean);
                 ObjectNode update = mapper.createObjectNode();
                 update.put("TableName", upd.table());
                 update.set("Key", key);
-                update.put("UpdateExpression", ue.toString());
+                update.put("UpdateExpression", ue);
+                update.put("ConditionExpression", updateCondition(table, upd.where(), eav, ean));
                 if (!eav.isEmpty()) update.set("ExpressionAttributeValues", eav.toNode(mapper));
                 if (!ean.isEmpty()) update.set("ExpressionAttributeNames", ean.toNode(mapper));
                 txItem.set("Update", update);
             }
             case Stmt.Delete del -> {
-                TableDefinition table = service.describeTable(del.table(), region);
                 ObjectNode key = buildKey(table, del.where());
+                ExprAttrBuilder eav = new ExprAttrBuilder();
+                ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
+                String ce = deleteCondition(table, del.where(), eav, ean);
                 ObjectNode delete = mapper.createObjectNode();
                 delete.put("TableName", del.table());
                 delete.set("Key", key);
+                if (ce != null) {
+                    delete.put("ConditionExpression", ce);
+                }
+                if (!eav.isEmpty()) {
+                    delete.set("ExpressionAttributeValues", eav.toNode(mapper));
+                }
+                if (!ean.isEmpty()) {
+                    delete.set("ExpressionAttributeNames", ean.toNode(mapper));
+                }
                 txItem.set("Delete", delete);
             }
             case Stmt.Select ignored ->
                 throw new AwsException("ValidationException",
                         "SELECT is not supported inside ExecuteTransaction", 400);
+            case Stmt.Exists exists -> txItem.set("ConditionCheck", conditionCheck(exists.select(), table));
         }
-        return txItem;
+        return new TransactMember(txItem, null);
+    }
+
+    private ObjectNode conditionCheck(Stmt.Select select, TableDefinition table) {
+        List<Cond> conditions = nonKeyConditions(table, select.where());
+        if (!pinsFullKey(table, select.where()) || conditions.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "EXISTS() must contain a single item read with additional condition", 400);
+        }
+        ExprAttrBuilder eav = new ExprAttrBuilder();
+        ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
+        ObjectNode check = mapper.createObjectNode();
+        check.put("TableName", select.table());
+        check.set("Key", buildKey(table, select.where()));
+        check.put("ConditionExpression", joinOperands(conditions, " AND ", eav, ean));
+        if (!eav.isEmpty()) {
+            check.set("ExpressionAttributeValues", eav.toNode(mapper));
+        }
+        if (!ean.isEmpty()) {
+            check.set("ExpressionAttributeNames", ean.toNode(mapper));
+        }
+        return check;
+    }
+
+    private static Optional<TransactMember> keyProblemOf(Stmt stmt, TableDefinition table) {
+        return switch (stmt) {
+            case Stmt.Insert ins -> table.getKeySchema().stream()
+                    .map(KeySchemaElement::getAttributeName)
+                    .filter(name -> !ins.item().containsKey(name))
+                    .findFirst()
+                    .map(name -> TransactMember.cancels("ValidationError",
+                            "One or more parameter values were invalid: Missing the key " + name + " in the item"));
+            case Stmt.Update upd -> wrongKey(table, upd.where());
+            case Stmt.Delete del -> wrongKey(table, del.where());
+            default -> Optional.empty();
+        };
+    }
+
+    private static Optional<TransactMember> wrongKey(TableDefinition table, List<Cond> where) {
+        boolean namesOneItem = secondKeyValue(table, where).isEmpty() && pinsFullKey(table, where)
+                && keyTypesMatch(table, where);
+        return namesOneItem ? Optional.empty() : Optional.of(TransactMember.KEY_MISMATCH);
+    }
+
+    private static boolean keyTypesMatch(TableDefinition table, List<Cond> where) {
+        return firstKeyValues(table, where).entrySet().stream()
+                .allMatch(key -> DynamoDbPartiQLKeyPlan.matchesKeyType(table, key.getKey(), key.getValue()));
+    }
+
+    TransactMember toTransactGetItem(Stmt.Select stmt, String region) {
+        Optional<TableDefinition> found = service.findTable(stmt.table(), region);
+        if (found.isEmpty()) {
+            return TransactMember.TABLE_NOT_FOUND;
+        }
+        TableDefinition table = found.get();
+        if (stmt.index() != null) {
+            throw new AwsException("ValidationException",
+                    "Reads on indices are not supported within transactions.", 400);
+        }
+        new DynamoDbPartiQLKeyPlan(stmt.where(), DynamoDbAccessPath.resolve(table, null), table).requireNoOverlap();
+        if (!namesOnlyTheKey(table, stmt.where())) {
+            throw new AwsException("ValidationException",
+                    "Select statements within ExecuteTransaction must specify the primary key in the where clause.", 400);
+        }
+        List<Cond> equalities = asEqualities(stmt.where());
+        if (!keyTypesMatch(table, equalities)) {
+            return TransactMember.KEY_MISMATCH;
+        }
+        ObjectNode get = mapper.createObjectNode();
+        get.put("TableName", stmt.table());
+        get.set("Key", buildKey(table, equalities));
+        ObjectNode txItem = mapper.createObjectNode();
+        txItem.set("Get", get);
+        return new TransactMember(txItem, null);
+    }
+
+    JsonNode projectSelected(Stmt.Select stmt, JsonNode item) {
+        if (item == null || stmt.columns().isEmpty()) {
+            return item;
+        }
+        return selectColumns(item, selectedColumns(stmt));
     }
 
     // --- Shared helpers ---
 
-    private ObjectNode buildKey(TableDefinition table, List<Cond> where) {
-        String pkName = table.getPartitionKeyName();
-        String skName = table.getSortKeyName();
-        ObjectNode key = mapper.createObjectNode();
-        for (Cond c : where) {
-            if (c instanceof Cond.Eq eq) {
-                if (pkName.equals(eq.attr()) || (skName != null && skName.equals(eq.attr()))) {
-                    key.set(eq.attr(), toTypedNode(eq.val()));
-                }
+    private String buildUpdateExpression(List<SetClause> sets, List<Path> removes,
+                                         ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
+        List<String> assignments = new ArrayList<>();
+        List<String> adds = new ArrayList<>();
+        List<String> deletes = new ArrayList<>();
+        for (SetClause clause : sets) {
+            switch (clause) {
+                case Assign assign -> assignments.add(assignExpr(assign, eav, ean));
+                case SetAdd add -> adds.add(ean.alias(add.path()) + " " + eav.add(toTypedNode(add.bag())));
+                case SetDelete delete -> deletes.add(ean.alias(delete.path()) + " " + eav.add(toTypedNode(delete.bag())));
             }
         }
-        if (!key.has(pkName)) {
-            throw new AwsException("ValidationException",
-                    "WHERE clause must include an equality condition on the partition key", 400);
+        List<String> clauses = new ArrayList<>();
+        if (!assignments.isEmpty()) {
+            clauses.add("SET " + String.join(", ", assignments));
         }
+        if (!removes.isEmpty()) {
+            clauses.add("REMOVE " + removes.stream()
+                    .map(ean::alias)
+                    .collect(Collectors.joining(", ")));
+        }
+        if (!adds.isEmpty()) {
+            clauses.add("ADD " + String.join(", ", adds));
+        }
+        if (!deletes.isEmpty()) {
+            clauses.add("DELETE " + String.join(", ", deletes));
+        }
+        return String.join(" ", clauses);
+    }
+
+    private String assignExpr(Assign assign, ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
+        String assignment = ean.alias(assign.path()) + " = " + operandExpr(assign.left(), eav, ean);
+        if (assign.op() == null) {
+            return assignment;
+        }
+        return assignment + " " + assign.op() + " " + operandExpr(assign.right(), eav, ean);
+    }
+
+    private String operandExpr(Operand operand, ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
+        return switch (operand) {
+            case Operand.Value value -> eav.add(toTypedNode(value.val()));
+            case Operand.Attribute attribute -> ean.alias(attribute.path());
+            case Operand.ListAppend append -> "list_append(" + operandExpr(append.first(), eav, ean)
+                    + ", " + operandExpr(append.second(), eav, ean) + ")";
+        };
+    }
+
+    private ObjectNode buildKey(TableDefinition table, List<Cond> where) {
+        if (!pinsFullKey(table, where)) {
+            throw new AwsException("ValidationException",
+                    "Where clause does not contain a mandatory equality on all key attributes", 400);
+        }
+        ObjectNode key = mapper.createObjectNode();
+        firstKeyValues(table, where).forEach((name, value) -> key.set(name, toTypedNode(value)));
         return key;
+    }
+
+    private static boolean pinsFullKey(TableDefinition table, List<Cond> where) {
+        return firstKeyValues(table, where).size() == keyAttributeNames(table).size();
+    }
+
+    static void requireReadsWithinLimit(TableDefinition table, List<Cond> where) {
+        new DynamoDbPartiQLKeyPlan(where, DynamoDbAccessPath.resolve(table, null), table).requireReadsWithinLimit();
+    }
+
+    static boolean namesOnlyTheKey(TableDefinition table, List<Cond> where) {
+        List<Cond> equalities = asEqualities(where);
+        return nonKeyConditions(table, equalities).isEmpty() && pinsFullKey(table, equalities);
+    }
+
+    private static List<Cond> asEqualities(List<Cond> where) {
+        return where.stream()
+                .map(c -> c instanceof Cond.In in && in.values().size() == 1 ? new Cond.Eq(in.path(), in.values().getFirst()) : c)
+                .toList();
+    }
+
+    private static Set<String> keyAttributeNames(TableDefinition table) {
+        return DynamoDbAccessPath.resolve(table, null).keyAttributeNames();
+    }
+
+    private static boolean isKeyEquality(Cond cond, Set<String> keyNames) {
+        return cond instanceof Cond.Eq eq && eq.bareAttribute().filter(keyNames::contains).isPresent();
+    }
+
+    private static Map<String, PVal> firstKeyValues(TableDefinition table, List<Cond> where) {
+        Set<String> keyNames = keyAttributeNames(table);
+        Map<String, PVal> firstValues = new LinkedHashMap<>();
+        for (Cond c : where) {
+            if (c instanceof Cond.Eq eq && isKeyEquality(eq, keyNames)) {
+                firstValues.putIfAbsent(eq.path().root(), eq.val());
+            }
+        }
+        return firstValues;
+    }
+
+    private static Optional<Cond.Eq> secondKeyValue(TableDefinition table, List<Cond> where) {
+        Map<String, PVal> firstValues = firstKeyValues(table, where);
+        return where.stream()
+                .filter(c -> c instanceof Cond.Eq eq
+                        && eq.bareAttribute().map(firstValues::get).filter(first -> !first.equals(eq.val())).isPresent())
+                .map(Cond.Eq.class::cast)
+                .findFirst();
+    }
+
+    private static List<Cond> nonKeyConditions(TableDefinition table, List<Cond> where) {
+        Set<String> keyNames = keyAttributeNames(table);
+        Map<String, PVal> firstValues = firstKeyValues(table, where);
+        return where.stream()
+                .filter(c -> !(c instanceof Cond.Eq eq && isKeyEquality(eq, keyNames)
+                        && firstValues.get(eq.path().root()).equals(eq.val())))
+                .toList();
+    }
+
+    private static void requireOneValuePerKey(TableDefinition table, List<Cond> where) {
+        secondKeyValue(table, where).ifPresent(eq -> {
+            throw new AwsException("ValidationException", "Multiple conditions on same key " + eq.path().root()
+                    + ". Only single item Update/Insert/Delete are supported", 400);
+        });
+    }
+
+    private String updateCondition(TableDefinition table, List<Cond> where,
+                                   ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
+        String exists = "attribute_exists(" + ean.alias(table.getPartitionKeyName()) + ")";
+        List<Cond> filters = nonKeyConditions(table, where);
+        return filters.isEmpty() ? exists : exists + " AND " + joinOperands(filters, " AND ", eav, ean);
+    }
+
+    private String deleteCondition(TableDefinition table, List<Cond> where,
+                                   ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
+        List<Cond> filters = nonKeyConditions(table, where);
+        if (filters.isEmpty()) {
+            return null;
+        }
+        return "attribute_not_exists(" + ean.alias(table.getPartitionKeyName()) + ") OR "
+                + joinOperands(filters, " AND ", eav, ean);
     }
 
     JsonNode toTypedNode(PVal val) {
@@ -397,12 +944,34 @@ class DynamoDbPartiQLHandler {
             case PVal.Bool b -> mapper.createObjectNode().put("BOOL", b.v());
             case PVal.Null ignored -> mapper.createObjectNode().put("NULL", true);
             case PVal.Av av -> av.node();
+            case PVal.ListOf list -> {
+                ObjectNode node = mapper.createObjectNode();
+                ArrayNode items = node.putArray("L");
+                list.items().forEach(item -> items.add(toTypedNode(item)));
+                yield node;
+            }
+            case PVal.Tuple tuple -> {
+                ObjectNode node = mapper.createObjectNode();
+                ObjectNode fields = node.putObject("M");
+                tuple.fields().forEach((name, value) -> fields.set(name, toTypedNode(value)));
+                yield node;
+            }
+            case PVal.Bag bag -> {
+                ObjectNode node = mapper.createObjectNode();
+                ArrayNode members = node.putArray(bag.type());
+                bag.members().forEach(member -> members.add(toTypedNode(member).path(bag.type().substring(0, 1))));
+                yield node;
+            }
         };
     }
 
-    private ObjectNode emptyItemsResponse() {
+    private ObjectNode itemsResponse(JsonNode returned) {
         ObjectNode resp = mapper.createObjectNode();
-        resp.set("Items", mapper.createArrayNode());
+        ArrayNode items = mapper.createArrayNode();
+        if (returned != null && !returned.isEmpty()) {
+            items.add(returned);
+        }
+        resp.set("Items", items);
         return resp;
     }
 
@@ -438,6 +1007,22 @@ class DynamoDbPartiQLHandler {
                 aliasToName.put(a, n);
                 return a;
             });
+        }
+
+        String alias(Path path) {
+            StringBuilder expression = new StringBuilder();
+            for (Seg segment : path.segments()) {
+                switch (segment) {
+                    case Seg.Name name -> {
+                        if (!expression.isEmpty()) {
+                            expression.append('.');
+                        }
+                        expression.append(alias(name.value()));
+                    }
+                    case Seg.Index index -> expression.append('[').append(index.value()).append(']');
+                }
+            }
+            return expression.toString();
         }
 
         boolean isEmpty() { return aliasToName.isEmpty(); }

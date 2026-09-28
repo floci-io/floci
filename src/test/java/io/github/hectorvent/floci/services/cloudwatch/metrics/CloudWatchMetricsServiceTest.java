@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
@@ -124,6 +125,60 @@ class CloudWatchMetricsServiceTest {
     }
 
     // ──────────────────────────── GetMetricStatistics ────────────────────────────
+
+    @Test
+    void getMetricStatisticsFiltersByUnit() {
+        MetricDatum count = datum("Requests", 10);
+        count.setUnit("Count");
+        MetricDatum bytes = datum("Requests", 20);
+        bytes.setUnit("Bytes");
+        service.putMetricData(NAMESPACE, List.of(count, bytes), REGION);
+
+        Instant start = Instant.now().minusSeconds(60);
+        Instant end = Instant.now().plusSeconds(60);
+
+        List<CloudWatchMetricsService.Datapoint> matching = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), "Count", REGION);
+        assertEquals(1, matching.size());
+        assertEquals(10.0, matching.getFirst().sum());
+        assertEquals("Count", matching.getFirst().unit());
+
+        List<CloudWatchMetricsService.Datapoint> otherUnit = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), "Bytes", REGION);
+        assertEquals(1, otherUnit.size());
+        assertEquals(20.0, otherUnit.getFirst().sum());
+        assertEquals("Bytes", otherUnit.getFirst().unit());
+
+        List<CloudWatchMetricsService.Datapoint> noMatch = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), "Percent", REGION);
+        assertTrue(noMatch.isEmpty());
+    }
+
+    @Test
+    void getMetricStatisticsTreatsNullOrNoneOrBlankUnitAsNoFilter() {
+        MetricDatum count = datum("Requests", 10);
+        count.setUnit("Count");
+        MetricDatum bytes = datum("Requests", 20);
+        bytes.setUnit("Bytes");
+        service.putMetricData(NAMESPACE, List.of(count, bytes), REGION);
+
+        Instant start = Instant.now().minusSeconds(60);
+        Instant end = Instant.now().plusSeconds(60);
+
+        List<CloudWatchMetricsService.Datapoint> allNull = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), null, REGION);
+        assertEquals(1, allNull.size());
+        assertEquals(30.0, allNull.getFirst().sum());
+
+        List<CloudWatchMetricsService.Datapoint> allNone = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), "None", REGION);
+        assertEquals(1, allNone.size());
+        assertEquals(30.0, allNone.getFirst().sum());
+
+        List<CloudWatchMetricsService.Datapoint> allBlank = service.getMetricStatistics(
+                NAMESPACE, "Requests", null, start, end, 60, List.of("Sum"), "  ", REGION);
+        assertEquals(1, allBlank.size());
+    }
 
     @Test
     void getMetricStatisticsBucketsByPeriod() {
@@ -252,5 +307,21 @@ class CloudWatchMetricsServiceTest {
     void buildDimKeyEmptyDimensions() {
         assertEquals("", CloudWatchMetricsService.buildDimKey(List.of()));
         assertEquals("", CloudWatchMetricsService.buildDimKey(null));
+    }
+
+    /** A writer outside any request can store datums in the account it acts for, not the default one. */
+    @Test
+    void putMetricDataForAccountStoresInThatAccountsPartition() {
+        AccountAwareStorageBackend<MetricDatum> store = AccountAwareStorageBackend.inMemory("000000000000");
+        CloudWatchMetricsService accountAware = new CloudWatchMetricsService(store, new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"));
+
+        accountAware.putMetricDataForAccount("111111111111", NAMESPACE, List.of(datum("Requests", 1)), REGION);
+        accountAware.putMetricData(NAMESPACE, List.of(datum("Requests", 2)), REGION);
+
+        assertEquals(1, store.scanForAccount("111111111111", k -> true).size());
+        assertEquals(1.0, store.scanForAccount("111111111111", k -> true).getFirst().getValue());
+        assertEquals(1, store.scan(k -> true).size(), "the default partition holds only the ambient put");
+        assertEquals(2.0, store.scan(k -> true).getFirst().getValue());
     }
 }

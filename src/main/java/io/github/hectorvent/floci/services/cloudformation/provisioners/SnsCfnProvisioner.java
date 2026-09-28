@@ -48,6 +48,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         String topicName = ctx.resolveOptional(props, "TopicName");
         String contentBasedDedupFlag = ctx.resolveOptional(props, "ContentBasedDeduplication");
         String throughputScope = ctx.resolveOptional(props, "FifoThroughputScope");
+        String maximumMessageSize = ctx.resolveOptional(props, "MaximumMessageSize");
         // The .fifo suffix is what makes SnsService treat a topic as FIFO, so an explicitly named
         // one is FIFO with or without the flag, which only has to steer a generated name.
         boolean fifo = "true".equalsIgnoreCase(ctx.resolveOptional(props, "FifoTopic"))
@@ -83,6 +84,9 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         if (throughputScope != null && !throughputScope.isBlank()) {
             attributes.put("FifoThroughputScope", throughputScope);
         }
+        if (maximumMessageSize != null && !maximumMessageSize.isBlank()) {
+            attributes.put("MaximumMessageSize", maximumMessageSize);
+        }
 
         var topic = snsService.createTopic(topicName, attributes, Map.of(), ctx.region());
         // createTopic leaves an existing topic untouched, so an update writes the mutable
@@ -92,6 +96,14 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
             if (fifo) {
                 desired.putIfAbsent("ContentBasedDeduplication", "false");
                 desired.putIfAbsent("FifoThroughputScope", "Topic");
+            }
+            // A dropped MaximumMessageSize goes back to the AWS default, but only where one was
+            // set: writing the default onto a topic that never carried the attribute would make
+            // GetTopicAttributes report something real SNS omits.
+            if (!desired.containsKey("MaximumMessageSize")
+                    && topic.getAttributes().containsKey("MaximumMessageSize")) {
+                desired.put("MaximumMessageSize",
+                        String.valueOf(SnsService.DEFAULT_MAX_MESSAGE_SIZE));
             }
             desired.forEach((name, value) ->
                     snsService.setTopicAttributes(topic.getTopicArn(), name, value, ctx.region()));

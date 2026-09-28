@@ -312,6 +312,111 @@ class SsmDirectCommandExecutorTest {
         assertEquals("terminated\n", result.get().standardError());
     }
 
+    @Test
+    void stdoutExceedingAwsLimitIsTruncatedToFirst24000CharsWithoutBufferingItAll() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        Instance instance = instance("i-container", "container-1");
+        when(ec2Service.findInstanceById("i-container")).thenReturn(instance);
+        when(ec2Service.isInstanceContainerRunning("i-container")).thenReturn(true);
+
+        ExecCreateCmd execCreate = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+        ExecCreateCmdResponse execCreateResponse = mock(ExecCreateCmdResponse.class);
+        when(execCreateResponse.getId()).thenReturn("exec-1");
+        when(execCreate.exec()).thenReturn(execCreateResponse);
+        when(dockerClient.execCreateCmd("container-1")).thenReturn(execCreate);
+
+        ExecStartCmd execStart = mock(ExecStartCmd.class);
+        when(execStart.exec(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            ResultCallback<Frame> resultCallback = invocation.getArgument(0);
+            // Far more than the AWS 24,000 char stdout limit, delivered as many frames.
+            byte[] chunk = "A".repeat(1000).getBytes();
+            for (int i = 0; i < 100; i++) {
+                resultCallback.onNext(new Frame(StreamType.STDOUT, chunk));
+            }
+            resultCallback.onComplete();
+            return resultCallback;
+        });
+        when(dockerClient.execStartCmd("exec-1")).thenReturn(execStart);
+
+        InspectExecCmd inspectExec = mock(InspectExecCmd.class);
+        InspectExecResponse inspectExecResponse = mock(InspectExecResponse.class);
+        when(inspectExecResponse.getExitCodeLong()).thenReturn(0L);
+        when(inspectExec.exec()).thenReturn(inspectExecResponse);
+        when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectExec);
+
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        Optional<SsmDirectCommandExecutor.ExecutionResult> result = executor.executeIfSupported(
+                "i-container",
+                "AWS-RunShellScript",
+                Map.of("commands", List.of("yes A | head -c 100000")),
+                30);
+
+        assertTrue(result.isPresent());
+        assertEquals(24_000, result.get().standardOutput().length());
+        assertEquals("A".repeat(24_000), result.get().standardOutput());
+    }
+
+    @Test
+    void stderrExceedingAwsLimitIsTruncatedToFirst8000CharsWithoutBufferingItAll() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        Instance instance = instance("i-container", "container-1");
+        when(ec2Service.findInstanceById("i-container")).thenReturn(instance);
+        when(ec2Service.isInstanceContainerRunning("i-container")).thenReturn(true);
+
+        ExecCreateCmd execCreate = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+        ExecCreateCmdResponse execCreateResponse = mock(ExecCreateCmdResponse.class);
+        when(execCreateResponse.getId()).thenReturn("exec-1");
+        when(execCreate.exec()).thenReturn(execCreateResponse);
+        when(dockerClient.execCreateCmd("container-1")).thenReturn(execCreate);
+
+        ExecStartCmd execStart = mock(ExecStartCmd.class);
+        when(execStart.exec(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            ResultCallback<Frame> resultCallback = invocation.getArgument(0);
+            // Far more than the AWS 8,000 char stderr limit, delivered as many frames.
+            byte[] chunk = "E".repeat(1000).getBytes();
+            for (int i = 0; i < 100; i++) {
+                resultCallback.onNext(new Frame(StreamType.STDERR, chunk));
+            }
+            resultCallback.onComplete();
+            return resultCallback;
+        });
+        when(dockerClient.execStartCmd("exec-1")).thenReturn(execStart);
+
+        InspectExecCmd inspectExec = mock(InspectExecCmd.class);
+        InspectExecResponse inspectExecResponse = mock(InspectExecResponse.class);
+        when(inspectExecResponse.getExitCodeLong()).thenReturn(1L);
+        when(inspectExec.exec()).thenReturn(inspectExecResponse);
+        when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectExec);
+
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        Optional<SsmDirectCommandExecutor.ExecutionResult> result = executor.executeIfSupported(
+                "i-container",
+                "AWS-RunShellScript",
+                Map.of("commands", List.of("yes E 1>&2 | head -c 100000")),
+                30);
+
+        assertTrue(result.isPresent());
+        assertEquals(8_000, result.get().standardError().length());
+        assertEquals("E".repeat(8_000), result.get().standardError());
+    }
+
+    @Test
+    void supportsPassesAccountIdToEc2Service() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        Instance instance = instance("i-container", "container-1");
+        when(ec2Service.findInstanceById("111122223333", "i-container")).thenReturn(instance);
+        when(ec2Service.isInstanceContainerRunning("111122223333", "i-container")).thenReturn(true);
+
+        SsmDirectCommandExecutor executor = new SsmDirectCommandExecutor(dockerClient, ec2Service);
+        assertTrue(executor.supports("111122223333", "i-container", "AWS-RunShellScript"));
+        assertFalse(executor.supports("444455556666", "i-container", "AWS-RunShellScript"));
+    }
+
     private static Instance instance(String instanceId, String containerId) {
         Instance instance = new Instance();
         instance.setInstanceId(instanceId);

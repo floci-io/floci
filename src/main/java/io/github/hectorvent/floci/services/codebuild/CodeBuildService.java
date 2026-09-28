@@ -414,6 +414,20 @@ public class CodeBuildService {
 
     // ---- Builds ----
 
+    // Upstream's signature; callers that override none of the per-build source/env fields use this.
+    public Build startBuild(String region, String account, String projectName,
+                            String buildspecOverride,
+                            ProjectEnvironment environmentOverride,
+                            ProjectArtifacts artifactsOverride,
+                            String sourceVersion,
+                            Integer timeoutOverride,
+                            String imageOverride,
+                            String computeTypeOverride) {
+        return startBuild(region, account, projectName, buildspecOverride, environmentOverride, null,
+                artifactsOverride, sourceVersion, null, null, null, timeoutOverride, imageOverride,
+                computeTypeOverride);
+    }
+
     public Build startBuild(String region, String account, String projectName,
                             String buildspecOverride,
                             ProjectEnvironment environmentOverride,

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
@@ -36,10 +37,10 @@ public final class CloudFrontRequestRouter {
     private static final int PATTERN_CACHE_CAPACITY = 256;
     private static final String REGION_PATTERN = "[a-z0-9-]+-[0-9]+";
     private static final Pattern AWS_S3_ENDPOINT = Pattern.compile(
-            "(?:s3|s3\\.(?:dualstack\\.)?" + REGION_PATTERN
+            "(?:s3|s3(?:-fips)?\\.(?:dualstack\\.)?" + REGION_PATTERN
                     + "|s3-" + REGION_PATTERN
                     + "|s3-website[.-]" + REGION_PATTERN
-                    + "|s3-accelerate(?:\\.dualstack)?)\\.amazonaws\\.com(?:\\.cn)?");
+                    + "|s3-accelerate(?:\\.dualstack)?)\\." + AwsPartitions.dnsSuffixRegex());
     private static final Pattern LOCAL_S3_ENDPOINT = Pattern.compile(
             "(?:s3(?:\\." + REGION_PATTERN + ")?"
                     + "|s3-website[.-]" + REGION_PATTERN
@@ -164,6 +165,35 @@ public final class CloudFrontRequestRouter {
         }
         DefaultCacheBehavior dflt = config.getDefaultCacheBehavior();
         return allowedMethodsOrDefault(dflt != null ? dflt.getAllowedMethods() : null);
+    }
+
+    /**
+     * The settings that decide what the cache behavior serving a normalized path forwards to its
+     * origin: cache policy, origin request policy, legacy {@code ForwardedValues} and cached methods.
+     */
+    public record BehaviorForwarding(String cachePolicyId, String originRequestPolicyId,
+                                     Map<String, Object> forwardedValues,
+                                     List<String> cachedMethods) {
+    }
+
+    /** Returns the forwarding settings of the cache behavior that serves a normalized path. */
+    public static BehaviorForwarding matchForwarding(DistributionConfig config, String normalizedPath) {
+        List<CacheBehavior> behaviors = config.getCacheBehaviors();
+        if (behaviors != null) {
+            for (CacheBehavior behavior : behaviors) {
+                if (pathPatternMatches(behavior.getPathPattern(), normalizedPath)) {
+                    return new BehaviorForwarding(behavior.getCachePolicyId(),
+                            behavior.getOriginRequestPolicyId(), behavior.getForwardedValues(),
+                            behavior.getCachedMethods());
+                }
+            }
+        }
+        DefaultCacheBehavior dflt = config.getDefaultCacheBehavior();
+        if (dflt == null) {
+            return new BehaviorForwarding(null, null, null, null);
+        }
+        return new BehaviorForwarding(dflt.getCachePolicyId(), dflt.getOriginRequestPolicyId(),
+                dflt.getForwardedValues(), dflt.getCachedMethods());
     }
 
     private static List<String> allowedMethodsOrDefault(List<String> methods) {

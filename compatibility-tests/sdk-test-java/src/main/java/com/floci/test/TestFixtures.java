@@ -5,6 +5,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.account.AccountClient;
 import software.amazon.awssdk.services.accessanalyzer.AccessAnalyzerClient;
+import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClient;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudhsmv2.CloudHsmV2Client;
 import software.amazon.awssdk.services.cloudfront.CloudFrontClient;
@@ -41,6 +42,7 @@ import software.amazon.awssdk.services.ssooidc.SsoOidcClient;
 import software.amazon.awssdk.services.identitystore.IdentitystoreClient;
 import software.amazon.awssdk.services.budgets.BudgetsClient;
 import software.amazon.awssdk.services.bcmpricingcalculator.BcmPricingCalculatorClient;
+import software.amazon.awssdk.services.timestreaminfluxdb.TimestreamInfluxDbClient;
 import software.amazon.awssdk.services.macie2.Macie2Client;
 import software.amazon.awssdk.services.controlcatalog.ControlCatalogClient;
 import software.amazon.awssdk.services.marketplacecatalog.MarketplaceCatalogClient;
@@ -53,6 +55,7 @@ import software.amazon.awssdk.services.marketplacemetering.MarketplaceMeteringCl
 import software.amazon.awssdk.services.marketplacediscovery.MarketplaceDiscoveryClient;
 import software.amazon.awssdk.services.inspector2.Inspector2Client;
 import software.amazon.awssdk.services.securityhub.SecurityHubClient;
+import software.amazon.awssdk.services.databasemigration.DatabaseMigrationClient;
 import software.amazon.awssdk.services.detective.DetectiveClient;
 import software.amazon.awssdk.services.globalaccelerator.GlobalAcceleratorClient;
 import software.amazon.awssdk.services.rum.RumClient;
@@ -111,6 +114,7 @@ import software.amazon.awssdk.services.scheduler.SchedulerClient;
 import software.amazon.awssdk.services.appconfig.AppConfigClient;
 import software.amazon.awssdk.services.appconfigdata.AppConfigDataClient;
 import software.amazon.awssdk.services.appintegrations.AppIntegrationsClient;
+import software.amazon.awssdk.services.dlm.DlmClient;
 import software.amazon.awssdk.services.datasync.DataSyncClient;
 import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.backup.BackupClient;
@@ -346,6 +350,14 @@ public final class TestFixtures {
 
     public static AccountClient accountClient() {
         return AccountClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static RedshiftServerlessClient redshiftServerlessClient() {
+        return RedshiftServerlessClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -1020,6 +1032,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static DatabaseMigrationClient databaseMigrationClient() {
+        return DatabaseMigrationClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static RumClient rumClient() {
         return RumClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1201,6 +1221,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static DlmClient dlmClient() {
+        return DlmClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static PipesClient pipesClient() {
         return PipesClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1333,6 +1361,14 @@ public final class TestFixtures {
 
     public static BcmPricingCalculatorClient bcmPricingCalculatorClient() {
         return BcmPricingCalculatorClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static TimestreamInfluxDbClient timestreamInfluxDbClient() {
+        return TimestreamInfluxDbClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

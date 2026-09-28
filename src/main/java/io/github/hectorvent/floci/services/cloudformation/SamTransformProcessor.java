@@ -471,7 +471,7 @@ class SamTransformProcessor {
     /**
      * Resolves the SAM authorizer's {@code IdentitySource}, accepting either the documented array
      * form or a single scalar string — mirroring
-     * {@code CloudFormationResourceProvisioner.resolveIdentitySource}, since the raw
+     * the {@code AWS::ApiGatewayV2::Authorizer} provisioner's own IdentitySource parsing, since the raw
      * {@code AWS::ApiGatewayV2::Authorizer} resource this expands to accepts both. SAM itself
      * rejects a JWT authorizer with no {@code IdentitySource} ({@code _validate_jwt_authorizer} in
      * samtranslator/model/apigatewayv2.py), so an absent or empty value is a template error here
@@ -662,7 +662,7 @@ class SamTransformProcessor {
     private ObjectNode authorizerInvokeUri(JsonNode functionArn) {
         ObjectNode sub = objectMapper.createObjectNode();
         ArrayNode args = objectMapper.createArrayNode();
-        args.add("arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthorizerArn}/invocations");
+        args.add("arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthorizerArn}/invocations");
         ObjectNode vars = objectMapper.createObjectNode();
         vars.set("AuthorizerArn", functionArn.deepCopy());
         args.add(vars);
@@ -838,7 +838,7 @@ class SamTransformProcessor {
     private ObjectNode lambdaInvokeUri(String functionLogicalId) {
         ObjectNode sub = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        arr.add("arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FnArn}/invocations");
+        arr.add("arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FnArn}/invocations");
         ObjectNode vars = objectMapper.createObjectNode();
         vars.set("FnArn", getAtt(functionLogicalId, "Arn"));
         arr.add(vars);
@@ -1015,7 +1015,9 @@ class SamTransformProcessor {
         roleProps.set("AssumeRolePolicyDocument", assumePolicy);
 
         ArrayNode managedPolicies = objectMapper.createArrayNode();
-        managedPolicies.add("arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
+        ObjectNode basicExecutionRole = objectMapper.createObjectNode();
+        basicExecutionRole.put("Fn::Sub", "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
+        managedPolicies.add(basicExecutionRole);
 
         JsonNode userPolicies = properties.path("Policies");
         if (userPolicies.isArray()) {
@@ -1371,7 +1373,7 @@ class SamTransformProcessor {
     /**
      * Converts SAM's string-to-string {@code Tags} map into the {@code {Key, Value}} list
      * {@code AWS::StepFunctions::StateMachine} reads (see {@code parseCfnTags} in
-     * {@code CloudFormationResourceProvisioner}, which returns an empty set for anything that is
+     * {@code StepFunctionsCfnProvisioner}, which returns an empty set for anything that is
      * not an array; a verbatim map copy would silently tag nothing). Emitted unconditionally,
      * even for an absent or empty {@code Tags} map: measured against real AWS, us-east-1, a
      * change set's Processed template for a state machine with no source {@code Tags} declared

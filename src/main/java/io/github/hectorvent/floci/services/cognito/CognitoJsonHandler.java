@@ -270,7 +270,8 @@ public class CognitoJsonHandler {
                         : null,
                 request.has("EnableTokenRevocation")
                         ? request.path("EnableTokenRevocation").asBoolean()
-                        : null
+                        : null,
+                authSessionValidity(request)
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("UserPoolClient", clientToNode(client));
@@ -334,7 +335,8 @@ public class CognitoJsonHandler {
                         ? objectMapper.convertValue(request.path("RefreshTokenRotation"),
                         new TypeReference<Map<String, Object>>() {})
                         : null,
-                request.has("EnableTokenRevocation") ? request.path("EnableTokenRevocation").asBoolean() : null
+                request.has("EnableTokenRevocation") ? request.path("EnableTokenRevocation").asBoolean() : null,
+                authSessionValidity(request)
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("UserPoolClient", clientToNode(client));
@@ -1140,6 +1142,7 @@ public class CognitoJsonHandler {
         node.put("ClientId", c.getClientId());
         node.put("UserPoolId", c.getUserPoolId());
         node.put("ClientName", c.getClientName());
+        node.put("AuthSessionValidity", c.getAuthSessionValidity());
         if (c.getClientSecret() != null) {
             node.put("ClientSecret", c.getClientSecret());
         }
@@ -1188,6 +1191,17 @@ public class CognitoJsonHandler {
         node.put("CreationDate", c.getCreationDate());
         node.put("LastModifiedDate", c.getLastModifiedDate());
         return node;
+    }
+
+    private static Integer authSessionValidity(JsonNode request) {
+        JsonNode value = request.get("AuthSessionValidity");
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new AwsException("SerializationException", "Expected integer or null", 400);
+        }
+        return value.intValue();
     }
 
     private ObjectNode resourceServerToNode(ResourceServer server) {

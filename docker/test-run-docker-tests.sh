@@ -12,6 +12,7 @@ export FAIL_BUILD_SUITE=
 
 docker() {
   if [[ "$1" == compose && "$2" == up ]]; then
+    printf 'compose-up\n' >> "$DOCKER_TEST_LOG"
     return 0
   fi
 
@@ -115,3 +116,42 @@ for suite in "${expected_suites[@]}"; do
     exit 1
   }
 done
+
+# A subset with FLOCI_START=0 runs only the named suites and never starts compose.
+: > "$LOG_FILE"
+export FAIL_BUILD_SUITE=
+
+FLOCI_START=0 COMPAT_SUITES="sdk-test-java compat-cdk" bash "$REPO_ROOT/docker/run-docker-tests.sh" || {
+  echo "expected the selected suites to pass" >&2
+  exit 1
+}
+
+grep -q "compose-up" "$LOG_FILE" && {
+  echo "FLOCI_START=0 must not start compose" >&2
+  exit 1
+}
+for suite in sdk-test-java compat-cdk; do
+  grep -qx "run:$suite" "$LOG_FILE" || {
+    echo "expected selected suite to run: $suite" >&2
+    exit 1
+  }
+done
+for suite in sdk-test-python sdk-test-node sdk-test-go sdk-test-awscli compat-terraform compat-opentofu; do
+  grep -q "run:$suite" "$LOG_FILE" && {
+    echo "unselected suite must not run: $suite" >&2
+    exit 1
+  }
+done
+
+# An unknown suite name is refused before anything runs.
+: > "$LOG_FILE"
+if COMPAT_SUITES="sdk-test-rust" bash "$REPO_ROOT/docker/run-docker-tests.sh" 2>/dev/null; then
+  echo "expected an unknown suite name to be refused" >&2
+  exit 1
+fi
+grep -q "run:" "$LOG_FILE" && {
+  echo "an unknown suite name must not run anything" >&2
+  exit 1
+}
+
+echo "run-docker-tests.sh: all checks passed"

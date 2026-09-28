@@ -315,7 +315,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
         return node.asText();
     }
 
-    // The distribution itself, moved out of CloudFormationResourceProvisioner. It reads the
+    // The distribution itself, moved out of the former CloudFormation monolith. It reads the
     // policy ids the types above hand it, which is why the two live in one provisioner.
 
 

@@ -76,6 +76,11 @@ public interface TagHandler {
         return false;
     }
 
+    /** AWS error code used when strict tag payload validation fails. */
+    default String tagValidationErrorCode() {
+        return "ValidationException";
+    }
+
     /**
      * Whether an {@code UntagResource} request may omit the tag-key query parameter.
      * Defaults to {@code false} so strict handlers retain their existing validation.

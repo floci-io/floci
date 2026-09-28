@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -683,7 +684,7 @@ public class NetworkFirewallService {
     }
 
     private static String arn(String region, String accountId, String type, String name) {
-        return "arn:aws:network-firewall:" + region + ":" + accountId + ":" + type + "/" + name;
+        return AwsArnUtils.Arn.of("network-firewall", region, accountId, type + "/" + name).toString();
     }
 
     static String textOrNull(JsonNode request, String field) {

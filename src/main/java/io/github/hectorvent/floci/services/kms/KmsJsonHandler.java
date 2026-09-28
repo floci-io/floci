@@ -36,12 +36,39 @@ public class KmsJsonHandler {
         this.regionResolver = regionResolver;
     }
 
+    private static final Set<String> KEY_ID_OPERATIONS = Set.of(
+            "GetPublicKey", "DescribeKey", "ReplicateKey", "CreateGrant", "ListGrants", "RevokeGrant", "Encrypt", "GenerateDataKey",
+            "GenerateDataKeyWithoutPlaintext", "Sign", "Verify", "GenerateMac", "VerifyMac", "ScheduleKeyDeletion",
+            "CancelKeyDeletion", "TagResource", "UntagResource", "ListResourceTags", "GetKeyPolicy", "PutKeyPolicy",
+            "ListKeyPolicies", "UpdateKeyDescription", "GetKeyRotationStatus", "EnableKeyRotation",
+            "DisableKeyRotation", "EnableKey", "DisableKey", "RotateKeyOnDemand", "GetParametersForImport",
+            "ImportKeyMaterial", "DeleteImportedKeyMaterial");
+
+    private static final Set<String> KEY_ONLY_OPERATIONS = Set.of(
+            "ReplicateKey", "CreateGrant", "ListGrants", "RevokeGrant", "ScheduleKeyDeletion", "CancelKeyDeletion", "TagResource",
+            "UntagResource", "ListResourceTags", "GetKeyPolicy", "PutKeyPolicy", "ListKeyPolicies",
+            "UpdateKeyDescription", "GetKeyRotationStatus", "EnableKeyRotation", "DisableKeyRotation", "EnableKey",
+            "DisableKey", "RotateKeyOnDemand", "GetParametersForImport", "ImportKeyMaterial",
+            "DeleteImportedKeyMaterial");
+
     public Response handle(String action, JsonNode request, String region) {
+        if (KEY_ID_OPERATIONS.contains(action)) {
+            validateKeyIdMember(request, "KeyId");
+            String keyId = request.path("KeyId").asText();
+            if (KEY_ONLY_OPERATIONS.contains(action) && (keyId.startsWith("alias/") || keyId.contains(":alias/"))) {
+                throw new AwsException("InvalidArnException", "Key Aliases are not supported for this operation.", 400);
+            }
+        } else if ("ReEncrypt".equals(action)) {
+            validateKeyIdMember(request, "DestinationKeyId");
+        } else if ("CreateAlias".equals(action) || "UpdateAlias".equals(action)) {
+            validateKeyIdMember(request, "TargetKeyId");
+        }
         return switch (action) {
             case "CreateKey" -> handleCreateKey(request, region);
             case "GenerateRandom" -> handleGenerateRandom(request, region);
             case "GetPublicKey" -> handleGetPublicKey(request, region);
             case "DescribeKey" -> handleDescribeKey(request, region);
+            case "ReplicateKey" -> handleReplicateKey(request, region);
             case "ListKeys" -> handleListKeys(request, region);
             case "CreateGrant" -> handleCreateGrant(request, region);
             case "ListGrants" -> handleListGrants(request, region);
@@ -96,9 +123,28 @@ public class KmsJsonHandler {
         request.path("Tags").forEach(t -> tags.put(t.path("TagKey").asText(), t.path("TagValue").asText()));
         rejectUnknownReservedTags(tags,"TagException");
         String origin = request.path("Origin").asText(null);
-        KmsKey key = service.createKey(description, keyUsage, keySpec, policy, tags, origin, region);
+        boolean multiRegion = request.path("MultiRegion").asBoolean(false);
+        KmsKey key = service.createKey(description, keyUsage, keySpec, policy, tags, origin, multiRegion, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("KeyMetadata", addKeyMetadata(key));
+        return Response.ok(response).build();
+    }
+
+    private Response handleReplicateKey(JsonNode request, String region) {
+        String description = request.path("Description").asText(null);
+        String policy = request.path("Policy").isMissingNode() ? null : request.path("Policy").asText(null);
+        String replicaRegion = requiredText(request, "ReplicaRegion");
+        Map<String, String> tags = new HashMap<>();
+        request.path("Tags").forEach(t -> tags.put(t.path("TagKey").asText(), t.path("TagValue").asText()));
+        rejectUnknownReservedTags(tags, "TagException");
+
+        KmsKey replica = service.replicateKey(request.path("KeyId").asText(), description, policy,
+                tags, replicaRegion, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("ReplicaKeyMetadata", addKeyMetadata(replica));
+        response.put("ReplicaPolicy", replica.getPolicy());
+        ArrayNode replicaTags = response.putArray("ReplicaTags");
+        addTags(replicaTags, replica);
         return Response.ok(response).build();
     }
 
@@ -251,7 +297,7 @@ public class KmsJsonHandler {
 
     private Response handleEncrypt(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        byte[] plaintext = decodeBlob(request, "Plaintext");
+        byte[] plaintext = requireSizedBlob(request, "Plaintext", true, KmsService.MAX_PLAINTEXT_BYTES);
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
         String algorithm = request.path("EncryptionAlgorithm").asText(null);
 
@@ -265,7 +311,7 @@ public class KmsJsonHandler {
     }
 
     private Response handleDecrypt(JsonNode request, String region) {
-        byte[] ciphertext = decodeBlob(request, "CiphertextBlob");
+        byte[] ciphertext = requireSizedBlob(request, "CiphertextBlob", false, KmsService.MAX_CIPHERTEXT_BYTES);
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
         String requestKeyId = request.path("KeyId").asText(null);
         String algorithm = request.path("EncryptionAlgorithm").asText(null);
@@ -283,8 +329,8 @@ public class KmsJsonHandler {
 
     private Response handleGenerateDataKey(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        String spec = request.path("KeySpec").asText(null);
-        int numberOfBytes = request.path("NumberOfBytes").asInt(0);
+        String spec = readDataKeySpec(request);
+        Integer numberOfBytes = readNumberOfBytes(request);
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
 
         Map<String, Object> result = service.generateDataKey(keyId, spec, numberOfBytes, context, region);
@@ -298,11 +344,11 @@ public class KmsJsonHandler {
 
     private Response handleGenerateDataKeyWithoutPlaintext(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        String spec = request.path("KeySpec").asText(null);
-        int numberOfBytes = request.path("NumberOfBytes").asInt(0);
+        String spec = readDataKeySpec(request);
+        Integer numberOfBytes = readNumberOfBytes(request);
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
 
-        Map<String, Object> result = service.generateDataKey(keyId, spec, numberOfBytes, context, region);
+        Map<String, Object> result = service.generateDataKeyWithoutPlaintext(keyId, spec, numberOfBytes, context, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("CiphertextBlob", Base64.getEncoder().encodeToString((byte[]) result.get("CiphertextBlob")));
@@ -311,7 +357,7 @@ public class KmsJsonHandler {
     }
 
     private Response handleReEncrypt(JsonNode request, String region) {
-        byte[] ciphertext = decodeBlob(request, "CiphertextBlob");
+        byte[] ciphertext = requireSizedBlob(request, "CiphertextBlob", false, KmsService.MAX_CIPHERTEXT_BYTES);
         String destKeyId = request.path("DestinationKeyId").asText();
         Map<String, String> sourceContext = readEncryptionContext(request.path("SourceEncryptionContext"));
         Map<String, String> destContext = readEncryptionContext(request.path("DestinationEncryptionContext"));
@@ -344,8 +390,8 @@ public class KmsJsonHandler {
 
     private Response handleSign(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        byte[] message = decodeBlob(request, "Message");
-        String algorithm = request.path("SigningAlgorithm").asText("RSASSA_PSS_SHA_256");
+        byte[] message = requireSizedBlob(request, "Message", true, KmsService.MAX_PLAINTEXT_BYTES);
+        String algorithm = request.path("SigningAlgorithm").asText(null);
         KmsMessageType messageType = KmsMessageType.fromString(request.path("MessageType").asText("RAW"));
 
         byte[] signature = service.sign(keyId, message, algorithm, messageType, region);
@@ -359,24 +405,24 @@ public class KmsJsonHandler {
 
     private Response handleVerify(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        byte[] message = decodeBlob(request, "Message");
-        byte[] signature = decodeBlob(request, "Signature");
-        String algorithm = request.path("SigningAlgorithm").asText("RSASSA_PSS_SHA_256");
+        byte[] signature = requireSizedBlob(request, "Signature", false, KmsService.MAX_CIPHERTEXT_BYTES);
+        byte[] message = requireSizedBlob(request, "Message", true, KmsService.MAX_PLAINTEXT_BYTES);
+        String algorithm = request.path("SigningAlgorithm").asText(null);
         KmsMessageType messageType = KmsMessageType.fromString(request.path("MessageType").asText("RAW"));
 
-        boolean valid = service.verify(keyId, message, signature, algorithm, messageType, region);
+        service.verify(keyId, message, signature, algorithm, messageType, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("KeyId", service.describeKey(keyId, region).getArn());
-        response.put("SignatureValid", valid);
+        response.put("SignatureValid", true);
         response.put("SigningAlgorithm", algorithm);
         return Response.ok(response).build();
     }
 
     private Response handleGenerateMac(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        byte[] message = decodeBlob(request, "Message");
-        String algorithm = request.path("MacAlgorithm").asText();
+        byte[] message = requireSizedBlob(request, "Message", true, KmsService.MAX_PLAINTEXT_BYTES);
+        String algorithm = request.path("MacAlgorithm").asText(null);
 
         KmsService.GenerateMacResult result = service.generateMacAndResolveKey(keyId, message, algorithm, region);
 
@@ -389,9 +435,9 @@ public class KmsJsonHandler {
 
     private Response handleVerifyMac(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        byte[] message = decodeBlob(request, "Message");
-        byte[] mac = decodeBlob(request, "Mac");
-        String algorithm = request.path("MacAlgorithm").asText();
+        byte[] mac = requireSizedBlob(request, "Mac", false, KmsService.MAX_CIPHERTEXT_BYTES);
+        byte[] message = requireSizedBlob(request, "Message", true, KmsService.MAX_PLAINTEXT_BYTES);
+        String algorithm = request.path("MacAlgorithm").asText(null);
 
         KmsService.VerifyMacResult result = service.verifyMacAndResolveKey(keyId, message, mac, algorithm, region);
 
@@ -530,6 +576,10 @@ public class KmsJsonHandler {
     }
 
     private Response handleEnableKeyRotation(JsonNode request, String region) {
+        JsonNode rotationPeriod = request.path("RotationPeriodInDays");
+        if (rotationPeriod.isNumber()) {
+            validateRange("rotationPeriodInDays", rotationPeriod.asInt(), 90, 2560);
+        }
         service.enableKeyRotation(request.path("KeyId").asText(), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -567,7 +617,10 @@ public class KmsJsonHandler {
                     "Custom key stores are not supported.",
                     400);
         }
-        int numberOfBytes = request.path("NumberOfBytes").asInt(0);
+        if (!request.path("NumberOfBytes").isNumber()) {
+            throw new AwsException("ValidationException", "NumberOfBytes is required.", 400);
+        }
+        int numberOfBytes = request.path("NumberOfBytes").asInt();
         byte[] randomBytes = service.generateRandom(numberOfBytes);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Plaintext", Base64.getEncoder().encodeToString(randomBytes));
@@ -616,6 +669,71 @@ public class KmsJsonHandler {
         return Response.ok(response).build();
     }
 
+    // The model check lists every KMS key spec, yet only the data key specs pass.
+    private static String readDataKeySpec(JsonNode request) {
+        String spec = request.path("KeySpec").asText(null);
+        if (spec != null && !"AES_256".equals(spec) && !"AES_128".equals(spec)) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + spec
+                    + "' at 'keySpec' failed to satisfy constraint: Member must satisfy enum value set: [RSA_2048, "
+                    + "RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, ECC_SECG_P256K1, "
+                    + "ECC_NIST_EDWARDS25519, SYMMETRIC_DEFAULT, HMAC_224, HMAC_256, HMAC_384, HMAC_512, SM2, "
+                    + "ML_DSA_44, ML_DSA_65, ML_DSA_87]", 400);
+        }
+        return spec;
+    }
+
+    private static Integer readNumberOfBytes(JsonNode request) {
+        JsonNode numberOfBytes = request.path("NumberOfBytes");
+        if (!numberOfBytes.isNumber()) {
+            return null;
+        }
+        validateRange("numberOfBytes", numberOfBytes.asInt(), 1, 1024);
+        return numberOfBytes.asInt();
+    }
+
+    private static void validateRange(String member, int value, int min, int max) {
+        if (value < min) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + value + "' at '"
+                    + member + "' failed to satisfy constraint: Member must have value greater than or equal to " + min, 400);
+        }
+        if (max < value) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + value + "' at '"
+                    + member + "' failed to satisfy constraint: Member must have value less than or equal to " + max, 400);
+        }
+    }
+
+    private static void validateKeyIdMember(JsonNode request, String member) {
+        String name = Character.toLowerCase(member.charAt(0)) + member.substring(1);
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value null at '" + name
+                    + "' failed to satisfy constraint: Member must not be null", 400);
+        }
+        String keyId = value.asText();
+        String pattern = "Value '" + keyId + "' at '" + name
+                + "' failed to satisfy constraint: Member must satisfy regular expression pattern: ^\\p{ASCII}+$";
+        if (keyId.isEmpty()) {
+            throw new AwsException("ValidationException", "2 validation errors detected: Value '' at '" + name
+                    + "' failed to satisfy constraint: Member must have length greater than or equal to 1; " + pattern, 400);
+        }
+        if (!keyId.chars().allMatch(c -> c < 128)) {
+            throw new AwsException("ValidationException", "1 validation error detected: " + pattern, 400);
+        }
+    }
+
+    // KMS hides the value of a sensitive member, even when it is null.
+    private static byte[] requireSizedBlob(JsonNode request, String member, boolean sensitive, int max) {
+        String name = Character.toLowerCase(member.charAt(0)) + member.substring(1);
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value " + (sensitive ? "" : "null ")
+                    + "at '" + name + "' failed to satisfy constraint: Member must not be null", 400);
+        }
+        byte[] blob = decodeBlob(request, member);
+        KmsService.validateBlobLength(name, blob, max);
+        return blob;
+    }
+
     private static String requireKeyId(JsonNode request) {
         String keyId = request.path("KeyId").asText(null);
         if (keyId == null || keyId.isBlank()) {
@@ -643,7 +761,7 @@ public class KmsJsonHandler {
         keyMetadata.put("Arn", k.getArn());
         keyMetadata.put("CreationDate", k.getCreationDate());
         keyMetadata.put("Enabled", k.isEnabled());
-        keyMetadata.put("Description", k.getDescription());
+        keyMetadata.put("Description", k.getDescription() == null ? "" : k.getDescription());
         keyMetadata.put("KeyUsage", k.getKeyUsage().name());
         keyMetadata.put("KeyState", k.getKeyState());
         keyMetadata.put("Origin", k.getOrigin());
@@ -656,11 +774,58 @@ public class KmsJsonHandler {
         keyMetadata.put("KeyManager", "CUSTOMER");
         keyMetadata.put("CustomerMasterKeySpec", k.getKeySpec().name());
         keyMetadata.put("KeySpec", k.getKeySpec().name());
+        keyMetadata.put("MultiRegion", k.isMultiRegion());
+        if (k.isMultiRegion()) {
+            keyMetadata.set("MultiRegionConfiguration", addMultiRegionConfiguration(k));
+        }
         addAlgorithms(k, keyMetadata);
         if (k.getDeletionDate() > 0) {
             keyMetadata.put("DeletionDate", k.getDeletionDate());
         }
         return keyMetadata;
+    }
+
+    private ObjectNode addMultiRegionConfiguration(KmsKey key) {
+        ObjectNode configuration = objectMapper.createObjectNode();
+        configuration.put("MultiRegionKeyType", key.getMultiRegionKeyType());
+
+        String primaryRegion = key.getMultiRegionPrimaryRegion();
+        KmsKey primary = service.listKeys(primaryRegion).stream()
+                .filter(candidate -> candidate.isMultiRegion())
+                .filter(candidate -> key.getKeyId().equals(candidate.getKeyId()))
+                .filter(candidate -> "PRIMARY".equals(candidate.getMultiRegionKeyType()))
+                .findFirst()
+                .orElseGet(() -> {
+                    KmsKey fallback = new KmsKey();
+                    fallback.setArn(regionResolver.buildArn("kms", primaryRegion, "key/" + key.getKeyId()));
+                    return fallback;
+                });
+        ObjectNode primaryKey = configuration.putObject("PrimaryKey");
+        primaryKey.put("Arn", primary.getArn());
+        primaryKey.put("Region", primaryRegion);
+
+        ArrayNode replicas = configuration.putArray("ReplicaKeys");
+        for (KmsKey candidate : service.listAllMultiRegionKeys(key.getKeyId())) {
+            if (!"PRIMARY".equals(candidate.getMultiRegionKeyType())) {
+                ObjectNode replica = replicas.addObject();
+                replica.put("Arn", candidate.getArn());
+                replica.put("Region", regionFromArn(candidate.getArn()));
+            }
+        }
+        return configuration;
+    }
+
+    private static String regionFromArn(String arn) {
+        String[] parts = arn.split(":", 6);
+        return parts.length > 3 ? parts[3] : "";
+    }
+
+    private static void addTags(ArrayNode array, KmsKey key) {
+        key.getTags().forEach((keyName, value) -> {
+            ObjectNode tag = array.addObject();
+            tag.put("TagKey", keyName);
+            tag.put("TagValue", value);
+        });
     }
 
     private ObjectNode errorResponse(String code, String message) {

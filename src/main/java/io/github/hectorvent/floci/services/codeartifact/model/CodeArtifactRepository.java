@@ -25,6 +25,15 @@ public class CodeArtifactRepository {
     private Map<String, String> tags = new LinkedHashMap<>();
     private String policyDocument;
     private String policyRevision;
+    /**
+     * The sidecar-backed id for each package format this repository has been used through (keyed
+     * by format name, e.g. {@code "maven"}), unique per creation so a deleted-and-recreated
+     * repository of the same name never inherits a previous repository's leftover artifacts for
+     * that format. What the id actually names depends on the format's sidecar shape: a Reposilite
+     * repository name for {@code maven} (one shared container, many named repositories inside
+     * it). Internal; never surfaced in the public API response.
+     */
+    private Map<String, String> sidecarContainerIds = new LinkedHashMap<>();
 
     public String getName() {
         return name;
@@ -128,5 +137,13 @@ public class CodeArtifactRepository {
 
     public void setPolicyRevision(String policyRevision) {
         this.policyRevision = policyRevision;
+    }
+
+    public Map<String, String> getSidecarContainerIds() {
+        return Collections.unmodifiableMap(sidecarContainerIds);
+    }
+
+    public void setSidecarContainerIds(Map<String, String> sidecarContainerIds) {
+        this.sidecarContainerIds = sidecarContainerIds;
     }
 }

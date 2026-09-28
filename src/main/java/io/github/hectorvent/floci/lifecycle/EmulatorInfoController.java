@@ -23,7 +23,9 @@ import jakarta.ws.rs.POST;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.security.GeneralSecurityException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -153,17 +155,52 @@ public class EmulatorInfoController {
         return reset();
     }
 
-    private void performReset() {
-        // Containers first: they are tracked independently of StorageBackend, so this can run
+    private synchronized void performReset() {
+        // Resolve live instances before taking any storage locks. Serialize resets so one reset
+        // cannot resume a publisher while another is still wiping its storage.
+        List<Resettable> services = new ArrayList<>();
+        for (Resettable service : resettables) {
+            services.add(service);
+        }
+        // Every service may refuse before the first destructive step, so a refusal changes nothing.
+        for (Resettable service : services) {
+            service.checkReset();
+        }
+        // Containers next: they are tracked independently of StorageBackend, so this can run
         // in any order relative to the storage wipe below, but stopping them here means a
         // client's reset actually reflects a clean slate instead of leaving Batch, CodeBuild,
         // or SageMaker containers running with no record of them left in the store.
         ContainerTeardowns.stopAll(containerTeardowns, LOG);
-        // Storage before resettables: services re-create their bootstrap state in clear(), and
-        // a wipe afterwards would remove it again until the next restart.
-        storageFactory.clearAll();
-        for (Resettable r : resettables) {
-            r.clear();
+        RuntimeException failure = null;
+        try {
+            for (Resettable service : services) {
+                service.beforeReset();
+            }
+            // Storage still precedes clear(): services recreate their bootstrap state there.
+            storageFactory.clearAll();
+            for (Resettable service : services) {
+                service.clear();
+            }
+        } catch (RuntimeException e) {
+            failure = e;
+        } finally {
+            // Every service, not only those whose beforeReset() ran: the teardowns above already
+            // shut down the pools that afterReset() restores, and a beforeReset() that throws
+            // would otherwise leave every later service with its pool terminated for good.
+            for (Resettable service : services.reversed()) {
+                try {
+                    service.afterReset();
+                } catch (RuntimeException e) {
+                    if (failure == null) {
+                        failure = e;
+                    } else {
+                        failure.addSuppressed(e);
+                    }
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 

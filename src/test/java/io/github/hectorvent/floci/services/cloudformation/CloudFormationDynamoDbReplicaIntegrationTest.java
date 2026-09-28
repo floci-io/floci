@@ -13,10 +13,8 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Verifies global-table v2 replica support: the DynamoDB API path (UpdateTable ReplicaUpdates +
@@ -306,7 +304,7 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
 
         // Deleting the stack must detach the replica from the surviving table (async delete).
         deleteStack(stackName);
-        awaitStackGone(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
 
         // The table still exists, but its replica is gone.
         given()
@@ -317,23 +315,5 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
         .when().post("/").then().statusCode(200)
             .body(containsString("\"TableName\":\"" + tableName + "\""))
             .body(not(containsString(REPLICA_REGION)));
-    }
-
-    private void awaitStackGone(String stackName) {
-        await()
-            .atMost(STACK_DELETE_TIMEOUT)
-            .pollInterval(STACK_DELETE_POLL_INTERVAL)
-            .untilAsserted(() -> {
-                String body = given()
-                    .contentType("application/x-www-form-urlencoded")
-                    .header("Authorization", CFN_AUTH)
-                    .formParam("Action", "DescribeStacks")
-                    .formParam("StackName", stackName)
-                .when().post("/").then().extract().asString();
-                if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                    fail("stack delete failed: " + body);
-                }
-                assertTrue(body.contains("does not exist"), "stack still exists: " + body);
-            });
     }
 }

@@ -83,6 +83,21 @@ class StepFunctionsMapConcurrencyIntegrationTest {
                         + "\"MaxConcurrencyPath\":\"$.config.['max-limit']\","), input), 4);
     }
 
+    /**
+     * A Reference Path may be rooted at the Context Object, so MaxConcurrencyPath reads
+     * {@code $$.Execution.Input} even though InputPath has narrowed the state input to a subtree
+     * that does not contain the limit.
+     */
+    @Test
+    void mapResolvesMaxConcurrencyPathFromTheContextObject() throws Exception {
+        String input = "{\"maxLimit\":2,\"payload\":{\"items\":["
+                + "{\"i\":0},{\"i\":1},{\"i\":2},{\"i\":3}]}}";
+
+        assertOrderedItems(run(mapDefWithConcurrencyField(
+                "\"InputPath\":\"$.payload\","
+                        + "\"MaxConcurrencyPath\":\"$$.Execution.Input.maxLimit\","), input), 4);
+    }
+
     @Test
     void mapResolvesItemsPathFromEffectiveInputWithoutResultWriter() throws Exception {
         String definition = """

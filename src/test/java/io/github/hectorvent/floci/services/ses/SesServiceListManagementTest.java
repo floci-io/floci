@@ -65,7 +65,7 @@ class SesServiceListManagementTest {
 
     private void send(List<String> to, String topicName) {
         service.sendEmail(FROM, to, null, null, null, null, "Subject", "body", null,
-                null, List.of(), List.of(), new ListManagementOptions(LIST, topicName), REGION);
+                null, List.of(), List.of(), new ListManagementOptions(LIST, topicName), null, REGION);
     }
 
     private SmtpRelay.RelayMessage capturedRelay() {
@@ -124,7 +124,7 @@ class SesServiceListManagementTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.sendEmail(FROM, List.of("sportsin@example.com"), null, null, null, null,
                         "Subject", "body", null, null, List.of(), List.of(),
-                        new ListManagementOptions("ghost-list", null), REGION));
+                        new ListManagementOptions("ghost-list", null), null, REGION));
         assertEquals(404, ex.getHttpStatus());
     }
 
@@ -134,7 +134,7 @@ class SesServiceListManagementTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.sendEmail(FROM, List.of("sportsin@example.com"), null, null, null, null,
                         "Subject", "body", null, null, List.of(), List.of(),
-                        new ListManagementOptions(LIST, "GhostTopic"), REGION));
+                        new ListManagementOptions(LIST, "GhostTopic"), null, REGION));
         assertEquals(400, ex.getHttpStatus());
     }
 
@@ -143,7 +143,7 @@ class SesServiceListManagementTest {
         // Without ListManagementOptions the contact list is never consulted: an unsubscribed contact
         // is not suppressed and no contact is auto-created.
         service.sendEmail(FROM, List.of("unsub@example.com"), null, null, null, null,
-                "Subject", "body", null, null, List.of(), List.of(), null, REGION);
+                "Subject", "body", null, null, List.of(), List.of(), null, null, REGION);
         assertEquals(List.of("unsub@example.com"), capturedRelayTo());
     }
 
@@ -152,7 +152,7 @@ class SesServiceListManagementTest {
         // newbie is not a contact (auto-created, Sports defaults OPT_IN) so the send reaches the relay.
         service.sendEmail(FROM, List.of("newbie@example.com"), null, null, null, null,
                 "Subject", "text", "<p>Unsub: {{amazonSESUnsubscribeUrl}}</p>",
-                null, List.of(), List.of(), new ListManagementOptions(LIST, "Sports"), REGION);
+                null, List.of(), List.of(), new ListManagementOptions(LIST, "Sports"), null, REGION);
         String html = capturedRelayBodyHtml();
         assertTrue(html.contains("http://localhost:4566/_aws/ses/unsubscribe?"), html);
         assertTrue(html.contains("contactList=" + LIST), html);
@@ -164,7 +164,7 @@ class SesServiceListManagementTest {
     void multiRecipient_doesNotReplacePlaceholder() {
         service.sendEmail(FROM, List.of("newbie@example.com", "sportsin@example.com"), null, null, null,
                 null, "Subject", "text", "<p>Unsub: {{amazonSESUnsubscribeUrl}}</p>",
-                null, List.of(), List.of(), new ListManagementOptions(LIST, "Sports"), REGION);
+                null, List.of(), List.of(), new ListManagementOptions(LIST, "Sports"), null, REGION);
         assertTrue(capturedRelayBodyHtml().contains("{{amazonSESUnsubscribeUrl}}"),
                 "multi-recipient send must not inject the unsubscribe link");
     }
@@ -217,7 +217,7 @@ class SesServiceListManagementTest {
     void singleRecipient_addsListUnsubscribeHeadersToRelay() {
         service.sendEmail(FROM, List.of("newbie@example.com"), null, null, null, null,
                 "Subject", "text", "<p>x</p>", null, List.of(), List.of(),
-                new ListManagementOptions(LIST, "Sports"), REGION);
+                new ListManagementOptions(LIST, "Sports"), null, REGION);
         List<MessageHeader> headers = capturedRelayHeaders();
         assertTrue(headers.stream().anyMatch(h -> "List-Unsubscribe".equals(h.name())
                 && h.value().contains("/_aws/ses/unsubscribe")), "List-Unsubscribe header must reach the relay");
@@ -230,7 +230,7 @@ class SesServiceListManagementTest {
         service.sendEmail(FROM, List.of("newbie@example.com"), null, null, null, null,
                 "Subject", "text", "<p>x</p>", null, List.of(),
                 List.of(new MessageHeader("List-Unsubscribe", "<https://caller.example/u>")),
-                new ListManagementOptions(LIST, "Sports"), REGION);
+                new ListManagementOptions(LIST, "Sports"), null, REGION);
         long count = capturedRelayHeaders().stream()
                 .filter(h -> "List-Unsubscribe".equalsIgnoreCase(h.name())).count();
         assertEquals(1L, count);

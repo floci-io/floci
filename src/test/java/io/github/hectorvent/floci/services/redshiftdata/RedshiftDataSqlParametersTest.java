@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshiftdata;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
@@ -72,7 +73,7 @@ class RedshiftDataSqlParametersTest {
     @Test
     void parseParametersReadsNameValueObjectsAndRejectsDuplicates() {
         ObjectNode request = om.createObjectNode();
-        var params = request.putArray("Parameters");
+        ArrayNode params = request.putArray("Parameters");
         params.addObject().put("name", "id").put("value", "1");
         params.addObject().put("name", "id").put("value", "2");
         AwsException e = assertThrows(AwsException.class,

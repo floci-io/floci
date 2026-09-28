@@ -67,7 +67,7 @@ class PostgresProtocolHandlerTest {
         IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
                 new MemorySocket(input.toByteArray()), NEVER_CONNECT,
                 "dbadmin", "adminpass", "postgres",
-                false, testSigV4Validator(), testTlsCertificates(),
+                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000));
 
         assertEquals("PostgreSQL startup message length exceeds the 1048576 byte limit: 1048577",
@@ -88,7 +88,7 @@ class PostgresProtocolHandlerTest {
         assertNull(PostgresProtocolHandler.authenticate(
                 client, NEVER_CONNECT,
                 "dbadmin", "adminpass", "postgres",
-                false, testSigV4Validator(), testTlsCertificates(),
+                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000));
     }
 
@@ -102,7 +102,7 @@ class PostgresProtocolHandlerTest {
         IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
                 new MemorySocket(input.toByteArray()), NEVER_CONNECT,
                 "dbadmin", "adminpass", "postgres",
-                false, testSigV4Validator(), testTlsCertificates(),
+                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000));
 
         assertEquals("PostgreSQL startup message length is below the 8 byte minimum: -1",
@@ -120,7 +120,7 @@ class PostgresProtocolHandlerTest {
         IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
                 new MemorySocket(input.toByteArray()), NEVER_CONNECT,
                 "dbadmin", "adminpass", "postgres",
-                false, testSigV4Validator(), testTlsCertificates(),
+                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000));
 
         assertEquals("PostgreSQL password message length is below the 5 byte minimum: 4",
@@ -137,7 +137,7 @@ class PostgresProtocolHandlerTest {
         IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
                 new MemorySocket(startupAndPassword()), () -> new MemorySocket(backendInput.toByteArray()),
                 "dbadmin", "adminpass", "postgres",
-                false, testSigV4Validator(), testTlsCertificates(),
+                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000));
 
         assertEquals("PostgreSQL backend authentication message length exceeds the 1048576 byte limit: 1048577",
@@ -157,7 +157,7 @@ class PostgresProtocolHandlerTest {
         IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
                 new MemorySocket(startupAndPassword()), () -> new MemorySocket(backendInput.toByteArray()),
                 "dbadmin", "adminpass", "postgres",
-                false, testSigV4Validator(), testTlsCertificates(),
+                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000));
 
         assertEquals("PostgreSQL backend message length exceeds the 1048576 byte limit: 1048577",
@@ -177,7 +177,7 @@ class PostgresProtocolHandlerTest {
         IOException error = assertThrows(IOException.class, () -> PostgresProtocolHandler.authenticate(
                 new MemorySocket(startupAndPassword()), () -> new MemorySocket(backendInput.toByteArray()),
                 "dbadmin", "adminpass", "postgres",
-                false, testSigV4Validator(), testTlsCertificates(),
+                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000));
 
         assertEquals("PostgreSQL SASL continue message length exceeds the 1048576 byte limit: 1048577",
@@ -224,7 +224,7 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.authenticate(
                                 proxyClient, () -> backend,
                                 "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(), testTlsCertificates(),
+                                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                         if (session != null) {
                             PostgresProtocolHandler.bridge(session);
@@ -284,7 +284,7 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.authenticate(
                                 proxyClient, () -> backend,
                                 "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(), testTlsCertificates(),
+                                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                         if (session != null) {
                             PostgresProtocolHandler.bridge(session);
@@ -344,7 +344,7 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.authenticate(
                                 proxyClient, () -> backend,
                                 "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(), testTlsCertificates(),
+                                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                         if (session != null) {
                             PostgresProtocolHandler.bridge(session);
@@ -413,13 +413,13 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.authenticate(
                                 proxyClient, () -> backend,
                                 "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(), tlsCertificates,
+                                false, testSigV4Validator(), testBinding(), tlsCertificates,
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                         if (session != null) {
                             PostgresProtocolHandler.bridge(session);
                         }
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
+                    } catch (IOException expected) {
+                        // The test closes proxyClient once the handshake succeeds, which ends authenticate.
                     }
                 });
 
@@ -467,7 +467,7 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.authenticate(
                                 proxyClient, () -> backend,
                                 "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(), tlsCertificates,
+                                false, testSigV4Validator(), testBinding(), tlsCertificates,
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                         if (session != null) {
                             PostgresProtocolHandler.bridge(session);
@@ -517,7 +517,7 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.authenticate(
                                 proxyClient, () -> backend,
                                 "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(), testTlsCertificates(),
+                                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                         if (session != null) {
                             PostgresProtocolHandler.bridge(session);
@@ -644,6 +644,30 @@ class PostgresProtocolHandlerTest {
 
             assertEquals("SET SESSION AUTHORIZATION \"nosuchrole\"", backendQuery.get());
         }
+    }
+
+    @Test
+    void iamSessionIsRejectedWhenTheTokenWasGeneratedForAnotherHost() throws Exception {
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(input);
+        writeStartup(out, "app_user", "postgres");
+        writePassword(out, SigV4TokenTestHelper.createRdsToken("other.example.local", 7001, "app_user",
+                "AKIATEST", "secret", Instant.now(), 900));
+        MemorySocket client = new MemorySocket(input.toByteArray());
+
+        assertNull(PostgresProtocolHandler.authenticate(
+                client, NEVER_CONNECT,
+                "dbadmin", "adminpass", "postgres",
+                true, testSigV4Validator(), testBinding(), testTlsCertificates(),
+                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000));
+
+        DataInputStream clientIn = new DataInputStream(
+                new ByteArrayInputStream(client.getOutputStream().toByteArray()));
+        readCleartextPasswordChallenge(clientIn);
+        Map<Character, String> error = readErrorResponse(clientIn);
+        assertEquals("FATAL", error.get('S'));
+        assertEquals("28P01", error.get('C'));
+        assertEquals("password authentication failed for user \"app_user\"", error.get('M'));
     }
 
     @Test
@@ -882,7 +906,7 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.authenticate(
                                 proxyClient, connector,
                                 "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(), testTlsCertificates(),
+                                false, testSigV4Validator(), testBinding(), testTlsCertificates(),
                                 (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 200);
                     } catch (IOException e) {
                         authFailure.set(e);
@@ -916,7 +940,7 @@ class PostgresProtocolHandlerTest {
                         PostgresProtocolHandler.authenticate(
                         proxyClient, () -> backend,
                         "dbadmin", "adminpass", "postgres",
-                        true, testSigV4Validator(), testTlsCertificates(),
+                        true, testSigV4Validator(), testBinding(), testTlsCertificates(),
                         (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                 if (session != null) {
                     PostgresProtocolHandler.bridge(session);
@@ -1119,6 +1143,11 @@ class PostgresProtocolHandlerTest {
             i++;
         }
         return fields;
+    }
+
+    /** The endpoint the test proxy publishes; {@link #rdsToken} signs tokens for exactly this endpoint. */
+    private static RdsProxyBinding testBinding() {
+        return new RdsProxyBinding("localhost", 7001, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true);
     }
 
     private static RdsSigV4Validator testSigV4Validator() {

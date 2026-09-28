@@ -4,13 +4,20 @@ import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+
+import static io.restassured.RestAssured.given;
 
 /**
  * Shared test utilities for WebSocket integration tests.
@@ -35,6 +42,28 @@ public final class WebSocketTestSupport {
             zos.closeEntry();
         }
         return Base64.getEncoder().encodeToString(baos.toByteArray());
+    }
+
+    // ──────────────────────────── Lambda cleanup ────────────────────────────
+
+    /**
+     * Deletes the given Lambda functions concurrently. Deleting a function that has a warm
+     * container stops that container, which takes about a second, so deleting several one after
+     * another dominates a test class's cleanup.
+     */
+    public static void deleteFunctions(String... functionNames) throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(functionNames.length);
+        try {
+            List<Future<?>> deletions = new ArrayList<>();
+            for (String functionName : functionNames) {
+                deletions.add(executor.submit(() -> given().when().delete("/2015-03-31/functions/" + functionName)));
+            }
+            for (Future<?> deletion : deletions) {
+                deletion.get();
+            }
+        } finally {
+            executor.shutdown();
+        }
     }
 
     // ──────────────────────────── WebSocket URL construction ────────────────────────────

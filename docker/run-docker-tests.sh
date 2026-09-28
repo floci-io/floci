@@ -1,25 +1,35 @@
 #!/bin/bash
 set -e
 
-# 1. Start Floci
-echo "=== Starting Floci with docker-compose ==="
-docker compose up -d --build
+# Environment:
+#   FLOCI_START=0       skip starting Floci; use the container already running under compose
+#                       (for example one started by `make native-up`)
+#   COMPAT_SUITES="..." space-separated subset of the suite directories below to run
+#                       (default: all of them), for example "sdk-test-java compat-cdk"
 
-# Wait for healthy
-echo "Waiting for Floci to be healthy..."
-# Portable wait without 'timeout' command
-MAX_RETRIES=60
-COUNT=0
-until curl -sf http://localhost:4566/_floci/health >/dev/null 2>&1; do
-  if [ $COUNT -ge $MAX_RETRIES ]; then
-    echo "Floci failed to become healthy in time"
-    exit 1
-  fi
-  sleep 1
-  COUNT=$((COUNT + 1))
-  echo -n "."
-done
-echo " Floci is up!"
+# 1. Start Floci
+if [ "${FLOCI_START:-1}" != "0" ]; then
+  echo "=== Starting Floci with docker-compose ==="
+  docker compose up -d --build
+
+  # Wait for healthy
+  echo "Waiting for Floci to be healthy..."
+  # Portable wait without 'timeout' command
+  MAX_RETRIES=60
+  COUNT=0
+  until curl -sf http://localhost:4566/_floci/health >/dev/null 2>&1; do
+    if [ $COUNT -ge $MAX_RETRIES ]; then
+      echo "Floci failed to become healthy in time"
+      exit 1
+    fi
+    sleep 1
+    COUNT=$((COUNT + 1))
+    echo -n "."
+  done
+  echo " Floci is up!"
+else
+  echo "=== Using the Floci already running under compose (FLOCI_START=0) ==="
+fi
 
 # 2. Network setup (Floci uses floci_default from compose)
 NETWORK="floci_default"
@@ -34,7 +44,7 @@ FLOCI_CONTAINER=$(docker compose ps -q floci 2>/dev/null | head -1)
 FLOCI_IP=$(docker inspect -f "{{.NetworkSettings.Networks.${NETWORK}.IPAddress}}" "$FLOCI_CONTAINER" 2>/dev/null || true)
 
 # 3. Test suites
-SUITES=(
+ALL_SUITES=(
   "sdk-test-python"
   "sdk-test-node"
   "sdk-test-java"
@@ -44,6 +54,17 @@ SUITES=(
   "compat-terraform"
   "compat-opentofu"
 )
+if [ -n "${COMPAT_SUITES:-}" ]; then
+  read -r -a SUITES <<< "$COMPAT_SUITES"
+  for suite in "${SUITES[@]}"; do
+    case " ${ALL_SUITES[*]} " in
+      *" $suite "*) ;;
+      *) echo "unknown suite: $suite (expected one of: ${ALL_SUITES[*]})"; exit 2 ;;
+    esac
+  done
+else
+  SUITES=("${ALL_SUITES[@]}")
+fi
 
 # results dir
 mkdir -p test-results

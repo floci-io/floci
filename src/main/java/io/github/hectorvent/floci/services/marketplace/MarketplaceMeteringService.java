@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -231,7 +232,7 @@ public class MarketplaceMeteringService implements Resettable {
         ObjectNode response = mapper.createObjectNode();
         response.put("ProductCode", productCode);
         response.put("CustomerAWSAccountId", customerAccount);
-        response.put("LicenseArn", "arn:aws:license-manager:" + region + ":" + customerAccount + ":license:l-" + licenseId);
+        response.put("LicenseArn", AwsArnUtils.Arn.of("license-manager", region, customerAccount, "license:l-" + licenseId).toString());
         customerMappings.put(region + "/" + token, response);
         return response.deepCopy();
     }

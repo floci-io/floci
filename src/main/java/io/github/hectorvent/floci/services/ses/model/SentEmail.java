@@ -55,6 +55,37 @@ public class SentEmail {
     @JsonProperty("SentAt")
     private Instant sentAt;
 
+    /**
+     * Set when the content scan rejected the message after acceptance. A rejected record keeps only
+     * its sender, its envelope and this reason, since the content is by definition something no
+     * store should hold.
+     */
+    @JsonProperty("RejectReason")
+    private String rejectReason;
+
+    @JsonProperty("EmailTags")
+    private List<MessageTag> emailTags;
+
+    /**
+     * The configuration set the send resolved to, which BatchGetMetricData filters on. Absent when
+     * the send named none and no default applied.
+     */
+    @JsonProperty("ConfigurationSetName")
+    private String configurationSetName;
+
+    /**
+     * The tenant the send named, which the TENANT_NAME metric dimension filters on. Absent for a
+     * send that named none, and always absent on the v1 surface, which has no tenants.
+     */
+    @JsonProperty("TenantName")
+    private String tenantName;
+
+    /**
+     * Per-recipient event timelines, derived at send time and served by {@code GetMessageInsights}.
+     */
+    @JsonProperty("Insights")
+    private List<EmailInsights> insights;
+
     public SentEmail() {}
 
     /** Constructor for Simple / Template content. */
@@ -129,4 +160,35 @@ public class SentEmail {
 
     public Instant getSentAt() { return sentAt; }
     public void setSentAt(Instant sentAt) { this.sentAt = sentAt; }
+
+    public String getRejectReason() { return rejectReason; }
+    public void setRejectReason(String rejectReason) { this.rejectReason = rejectReason; }
+
+    /**
+     * Drops everything but the sender, the envelope and the reason; used when the content scan
+     * rejects the message.
+     */
+    public void discardContent(String reason) {
+        this.rejectReason = reason;
+        this.replyToAddresses = null;
+        this.subject = null;
+        this.headers = null;
+        this.bodyText = null;
+        this.bodyHtml = null;
+        this.rawData = null;
+    }
+
+    public List<MessageTag> getEmailTags() { return emailTags; }
+    public void setEmailTags(List<MessageTag> emailTags) { this.emailTags = emailTags; }
+
+    public String getTenantName() { return tenantName; }
+    public void setTenantName(String tenantName) { this.tenantName = tenantName; }
+
+    public String getConfigurationSetName() { return configurationSetName; }
+    public void setConfigurationSetName(String configurationSetName) {
+        this.configurationSetName = configurationSetName;
+    }
+
+    public List<EmailInsights> getInsights() { return insights; }
+    public void setInsights(List<EmailInsights> insights) { this.insights = insights; }
 }

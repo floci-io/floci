@@ -41,7 +41,8 @@ class CloudFormationEcsDeleteAfterRestoreIntegrationTest {
         // it through the ECS API so ECS no longer has the record the stack still references. These
         // run unauthenticated, like CreateStack/DeleteStack, so they share the same account namespace.
         ecs("DeregisterTaskDefinition", "{\"taskDefinition\":\"" + family + "\"}");
-        ecs("DeleteTaskDefinitions", "{\"taskDefinitions\":[\"" + family + "\"]}");
+        // DeleteTaskDefinitions takes a revision, never a bare family.
+        ecs("DeleteTaskDefinitions", "{\"taskDefinitions\":[\"" + family + ":1\"]}");
 
         deleteStack(stack);
 
@@ -62,7 +63,9 @@ class CloudFormationEcsDeleteAfterRestoreIntegrationTest {
         // The cluster still has a running task at delete time (a genuine ClusterContainsTasksException),
         // which must NOT be treated as already-gone. ECS runs in mock mode under test, so the task is
         // in-memory RUNNING with no container behind it.
-        ecs("RunTask", "{\"cluster\":\"" + cluster + "\",\"taskDefinition\":\"" + family + "\",\"count\":1}");
+        ecs("RunTask", "{\"cluster\":\"" + cluster + "\",\"taskDefinition\":\"" + family + "\",\"count\":1,"
+                + "\"networkConfiguration\":{\"awsvpcConfiguration\":"
+                + "{\"subnets\":[\"subnet-default-us-east-1-a\"]}}}");
 
         deleteStack(stack);
 

@@ -8,13 +8,18 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * The JSON 1.0 handler defaults {@code ActionsEnabled} to {@code true} when omitted, matching
@@ -95,5 +100,27 @@ class CloudWatchMetricsQueryHandlerTest {
         ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
         verify(metricsService).putMetricAlarm(captor.capture(), anyString());
         assertEquals(2, captor.getValue().getDatapointsToAlarm());
+    }
+
+    // The JSON handler forwards the Unit filter now; this pins the Query path to the same
+    // contract so the two protocols cannot drift apart again.
+    @Test
+    void getMetricStatisticsForwardsTheUnitFilterToTheService() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Namespace", "NS");
+        params.putSingle("MetricName", "M");
+        params.putSingle("Period", "60");
+        params.putSingle("Statistics.member.1", "Sum");
+        params.putSingle("Unit", "Count");
+
+        when(metricsService.getMetricStatistics(any(), any(), any(), any(), any(),
+                anyInt(), any(), any(), any())).thenReturn(List.of());
+
+        handler.handle("GetMetricStatistics", params, REGION);
+
+        ArgumentCaptor<String> unitCaptor = ArgumentCaptor.forClass(String.class);
+        verify(metricsService).getMetricStatistics(any(), any(), any(), any(), any(),
+                anyInt(), any(), unitCaptor.capture(), any());
+        assertEquals("Count", unitCaptor.getValue());
     }
 }

@@ -6,12 +6,20 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /**
  * Verifies the resource-level {@code DeletionPolicy} attribute (issue #1555): {@code Retain} keeps a
@@ -26,6 +34,53 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
     private static final String CUSTOM_AUTH =
             "AWS4-HMAC-SHA256 Credential=111122223333/20260205/eu-west-1/cloudformation/aws4_request";
+    /** CUSTOM_AUTH signs for eu-west-1, whose S3 endpoint requires a matching LocationConstraint, as on AWS. */
+    private static final String EU_WEST_1_BUCKET =
+            "<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>";
+
+    @Test
+    void deletingNestedStacksDoesNotExhaustOperationWorkers() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String childTemplateKey = "child-delete-workers-" + suffix + ".json";
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        given()
+                .contentType("application/json")
+                .body("{\"Resources\":{}}")
+        .when()
+                .put("/nested-stack-templates/" + childTemplateKey)
+        .then()
+                .statusCode(200);
+
+        List<String> stackIds = new ArrayList<>();
+        List<String> stackNames = new ArrayList<>();
+        String childUrl = "http://localhost/nested-stack-templates/" + childTemplateKey;
+        for (int i = 0; i < 16; i++) {
+            String stackName = "nested-delete-worker-" + suffix + "-" + i;
+            String template = "{\"Resources\":{\"Child\":{\"Type\":\"AWS::CloudFormation::Stack\","
+                    + "\"Properties\":{\"TemplateURL\":\"" + childUrl + "\"}}}}";
+            String stackId = createStack(stackName, template);
+            awaitStackStatus(stackId, "CREATE_COMPLETE");
+            stackNames.add(stackName);
+            stackIds.add(stackId);
+        }
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> {
+            try (ExecutorService clients = Executors.newFixedThreadPool(16)) {
+                List<CompletableFuture<Void>> deletes = stackNames.stream()
+                        .map(name -> CompletableFuture.runAsync(() -> deleteStack(name), clients))
+                        .toList();
+                CompletableFuture.allOf(deletes.toArray(CompletableFuture[]::new)).join();
+                for (String stackId : stackIds) {
+                    try {
+                        awaitStackStatus(stackId, "DELETE_COMPLETE");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError("Interrupted while waiting for nested stack deletion", e);
+                    }
+                }
+            }
+        });
+    }
 
     @BeforeAll
     static void configureRestAssured() {
@@ -284,7 +339,8 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
     @Test
     void nestedStackIsPhysicallyDeletedWhenRemovedFromTemplateOnUpdate() throws InterruptedException {
-        given().header("Authorization", CUSTOM_AUTH).when().put("/nested-stack-templates").then().statusCode(200);
+        given().header("Authorization", CUSTOM_AUTH).contentType("application/xml").body(EU_WEST_1_BUCKET)
+                .when().put("/nested-stack-templates").then().statusCode(200);
         String childTemplate = "{\"Resources\": {\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}}";
         given()
             .header("Authorization", CUSTOM_AUTH)
@@ -363,6 +419,50 @@ class CloudFormationDeletionPolicyIntegrationTest {
             if (nestedStackId != null) {
                 deleteStack(nestedStackId);
             }
+        }
+    }
+
+    @Test
+    void updateNestedStackReusesChildStackAndUpdatesNamedLambda() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String functionName = "cfn-nested-update-func-" + suffix;
+        String bucketName = "nested-stack-templates-" + suffix;
+        String templateUrl = bucketName + "/child-lambda-update.json";
+        String parentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/%s" }
+                }
+              }
+            }
+        """.formatted(templateUrl);
+        String stackName = "parent-nested-lambda-update-" + suffix;
+
+        given().header("Authorization", CUSTOM_AUTH).contentType("application/xml").body(EU_WEST_1_BUCKET)
+                .when().put("/" + bucketName).then().statusCode(200);
+        given().header("Authorization", CUSTOM_AUTH)
+                .contentType("application/json").body(nestedLambdaTemplate(functionName, 3))
+                .when().put("/" + templateUrl).then().statusCode(200);
+        String parentStackId = createStack(stackName, parentTemplate, CUSTOM_AUTH);
+        try {
+            awaitStackStatus(parentStackId, "CREATE_COMPLETE", CUSTOM_AUTH);
+            String childStackId = getNestedStackId(parentStackId, "ChildStack", CUSTOM_AUTH);
+
+            given().header("Authorization", CUSTOM_AUTH)
+                    .contentType("application/json").body(nestedLambdaTemplate(functionName, 9))
+                    .when().put("/" + templateUrl).then().statusCode(200);
+            updateStack(stackName, parentTemplate, CUSTOM_AUTH);
+            awaitStackStatus(parentStackId, "UPDATE_COMPLETE", CUSTOM_AUTH);
+
+            assertThat(getNestedStackId(parentStackId, "ChildStack", CUSTOM_AUTH), equalTo(childStackId));
+            given().header("Authorization", CUSTOM_AUTH)
+                    .when().get("/2015-03-31/functions/" + functionName)
+                    .then().statusCode(200)
+                    .body("Configuration.Timeout", equalTo(9));
+        } finally {
+            deleteStack(stackName);
         }
     }
 
@@ -649,6 +749,8 @@ class CloudFormationDeletionPolicyIntegrationTest {
         try {
             awaitStackStatus(parentStackId, "ROLLBACK_COMPLETE");
             assertBucketDeleted(bucketName);
+            // The child this create made goes with the parent's rollback instead of outliving it.
+            cfnQuery("DescribeStacks", stackName + "-ChildStack").then().statusCode(400);
 
             // The parent must have stopped at the failed ChildStack resource and never reached
             // ConsumerParam: proof the child's failure was detected before its (never-computed)
@@ -664,6 +766,216 @@ class CloudFormationDeletionPolicyIntegrationTest {
             .then()
                 .statusCode(400)
                 .body("__type", equalTo("ParameterNotFound"));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
+    void createChangeSet_nestedStackPreExistingLogGroup_rollsBackParentStack() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String logGroupName = "/aws/lambda/demo-fn-" + suffix;
+        String bucketName = "nested-stack-templates-" + suffix;
+        String templateUrl = bucketName + "/child-loggroup-" + suffix + ".json";
+
+        // Pre-create log group to induce ResourceAlreadyExists failure
+        given()
+                .header("X-Amz-Target", "Logs_20140328.CreateLogGroup")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"logGroupName\":\"" + logGroupName + "\"}")
+                .when().post("/").then().statusCode(200);
+
+        String childTemplate = """
+            {
+              "Resources": {
+                "MyLogGroup": {
+                  "Type": "AWS::Logs::LogGroup",
+                  "Properties": { "LogGroupName": "%s" }
+                }
+              }
+            }
+            """.formatted(logGroupName);
+
+        given().when().put("/" + bucketName).then().statusCode(200);
+        given().contentType("application/json").body(childTemplate)
+                .when().put("/" + templateUrl).then().statusCode(200);
+
+        String parentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/%s" }
+                }
+              }
+            }
+            """.formatted(templateUrl);
+
+        String stackName = "parent-nested-fail-" + suffix;
+        String changeSetName = "cdk-deploy-change-set-" + suffix;
+
+        try {
+            // CDK workflow: CreateChangeSet -> ExecuteChangeSet
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "CreateChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName)
+                    .formParam("ChangeSetType", "CREATE")
+                    .formParam("TemplateBody", parentTemplate)
+                    .when().post("/").then().statusCode(200);
+
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "ExecuteChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName)
+                    .when().post("/").then().statusCode(200);
+
+            // Await parent stack terminal status
+            long deadline = System.currentTimeMillis() + 15_000;
+            String parentStatus = "";
+            while (System.currentTimeMillis() < deadline) {
+                String xml = describeStacks(stackName);
+                int start = xml.indexOf("<StackStatus>") + "<StackStatus>".length();
+                int end = xml.indexOf("</StackStatus>", start);
+                if (start > "<StackStatus>".length() && end > start) {
+                    parentStatus = xml.substring(start, end);
+                    if (!parentStatus.endsWith("_IN_PROGRESS")) {
+                        break;
+                    }
+                }
+                Thread.sleep(100);
+            }
+
+            assertThat(parentStatus, equalTo("ROLLBACK_COMPLETE"));
+
+            String events = describeStackEvents(stackName);
+            assertThat(events, containsString("<LogicalResourceId>ChildStack</LogicalResourceId>"));
+            assertThat(events, containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"));
+            assertThat(events, containsString("<ResourceStatusReason>Nested stack " + stackName
+                    + "-ChildStack failed: The specified log group already exists: " + logGroupName
+                    + "</ResourceStatusReason>"));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
+    void updateChangeSet_nestedStackUpdateFails_rollsBackParentStack() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketName = "nested-stack-templates-" + suffix;
+        String templateUrl = bucketName + "/child-update-" + suffix + ".json";
+        String logGroupName = "/aws/lambda/good-fn-" + suffix;
+
+        String childTemplateV1 = """
+            {
+              "Resources": {
+                "MyLogGroup": {
+                  "Type": "AWS::Logs::LogGroup",
+                  "Properties": { "LogGroupName": "%s" }
+                }
+              }
+            }
+            """.formatted(logGroupName);
+
+        given().when().put("/" + bucketName).then().statusCode(200);
+        given().contentType("application/json").body(childTemplateV1)
+                .when().put("/" + templateUrl).then().statusCode(200);
+
+        String parentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/%s" }
+                }
+              }
+            }
+            """.formatted(templateUrl);
+
+        String stackName = "parent-update-fail-" + suffix;
+        String changeSetName1 = "cdk-deploy-create-" + suffix;
+
+        try {
+            // Create stack via ChangeSet
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "CreateChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName1)
+                    .formParam("ChangeSetType", "CREATE")
+                    .formParam("TemplateBody", parentTemplate)
+                    .when().post("/").then().statusCode(200);
+
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "ExecuteChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName1)
+                    .when().post("/").then().statusCode(200);
+
+            awaitStackStatus(stackName, "CREATE_COMPLETE");
+
+            // Now update child template with an unprovisionable/failing resource placed first
+            String badSecretName = "bad-secret-" + suffix;
+            String childTemplateV2 = """
+                {
+                  "Resources": {
+                    "BadSecret": {
+                      "Type": "AWS::SecretsManager::Secret",
+                      "Properties": {
+                        "Name": "%s",
+                        "SecretString": "explicit",
+                        "GenerateSecretString": { "PasswordLength": 32 }
+                      }
+                    },
+                    "MyLogGroup": {
+                      "Type": "AWS::Logs::LogGroup",
+                      "Properties": { "LogGroupName": "%s" }
+                    }
+                  }
+                }
+                """.formatted(badSecretName, logGroupName);
+
+            given().contentType("application/json").body(childTemplateV2)
+                    .when().put("/" + templateUrl).then().statusCode(200);
+
+            // Update parent stack via ChangeSet
+            String changeSetName2 = "cdk-deploy-update-" + suffix;
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "CreateChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName2)
+                    .formParam("ChangeSetType", "UPDATE")
+                    .formParam("TemplateBody", parentTemplate)
+                    .when().post("/").then().statusCode(200);
+
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "ExecuteChangeSet")
+                    .formParam("StackName", stackName)
+                    .formParam("ChangeSetName", changeSetName2)
+                    .when().post("/").then().statusCode(200);
+
+            // Await parent stack terminal status
+            long deadline = System.currentTimeMillis() + 15_000;
+            String parentStatus = "";
+            while (System.currentTimeMillis() < deadline) {
+                String xml = describeStacks(stackName);
+                int start = xml.indexOf("<StackStatus>") + "<StackStatus>".length();
+                int end = xml.indexOf("</StackStatus>", start);
+                if (start > "<StackStatus>".length() && end > start) {
+                    parentStatus = xml.substring(start, end);
+                    if (!parentStatus.endsWith("_IN_PROGRESS")) {
+                        break;
+                    }
+                }
+                Thread.sleep(100);
+            }
+
+            assertThat(parentStatus, equalTo("UPDATE_ROLLBACK_COMPLETE"));
+
+            String events = describeStackEvents(stackName);
+            assertThat(events, containsString("<LogicalResourceId>ChildStack</LogicalResourceId>"));
+            assertThat(events, containsString("<ResourceStatusReason>Nested stack " + stackName
+                    + "-ChildStack rolled back or failed with status UPDATE_ROLLBACK_COMPLETE</ResourceStatusReason>"));
+            assertThat(events, not(containsString("failed: null")));
         } finally {
             deleteStack(stackName);
         }
@@ -965,6 +1277,25 @@ class CloudFormationDeletionPolicyIntegrationTest {
         int physStart = xml.indexOf("<PhysicalResourceId>", logIdx) + "<PhysicalResourceId>".length();
         int physEnd = xml.indexOf("</PhysicalResourceId>", physStart);
         return xml.substring(physStart, physEnd);
+    }
+
+    private static String nestedLambdaTemplate(String functionName, int timeout) {
+        return """
+            {
+              "Resources": {
+                "Function": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Timeout": %d,
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role"
+                  }
+                }
+              }
+            }
+            """.formatted(functionName, timeout);
     }
 
     private static String createStack(String stackName, String template) {

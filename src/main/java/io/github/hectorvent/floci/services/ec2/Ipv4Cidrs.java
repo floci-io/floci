@@ -8,19 +8,19 @@ import java.util.List;
  * Minimal IPv4 CIDR math backing the IPAM emulation: containment, overlap and
  * first-free-block scans over a pool's provisioned space.
  */
-final class Ipv4Cidrs {
+public final class Ipv4Cidrs {
 
     private Ipv4Cidrs() {}
 
     /** True when {@code inner} lies entirely within {@code outer}. */
-    static boolean contains(String outer, String inner) {
+    public static boolean contains(String outer, String inner) {
         long[] o = parse(outer);
         long[] i = parse(inner);
         return o[0] <= i[0] && i[1] <= o[1];
     }
 
     /** True when the two blocks share any address. */
-    static boolean overlaps(String a, String b) {
+    public static boolean overlaps(String a, String b) {
         long[] x = parse(a);
         long[] y = parse(b);
         return x[0] <= y[1] && y[0] <= x[1];

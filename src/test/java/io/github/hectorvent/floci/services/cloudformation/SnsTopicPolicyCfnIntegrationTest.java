@@ -13,7 +13,6 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Provisions an {@code AWS::SNS::TopicPolicy} over two topics the same stack creates, with the
@@ -63,7 +62,7 @@ class SnsTopicPolicyCfnIntegrationTest {
         """;
 
     @Test
-    void createUpdateAndDeleteATopicPolicy() throws InterruptedException {
+    void createUpdateAndDeleteATopicPolicy() {
         cloudFormation("CreateStack", Map.of("Sid", "AllowPublishV1"));
         String created = describeStacks("CREATE_COMPLETE");
         String policyId = outputValue(created, "PolicyRef");
@@ -95,7 +94,7 @@ class SnsTopicPolicyCfnIntegrationTest {
         topicAttributes(topicB).body(containsString("AllowPublishV2"));
 
         cloudFormation("DeleteStack", Map.of());
-        awaitStackDeleted();
+        CfnStackWaits.awaitStackDeleted(STACK);
 
         topicAttributes(topicA).statusCode(404);
         topicAttributes(topicB).statusCode(404);
@@ -131,24 +130,6 @@ class SnsTopicPolicyCfnIntegrationTest {
     }
 
     /** DeleteStack runs asynchronously; a successful delete removes the stack entirely. */
-    private static void awaitStackDeleted() throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", STACK)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + STACK + " was not deleted within the timeout");
-    }
 
     private static String outputValue(String xml, String key) {
         return XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue").get(key);

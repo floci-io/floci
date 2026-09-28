@@ -12,6 +12,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -245,6 +247,62 @@ class DynamoDbProjectionIntegrationTest {
             .body("Count", equalTo(1))
             .body("Items[0].data.M.settings.M.'[alpha]'.L[0].S", equalTo("one"))
             .body("Items[0].data.M.settings.M.'[beta]'", nullValue());
+    }
+
+    @Test
+    @Order(9)
+    void getItemRejectsOverlappingPathsBeforeReadingTheItem() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(CT)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "Key": {"pk": {"S": "no-such-item"}},
+                    "ProjectionExpression": "a, a.b"
+                }
+                """.formatted(TABLE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Invalid ProjectionExpression: Two document paths overlap with each other; "
+                    + "must remove or rewrite one of these paths; path one: [a], path two: [a, b]"));
+    }
+
+    @Test
+    @Order(11)
+    void otherReadsRejectOverlappingPathsWhenNothingMatches() {
+        String missingKey = "{\"pk\": {\"S\": \"no-such-item\"}}";
+        Map<String, String> requests = Map.of(
+                "Query", """
+                    {"TableName": "%s", "KeyConditionExpression": "pk = :p",
+                     "ExpressionAttributeValues": {":p": {"S": "no-such-item"}}, "ProjectionExpression": "a, a.b"}
+                    """.formatted(TABLE),
+                "Scan", """
+                    {"TableName": "%s", "FilterExpression": "pk = :p",
+                     "ExpressionAttributeValues": {":p": {"S": "no-such-item"}}, "ProjectionExpression": "a, a.b"}
+                    """.formatted(TABLE),
+                "BatchGetItem", """
+                    {"RequestItems": {"%s": {"Keys": [%s], "ProjectionExpression": "a, a.b"}}}
+                    """.formatted(TABLE, missingKey),
+                "TransactGetItems", """
+                    {"TransactItems": [
+                        {"Get": {"TableName": "%1$s", "Key": {"pk": {"S": "other"}}}},
+                        {"Get": {"TableName": "%1$s", "Key": %2$s, "ProjectionExpression": "a, a.b"}}]}
+                    """.formatted(TABLE, missingKey));
+        requests.forEach((action, body) -> given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + action)
+            .contentType(CT)
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Invalid ProjectionExpression: Two document paths overlap with each other; "
+                    + "must remove or rewrite one of these paths; path one: [a], path two: [a, b]")));
     }
 
     @AfterAll

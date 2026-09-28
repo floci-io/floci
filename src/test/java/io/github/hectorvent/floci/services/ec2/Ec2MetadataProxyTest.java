@@ -45,6 +45,20 @@ class Ec2MetadataProxyTest {
     }
 
     @Test
+    void podIdentityStartCommandAttachesAddressIdempotentlyAndTargetsHostAndPort() {
+        String[] command = Ec2MetadataProxy.podIdentityStartCommand("10.0.0.1", 4566);
+        assertEquals(3, command.length);
+        assertEquals("sh", command[0]);
+        assertEquals("-c", command[1]);
+
+        String script = command[2];
+        assertTrue(script.contains("ip addr show dev lo | grep -q '169.254.170.23/32' || ip addr add 169.254.170.23/32 dev lo"));
+        assertTrue(script.contains("if [ -f /tmp/floci-pod-identity-proxy.pid ] && kill -0 \"$(cat /tmp/floci-pod-identity-proxy.pid)\" 2>/dev/null; then\n  exit 0\nfi"));
+        assertTrue(script.contains("nohup socat TCP-LISTEN:80,bind=169.254.170.23,fork,reuseaddr TCP:10.0.0.1:4566 >/tmp/floci-pod-identity-proxy.log 2>&1 &"));
+        assertTrue(script.contains("http://169.254.170.23/v1/credentials"));
+    }
+
+    @Test
     void preferredMetadataSourceIpPrefersConfiguredNetworkOverBridge() {
         ContainerNetwork bridge = new ContainerNetwork();
         bridge.withIpv4Address("172.17.0.2");

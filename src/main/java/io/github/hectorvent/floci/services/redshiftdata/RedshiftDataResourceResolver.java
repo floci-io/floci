@@ -131,9 +131,9 @@ class RedshiftDataResourceResolver {
         return null;
     }
 
-    private static String clusterArn(String clusterId, String region) {
-        String r = (region == null || region.isBlank()) ? "us-east-1" : region;
-        return "arn:aws:redshift:" + r + ":000000000000:cluster:" + clusterId;
+    private String clusterArn(String clusterId, String region) {
+        String r = (region == null || region.isBlank()) ? regionResolver.getDefaultRegion() : region;
+        return AwsArnUtils.Arn.of("redshift", r, "000000000000", "cluster:" + clusterId).toString();
     }
 
     private static AwsException validation(String message) {

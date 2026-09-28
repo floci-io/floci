@@ -1,12 +1,11 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.testing.S3IamEnforcementProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -20,7 +19,7 @@ import static org.hamcrest.Matchers.containsString;
  * any object it could not otherwise read, as long as it could guess the bucket/key.
  */
 @QuarkusTest
-@TestProfile(S3CopyObjectSourcePermissionIntegrationTest.IamEnforcementProfile.class)
+@TestProfile(S3IamEnforcementProfile.class)
 class S3CopyObjectSourcePermissionIntegrationTest {
 
     /**
@@ -520,15 +519,5 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     private static String auth(String accessKeyId, String service) {
         return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260629/" + REGION + "/" + service
                 + "/aws4_request, SignedHeaders=host, Signature=abc";
-    }
-
-    public static final class IamEnforcementProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.iam.enforcement-enabled", "true",
-                    "floci.services.s3.enforce-auth", "true",
-                    "floci.services.s3.global-bucket-namespace", "true");
-        }
     }
 }

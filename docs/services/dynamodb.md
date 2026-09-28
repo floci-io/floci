@@ -18,6 +18,7 @@
 | `UpdateItem` | Partially update an item |
 | `Query` | Query by partition key with optional filter |
 | `Scan` | Full table scan with optional filter |
+| `SearchVectors` | Rank a vector index by distance from a query vector |
 | `BatchWriteItem` | Write/delete up to 25 items across tables |
 | `BatchGetItem` | Read up to 100 items across tables |
 | `TransactWriteItems` | ACID write transaction |
@@ -33,6 +34,10 @@
 | `EnableKinesisStreamingDestination` | Enable Kinesis streaming for a table |
 | `DisableKinesisStreamingDestination` | Disable Kinesis streaming for a table |
 | `ExportTableToPointInTime` | Export table data to S3 as gzip NDJSON |
+| `CreateGlobalTable` | Make an existing table a global table (2017.11.29) |
+| `DescribeGlobalTable` | Read a global table's replication group |
+| `UpdateGlobalTable` | Add or remove replica regions |
+| `ListGlobalTables` | List global tables, optionally filtered by region |
 | `DescribeExport` | Get export status and metadata |
 | `ListExports` | List exports, optionally filtered by table ARN |
 | `ImportTable` | Create a table and load DynamoDB JSON from S3 into it |
@@ -50,6 +55,21 @@ DynamoDB Streams are supported via a separate target (`DynamoDBStreams_20120810`
 | `GetShardIterator` | Get a shard iterator |
 | `GetRecords` | Read stream records from a shard |
 
+Redshift zero-ETL integrations can consume these stream records directly. See the
+[Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported target,
+landing table, checkpoint, and retry behavior.
+
+Stream records are held in memory. `POST /_floci/state/reset` removes every stream along with the
+tables, so `ListStreams` and `DescribeStream` no longer return the streams of tables created before
+the reset.
+
+## Time to Live
+
+With TTL enabled, a sweep runs every 60 seconds and deletes the items whose TTL attribute holds an
+epoch time in the past. Each deletion writes a `REMOVE` record to the table's stream and is
+forwarded to an active Kinesis streaming destination. Between sweeps, reads already leave expired
+items out.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -57,6 +77,8 @@ DynamoDB Streams are supported via a separate target (`DynamoDBStreams_20120810`
 | `FLOCI_SERVICES_DYNAMODB_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_MODE` | *(global default)* | Storage mode override for DynamoDB (`memory`, `persistent`, `hybrid`, `wal`) |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_FLUSH_INTERVAL_MS` | `5000` | Flush interval for `hybrid`/`wal` storage modes (milliseconds) |
+| `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS` | `4` | Seconds a vector index added by `UpdateTable` spends in resource allocation |
+| `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS` | `10` | Seconds that index then spends backfilling before it goes `ACTIVE` |
 
 ### Storage and Performance
 
@@ -138,6 +160,79 @@ aws dynamodb create-table \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
+Deviations from AWS:
+
+- **No index is stored.** A `Query` or `Scan` on an index reads the base table and applies the
+  index's key schema and projection on the way out.
+- **Index reads are immediately consistent.** A GSI on AWS is eventually consistent, so code that
+  tolerates replication lag never exercises that wait here.
+- **A new index is `ACTIVE` at once.** AWS copies the table's items into a new index first, which
+  takes minutes on a large table. Nothing is copied here, so a waiter returns straight away.
+
+## Vector indexes
+
+A vector index serves `SearchVectors`, which ranks a table's items by the distance between a query
+vector and the vector attribute each item carries. Indexes are declared on `CreateTable` or added
+later with `UpdateTable`, on `PAY_PER_REQUEST` tables only. An item that does not carry the vector
+attribute, or that lacks the index's `HASH` search schema attribute, is still written but stays out
+of that index. `Query`, `Scan` and PartiQL cannot read a vector index.
+
+```bash
+# A table with a vector index
+aws dynamodb create-table \
+  --table-name Docs \
+  --attribute-definitions AttributeName=docId,AttributeType=S \
+  --key-schema AttributeName=docId,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST \
+  --vector-indexes '[{
+    "IndexName": "embedding-index",
+    "VectorAttribute": {"AttributeName": "embedding"},
+    "Projection": {"ProjectionType": "ALL"},
+    "Dimensions": 3,
+    "DistanceFunction": "COSINE"
+  }]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Write an item carrying a vector
+aws dynamodb put-item \
+  --table-name Docs \
+  --item '{"docId":{"S":"d1"},"title":{"S":"first"},"embedding":{"L":[{"N":"1"},{"N":"0"},{"N":"0"}]}}' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Search it
+aws dynamodb search-vectors \
+  --table-name Docs \
+  --index-name embedding-index \
+  --search-vector '[{"N":"1"},{"N":"0"},{"N":"0"}]' \
+  --top-k 5 \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+`DistanceFunction` is `COSINE`, `EUCLIDEAN` or `DOT_PRODUCT`. The first two rank the lowest score
+first, `DOT_PRODUCT` the highest. The vector attribute is left out of a result unless
+`--projection-expression` names it, and when it is named the values returned are the index's own
+32 bit copies, so a `1` written to the table comes back as `1.0`.
+
+Deviations from AWS:
+
+- **The search is exact, not approximate.** AWS may return a slightly different set or order on a
+  large index. Scoring every item makes a result here repeatable.
+- **No index is stored, as above.** Every search reads the vectors from the base table and converts
+  them, so the work grows with items times dimensions. A large index is slower than AWS.
+- **A written vector is searchable at once.** AWS copies it into the index in the background, so
+  code that polls for a new vector never waits here.
+- **`ItemCount` and `IndexSizeBytes` always report 0.** That is what AWS reports for a fresh index,
+  because it refreshes both roughly every six hours.
+- **An index created with its table is `ACTIVE` at once.** One added by `UpdateTable` walks a
+  resource allocation phase and then a backfill phase. Their lengths are
+  `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS` and
+  `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS`, 4 and 10 seconds by default, against
+  minutes on AWS.
+- **`SearchVectors` is served on Floci's ordinary endpoint.** AWS gives the operation a dedicated
+  search endpoint. The SDKs honor an endpoint override, so this is invisible to callers.
+- **`VectorSearchRequestBytes` is a fixed figure, not a measured one.** It uses the same 1024 byte
+  floor AWS uses. AWS's own value above that floor is not deterministic.
+
 ## Export to S3
 
 Export table data to an S3 bucket as gzip-compressed NDJSON (DynamoDB JSON format):
@@ -208,6 +303,15 @@ When a table has an **ACTIVE** Kinesis streaming destination (see
 `EnableKinesisStreamingDestination`), every item change, `INSERT`, `MODIFY`, and `REMOVE`,
 including TTL expirations, is forwarded to the destination stream as a Kinesis record in the
 AWS CDC envelope (`eventName`, `dynamodb.Keys`, `NewImage`/`OldImage`, `ApproximateCreationDateTime`).
+
+`ApproximateCreationDateTime` follows the destination's
+`EnableKinesisStreamingConfiguration.ApproximateCreationDateTimePrecision`: epoch milliseconds for
+`MILLISECOND` (the default) and epoch microseconds for `MICROSECOND`. The precision is returned by
+`DescribeKinesisStreamingDestination` and stamped on each record as
+`dynamodb.ApproximateCreationDateTimePrecision`.
+
+Enabling a Kinesis streaming destination does not change the table's DynamoDB Streams setting.
+Kinesis forwarding works whether or not `StreamSpecification.StreamEnabled` is set.
 
 ### Delivery contract
 

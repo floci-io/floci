@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -58,9 +59,9 @@ public class SesReceiptRuleService {
     // Probed: a value that is not a well-formed topic/function ARN (a bare name, or an ARN with
     // missing segments) gets the "Invalid ..." message before any existence lookup. There is no
     // recipient-count limit (101 recipients are accepted).
-    private static final Pattern SNS_TOPIC_ARN = Pattern.compile("^arn:aws[a-zA-Z-]*:sns:[a-z0-9-]+:\\d{12}:.+$");
+    private static final Pattern SNS_TOPIC_ARN = Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX + ":sns:[a-z0-9-]+:\\d{12}:.+$");
     private static final Pattern LAMBDA_FUNCTION_ARN =
-            Pattern.compile("^arn:aws[a-zA-Z-]*:lambda:[a-z0-9-]+:\\d{12}:function:.+$");
+            Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX + ":lambda:[a-z0-9-]+:\\d{12}:function:.+$");
     // RFC 5322 ftext: printable US-ASCII excluding the colon. Real SES rejects anything else with
     // "Invalid header name: <name>" (probed 2026-09).
     private static final Pattern HEADER_NAME_CHARS = Pattern.compile("^[\\x21-\\x39\\x3B-\\x7E]+$");

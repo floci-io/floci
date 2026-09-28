@@ -16,6 +16,15 @@
 
 Terminated instances remain queryable for 1 hour (matching real EC2 tombstone behavior) before being pruned.
 
+## Instance Resource Limits
+
+By default, Docker containers launched for EC2 instances are bounded to the CPU and memory limits defined in the instance type catalog (`src/main/resources/ec2/instance-type-catalog.yaml`).
+
+- **CPU limit**: Each vCPU corresponds to 1024 CPU units (Docker nanoCPUs = `vcpu * 1_000_000_000`). If the host machine has fewer physical cores than requested, Floci clamps execution to available host CPUs and warns (since Docker refuses a nanoCPUs value exceeding the host CPU count).
+- **Memory limit**: Container memory is bounded to the exact MiB value specified for the instance type in the catalog.
+- **Unknown instance types**: If an instance type is not present in the catalog, the container launches unbounded without CPU or memory restrictions, avoiding launch failures for custom or unmodeled instance types.
+- **Configuration knob**: To disable container resource limits (for example, running a large instance type on a developer machine with limited resources), set `floci.services.ec2.instance-resource-limits: false` (or environment variable `FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS=false`).
+
 ## AMI to Docker Image Mapping
 
 Floci resolves AMI IDs to Docker images from the EC2 image catalog at
@@ -27,6 +36,7 @@ metadata.
 |---|---|---|
 | `ami-0abcdef1234567890` | `ami-amazonlinux2` | `public.ecr.aws/amazonlinux/amazonlinux:2` |
 | `ami-0abcdef1234567891` | `ami-amazonlinux2023` | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
+| `ami-amazonlinux2023-arm64` | | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
 | `ami-0abcdef1234567892` | `ami-ubuntu2004` | `public.ecr.aws/docker/library/ubuntu:20.04` |
 | `ami-ubuntu2204` | | `public.ecr.aws/docker/library/ubuntu:22.04` |
 | `ami-ubuntu2404-arm64` | `ami-ubuntu2404` | `public.ecr.aws/docker/library/ubuntu:24.04` |
@@ -118,6 +128,8 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
   http://169.254.169.254/latest/meta-data/instance-id
 ```
 
+As on AWS, the token TTL must be an integer from 1 to 21600 seconds, or the `PUT` returns `400`. A metadata request that presents an unknown or expired token returns `401`, which tells the SDK to fetch a new token. A token is valid only on the instance that requested it: presenting it from another instance returns `401`. A request without a token header still uses IMDSv1; Floci does not enforce `HttpTokens=required`.
+
 ### Supported IMDS endpoints
 
 | Endpoint | Returns |
@@ -154,6 +166,14 @@ Registering a container with SSM is independent of this: an SSM agent that calls
 
 To get a container that both answers IMDS (including instance profile credentials) and executes `SendCommand` directly, launch it with `RunInstances` first, then register that same container's SSM agent as a managed instance. Do not register an arbitrary or pre-existing container directly with SSM and expect IMDS to work. See [SSM](ssm.md#run-command-execution) for the SendCommand side of this.
 
+### Cluster Node Instances
+
+When an EKS cluster is running, its synthesized node instance is registered and visible through the EC2 service:
+
+- **Visibility**: Exposed via `DescribeInstances` and `DescribeInstanceStatus` with its synthesized instance ID (`i-...`), type (`m5.large`), running state, VPC, subnet, launch time, and cluster tags (`Name`, `kubernetes.io/cluster/<cluster-name>=owned`, `eks:cluster-name=<cluster-name>`). It can be queried by ID, filtered, or listed with other instances.
+- **Operations**: Supports volume attachments (`AttachVolume`, `DetachVolume`), instance attribute inspection and modification, and resource tagging (`CreateTags`, `DeleteTags`, `DescribeTags`).
+- **Lifecycle protection**: Lifecycle actions that would mutate or delete the node through EC2 (`TerminateInstances`, `StopInstances`, `StartInstances`, `RebootInstances`) are rejected with `OperationNotPermitted` (HTTP 400) as a Floci emulation limitation because the instance directly represents the underlying k3s cluster container. In real AWS, cluster node instances in an Auto Scaling group can be terminated or stopped and are subsequently replaced by the ASG. In Floci, the node instance lifecycle is managed solely through the EKS cluster lifecycle.
+
 ## Default Resources
 
 Floci seeds the following resources on first use in each region so Terraform, the AWS CLI, and SDK clients work out of the box without any setup:
@@ -185,7 +205,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DescribeInstanceStatus | Returns status records for stored instances. |
 | DescribeInstanceCreditSpecifications | Returns the CPU credit option of burstable performance instances. A named instance id reports the option the instance acquired at launch, either the explicit `CreditSpecification.CpuCredits` or the family default, `standard` for t2 and `unlimited` for t3, t3a and t4g. An id that is not a burstable performance instance reports `standard`, and only an unknown id is an error. Naming no id returns the instances on the unlimited option, including one that kept `unlimited` after a resize onto a non-burstable type. `Filter.N` supports the modeled `instance-id` and narrows whichever set the request selected. `MaxResults` accepts 5 through 1000 and cannot be combined with instance ids. `DryRun=true` returns `DryRunOperation`. |
 | DescribeInstanceAttribute | Returns a supported attribute for an instance. |
-| ModifyInstanceAttribute | Updates supported mutable attributes for an instance. |
+| ModifyInstanceAttribute | Updates supported mutable attributes for an instance. `UserData.Value` (base64) needs the instance stopped, as on AWS, and answers `IncorrectInstanceState` otherwise. |
 | ModifyInstanceMetadataOptions | Updates an instance's IMDS options, changing only the fields the request names. |
 
 ### VPCs
@@ -194,7 +214,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 |--------|-------------|
 | CreateVpc | Creates a VPC with the requested CIDR block. |
 | DescribeVpcs | Lists or returns stored VPCs. |
-| DeleteVpc | Deletes a VPC from the local EC2 store. |
+| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, or an attached internet gateway. Instances, NAT gateways and other subnet-resident resources are not checked. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Returns an empty local VPC endpoint service catalog. |
@@ -202,9 +222,16 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
 | ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` and `IpAddressType` are accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
+| DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
+| DescribeEgressOnlyInternetGateways | Validates filters and pagination parameters and returns an empty set, including for explicit IDs, as AWS does. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
 | DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
+
+The two describe-only network actions above provide discovery compatibility when no
+resources exist. Egress-only gateway discovery validates its pagination parameters before
+returning an empty page. Neither models virtual private gateway or egress-only internet
+gateway lifecycles.
 
 ### Subnets
 
@@ -249,6 +276,14 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
 
+Every resource EC2 creates is owned by the account the request resolves to, the same account
+[STS](sts.md) reports for those credentials, and that account is what `ownerId` and the resource ARN
+carry. So `DescribeImages` with `--owners <your account id>` matches the AMIs that account
+registered, and `--owners self` resolves to the same account. This is what lets a Terraform
+`aws_ami` data source pin `owners` to the account under test instead of the emulator's default
+`000000000000`. The `amazon` and `aws-marketplace` aliases still resolve to the AWS-owned accounts
+that publish those images.
+
 ### Tags
 
 | Action | Description |
@@ -276,8 +311,8 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DeleteRouteTable | Deletes a route table from the local EC2 store. |
 | AssociateRouteTable | Associates a route table with a subnet. |
 | DisassociateRouteTable | Removes a route table association. |
-| CreateRoute | Adds a route to a route table. Accepts `VpcPeeringConnectionId` as a target (alongside `GatewayId`/`NatGatewayId`/`EgressOnlyInternetGatewayId`) and reports it back on `DescribeRouteTables`. |
-| ReplaceRoute | Replaces the target of an existing route. |
+| CreateRoute | Adds a route to a route table. Accepts `InstanceId`, `NetworkInterfaceId`, and `VpcPeeringConnectionId` as targets (alongside `GatewayId`/`NatGatewayId`/`EgressOnlyInternetGatewayId`) and reports them back on `DescribeRouteTables`. |
+| ReplaceRoute | Replaces the target of an existing route, accepting `InstanceId`, `NetworkInterfaceId`, and `VpcPeeringConnectionId`. |
 | DeleteRoute | Removes a route from a route table. |
 
 ### VPC Peering Connections
@@ -596,8 +631,10 @@ starts from empty data and is how a template moves between the two selection mod
 Two behaviours worth calling out, because they are what Terraform reads back:
 
 - **`IamInstanceProfile` keeps the form it was given.** A profile submitted as `Name` reads back as
-  `Name`, not rewritten to `Arn`. The instance-profile ARN is derived at launch time instead, so
-  `aws_launch_template.iam_instance_profile.name` converges.
+  `Name`, not rewritten to `Arn`. At launch time, Floci resolves that name against IAM in the
+  caller's account and preserves the profile's full path in its ARN. A name missing from that
+  account is rejected with `InvalidParameterValue`. This also applies to direct `RunInstances`
+  requests and `CreateFleet` launches, so `aws_launch_template.iam_instance_profile.name` converges.
 - **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
   top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
   resolves its security groups from whichever of the two is populated.
@@ -631,6 +668,9 @@ prefix lists, `EnaSrdSpecification`, `PrimaryIpv6` and `EnaQueueCount` are likew
 | Action | Description |
 |--------|-------------|
 | DescribeIamInstanceProfileAssociations | Lists IAM instance profile associations known to the local EC2 service. |
+| AssociateIamInstanceProfile | Attaches a profile, named by `IamInstanceProfile.Arn` or `IamInstanceProfile.Name`, to an instance that has none; a second association answers `IncorrectState`. |
+| ReplaceIamInstanceProfileAssociation | Swaps the profile behind an existing association id; an unknown id answers `InvalidAssociationID.NotFound`. |
+| DisassociateIamInstanceProfile | Detaches the profile behind an association id. |
 
 ### Network Interfaces
 
@@ -653,6 +693,52 @@ A standalone ENI created via `CreateNetworkInterface` can also be handed to `Run
 | CreateVolume | Creates an EBS volume record. |
 | DescribeVolumes | Lists or returns stored EBS volume records. |
 | DeleteVolume | Deletes an EBS volume record. |
+| ModifyVolume | Modifies size, type, IOPS, throughput, or multi-attach settings of an EBS volume record. |
+| DescribeVolumesModifications | Reports the current modification state for EBS volumes, filterable by volume ID and state. |
+| AttachVolume | Attaches a volume to an instance at the requested device; returns the attachment in `attaching` state. |
+| DetachVolume | Detaches a volume from an instance, optionally forced; returns the attachment in `detaching` state. |
+
+When `floci.services.ec2.volume-block-devices` is enabled (the default), attached EBS volumes are backed by real Linux loop devices inside running instance containers and synthesized EKS cluster node containers:
+- **Storage mechanism**: Backing sparse raw image files are allocated in Floci storage under `floci-aws-ec2-volumes` (named volume or host path). A privileged helper container (`floci-aws-ec2-volume-helper`, running `floci.services.ec2.volume-helper-image`, default `alpine:3.21`) manages Linux loop devices via `losetup`.
+- **Target device nodes**: Inside privileged target instance containers, the corresponding device node is created at the requested path (for example `/dev/xvdf` or `/dev/sdf`) using `mknod` or a symlink to the loop device, matching the exact size specified during volume creation. Target containers can format filesystems (such as ext4 or xfs), mount them, and persist data across detach and reattach.
+- **Restart reconciliation**: When an instance container stops and starts, or when Floci restarts, attached volume device nodes are automatically restored inside the target container. Backing raw files remain preserved across reboots in persistent storage.
+- **Graceful degradation**: If Docker is unavailable, the target instance container is not running, or the container is not privileged, volume attachments degrade gracefully to metadata-only tracking without failing the API call.
+- **Platform requirements**: Requires a Linux Docker environment (native Linux Docker daemon, or Colima / Docker Desktop with a Linux virtual machine) and privileged instance containers.
+- **Unmodeled aspects**: Multi-attach is tracked at metadata level only. Automated filesystem formatting (volumes start unformatted like real EBS block devices), volume encryption at the block layer, and live resizing of underlying raw backing files are not modeled. `ModifyVolume` updates recorded metadata and reports completion without resizing the backing raw image.
+
+Validation matches AWS behavior:
+- Unknown volumes are rejected with `InvalidVolume.NotFound`.
+- Decreasing volume size is rejected with `InvalidParameterValue`.
+- Unsupported parameters (such as `Throughput` on non-gp3 volumes or `Iops` on non-provisioned IOPS volume types) are rejected with `InvalidParameterCombination`.
+- When querying `DescribeVolumesModifications` with an explicit volume ID for an unmodified volume, the request fails with `InvalidVolumeModification.NotFound`. Listing or filtering without explicit IDs returns only modified volumes.
+
+### Snapshots
+
+| Action | Description |
+|--------|-------------|
+| DescribeSnapshots | Lists or returns stored snapshots, filterable by id and owner. |
+
+### Flow Logs
+
+| Action | Description |
+|--------|-------------|
+| CreateFlowLogs | Creates flow logs for the given resources; returns one flow log id per resource. |
+| DescribeFlowLogs | Lists stored flow logs, optionally filtered by id. |
+| DeleteFlowLogs | Deletes the named flow logs. |
+
+### Spot Instances
+
+| Action | Description |
+|--------|-------------|
+| RequestSpotInstances | Requests spot instances from a launch specification; returns the created spot instance requests. |
+| DescribeSpotInstanceRequests | Lists spot instance requests, optionally filtered by id. |
+| CancelSpotInstanceRequests | Cancels the named spot instance requests, returning each id with its new state. |
+
+### VPN Gateways
+
+| Action | Description |
+|--------|-------------|
+| DescribeVpnGateways | Returns an empty gateway set (no stored gateways). |
 
 ### EBS Encryption Defaults
 
@@ -868,3 +954,12 @@ aws ec2 associate-address \
 - `DescribeImages` returns AMIs from the EC2 image catalog, including common AMIs and Floci-native AMI IDs.
 - Security group rules are not enforced as a firewall (Docker bridge networking handles routing), but TCP ingress rules opened to a CIDR source are published on the host via socat sidecars so the instance's app is reachable from `localhost` — see [Security Group Port Publishing](#security-group-port-publishing).
 - The IMDS server identifies which instance is calling via IMDSv2 tokens (mapped at token issuance time) or by the container's bridge IP for IMDSv1.
+
+### External image catalog
+
+Set `FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH` (`floci.services.ec2.image-catalog-path`)
+to a readable YAML file to replace the bundled image catalog for a Floci process.
+The file uses the same schema as `src/main/resources/ec2/image-catalog.yaml` and must
+include every image that process should expose. Missing or invalid files fail on first
+catalog use; leaving the setting unset preserves the bundled catalog. Containerized
+Floci needs the file mounted at the configured container path.

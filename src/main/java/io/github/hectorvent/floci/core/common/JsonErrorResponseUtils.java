@@ -58,6 +58,18 @@ public class JsonErrorResponseUtils {
     }
 
     /**
+     * A JSON request with no X-Amz-Target names no operation, so there is nothing to route on.
+     * It fails as an unknown operation but with a message about the missing header rather than
+     * concatenating a literal {@code null} into {@link #createUnknownOperationErrorResponse}.
+     */
+    public static Response createMissingTargetErrorResponse() {
+        return createErrorResponse(404,
+                "UnknownOperationException",
+                "UnknownOperationException",
+                "Missing X-Amz-Target header.", null);
+    }
+
+    /**
      * A request body that is not valid JSON is a client (deserialization) error, not a server
      * fault. AWS's JSON protocols reject it with 400 SerializationException; without this the
      * unparsed body escapes to the generic catch and surfaces as 500 InternalFailure.

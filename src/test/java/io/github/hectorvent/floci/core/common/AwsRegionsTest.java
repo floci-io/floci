@@ -6,6 +6,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -97,17 +99,29 @@ class AwsRegionsTest {
         assertEquals("aws-cn", AwsRegions.partitionFor("CN-NORTH-1"));
     }
 
-    /** Every GovCloud and China id the emulator recognises must land outside {@code aws}. */
+    /** Every known id resolves to a partition whose published regions contain it. */
     @Test
-    void knownNonCommercialIdsAreNotCommercial() {
+    void everyKnownIdResolvesToThePartitionThatPublishesIt() {
         for (String region : AwsRegions.KNOWN_IDS) {
-            if (region.startsWith("us-gov-")) {
-                assertEquals("aws-us-gov", AwsRegions.partitionFor(region), region);
-            } else if (region.startsWith("cn-")) {
-                assertEquals("aws-cn", AwsRegions.partitionFor(region), region);
-            } else {
-                assertEquals("aws", AwsRegions.partitionFor(region), region);
-            }
+            String partition = AwsRegions.partitionFor(region);
+            assertTrue(AwsRegions.advertised(partition).contains(region),
+                    region + " resolves to " + partition + ", which does not publish it");
         }
+    }
+
+    @Test
+    void advertisedListsArePerPartition() {
+        assertEquals(AwsRegions.ALL, AwsRegions.advertised("aws"));
+        assertEquals(34, AwsRegions.ALL.size());
+        assertEquals(List.of("cn-north-1", "cn-northwest-1"), AwsRegions.advertised("aws-cn"));
+        assertTrue(AwsRegions.KNOWN_IDS.contains("eusc-de-east-1"));
+        assertTrue(AwsRegions.KNOWN_IDS.contains("us-isof-south-1"));
+    }
+
+    @Test
+    void pseudoRegionsResolveToTheirPartition() {
+        assertEquals("aws-cn", AwsRegions.partitionFor("aws-cn-global"));
+        assertEquals("amazonaws.com.cn", AwsRegions.dnsSuffixFor("aws-cn-global"));
+        assertEquals("aws-us-gov", AwsRegions.partitionFor("aws-us-gov-global"));
     }
 }

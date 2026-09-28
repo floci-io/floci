@@ -18,7 +18,6 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Provisions an {@code AWS::ApiGateway::DomainName} and an {@code AWS::ApiGateway::BasePathMapping}
@@ -219,7 +218,7 @@ class ApiGatewayDomainCfnIntegrationTest {
         invokeThroughDomain(RENAMED_DOMAIN, "/v1/items");
 
         cloudFormation(STACK, "DeleteStack", null, Map.of());
-        awaitStackDeleted(STACK);
+        CfnStackWaits.awaitStackDeleted(STACK);
 
         getDomain(RENAMED_DOMAIN).statusCode(404);
         getMapping(RENAMED_DOMAIN, "v1").statusCode(404);
@@ -241,7 +240,7 @@ class ApiGatewayDomainCfnIntegrationTest {
               .body("stage", nullValue());
 
         cloudFormation(INLINE_API_STACK, "DeleteStack", null, Map.of());
-        awaitStackDeleted(INLINE_API_STACK);
+        CfnStackWaits.awaitStackDeleted(INLINE_API_STACK);
 
         getDomain(INLINE_DOMAIN).statusCode(404);
         given().when().get("/restapis/" + apiId).then().statusCode(404);
@@ -289,24 +288,6 @@ class ApiGatewayDomainCfnIntegrationTest {
     }
 
     /** DeleteStack runs asynchronously; a successful delete removes the stack entirely. */
-    private static void awaitStackDeleted(String stack) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stack)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stack + " was not deleted within the timeout");
-    }
 
     private static String outputValue(String xml, String key) {
         return XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue").get(key);

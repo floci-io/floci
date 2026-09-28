@@ -133,7 +133,7 @@ public final class SecurityGroupPolicy {
         }
     }
 
-    static boolean validCidr(String cidr) {
+    public static boolean validCidr(String cidr) {
         if (cidr == null) {
             return false;
         }

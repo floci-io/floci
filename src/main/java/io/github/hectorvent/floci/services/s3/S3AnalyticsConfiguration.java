@@ -40,9 +40,9 @@ record S3AnalyticsConfiguration(String id, String innerXml) {
 
         // The configuration is one Id, at most one Filter and one StorageClassAnalysis, so
         // anything else under the root is a body AWS would not have accepted.
-        long ids = count(root, "Id");
-        long filters = count(root, "Filter");
-        long analyses = count(root, "StorageClassAnalysis");
+        long ids = root.count("Id");
+        long filters = root.count("Filter");
+        long analyses = root.count("StorageClassAnalysis");
         if (ids != 1 || filters > 1 || analyses != 1
                 || root.children().size() != ids + filters + analyses) {
             throw malformed();
@@ -78,8 +78,8 @@ record S3AnalyticsConfiguration(String id, String innerXml) {
             case "Tag" -> tagXml(predicate);
             case "And" -> {
                 List<XmlElement> conjuncts = predicate.children();
-                long prefixes = count(predicate, "Prefix");
-                long tags = count(predicate, "Tag");
+                long prefixes = predicate.count("Prefix");
+                long tags = predicate.count("Tag");
                 // Every conjunct has to be one floci understands, or the filter it stores would
                 // not be the filter that was sent.
                 if (conjuncts.size() < 2 || prefixes > 1 || conjuncts.size() != prefixes + tags) {
@@ -112,7 +112,7 @@ record S3AnalyticsConfiguration(String id, String innerXml) {
      * the output schema version and a destination bucket, with the account id and prefix optional.
      */
     private static String storageClassAnalysisXml(XmlElement analysis) {
-        long exports = count(analysis, "DataExport");
+        long exports = analysis.count("DataExport");
         if (exports > 1 || analysis.children().size() != exports) {
             throw malformed();
         }
@@ -155,9 +155,5 @@ record S3AnalyticsConfiguration(String id, String innerXml) {
             out.elem("Prefix", prefix.text());
         }
         return out.end("S3BucketDestination").end("Destination").end("DataExport").build();
-    }
-
-    private static long count(XmlElement parent, String childName) {
-        return parent.children().stream().filter(child -> childName.equals(child.name())).count();
     }
 }

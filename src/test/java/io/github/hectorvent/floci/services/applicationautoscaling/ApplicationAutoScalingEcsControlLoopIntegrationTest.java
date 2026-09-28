@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.applicationautoscaling;
 
+import io.github.hectorvent.floci.services.cloudwatch.metrics.AlarmEvaluator;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.AlarmEvaluatorTestAccess;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -48,6 +51,9 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
     private static final String CLUSTER = "aas-loop-cluster";
     private static final String SERVICE = "aas-loop-svc";
     private static final String RESOURCE_ID = "service/" + CLUSTER + "/" + SERVICE;
+
+    @Inject
+    AlarmEvaluator alarmEvaluator;
 
     @BeforeAll
     static void configure() {
@@ -125,15 +131,20 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
                 "{\"Namespace\":\"AWS/ECS\",\"MetricData\":" + metricData + "}", CLOUDWATCH_JSON_CONTENT_TYPE);
 
         int maxCapacity = 10;
-        await().atMost(Duration.ofSeconds(60)).untilAsserted(() ->
-                call(ECS_TARGET, "DescribeServices",
-                        "{\"cluster\":\"" + CLUSTER + "\",\"services\":[\"" + SERVICE + "\"]}")
-                        .then().body("services[0].desiredCount", equalTo(maxCapacity)));
+        await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(100)).untilAsserted(() -> {
+            AlarmEvaluatorTestAccess.evaluateNow(alarmEvaluator);
+            call(ECS_TARGET, "DescribeServices",
+                    "{\"cluster\":\"" + CLUSTER + "\",\"services\":[\"" + SERVICE + "\"]}")
+                    .then().body("services[0].desiredCount", equalTo(maxCapacity));
+        });
 
-        await().during(Duration.ofSeconds(15)).atMost(Duration.ofSeconds(20)).untilAsserted(() ->
-                call(ECS_TARGET, "DescribeServices",
-                        "{\"cluster\":\"" + CLUSTER + "\",\"services\":[\"" + SERVICE + "\"]}")
-                        .then().body("services[0].desiredCount", equalTo(maxCapacity)));
+        await().during(Duration.ofSeconds(3)).atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100))
+                .untilAsserted(() -> {
+                    AlarmEvaluatorTestAccess.evaluateNow(alarmEvaluator);
+                    call(ECS_TARGET, "DescribeServices",
+                            "{\"cluster\":\"" + CLUSTER + "\",\"services\":[\"" + SERVICE + "\"]}")
+                            .then().body("services[0].desiredCount", equalTo(maxCapacity));
+                });
 
         call(AAS_TARGET, "DescribeScalingActivities", """
                 { "ServiceNamespace": "ecs", "ResourceId": "%s" }

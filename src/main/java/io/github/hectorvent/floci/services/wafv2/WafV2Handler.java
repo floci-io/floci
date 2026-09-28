@@ -43,6 +43,11 @@ public class WafV2Handler {
     public Response handle(String action, JsonNode request, String region) {
         LOG.debugv("WAFv2 action: {0}", action);
         try {
+            // Gated on the region the request was sent to; the service's own callers (CloudFormation)
+            // pass a resource's region explicitly and are checked where the ARN is built.
+            if ("CLOUDFRONT".equals(text(request, "Scope"))) {
+                service.requireCloudFrontScope(region);
+            }
             return switch (action) {
                 case "CreateWebACL" -> handleCreateWebAcl(request, region);
                 case "GetWebACL" -> handleGetWebAcl(request);

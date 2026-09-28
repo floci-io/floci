@@ -23,20 +23,20 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.util.Collections;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -63,11 +63,44 @@ public class SecretsManagerService implements ResourceProvider {
     private final LambdaService lambdaService;
     private final ObjectMapper objectMapper;
     private final KmsService kmsService;
-    private final ExecutorService rotationExecutor = Executors.newCachedThreadPool();
-    private final ConcurrentHashMap<String, Object> rotationLocks = new ConcurrentHashMap<>();
+
+    // Fixed threads with an unbounded queue: a burst of rotations is queued, not rejected,
+    // because RotateSecret documents no overload error.
+    static final int ROTATION_EXECUTOR_POOL_SIZE = Math.max(4, Runtime.getRuntime().availableProcessors());
+    private final ExecutorService rotationExecutor =
+            Executors.newFixedThreadPool(ROTATION_EXECUTOR_POOL_SIZE, new RotationThreadFactory());
+
+    // Fixed stripes instead of one lock per ARN, which was never removed. Secrets that share a
+    // stripe only contend; no lock is held while a rotation Lambda runs.
+    private static final int ROTATION_LOCK_STRIPE_COUNT = 32;
+    private final Object[] rotationLockStripes = newLockStripes(ROTATION_LOCK_STRIPE_COUNT);
+
+    private static Object[] newLockStripes(int count) {
+        Object[] stripes = new Object[count];
+        for (int i = 0; i < count; i++) {
+            stripes[i] = new Object();
+        }
+        return stripes;
+    }
 
     private Object lockFor(String secretArn) {
-        return rotationLocks.computeIfAbsent(secretArn, k -> new Object());
+        int index = Math.floorMod(secretArn.hashCode(), rotationLockStripes.length);
+        return rotationLockStripes[index];
+    }
+
+    /** Names rotation threads for diagnostics. */
+    private static final class RotationThreadFactory implements ThreadFactory {
+        private final AtomicInteger nextId = new AtomicInteger(1);
+
+        @Override
+        public Thread newThread(Runnable runnable) {
+            // Set explicitly: a new thread otherwise inherits these from whichever thread grows the
+            // pool, and a daemon rotation thread could be cut off mid-rotation at JVM exit.
+            Thread thread = new Thread(runnable, "secretsmanager-rotation-" + nextId.getAndIncrement());
+            thread.setDaemon(false);
+            thread.setPriority(Thread.NORM_PRIORITY);
+            return thread;
+        }
     }
 
     @Inject
@@ -81,7 +114,7 @@ public class SecretsManagerService implements ResourceProvider {
     }
 
     SecretsManagerService(StorageBackend<String, Secret> store, int defaultRecoveryWindowDays) {
-        this(store, defaultRecoveryWindowDays, new RegionResolver("us-east-1", "000000000000"), null,
+        this(store, defaultRecoveryWindowDays, new RegionResolver("us-east-1", "000000000000"), null, // partition-literal: test-shaped constructor default
                 new ObjectMapper(), null);
     }
 

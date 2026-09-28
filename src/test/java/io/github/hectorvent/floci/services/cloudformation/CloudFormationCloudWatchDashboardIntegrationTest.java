@@ -11,7 +11,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
-import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -20,7 +19,6 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 
@@ -110,7 +108,7 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
     }
 
     @Test
-    void dashboardFollowsTheTemplateThroughCreateUpdateReplacementAndDelete() throws InterruptedException {
+    void dashboardFollowsTheTemplateThroughCreateUpdateReplacementAndDelete() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stack = "cfn-dashboard-" + suffix;
         String name = "ops-" + suffix;
@@ -150,14 +148,14 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
         assertEvent(describeEvents(stack), "DELETE_COMPLETE", name);
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         getDashboard(renamed).then()
             .statusCode(404)
             .body("ErrorResponse.Error.Code", equalTo("ResourceNotFound"));
     }
 
     @Test
-    void anUnnamedDashboardKeepsItsGeneratedNameAcrossUpdates() throws InterruptedException {
+    void anUnnamedDashboardKeepsItsGeneratedNameAcrossUpdates() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stack = "cfn-dashboard-unnamed-" + suffix;
 
@@ -176,12 +174,12 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
             .body("GetDashboardResponse.GetDashboardResult.DashboardBody", containsString("\"Throughput\""));
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
         getDashboard(generated).then().statusCode(404);
     }
 
     @Test
-    void aFailedUpdateRollsTheReplacementBack() throws InterruptedException {
+    void aFailedUpdateRollsTheReplacementBack() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stack = "cfn-dashboard-rb-" + suffix;
         String name = "ops-rb-" + suffix;
@@ -200,12 +198,12 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
             .body("ErrorResponse.Error.Code", equalTo("ResourceNotFound"));
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
     }
 
     /** An in-place body and tag change is put back from the snapshot the update took. */
     @Test
-    void aFailedUpdateRestoresTheBodyAndTagsAnInPlaceUpdateChanged() throws InterruptedException {
+    void aFailedUpdateRestoresTheBodyAndTagsAnInPlaceUpdateChanged() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stack = "cfn-dashboard-ip-" + suffix;
         String name = "ops-ip-" + suffix;
@@ -225,7 +223,7 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
         assertTags(arn, Map.of("team", "platform", "env", "dev"), Map.of());
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
     }
 
     /**
@@ -236,7 +234,7 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
      */
     @Test
     void anUpdateThatFailedOnItsTagsPutsTheDashboardBackAndTheStackRollsBackCleanly()
-            throws InterruptedException {
+            {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stack = "cfn-dashboard-tagfail-" + suffix;
         String name = "ops-tagfail-" + suffix;
@@ -270,7 +268,7 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
         }
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
     }
 
     /**
@@ -280,7 +278,7 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
      * dashboard is intact.
      */
     @Test
-    void aFailedRestoreLeavesTheStackInUpdateRollbackFailedNamingTheDashboard() throws InterruptedException {
+    void aFailedRestoreLeavesTheStackInUpdateRollbackFailedNamingTheDashboard() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stack = "cfn-dashboard-restorefail-" + suffix;
         String name = "ops-restorefail-" + suffix;
@@ -306,15 +304,14 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
         }
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
-        // A resource left UPDATE_FAILED by a failed rollback is not one DeleteStack removes, so the
-        // dashboard outlives the stack and this test removes it itself.
-        dashboardsService.deleteDashboards(List.of(name), "us-east-1");
+        CfnStackWaits.awaitStackDeleted(stack);
+        // A resource left UPDATE_FAILED by a failed rollback still belongs to the stack.
+        getDashboard(name).then().statusCode(404);
     }
 
     /** Dropping an explicit name is a replacement on AWS: the dashboard comes back under a generated name. */
     @Test
-    void droppingTheExplicitNameReplacesTheDashboard() throws InterruptedException {
+    void droppingTheExplicitNameReplacesTheDashboard() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stack = "cfn-dashboard-drop-" + suffix;
         String name = "ops-drop-" + suffix;
@@ -331,7 +328,7 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
             .body("ErrorResponse.Error.Code", equalTo("ResourceNotFound"));
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
-        awaitStackDeleted(stack);
+        CfnStackWaits.awaitStackDeleted(stack);
     }
 
     private static Response getDashboard(String name) {
@@ -406,25 +403,6 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
                 .anyMatch(event -> status.equals(event.get("ResourceStatus"))
                         && physicalId.equals(event.get("PhysicalResourceId")));
         assertTrue(found, "no " + status + " event for " + physicalId + " in " + eventsXml);
-    }
-
-    private static void awaitStackDeleted(String stack) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stack)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stack + " was not deleted within the timeout");
     }
 
     private static String outputValue(String xml, String key) {

@@ -19,6 +19,14 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 
 An action given a user pool ID that does not resolve returns `ResourceNotFoundException` with the live service's wording, `User pool <poolId> does not exist.`, so tooling that matches Cognito error text behaves the same way locally.
 
+`CreateUserPoolClient` and `UpdateUserPoolClient` store `AuthSessionValidity` in minutes,
+and `DescribeUserPoolClient` returns it. Values must be integers from 3 through 15.
+New clients default to 3 minutes; an update that omits the field retains its stored value.
+An explicit JSON `null` behaves as an omitted field. Wrong JSON types or numbers
+outside the 32-bit integer range return `SerializationException`. Integer durations
+outside 3 through 15 return `InvalidParameterException` with Cognito's constraint-error
+format. Validation runs before pool or client lookup.
+
 ## Supported Actions
 
 ### User Pools
@@ -29,7 +37,7 @@ An action given a user pool ID that does not resolve returns `ResourceNotFoundEx
 | DescribeUserPool | Returns the stored user pool configuration. |
 | ListUserPools | Lists local user pools visible in the request region. |
 | UpdateUserPool | Updates mutable user pool settings and persisted user-pool tags. |
-| DeleteUserPool | Deletes a local user pool and everything it owns: users, groups, app clients, resource servers, identity providers, revoked tokens and verification codes. Refused with `InvalidParameterException` while a domain is still configured. |
+| DeleteUserPool | Deletes a local user pool and everything it owns: users, groups, app clients, resource servers, identity providers, revoked tokens and verification codes. Refused with `InvalidParameterException` while `DeletionProtection` is `ACTIVE` (switch it to `INACTIVE` with `UpdateUserPool` first, as on AWS) or while a domain is still configured. |
 | GetUserPoolMfaConfig | Returns the pool's MFA mode and, once configured, its software-token setting. |
 | SetUserPoolMfaConfig | Sets `MfaConfiguration` (`OFF`/`ON`/`OPTIONAL`) and `SoftwareTokenMfaConfiguration`. An absent `MfaConfiguration` means `OFF`, and turning MFA off drops the factor configuration with it. Validation follows the live service: `OFF` alongside a software-token, email or SMS factor is rejected, and `ON`/`OPTIONAL` with none of those three is rejected, in both cases on the member being present, not on its `Enabled` value. `WebAuthnConfiguration` sits outside both rules, as it does in AWS. SMS, email and WebAuthn configurations are validated and not stored: Floci cannot deliver those factors, so keeping the config would imply a capability it does not have. |
 
@@ -70,10 +78,14 @@ An action given a user pool ID that does not resolve returns `ResourceNotFoundEx
 | UpdateIdentityProvider | Updates a provider's details, attribute mapping or identifiers. |
 | DeleteIdentityProvider | Deletes an identity provider from a user pool. |
 
-Providers are stored configuration only. Floci does not perform the federated sign-in
-flow: there is no `/oauth2/authorize` or `/oauth2/idpresponse` endpoint, so a registered
-provider cannot be used to authenticate. This covers infrastructure tooling that creates
-and reads provider configuration, not federated login.
+Providers can be used for generic OIDC authorization-code sign-in. Floci routes the
+AWS-shaped `/oauth2/authorize` and `/oauth2/idpresponse` endpoints to the configured local
+OIDC provider, exchanges the returned code, provisions or reconciles the federated user,
+and issues a Cognito authorization code for the registered callback.
+
+Only `ProviderType=OIDC` is supported by this flow. Floci does not implement social providers
+such as Google, Facebook, Login with Amazon or SignInWithApple. The pool's own users sign in
+through managed login instead (see [Managed login](#managed-login)).
 
 Two deliberate divergences from AWS, both consequences of not calling out to a third
 party:
@@ -106,8 +118,11 @@ always returns it.
 A domain created with `CustomDomainConfig` answers the OAuth endpoints on that host, as on AWS:
 
 ```
+GET  https://auth.example.localhost.floci.io/oauth2/authorize
 POST https://auth.example.localhost.floci.io/oauth2/token
 GET  https://auth.example.localhost.floci.io/oauth2/userInfo
+GET  https://auth.example.localhost.floci.io/login
+GET  https://auth.example.localhost.floci.io/logout
 ```
 
 Requests are matched on the `Host` header, so the name must resolve to Floci (any
@@ -116,8 +131,8 @@ the account that created it, since these requests carry no AWS credential: a `cl
 another pool is refused with `invalid_client`, and an access token issued by another pool with
 `invalid_token`. Domain names are unique across all accounts, as on AWS. The pool's `openid-configuration` advertises the custom-domain
 URLs when one exists. Prefix domains (`<prefix>.auth.<region>.amazoncognito.com`) are stored but not
-routed, since that hostname never reaches Floci. `/oauth2/authorize`, `/login` and `/logout` are not
-served on any host.
+routed, since that hostname never reaches Floci. `/login` and `/logout` are served at the root only
+on a custom-domain host; on Floci's own host they are `/cognito-idp/login` and `/cognito-idp/logout`.
 
 With TLS enabled, a custom domain (`CustomDomainConfig` set) is added to Floci's server
 certificate as soon as it is created, so `https://<domain>` verifies without a restart; see
@@ -192,6 +207,38 @@ further divergences, both deliberate:
 |--------|-------------|
 | ListUsers | Lists users stored in a user pool. |
 
+## Supported AuthFlow Values
+
+`InitiateAuth` accepts `USER_PASSWORD_AUTH`, `USER_SRP_AUTH`, `CUSTOM_AUTH`, `USER_AUTH`,
+`REFRESH_TOKEN_AUTH` and `REFRESH_TOKEN`. `AdminInitiateAuth` accepts `ADMIN_USER_PASSWORD_AUTH`,
+`ADMIN_NO_SRP_AUTH`, `USER_SRP_AUTH`, `USER_PASSWORD_AUTH`, `CUSTOM_AUTH`, `USER_AUTH`,
+`REFRESH_TOKEN_AUTH` and `REFRESH_TOKEN`.
+
+`USER_AUTH` is the choice-based flow: with no `PREFERRED_CHALLENGE` it returns
+`ChallengeName=SELECT_CHALLENGE` and an `AvailableChallenges` list drawn from what the user has
+configured (`PASSWORD`, `PASSWORD_SRP`, `EMAIL_OTP`, `SMS_OTP`); with one, it goes straight to that
+challenge. It requires the user pool's tier to be Essentials or higher. `WEB_AUTHN` and the
+`ConfirmSignUp` session as a first-factor shortcut are not implemented yet.
+
+Any other `AuthFlow` value is rejected with `InvalidParameterException` and no tokens are issued.
+
+The challenge `Session` of a `USER_SRP_AUTH`, `CUSTOM_AUTH` or `USER_AUTH` sign-in is valid for 3 minutes
+from when it was issued, the AWS default for the client's `AuthSessionValidity`. Answering the challenge with
+an older session fails with `NotAuthorizedException` (`Invalid session for the user, session is expired.`)
+and the sign-in has to start again. A per-client `AuthSessionValidity` is not supported yet, and the
+`NEW_PASSWORD_REQUIRED` challenge does not check its session.
+
+An app client only accepts the flows in its `ExplicitAuthFlows`: `ALLOW_USER_PASSWORD_AUTH`,
+`ALLOW_USER_SRP_AUTH`, `ALLOW_CUSTOM_AUTH`, `ALLOW_USER_AUTH`, `ALLOW_ADMIN_USER_PASSWORD_AUTH` and
+`ALLOW_REFRESH_TOKEN_AUTH`, or the legacy `USER_PASSWORD_AUTH`, `ADMIN_NO_SRP_AUTH` and
+`CUSTOM_AUTH_FLOW_ONLY`. Any other flow fails with `InvalidParameterException`.
+
+A client created without `ExplicitAuthFlows`, or with it cleared to an empty list, stores and describes an
+empty list, matching AWS. It is enforced as if it had `ALLOW_REFRESH_TOKEN_AUTH`, `ALLOW_USER_SRP_AUTH` and
+`ALLOW_CUSTOM_AUTH`, the default AWS documents for such a client: only the enforcement uses that default, not
+the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` or
+`USER_AUTH` must list the matching `ALLOW_` value.
+
 ## User Attribute Update Verification
 
 `CreateUserPool`, `UpdateUserPool`, and `DescribeUserPool` support
@@ -251,8 +298,8 @@ up, so an oversized request naming something that does not exist reports the req
 problem rather than `ResourceNotFoundException`, and an update violating both reports them
 in one message with the asset list first.
 
-Branding is presentation for the hosted UI, which Floci does not serve, so it is stored
-and returned rather than rendered. Two divergences follow from that:
+Branding is presentation for the managed login pages. Floci's sign-in page is deliberately
+plain, so branding is stored and returned rather than rendered. Two divergences follow from that:
 
 - **`Settings` is stored opaquely.** AWS validates it against a deep schema, rejecting
   unknown properties with `Invalid settings provided. Validation errors: [{property:
@@ -273,16 +320,118 @@ and returned rather than rendered. Two divergences follow from that:
 |------------------------------------------------------|------------------------------------------------------------------|
 | `GET /{userPoolId}/.well-known/openid-configuration` | OpenID discovery document                                        |
 | `GET /{userPoolId}/.well-known/jwks.json`            | JSON Web Key Set for JWT validation                              |
-| `POST /cognito-idp/oauth2/token`                     | Relaxed OAuth token endpoint for `grant_type=client_credentials` |
+| `GET /cognito-idp/oauth2/authorize`                  | Authorization-code start endpoint, for managed login and OIDC    |
+| `GET /cognito-idp/oauth2/idpresponse`                | OIDC provider callback endpoint                                  |
+| `GET`, `POST /cognito-idp/login`                     | Managed login sign-in form                                       |
+| `GET /cognito-idp/logout`                            | Managed login sign-out                                           |
+| `POST /cognito-idp/oauth2/token`                     | OAuth authorization-code and client-credentials token endpoint   |
+
+The OAuth endpoints support browser-style authorization-code sign-in, for the pool's own
+users and through a federated OIDC provider, as well as the emulator-friendly
+client-credentials flow:
+
+- `GET /cognito-idp/oauth2/authorize` validates the app client and callback. With no
+  `identity_provider`, or `identity_provider=COGNITO`, it starts managed login (below);
+  with any other provider name it redirects to that OIDC provider with an opaque state and nonce.
+- `GET /cognito-idp/oauth2/idpresponse` consumes the provider state, exchanges the provider
+  code and redirects to the registered callback with a one-time Cognito authorization code.
+- `POST /cognito-idp/oauth2/token` redeems that authorization code once, checking its PKCE
+  `code_verifier` when the authorization request sent a `code_challenge`, or issues a machine
+  token for `grant_type=client_credentials`.
+
+### Managed login
+
+Managed login signs in the pool's own users with authorization code and, optionally, PKCE.
+The client needs `COGNITO` in `SupportedIdentityProviders`, `AllowedOAuthFlows=["code"]` and
+the callback in `CallbackURLs`. No domain is needed; on a custom domain the same flow runs at
+`/oauth2/authorize`, `/login` and `/logout`.
+
+1. `GET /cognito-idp/oauth2/authorize` redirects to `/cognito-idp/login` with the request's
+   parameters. If the browser already has a managed login session in the pool, it skips the
+   form and redirects straight to the callback with a code, as AWS does.
+2. `GET /cognito-idp/login` renders a plain username and password form. The form carries the
+   request in hidden fields and a CSRF token that must match the `XSRF-TOKEN` cookie set with it.
+3. `POST /cognito-idp/login` checks the password as `USER_PASSWORD_AUTH` does, including
+   sign-in aliases and the pre and post authentication and user migration triggers, but
+   without the client's `ExplicitAuthFlows`. On success it sets a `cognito` session cookie
+   (one hour) and redirects to the callback with `code` and `state`. A wrong password shows
+   the form again with `Incorrect username or password.`; an unknown user reads the same.
+4. `POST /cognito-idp/oauth2/token` redeems the code. It invokes the pre token generation
+   trigger with triggerSource `TokenGeneration_HostedAuth`, as AWS does for a hosted-UI
+   sign-in, so a pool that customises its claims gets the same tokens here as from
+   `InitiateAuth`. The trigger is told the scopes the request asked for, narrowed to the
+   client's `AllowedOAuthScopes`, since the authorize endpoint does not check them itself. The
+   ID token carries the request's `nonce`, which the trigger cannot override.
+5. `GET /cognito-idp/logout?client_id=...&logout_uri=...` ends the session and redirects to
+   `logout_uri`, which must be one of the client's `LogoutURLs`. With `redirect_uri` and
+   `response_type=code` instead of `logout_uri`, it ends the session and redirects to the
+   sign-in form for that request.
+
+PKCE follows AWS: `code_challenge_method` must be `S256`, and discovery advertises
+`code_challenge_methods_supported: ["S256"]`. A code issued with a `code_challenge` is
+redeemed only with the matching `code_verifier`, so a public client (no secret) can use it
+alone. A code issued without one is refused if a `code_verifier` is sent, as RFC 9700
+recommends. A failed PKCE check spends the code; a request naming the wrong client or
+`redirect_uri` does not. PKCE applies to federated OIDC sign-in too.
+
+Differences from AWS:
+
+- **No challenge pages.** A user who must change or reset their password, or who is not
+  confirmed, sees an error on the form instead. Sign-up, forgot-password, MFA and passkey
+  pages are not served, and `prompt`, `login_hint`, `lang` and `idp_identifier` are ignored.
+- **Errors are JSON.** An authorization request error returns `400` with an OAuth error body,
+  even after `redirect_uri` is validated, where AWS redirects the error to the callback.
+- **Relative redirect.** The redirect from `/oauth2/authorize` to the sign-in form has a
+  relative `Location`, where AWS's is absolute.
+- **One session cookie per host.** Floci's own host serves every pool, so signing in to a
+  second pool there replaces the first pool's session. Custom domains keep separate sessions,
+  as on AWS. Sessions are held in memory and are lost on restart.
+
+```bash
+EP=http://localhost:4566
+POOL_ID=$(aws --endpoint-url $EP cognito-idp create-user-pool --pool-name web \
+  --query UserPool.Id --output text)
+CLIENT_ID=$(aws --endpoint-url $EP cognito-idp create-user-pool-client --user-pool-id $POOL_ID \
+  --client-name spa --supported-identity-providers COGNITO \
+  --allowed-o-auth-flows-user-pool-client --allowed-o-auth-flows code \
+  --allowed-o-auth-scopes openid email --callback-urls https://app.example.com/cb \
+  --logout-urls https://app.example.com/ --query UserPoolClient.ClientId --output text)
+aws --endpoint-url $EP cognito-idp admin-create-user --user-pool-id $POOL_ID --username alice
+aws --endpoint-url $EP cognito-idp admin-set-user-password --user-pool-id $POOL_ID \
+  --username alice --password 'Perm1234!' --permanent
+
+# PKCE pair: verifier, and its unpadded base64url SHA-256 challenge
+VERIFIER=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n')
+CHALLENGE=$(printf %s "$VERIFIER" | openssl dgst -sha256 -binary | base64 | tr '+/' '-_' | tr -d '=')
+
+# Open the sign-in form, then post the credentials with its CSRF token
+Q="response_type=code&client_id=$CLIENT_ID&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb&scope=openid&state=s1&code_challenge=$CHALLENGE&code_challenge_method=S256"
+CSRF=$(curl -s -c jar "$EP/cognito-idp/login?$Q" | sed -n 's/.*name="_csrf" value="\([^"]*\)".*/\1/p')
+CODE=$(curl -s -b jar -c jar -o /dev/null -w '%{redirect_url}' "$EP/cognito-idp/login?$Q" \
+  --data-urlencode "_csrf=$CSRF" --data-urlencode username=alice --data-urlencode 'password=Perm1234!' \
+  | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
+
+# Redeem the code with the verifier
+curl -s -X POST "$EP/cognito-idp/oauth2/token" \
+  --data-urlencode grant_type=authorization_code --data-urlencode client_id=$CLIENT_ID \
+  --data-urlencode code=$CODE --data-urlencode redirect_uri=https://app.example.com/cb \
+  --data-urlencode code_verifier=$VERIFIER
+
+# Sign out
+curl -s -b jar -o /dev/null -w '%{http_code} %{redirect_url}\n' \
+  "$EP/cognito-idp/logout?client_id=$CLIENT_ID&logout_uri=https%3A%2F%2Fapp.example.com%2F"
+```
 
 `POST /cognito-idp/oauth2/token` is intentionally emulator-friendly rather than full Cognito parity:
 
 - It requires an existing `client_id`.
 - It accepts `client_id` and `client_secret` from the form body or Basic auth.
-- It requires a confidential app client created with `GenerateSecret=true`.
+- Client-credentials requires a confidential app client created with `GenerateSecret=true`.
+- Authorization-code redemption validates the client, callback URI and one-time code binding.
 - It requires `AllowedOAuthFlowsUserPoolClient=true` and `AllowedOAuthFlows=["client_credentials"]`.
 - It doesn't require a Cognito domain.
-- It returns only `access_token`, `token_type`, and `expires_in`.
+- Client-credentials returns only `access_token`, `token_type`, and `expires_in`; authorization-code
+  redemption returns the Cognito access, ID and refresh token set.
 - It validates requested OAuth scopes against the app client's `AllowedOAuthScopes` and the pool's registered resource-server scopes.
 - It advertises the prefixed token endpoint in `/{userPoolId}/.well-known/openid-configuration`, or
   `https://<domain>/oauth2/token` when the pool has a custom domain (see Custom domains above).

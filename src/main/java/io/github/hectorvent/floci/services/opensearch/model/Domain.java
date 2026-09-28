@@ -74,6 +74,14 @@ public class Domain {
     @JsonProperty("VolumeId")
     private String volumeId;
 
+    /**
+     * The domain's Docker volume name. Stamped at creation with the current prefix; null on
+     * records written before this field existed, which are backfilled with the frozen legacy
+     * name so their data stays reachable.
+     */
+    @JsonProperty("DockerVolumeName")
+    private String dockerVolumeName;
+
     @JsonProperty("CreatedAt")
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant createdAt;
@@ -230,6 +238,14 @@ public class Domain {
 
     public void setVolumeId(String volumeId) {
         this.volumeId = volumeId;
+    }
+
+    public String getDockerVolumeName() {
+        return dockerVolumeName;
+    }
+
+    public void setDockerVolumeName(String dockerVolumeName) {
+        this.dockerVolumeName = dockerVolumeName;
     }
 
     public Instant getCreatedAt() {

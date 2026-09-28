@@ -1321,7 +1321,7 @@ class SamTransformIntegrationTest {
             .extract().asString();
 
         // AGENTS.md:289-291 asks for the exact Fn::GetAtt key set the provisioner publishes
-        // (CloudFormationResourceProvisioner.java:4231-4233): Arn, Name, StateMachineRevisionId.
+        // (StepFunctionsCfnProvisioner): Arn, Name, StateMachineRevisionId.
         // Asserting only "not a stub ARN" (as red loop 2 did) would also pass on an empty Output.
         String machineArn = stackOutputValue(describeStacks, "MachineArn");
         assertThat(machineArn, startsWith("arn:aws:states:"));

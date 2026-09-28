@@ -5,6 +5,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -596,7 +598,7 @@ public class VerifiedPermissionsService implements Resettable {
                 throw validation("The Cognito user pool must be in the same Region as the policy store.");
             }
             String poolId = arnParts[5].substring("userpool/".length());
-            cognito.put("issuer", "https://cognito-idp." + arnParts[3] + ".amazonaws.com/" + poolId);
+            cognito.put("issuer", "https://" + AwsEndpoints.host("cognito-idp", arnParts[3]) + "/" + poolId);
             validateStringArray(cognito.get("clientIds"), "clientIds", 0, 1000);
             JsonNode group = cognito.get("groupConfiguration");
             if (group != null && !group.isNull()) {
@@ -1059,11 +1061,11 @@ public class VerifiedPermissionsService implements Resettable {
     }
 
     private String storeArn(String region, String id) {
-        return "arn:aws:verifiedpermissions:" + region + ":" + regionResolver.getAccountId() + ":policy-store/" + id;
+        return AwsArnUtils.Arn.of("verifiedpermissions", region, regionResolver.getAccountId(), "policy-store/" + id).toString();
     }
 
     private String aliasArn(String region, String aliasName) {
-        return "arn:aws:verifiedpermissions:" + region + ":" + regionResolver.getAccountId() + ":" + aliasName;
+        return AwsArnUtils.Arn.of("verifiedpermissions", region, regionResolver.getAccountId(), aliasName).toString();
     }
 
     private static String storeKey(String region, String id) { return region + ":" + id; }

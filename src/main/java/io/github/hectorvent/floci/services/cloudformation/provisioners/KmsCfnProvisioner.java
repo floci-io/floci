@@ -67,10 +67,8 @@ public class KmsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Copied from {@code CloudFormationResourceProvisioner} rather than delegating to
-     * {@link ProvisionContext#resolveTags}, which is not equivalent: it skips a blank key this
-     * keeps and orders entries by insertion rather than hash. This copy dies when the monolith's
-     * last caller migrates.
+     * Kept rather than delegating to {@link ProvisionContext#resolveTags}, which is not
+     * equivalent: it skips a blank key this keeps and orders entries by insertion rather than hash.
      */
     private Map<String, String> parseCfnTags(JsonNode tagsNode, ProvisionContext ctx) {
         tagsNode = ctx.engine().resolveNode(tagsNode);

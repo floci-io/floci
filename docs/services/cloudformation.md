@@ -53,6 +53,64 @@ StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` 
 
 Operation IDs are recorded and validated. Duplicate IDs return `OperationIdAlreadyExistsException`, missing stack sets return `StackSetNotFoundException`, and missing operation IDs return `OperationNotFoundException`. Invalid targets and request shapes use the CloudFormation query-protocol validation errors. Operations complete locally, so `OperationInProgressException` is only reachable when local operation state actually overlaps; Floci does not inject concurrency failures solely to exercise an error code.
 
+## CloudWatch Logs log streams
+
+`AWS::Logs::LogStream` creates a stream in the required `LogGroupName`. `LogStreamName` is optional;
+when omitted, including through `Fn::If` returning `AWS::NoValue`, CloudFormation generates a name
+and keeps it across updates. An explicit empty name remains invalid. `Ref` returns the stream name.
+The resource has no `Fn::GetAtt` attributes.
+
+Changing either name replaces the stream. The previous stream and its events remain available
+until the update commits; a failed stack update restores the previous stream. `UpdateReplacePolicy:
+Retain` keeps a displaced stream. Stack deletion removes the current stream and its events, and
+tolerates a stream that was already deleted.
+
+## CloudWatch Logs metric filters
+
+`AWS::Logs::MetricFilter` returns the filter name alone for both `Ref` and
+`PhysicalResourceId`. Floci stores the log group separately for cleanup, including when names
+contain `|`. Mutable updates keep generated names stable.
+
+Changing `FilterName` or `LogGroupName` deletes the old filter before creating the replacement.
+This works at the 100-filter group limit without temporarily exceeding the quota. The resource's
+DELETE and CREATE events precede its final UPDATE event. The
+[recorded AWS observations](cloudwatch-metric-filters-verification.md) also show this ordering
+with an already-installed `UpdateReplacePolicy: Retain`. This is specific to metric-filter
+replacement, not a change to ordinary stack `DeletionPolicy: Retain`.
+
+Rollback restores the complete prior backing definition, not just its reference. A replacement
+recreates the deleted filter and receives a new creation time. Failed restoration keeps its
+snapshot for retry; a filter absent before the update remains absent after rollback.
+That absence is retained as private nonownership metadata: later stack operations cannot adopt
+or delete another filter that reuses the same group and name.
+Named creates reject an existing filter rather than adopting it through Logs' upsert API.
+If storage fails both the write and its ownership inspection, cleanup reports failure rather
+than guessing ownership. The snapshot remains available, but an indeterminate surviving filter
+requires operator reconciliation before rollback or deletion can finish.
+`DeleteStack` preserves failed-rollback metadata until resource-aware cleanup runs. It removes
+confirmed owned restorations or newly created filters whose rollback deletion failed. An
+indeterminate outcome keeps the stack in `DELETE_FAILED` with its metadata available for retry.
+
+CFN mutations record `APPLIED`, `NOT_APPLIED`, or `UNKNOWN` while holding the canonical filter
+storage lock, including when storage throws after applying a write or delete. Each group/name
+address tracks confirmed ownership, nonownership, or uncertainty. A confirmed delete relinquishes
+ownership before another creator can enter, so neither rollback nor a later delete retry can
+adopt that creator's filter. Unknown outcomes cannot authorize an upsert or deletion of a
+surviving row. Confirmed absence permits safe recovery and finishes account-scoped pending
+publication cleanup. Older private rollback flags that cannot establish an outcome are treated
+conservatively as unknown.
+Baseline snapshots containing `logGroupName` and `filterName` are retained as historical metadata,
+not replayed as compensation for a new update: that older format could survive a successful
+in-place update. Its explicit group/name fields preserve pipe-containing names without ambiguity.
+After confirmed absence, a new update creates the requested definition rather than reviving
+the stale snapshot.
+
+CloudFormation dimensions use a `[{Key, Value}]` array, not the Logs API's object shape.
+CFN model validation precedes mutation, while provider validation (such as parsing a replacement
+filter pattern) can fail after deletion and trigger restoration. The CFN schema allows a
+256-character metric namespace, but Floci's Logs API validation currently accepts at most 255:
+passing model validation does not imply provider acceptance.
+
 ## Supported Resource Types
 
 Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`. Each delegates to
@@ -66,12 +124,12 @@ cross-resource references.
 <!-- floci:cfn-types:start -->
 | Service | Resource types |
 |---|---|
-| S3 | `Bucket`, `BucketPolicy` (accepted; policy not enforced) |
+| S3 | `Bucket`, `BucketPolicy` (document stored on the bucket; S3 does not evaluate it) |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription`, `TopicPolicy` |
 | DynamoDB | `Table`, `GlobalTable` |
-| Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig`, `MicrovmImage`, `NetworkConnector`, `Url`. Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
-| IAM | `Role`, `User`, `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
+| Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig`, `MicrovmImage`, `NetworkConnector`, `Url`. Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
+| IAM | `Role`, `User` (template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete), `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | Organizations | `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy` |
 | SSM | `Parameter` |
 | KMS | `Key`, `Alias` |
@@ -92,7 +150,7 @@ cross-resource references.
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
-| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain` |
+| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup` |
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | EventBridge Scheduler | `ScheduleGroup` |
@@ -103,7 +161,7 @@ cross-resource references.
 | IoT Core | `DomainConfiguration` (`ServerCertificates` resolves to a JSON string), `Policy` (deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached), `Thing`, `TopicRule` |
 | CloudFront | `CachePolicy`, `Distribution`, `OriginAccessControl`, `OriginRequestPolicy`, `ResponseHeadersPolicy` |
 | CloudWatch | `Alarm`, `Dashboard` |
-| CloudWatch Logs | `LogGroup` |
+| CloudWatch Logs | `LogGroup`, `LogStream`, `MetricFilter` |
 | WAFv2 | `WebACL` |
 | Config | `ConfigRule` |
 | CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
@@ -210,6 +268,7 @@ accepts, not only by name:
 - Code and mutable configuration changes update the existing function in place.
 - Replacement-only changes such as `FunctionName` or `PackageType` changes create a replacement function and remove the old one.
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
+- Hot-reload code (`S3Bucket: hot-reload`) is compared by host path: the same path is a no-op, a different path updates the bind mount in place.
 
 ## RDS Credential Dynamic References
 
@@ -324,6 +383,25 @@ Lambda. floci supports two shapes:
   ResponseURL callback fires. The wait is bounded by an async custom-resource timeout (3 minutes by
   default); a resource that never completes fails the stack rather than hanging.
 
+## Deleted Stacks
+
+A deleted stack is kept for a short window afterwards rather than being forgotten at
+`DELETE_COMPLETE`, because the client that asked for the delete goes on polling for it. Within that
+window AWS's asymmetry is reproduced:
+
+- `DescribeStacks` **by stack id** (the ARN) answers with the stack, its `DELETE_COMPLETE` status
+  and its `DeletionTime`. `DescribeStackEvents` by stack id answers likewise.
+- `DescribeStacks` **by name** returns `ValidationError`, as it does on AWS. The CDK CLI depends on
+  the pair: it monitors a delete by stack id, and a stack id that stops resolving ends the rest of
+  a `cdk destroy --all` run.
+- `ListStacks` includes the stack as `DELETE_COMPLETE` with its `DeletionTime`, and a
+  `StackStatusFilter` of `DELETE_COMPLETE` selects it. A name reused after a delete is listed
+  twice, once per stack id.
+
+Once the window passes, all of those behave as though the stack had never existed. AWS keeps a
+deleted stack for 90 days; locally it only has to outlive the delete polling of the client that
+asked for it, so the window defaults to 30 seconds (see [Configuration](#configuration)).
+
 ## Deletion Policies
 
 A resource's [`DeletionPolicy`](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html)
@@ -338,6 +416,20 @@ attribute is honored on `DeleteStack` and on the rollback of a failed `CreateSta
 A kept resource is reported as `DELETE_SKIPPED` in `DescribeStackEvents` and does not fail the
 deletion — the stack still reaches `DELETE_COMPLETE` while the resource keeps existing. This also
 lets a stack owning a non-empty S3 bucket be deleted, since the bucket is never touched.
+
+Otherwise `DeleteStack` deletes each resource that has a physical id and is in one of these
+statuses:
+
+- `CREATE_COMPLETE`, `UPDATE_COMPLETE`
+- `UPDATE_FAILED`, which a failed update rollback leaves on the resources it could not restore, so
+  deleting a stack in `UPDATE_ROLLBACK_FAILED` removes them
+- `DELETE_FAILED`, which a retried `DeleteStack` attempts again
+- `CREATE_FAILED`, only when the stack created the backing entity, since a failed create can name
+  an entity that existed before and belongs to someone else
+
+Resources in any other status (`DELETE_COMPLETE`, `DELETE_SKIPPED`, an in-progress status) and
+resources without a physical id are skipped. A resource that cannot be deleted leaves the stack in
+`DELETE_FAILED`, named in the status reason.
 
 Deviations from AWS to be aware of:
 
@@ -398,6 +490,7 @@ provisioning outcomes rather than always returning `SUCCEEDED`.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDFORMATION_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_CLOUDFORMATION_DELETED_STACK_RETENTION_SECONDS` | `30` | How long a deleted stack stays describable by its stack id and listed as `DELETE_COMPLETE` (see [Deleted Stacks](#deleted-stacks)) |
 
 ## Examples
 

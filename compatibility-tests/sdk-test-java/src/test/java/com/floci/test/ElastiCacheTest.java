@@ -16,9 +16,11 @@ import software.amazon.awssdk.services.elasticache.model.DeleteReplicationGroupR
 import software.amazon.awssdk.services.elasticache.model.DeleteUserRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeUsersRequest;
+import software.amazon.awssdk.services.elasticache.model.Endpoint;
 import software.amazon.awssdk.services.elasticache.model.InputAuthenticationType;
 import software.amazon.awssdk.services.elasticache.model.ModifyReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.ModifyUserRequest;
+import software.amazon.awssdk.services.elasticache.model.ReplicationGroup;
 import software.amazon.awssdk.services.elasticache.model.ElastiCacheException;
 
 import java.io.IOException;
@@ -87,11 +89,13 @@ class ElastiCacheTest {
 
         assertThat(response.replicationGroup().replicationGroupId()).isEqualTo(groupId);
         assertThat(response.replicationGroup().status()).isEqualTo("available");
-        assertThat(response.replicationGroup().configurationEndpoint()).isNotNull();
-        assertThat(response.replicationGroup().configurationEndpoint().address()).isEqualTo(TestFixtures.proxyHost());
+        assertThat(response.replicationGroup().clusterEnabled()).isFalse();
+        assertThat(response.replicationGroup().configurationEndpoint()).isNull();
+        assertThat(response.replicationGroup().nodeGroups()).hasSize(1);
+        assertThat(primaryEndpoint(response.replicationGroup()).address()).isEqualTo(TestFixtures.proxyHost());
         assertThat(response.replicationGroup().authTokenEnabled()).isTrue();
 
-        firstProxyPort = response.replicationGroup().configurationEndpoint().port();
+        firstProxyPort = primaryEndpoint(response.replicationGroup()).port();
         groupCreated = true;
     }
 
@@ -106,7 +110,8 @@ class ElastiCacheTest {
 
         assertThat(response.replicationGroups()).hasSize(1);
         assertThat(response.replicationGroups().get(0).replicationGroupId()).isEqualTo(groupId);
-        assertThat(response.replicationGroups().get(0).configurationEndpoint().port()).isEqualTo(firstProxyPort);
+        assertThat(response.replicationGroups().get(0).configurationEndpoint()).isNull();
+        assertThat(primaryEndpoint(response.replicationGroups().get(0)).port()).isEqualTo(firstProxyPort);
     }
 
     @Test
@@ -315,9 +320,13 @@ class ElastiCacheTest {
                 .authToken(authToken)
                 .build());
 
-        assertThat(response.replicationGroup().configurationEndpoint().port()).isEqualTo(firstProxyPort);
+        assertThat(primaryEndpoint(response.replicationGroup()).port()).isEqualTo(firstProxyPort);
         groupCreated = false;
-        firstProxyPort = response.replicationGroup().configurationEndpoint().port();
+        firstProxyPort = primaryEndpoint(response.replicationGroup()).port();
+    }
+
+    private static Endpoint primaryEndpoint(ReplicationGroup group) {
+        return group.nodeGroups().get(0).primaryEndpoint();
     }
 
     private static void requireGroup() {

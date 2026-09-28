@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -35,6 +36,8 @@ class SnsIntegrationTest {
     private static String rawDeliverySubArn;
     private static String envelopeQueueUrl;
     private static String envelopeSubArn;
+    private static String maxSizeQueryTopicArn;
+    private static String maxSizeJsonTopicArn;
 
     @Test
     @Order(1)
@@ -679,6 +682,66 @@ class SnsIntegrationTest {
     }
 
     @Test
+    @Order(19)
+    void filterPolicy_messageBodyMatchesS3RecordsArray() {
+        String queueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "sns-records-filter-" + UUID.randomUUID())
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        String subscription = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", topicArn)
+            .formParam("Protocol", "sqs")
+            .formParam("Endpoint", queueUrl)
+            .formParam("Attributes.entry.1.key", "FilterPolicyScope")
+            .formParam("Attributes.entry.1.value", "MessageBody")
+            .formParam("Attributes.entry.2.key", "FilterPolicy")
+            .formParam("Attributes.entry.2.value",
+                    "{\"Records\":{\"s3\":{\"bucket\":{\"name\":[\"mybucket\"]}}}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("SubscribeResponse.SubscribeResult.SubscriptionArn");
+
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "Publish")
+                .formParam("TopicArn", topicArn)
+                .formParam("Message", "{\"Records\":[{\"s3\":{\"bucket\":{\"name\":\"mybucket\"}}}]}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", queueUrl)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("mybucket"));
+        } finally {
+            given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "Unsubscribe").formParam("SubscriptionArn", subscription)
+                .when().post("/");
+            given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue").formParam("QueueUrl", queueUrl)
+                .when().post("/");
+        }
+    }
+
+    @Test
     @Order(50)
     void rawDelivery_createQueuesAndSubscribe() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
@@ -902,6 +965,317 @@ class SnsIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("UnsupportedOperation"));
+    }
+
+    // --- MaximumMessageSize, over both wire protocols ---
+    // SnsMaximumMessageSizeTest covers the rules; these cover the wire: parameter extraction,
+    // attribute omission, error codes and AWS-shaped serialization on Query and JSON 1.1.
+
+    @Test
+    @Order(60)
+    void maximumMessageSize_queryProtocol_createsAndReadsBackTheAttribute() {
+        maxSizeQueryTopicArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "max-size-query-topic")
+            .formParam("Attributes.entry.1.key", "MaximumMessageSize")
+            .formParam("Attributes.entry.1.value", "1048576")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetTopicAttributes")
+            .formParam("TopicArn", maxSizeQueryTopicArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<key>MaximumMessageSize</key>"))
+            .body(containsString("<value>1048576</value>"));
+    }
+
+    /** AWS omits the attribute until it is set rather than reporting the default. */
+    @Test
+    @Order(61)
+    void maximumMessageSize_queryProtocol_omittedUntilSet() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetTopicAttributes")
+            .formParam("TopicArn", topicArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("MaximumMessageSize")));
+    }
+
+    @Test
+    @Order(62)
+    void maximumMessageSize_queryProtocol_rejectsValueOutsideRangeOnCreate() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "max-size-rejected-topic")
+            .formParam("Attributes.entry.1.key", "MaximumMessageSize")
+            .formParam("Attributes.entry.1.value", "999")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameter"))
+            .body("ErrorResponse.Error.Message", equalTo("Invalid parameter: Attributes Reason: "
+                    + "MaximumMessageSize: 999 is not an integer between 1024 and 1048576 bytes"));
+    }
+
+    /** A 300 KiB publish clears the raised topic but would fail at the 256 KiB default. */
+    @Test
+    @Order(63)
+    void maximumMessageSize_queryProtocol_publishAboveTheDefaultLimit() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", maxSizeQueryTopicArn)
+            .formParam("Message", "x".repeat(307_200))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<MessageId>"));
+    }
+
+    @Test
+    @Order(64)
+    void maximumMessageSize_queryProtocol_rejectsOversizedPublishAndBatch() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SetTopicAttributes")
+            .formParam("TopicArn", maxSizeQueryTopicArn)
+            .formParam("AttributeName", "MaximumMessageSize")
+            .formParam("AttributeValue", "1024")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", maxSizeQueryTopicArn)
+            .formParam("Message", "x".repeat(1025))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameter"))
+            .body("ErrorResponse.Error.Message", equalTo("Invalid parameter: Message too long"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "PublishBatch")
+            .formParam("TopicArn", maxSizeQueryTopicArn)
+            .formParam("PublishBatchRequestEntries.member.1.Id", "big1")
+            .formParam("PublishBatchRequestEntries.member.1.Message", "x".repeat(600))
+            .formParam("PublishBatchRequestEntries.member.2.Id", "big2")
+            .formParam("PublishBatchRequestEntries.member.2.Message", "x".repeat(600))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("BatchRequestTooLong"))
+            .body("ErrorResponse.Error.Message",
+                    equalTo("The length of all the messages put together is more than the limit."));
+    }
+
+    @Test
+    @Order(65)
+    void maximumMessageSize_jsonProtocol_createsAndReadsBackTheAttribute() {
+        maxSizeJsonTopicArn = given()
+            .contentType(SNS_CONTENT_TYPE)
+            .header("X-Amz-Target", "SNS_20100331.CreateTopic")
+            .body("""
+                {
+                    "Name": "max-size-json-topic",
+                    "Attributes": {"MaximumMessageSize": "1048576"}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TopicArn", notNullValue())
+            .extract().path("TopicArn");
+
+        given()
+            .contentType(SNS_CONTENT_TYPE)
+            .header("X-Amz-Target", "SNS_20100331.GetTopicAttributes")
+            .body("{\"TopicArn\": \"%s\"}".formatted(maxSizeJsonTopicArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Attributes.MaximumMessageSize", equalTo("1048576"));
+    }
+
+    @Test
+    @Order(66)
+    void maximumMessageSize_jsonProtocol_rejectsValueOutsideRangeOnSet() {
+        given()
+            .contentType(SNS_CONTENT_TYPE)
+            .header("X-Amz-Target", "SNS_20100331.SetTopicAttributes")
+            .body("""
+                {
+                    "TopicArn": "%s",
+                    "AttributeName": "MaximumMessageSize",
+                    "AttributeValue": "1048577"
+                }
+                """.formatted(maxSizeJsonTopicArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameter"))
+            .body("message", equalTo("Invalid parameter: MaximumMessageSize: 1048577 "
+                    + "is not an integer between 1024 and 1048576 bytes"));
+    }
+
+    @Test
+    @Order(67)
+    void maximumMessageSize_jsonProtocol_rejectsOversizedPublishAndBatch() {
+        given()
+            .contentType(SNS_CONTENT_TYPE)
+            .header("X-Amz-Target", "SNS_20100331.SetTopicAttributes")
+            .body("""
+                {
+                    "TopicArn": "%s",
+                    "AttributeName": "MaximumMessageSize",
+                    "AttributeValue": "1024"
+                }
+                """.formatted(maxSizeJsonTopicArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(SNS_CONTENT_TYPE)
+            .header("X-Amz-Target", "SNS_20100331.Publish")
+            .body("{\"TopicArn\": \"%s\", \"Message\": \"%s\"}"
+                    .formatted(maxSizeJsonTopicArn, "x".repeat(1025)))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameter"))
+            .body("message", equalTo("Invalid parameter: Message too long"));
+
+        given()
+            .contentType(SNS_CONTENT_TYPE)
+            .header("X-Amz-Target", "SNS_20100331.PublishBatch")
+            .body("""
+                {
+                    "TopicArn": "%s",
+                    "PublishBatchRequestEntries": [
+                        {"Id": "big1", "Message": "%s"},
+                        {"Id": "big2", "Message": "%s"}
+                    ]
+                }
+                """.formatted(maxSizeJsonTopicArn, "x".repeat(600), "x".repeat(600)))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BatchRequestTooLong"))
+            .body("message",
+                    equalTo("The length of all the messages put together is more than the limit."));
+    }
+
+    @Test
+    @Order(68)
+    void maximumMessageSize_cleanup() {
+        for (String arn : List.of(maxSizeQueryTopicArn, maxSizeJsonTopicArn)) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteTopic")
+                .formParam("TopicArn", arn)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(69)
+    void publish_toQueueWithDelaySeconds_withholdsTheMessage() {
+        String delayQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "sns-delay-fanout-queue")
+            .formParam("Attribute.1.Name", "DelaySeconds")
+            .formParam("Attribute.1.Value", "2")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        String delayTopicArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "sns-delay-fanout-topic")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", delayTopicArn)
+            .formParam("Protocol", "sqs")
+            .formParam("Endpoint", delayQueueUrl)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", delayTopicArn)
+            .formParam("Message", "delayed fanout")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", delayQueueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<Message>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", delayQueueUrl)
+            .formParam("AttributeName.1", "ApproximateNumberOfMessagesDelayed")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetQueueAttributesResponse.GetQueueAttributesResult.Attribute.Value",
+                    equalTo("1"));
     }
 
     /**

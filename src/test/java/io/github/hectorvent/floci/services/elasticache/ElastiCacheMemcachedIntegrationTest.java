@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -52,8 +53,7 @@ class ElastiCacheMemcachedIntegrationTest {
     @Test
     @Order(1)
     void createCacheCluster() {
-        var response =
-                given()
+        XmlPath response = given()
                     .formParam("Action", "CreateCacheCluster")
                     .formParam("CacheClusterId", CLUSTER_ID)
                     .formParam("Engine", "memcached")
@@ -97,10 +97,13 @@ class ElastiCacheMemcachedIntegrationTest {
     @Test
     @Order(3)
     void createCacheClusterWithInvalidEngineReturnsError() {
+        // Engine=redis used to be refused here. It is a valid single-node cache cluster on AWS and
+        // is now accepted (see ElastiCacheRedisClusterIntegrationTest), so the refusal is asserted
+        // with an engine ElastiCache really does not have.
         given()
             .formParam("Action", "CreateCacheCluster")
-            .formParam("CacheClusterId", "redis-attempt")
-            .formParam("Engine", "redis")
+            .formParam("CacheClusterId", "mongodb-attempt")
+            .formParam("Engine", "mongodb")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")

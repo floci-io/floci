@@ -6,11 +6,13 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.github.hectorvent.floci.services.ses.SesV2TimestampMatchers.DECIMAL_NUMBERS;
+import static io.github.hectorvent.floci.services.ses.SesV2TimestampMatchers.epochSecondsWithMillis;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
-import static org.hamcrest.Matchers.notNullValue;
 
 /**
  * Integration test for SES V2 ContactList CRUD:
@@ -53,6 +55,7 @@ class SesContactListV2IntegrationTest {
     @Order(2)
     void getContactList_returnsShape() {
         given()
+                .config(DECIMAL_NUMBERS)
                 .header("Authorization", SES_AUTH)
         .when()
                 .get("/v2/email/contact-lists/" + LIST)
@@ -64,20 +67,22 @@ class SesContactListV2IntegrationTest {
                 .body("Topics[0].TopicName", equalTo("weekly"))
                 .body("Topics[0].DefaultSubscriptionStatus", equalTo("OPT_IN"))
                 .body("Topics[1].TopicName", equalTo("promos"))
-                .body("CreatedTimestamp", notNullValue())
-                .body("LastUpdatedTimestamp", notNullValue());
+                .body("CreatedTimestamp", epochSecondsWithMillis())
+                .body("LastUpdatedTimestamp", epochSecondsWithMillis());
     }
 
     @Test
     @Order(3)
     void listContactLists_containsList() {
         given()
+                .config(DECIMAL_NUMBERS)
                 .header("Authorization", SES_AUTH)
         .when()
                 .get("/v2/email/contact-lists")
         .then()
                 .statusCode(200)
-                .body("ContactLists.ContactListName", hasItem(LIST));
+                .body("ContactLists.ContactListName", hasItem(LIST))
+                .body("ContactLists.LastUpdatedTimestamp", everyItem(epochSecondsWithMillis()));
     }
 
     @Test

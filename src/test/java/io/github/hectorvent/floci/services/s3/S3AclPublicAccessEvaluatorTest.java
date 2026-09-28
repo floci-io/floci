@@ -83,6 +83,63 @@ class S3AclPublicAccessEvaluatorTest {
         assertFalse(S3AclPublicAccessEvaluator.aclAllowsPublicRead("<AccessControlPolicy>"));
     }
 
+    // Block Public Access asks a broader question than grant evaluation does: an ACL counts as
+    // public when it grants ANY permission to AllUsers or to AuthenticatedUsers, so a
+    // WRITE_ACP grant and an AuthenticatedUsers grant are both public here while neither
+    // grants an anonymous caller a read.
+
+    @Test
+    void allUsersReadAclIsPublic() {
+        assertTrue(S3AclPublicAccessEvaluator.aclIsPublic(acl(
+                groupGrant(S3AclPublicAccessEvaluator.ALL_USERS_GROUP_URI, "READ"))));
+    }
+
+    @Test
+    void authenticatedUsersAclIsPublic() {
+        assertTrue(S3AclPublicAccessEvaluator.aclIsPublic(acl(
+                groupGrant(AUTHENTICATED_USERS_GROUP_URI, "READ"))));
+    }
+
+    @Test
+    void anyPermissionToAPublicGroupIsPublic() {
+        assertTrue(S3AclPublicAccessEvaluator.aclIsPublic(acl(
+                groupGrant(S3AclPublicAccessEvaluator.ALL_USERS_GROUP_URI, "WRITE_ACP"))));
+        assertTrue(S3AclPublicAccessEvaluator.aclIsPublic(acl(
+                groupGrant(S3AclPublicAccessEvaluator.ALL_USERS_GROUP_URI, "READ_ACP"))));
+    }
+
+    @Test
+    void logDeliveryGroupAclIsNotPublic() {
+        assertFalse(S3AclPublicAccessEvaluator.aclIsPublic(acl(groupGrant(
+                "http://acs.amazonaws.com/groups/s3/LogDelivery", "WRITE"))));
+    }
+
+    @Test
+    void canonicalUserOnlyAclIsNotPublic() {
+        String acl = """
+                <AccessControlPolicy>
+                  <AccessControlList>
+                    <Grant>
+                      <Grantee xsi:type="CanonicalUser"
+                               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                        <ID>000000000000</ID>
+                      </Grantee>
+                      <Permission>FULL_CONTROL</Permission>
+                    </Grant>
+                  </AccessControlList>
+                </AccessControlPolicy>
+                """;
+
+        assertFalse(S3AclPublicAccessEvaluator.aclIsPublic(acl));
+    }
+
+    @Test
+    void invalidAclIsNotPublic() {
+        assertFalse(S3AclPublicAccessEvaluator.aclIsPublic(null));
+        assertFalse(S3AclPublicAccessEvaluator.aclIsPublic(""));
+        assertFalse(S3AclPublicAccessEvaluator.aclIsPublic("<AccessControlPolicy>"));
+    }
+
     private static String acl(String... grants) {
         return """
                 <AccessControlPolicy>

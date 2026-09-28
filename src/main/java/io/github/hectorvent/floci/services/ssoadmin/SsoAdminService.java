@@ -51,12 +51,12 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SsoAdminService implements Resettable {
-    private static final String INSTANCE_ARN = globalArn("sso", "us-east-1", "", "instance/ssoins-7223b02a5d9f7c8e");
+    private static final String INSTANCE_ARN = globalArn("sso", "us-east-1", "", "instance/ssoins-7223b02a5d9f7c8e"); // partition-literal: seeded Identity Center instance home region
     private static final String IDENTITY_STORE_ID = "d-9067f2a3c1";
-    private static final String PRIMARY_REGION = "us-east-1";
-    private static final Pattern INSTANCE_ARN_PATTERN = Pattern.compile("arn:aws(?:-[a-z]{1,5}){0,3}:sso:::instance/(?:sso)?ins-[a-zA-Z0-9-.]{16}");
+    private static final String PRIMARY_REGION = "us-east-1"; // partition-literal: seeded Identity Center instance home region
+    private static final Pattern INSTANCE_ARN_PATTERN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso:::instance/(?:sso)?ins-[a-zA-Z0-9-.]{16}");
     private static final Pattern PERMISSION_SET_NAME = Pattern.compile("[\\w+=,.@-]+");
-    private static final Pattern PERMISSION_SET_ARN = Pattern.compile("arn:aws(?:-[a-z]{1,5}){0,3}:sso:::permissionSet/(?:sso)?ins-[a-zA-Z0-9-.]{16}/ps-[a-zA-Z0-9-./]{16}");
+    private static final Pattern PERMISSION_SET_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso:::permissionSet/(?:sso)?ins-[a-zA-Z0-9-.]{16}/ps-[a-zA-Z0-9-./]{16}");
     private static final Pattern PRINCIPAL_ID = Pattern.compile("([0-9a-f]{10}-|)[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}");
     /**
      * The model's own {@code ManagedPolicyArn} pattern. The previous
@@ -64,16 +64,16 @@ public class SsoAdminService implements Resettable {
      * partition, and its {@code .+} tail accepted a policy name containing characters AWS rejects.
      */
     private static final Pattern MANAGED_POLICY_ARN = Pattern.compile(
-            "arn:aws(?:-[a-z]{1,5}){0,3}:iam::aws:policy((?:/[A-Za-z0-9\\.,\\+@=_-]+)*)"
+            "arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::aws:policy((?:/[A-Za-z0-9\\.,\\+@=_-]+)*)"
                     + "/(?:[A-Za-z0-9\\.,\\+=@_-]+)");
     private static final Pattern CUSTOMER_MANAGED_POLICY_NAME = Pattern.compile("[\\w+=,.@-]+");
     private static final Pattern CUSTOMER_MANAGED_POLICY_PATH = Pattern.compile("((/[A-Za-z0-9\\.,\\+@=_-]+)*)/");
     private static final Pattern REGION_NAME = Pattern.compile("([a-z]+-){2,3}\\d");
-    private static final Pattern APPLICATION_PROVIDER_ARN = Pattern.compile("arn:aws(?:-[a-z]{1,5}){0,3}:sso::aws:applicationProvider/[a-zA-Z0-9-/]+");
-    private static final Pattern APPLICATION_ARN = Pattern.compile("arn:aws(?:-[a-z]{1,5}){0,3}:sso::\\d{12}:application/(?:sso)?ins-[a-zA-Z0-9-.]{16}/apl-[a-zA-Z0-9]{16}");
-    private static final Pattern TRUSTED_TOKEN_ISSUER_ARN = Pattern.compile("arn:aws(?:-[a-z]{1,5}){0,3}:sso::\\d{12}:trustedTokenIssuer/(?:sso)?ins-[a-zA-Z0-9-.]{16}/tti-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}");
+    private static final Pattern APPLICATION_PROVIDER_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso::aws:applicationProvider/[a-zA-Z0-9-/]+");
+    private static final Pattern APPLICATION_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso::\\d{12}:application/(?:sso)?ins-[a-zA-Z0-9-.]{16}/apl-[a-zA-Z0-9]{16}");
+    private static final Pattern TRUSTED_TOKEN_ISSUER_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso::\\d{12}:trustedTokenIssuer/(?:sso)?ins-[a-zA-Z0-9-.]{16}/tti-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}");
     private static final Pattern APPLICATION_ACCESS_SCOPE = Pattern.compile("([A-Za-z0-9_]{1,50})(:[A-Za-z0-9_]{1,50}){0,1}(:[A-Za-z0-9_]{1,50}){0,1}");
-    private static final Pattern APPLICATION_ACCESS_TARGET = Pattern.compile("arn:aws(?:-[a-z]{1,5}){0,3}:sso::(?:\\d{12}:application/(?:sso)?ins-[a-zA-Z0-9-.]{16}/apl-[a-zA-Z0-9]{16}|:instance/(?:sso)?ins-[a-zA-Z0-9-.]{16})");
+    private static final Pattern APPLICATION_ACCESS_TARGET = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso::(?:\\d{12}:application/(?:sso)?ins-[a-zA-Z0-9-.]{16}/apl-[a-zA-Z0-9]{16}|:instance/(?:sso)?ins-[a-zA-Z0-9-.]{16})");
     private static final Pattern CLIENT_TOKEN = Pattern.compile("[!-~]+");
     private static final Pattern APPLICATION_URL = Pattern.compile("http(s)?://[-a-zA-Z0-9+&@#/%?=~_|!:,.;]*[-a-zA-Z0-9+&@#/%?=~_|]");
     private static final Pattern TAG_VALUE = Pattern.compile("[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*");
@@ -84,7 +84,7 @@ public class SsoAdminService implements Resettable {
     private static final Pattern OIDC_CLAIM_ATTRIBUTE_PATH = Pattern.compile("\\p{L}+(?:(\\.|_)\\p{L}+){0,2}");
     private static final Pattern OIDC_IDENTITY_STORE_ATTRIBUTE_PATH = Pattern.compile("\\p{L}+(?:\\.\\p{L}+){0,2}");
     private static final Pattern OIDC_ISSUER_URL = Pattern.compile("https?://[-a-zA-Z0-9+&@/%=~_|!:,.;]*[-a-zA-Z0-9+&@/%=~_|]");
-    private static final Pattern KMS_KEY_ARN = Pattern.compile("arn:aws(?:-[a-z]{1,5}){0,3}:kms:([a-z]{2,}(-[a-z0-9]+)+):[0-9]{12}:key/(?:mrk-[a-f0-9]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})");
+    private static final Pattern KMS_KEY_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":kms:([a-z]{2,}(-[a-z0-9]+)+):[0-9]{12}:key/(?:mrk-[a-f0-9]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})");
     private static final int PERMISSION_SET_QUOTA = 3500;
     private static final int REGION_QUOTA = 6;
     private static final int MANAGED_POLICY_QUOTA = 25;
@@ -971,7 +971,7 @@ public class SsoAdminService implements Resettable {
             return false;
         }
         JsonNode aws = principal.get("AWS");
-        Pattern rootArn = Pattern.compile("arn:aws(?:-[a-z]{1,5}){0,3}:iam::" + accountId + ":root");
+        Pattern rootArn = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::" + accountId + ":root");
         return policyStringOrArrayMatches(aws, value -> "*".equals(value)
                 || accountId.equals(value) || rootArn.matcher(value).matches());
     }

@@ -8,10 +8,12 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
 import io.github.hectorvent.floci.services.athena.AthenaJsonHandler;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataJsonHandler;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessJsonHandler;
 import io.github.hectorvent.floci.services.cloudhsmv2.CloudHsmV2JsonHandler;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildJsonHandler;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployJsonHandler;
 import io.github.hectorvent.floci.services.codepipeline.CodePipelineJsonHandler;
+import io.github.hectorvent.floci.services.dms.DmsJsonHandler;
 import io.github.hectorvent.floci.services.ecr.EcrJsonHandler;
 import io.github.hectorvent.floci.services.transfer.TransferHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
@@ -105,6 +107,7 @@ public class AwsJson11Controller {
     private final GlueJsonHandler glueJsonHandler;
     private final AthenaJsonHandler athenaJsonHandler;
     private final RedshiftDataJsonHandler redshiftDataJsonHandler;
+    private final RedshiftServerlessJsonHandler redshiftServerlessJsonHandler;
     private final FirehoseJsonHandler firehoseJsonHandler;
     private final ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler;
     private final CodeBuildJsonHandler codeBuildJsonHandler;
@@ -141,6 +144,7 @@ public class AwsJson11Controller {
     private final MarketplaceEntitlementController marketplaceEntitlementController;
     private final MarketplaceMeteringController marketplaceMeteringController;
     private final SageMakerJsonHandler sageMakerJsonHandler;
+    private final DmsJsonHandler dmsJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -160,6 +164,7 @@ public class AwsJson11Controller {
                                EcrJsonHandler ecrJsonHandler, GlueJsonHandler glueJsonHandler,
                                AthenaJsonHandler athenaJsonHandler,
                                RedshiftDataJsonHandler redshiftDataJsonHandler,
+                               RedshiftServerlessJsonHandler redshiftServerlessJsonHandler,
                                FirehoseJsonHandler firehoseJsonHandler,
                                ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler,
                                CodeBuildJsonHandler codeBuildJsonHandler,
@@ -195,7 +200,8 @@ public class AwsJson11Controller {
                                ServiceQuotasJsonHandler serviceQuotasJsonHandler,
                                MarketplaceEntitlementController marketplaceEntitlementController,
                                MarketplaceMeteringController marketplaceMeteringController,
-                               SageMakerJsonHandler sageMakerJsonHandler) {
+                               SageMakerJsonHandler sageMakerJsonHandler,
+                               DmsJsonHandler dmsJsonHandler) {
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
@@ -219,6 +225,7 @@ public class AwsJson11Controller {
         this.glueJsonHandler = glueJsonHandler;
         this.athenaJsonHandler = athenaJsonHandler;
         this.redshiftDataJsonHandler = redshiftDataJsonHandler;
+        this.redshiftServerlessJsonHandler = redshiftServerlessJsonHandler;
         this.firehoseJsonHandler = firehoseJsonHandler;
         this.resourceGroupsTaggingJsonHandler = resourceGroupsTaggingJsonHandler;
         this.codeBuildJsonHandler = codeBuildJsonHandler;
@@ -255,6 +262,7 @@ public class AwsJson11Controller {
         this.marketplaceEntitlementController = marketplaceEntitlementController;
         this.marketplaceMeteringController = marketplaceMeteringController;
         this.sageMakerJsonHandler = sageMakerJsonHandler;
+        this.dmsJsonHandler = dmsJsonHandler;
     }
 
     @POST
@@ -266,7 +274,7 @@ public class AwsJson11Controller {
             String body) {
 
         if (target == null) {
-            return null;
+            return JsonErrorResponseUtils.createMissingTargetErrorResponse();
         }
 
         ServiceCatalog.TargetMatch targetMatch = catalog.matchTarget(target).orElse(null);
@@ -316,6 +324,7 @@ public class AwsJson11Controller {
                 case "glue" -> glueJsonHandler.handle(action, request, region);
                 case "athena" -> athenaJsonHandler.handle(action, request, region);
                 case "redshift-data" -> redshiftDataJsonHandler.handle(action, request, region);
+                case "redshift-serverless" -> redshiftServerlessJsonHandler.handle(action, request, region);
                 case "firehose" -> firehoseJsonHandler.handle(action, request, region);
                 case "tagging" -> resourceGroupsTaggingJsonHandler.handle(action, request, region);
                 case "codebuild" -> codeBuildJsonHandler.handle(action, request, region, regionResolver.getAccountId());
@@ -367,6 +376,7 @@ public class AwsJson11Controller {
                     yield marketplaceMeteringController.handle(action, request, region);
                 }
                 case "sagemaker" -> sageMakerJsonHandler.handle(action, request, region);
+                case "dms" -> dmsJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target

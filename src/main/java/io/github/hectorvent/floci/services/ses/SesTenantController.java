@@ -25,6 +25,7 @@ import java.util.List;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringArrayOrAbsent;
@@ -32,8 +33,8 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAb
 
 /**
  * SES V2 tenant endpoints ({@code /v2/email/tenants}, {@code /v2/email/tenant} and
- * {@code /v2/email/resources/tenants}), split out of {@link SesController}. Tenant create, get,
- * list and suppression attributes call {@link SesTenantService} directly; the resource
+ * {@code /v2/email/resources/tenants}). Tenant create, get, list and suppression attributes
+ * call {@link SesTenantService} directly; the resource
  * associations and tenant delete go through the {@link SesService} facade, which checks the
  * associated identity, configuration set or template exists and cascades the tenant's
  * suppression entries, work that spans several domains.
@@ -134,9 +135,7 @@ public class SesTenantController {
             item.put("TenantName", t.tenantName());
             item.put("TenantId", t.tenantId());
             item.put("TenantArn", t.tenantArn());
-            if (t.createdTimestamp() != null) {
-                item.put("CreatedTimestamp", t.createdTimestamp().toEpochMilli() / 1000.0);
-            }
+            putTimestamp(item, "CreatedTimestamp", t.createdTimestamp());
         }
         return Response.ok(result).build();
     }
@@ -267,9 +266,7 @@ public class SesTenantController {
                 item.put("TenantName", a.tenantName());
                 item.put("TenantId", a.tenantId());
                 item.put("ResourceArn", a.resourceArn());
-                if (a.associatedTimestamp() != null) {
-                    item.put("AssociatedTimestamp", a.associatedTimestamp().toEpochMilli() / 1000.0);
-                }
+                putTimestamp(item, "AssociatedTimestamp", a.associatedTimestamp());
             }
             return Response.ok(result).build();
         } catch (AwsException e) {
@@ -308,9 +305,7 @@ public class SesTenantController {
         node.put("TenantName", tenant.tenantName());
         node.put("TenantId", tenant.tenantId());
         node.put("TenantArn", tenant.tenantArn());
-        if (tenant.createdTimestamp() != null) {
-            node.put("CreatedTimestamp", tenant.createdTimestamp().toEpochMilli() / 1000.0);
-        }
+        putTimestamp(node, "CreatedTimestamp", tenant.createdTimestamp());
         if (tenant.tags() != null && !tenant.tags().isEmpty()) {
             ArrayNode tags = node.putArray("Tags");
             for (Tag t : tenant.tags()) {

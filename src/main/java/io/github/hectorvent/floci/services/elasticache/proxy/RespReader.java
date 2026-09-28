@@ -5,8 +5,8 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Minimal Redis RESP protocol parser for reading the first command from a socket InputStream.
- * Only parses the AUTH command — after that, the connection is relayed verbatim.
+ * Minimal Redis RESP protocol parser for reading authentication-handshake commands from a
+ * socket InputStream. After authentication, the connection is relayed verbatim.
  */
 public class RespReader {
 

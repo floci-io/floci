@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RedshiftCatalogResourceTest {
 
     @Test
-    void testBootstrapCatalogResourceExistsAndContainsExpectedViews() throws Exception {
+    void bootstrapCatalogResourceExistsAndContainsExpectedViews() throws Exception {
         try (InputStream in = getClass().getResourceAsStream("/redshift/bootstrap-catalog.sql")) {
             assertNotNull(in, "bootstrap-catalog.sql must exist on classpath");
             String sql = new String(in.readAllBytes(), StandardCharsets.UTF_8);

@@ -16,7 +16,6 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Provisions an {@code AWS::CertificateManager::Certificate} through a CloudFormation stack and
@@ -91,7 +90,7 @@ class AcmCfnIntegrationTest {
     }
 
     @Test
-    void certificateStackExposesAnArnThatDescribeCertificateFinds() throws InterruptedException {
+    void certificateStackExposesAnArnThatDescribeCertificateFinds() {
         cloudFormation(STACK, "CreateStack", TEMPLATE, Map.of());
 
         String stacks = describeStacks(STACK, "CREATE_COMPLETE");
@@ -108,7 +107,7 @@ class AcmCfnIntegrationTest {
             .body("Certificate.Options.CertificateTransparencyLoggingPreference", equalTo("ENABLED"));
 
         cloudFormation(STACK, "DeleteStack", null, Map.of());
-        awaitStackDeleted(STACK);
+        CfnStackWaits.awaitStackDeleted(STACK);
 
         describeCertificate(arn).then()
             .statusCode(404)
@@ -116,7 +115,7 @@ class AcmCfnIntegrationTest {
     }
 
     @Test
-    void certificateOptionsFollowTheTemplateThroughCreateAndUpdate() throws InterruptedException {
+    void certificateOptionsFollowTheTemplateThroughCreateAndUpdate() {
         cloudFormation(OPTIONS_STACK, "CreateStack", OPTIONS_TEMPLATE, options("ENABLED", "DISABLED"));
         String arn = outputValue(describeStacks(OPTIONS_STACK, "CREATE_COMPLETE"), "CertArn");
         describeCertificate(arn).then()
@@ -146,7 +145,7 @@ class AcmCfnIntegrationTest {
             .body("Certificate.Options.CertificateTransparencyLoggingPreference", equalTo("ENABLED"));
 
         cloudFormation(OPTIONS_STACK, "DeleteStack", null, Map.of());
-        awaitStackDeleted(OPTIONS_STACK);
+        CfnStackWaits.awaitStackDeleted(OPTIONS_STACK);
 
         describeCertificate(replacement).then()
             .statusCode(404)
@@ -188,24 +187,6 @@ class AcmCfnIntegrationTest {
     }
 
     /** DeleteStack runs asynchronously; a successful delete removes the stack entirely. */
-    private static void awaitStackDeleted(String stack) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stack)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stack + " was not deleted within the timeout");
-    }
 
     private static Response describeCertificate(String arn) {
         return given()

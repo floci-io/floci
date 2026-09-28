@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.*;
 
 /**
@@ -414,5 +415,61 @@ class S3VirtualHostIntegrationTest {
             .delete("/")
         .then()
             .statusCode(204);
+    }
+
+    // A key may contain the bucket's own name as a path segment, for example
+    // "archive/<bucket>/...". The raw request path of a virtual-hosted request is the key
+    // alone, so the "/<bucket>/" inside it is part of the key and not the path-style bucket
+    // prefix.
+    @Test
+    @Order(90)
+    void keyContainingTheBucketNameAsASegmentIsStoredWhole() {
+        // Its own bucket: the shared one is deleted by an earlier ordered test, and a 404 on
+        // the PUT below would fail this test without saying anything about keys.
+        String segmentBucket = "vhost-key-segment";
+        String segmentHost = segmentBucket + ".localhost";
+        given().header("Host", segmentHost).when().put("/").then().statusCode(200);
+
+        String key = "archive/" + segmentBucket + "/.sentinel";
+        given()
+            .header("Host", segmentHost)
+            .contentType("text/plain")
+            .body("sentinel")
+        .when()
+            .put("/" + key)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Host", segmentHost)
+            .queryParam("list-type", "2")
+            .queryParam("prefix", "archive/" + segmentBucket + "/")
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Key>" + key + "</Key>"));
+
+        given()
+            .header("Host", segmentHost)
+        .when()
+            .get("/" + key)
+        .then()
+            .statusCode(200)
+            .body(equalTo("sentinel"));
+
+        // And nothing was stored under the truncated key: what would remain if the "/<bucket>/"
+        // inside the key were mistaken for the path-style bucket prefix and stripped. Derived from
+        // the key rather than written out, so renaming the key cannot leave this asking for a
+        // third key that neither behaviour ever stores.
+        String truncated = key.substring(key.indexOf("/" + segmentBucket + "/")
+                + segmentBucket.length() + 2);
+        assertEquals(".sentinel", truncated, "the guard below must name the truncation, not a third key");
+        given()
+            .header("Host", segmentHost)
+        .when()
+            .get("/" + truncated)
+        .then()
+            .statusCode(404);
     }
 }

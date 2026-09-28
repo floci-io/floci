@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizerCache;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizerResult;
 import io.github.hectorvent.floci.services.appsync.model.ApiKey;
 import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
@@ -332,7 +334,24 @@ class AppSyncServiceTest {
         verify(schemaRegistry, never()).register(any(), any());
     }
 
+    @Test
+    void deleteGraphqlApiEvictsItsLambdaAuthorizerCacheEntries() {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "authz", "authenticationType", "AWS_LAMBDA"), "us-east-1");
+        GraphqlApi otherApi = service.createGraphqlApi(
+                Map.of("name", "authz-other", "authenticationType", "AWS_LAMBDA"), "us-east-1");
+        LambdaAuthorizerResult result = new LambdaAuthorizerResult(true, List.of(), Map.of(), 300, 10);
+        lambdaAuthorizerCache.put(api.getApiId(), "tok", result, 300);
+        lambdaAuthorizerCache.put(otherApi.getApiId(), "tok", result, 300);
+
+        service.deleteGraphqlApi(api.getApiId());
+
+        assertTrue(lambdaAuthorizerCache.get(api.getApiId(), "tok").isEmpty());
+        assertTrue(lambdaAuthorizerCache.get(otherApi.getApiId(), "tok").isPresent());
+    }
+
     private SchemaRegistry schemaRegistry;
+    private LambdaAuthorizerCache lambdaAuthorizerCache;
 
     @SuppressWarnings("unchecked")
     private AppSyncService newService(Clock clock) {
@@ -362,6 +381,7 @@ class AppSyncServiceTest {
         };
         Instance<RequestContext> requestContext = mock(Instance.class);
         schemaRegistry = mock(SchemaRegistry.class);
+        lambdaAuthorizerCache = new LambdaAuthorizerCache();
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn(baseUrl);
         return new AppSyncService(
@@ -374,7 +394,8 @@ class AppSyncServiceTest {
                 new ObjectMapper(),
                 AccountAwareStorageBackend.inMemory("000000000000"),
                 AccountAwareStorageBackend.inMemory("000000000000"),
-                clock);
+                clock,
+                lambdaAuthorizerCache);
     }
 
     private static final class MutableClock extends Clock {

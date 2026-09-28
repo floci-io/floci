@@ -6,6 +6,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.parsing.Parser;
+import io.restassured.response.ExtractableResponse;
+import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -15,6 +18,7 @@ import static io.restassured.config.EncoderConfig.encoderConfig;
 import static io.restassured.config.RestAssuredConfig.config;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -125,7 +129,7 @@ class CloudControlIntegrationTest {
         // Poll GetResourceRequestStatus until the async provision reaches SUCCESS.
         String identifier = null;
         for (int i = 0; i < 20 && identifier == null; i++) {
-            var pe = given()
+            ExtractableResponse<Response> pe = given()
                     .config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
                     .contentType(ct)
                     .header("X-Amz-Target", "CloudApiService.GetResourceRequestStatus")
@@ -224,7 +228,7 @@ class CloudControlIntegrationTest {
                 .body("{\"TypeName\":\"AWS::S3::Bucket\"}")
                 .when().post("/")
                 .then().statusCode(200)
-                .body("TypeName", org.hamcrest.Matchers.equalTo("AWS::S3::Bucket"));
+                .body("TypeName", equalTo("AWS::S3::Bucket"));
     }
 
     private void assertErrorCode(String contentType, String target, String body) {
@@ -284,7 +288,7 @@ class CloudControlIntegrationTest {
                 .body("{\"TypeName\":\"AWS::IAM::Policy\",\"Identifier\":\"never-created\"}")
                 .when().post("/")
                 .then().statusCode(200)
-                .body("ProgressEvent.OperationStatus", org.hamcrest.Matchers.equalTo("FAILED"));
+                .body("ProgressEvent.OperationStatus", equalTo("FAILED"));
     }
 
     private String createVpcThroughCloudControl(String ct, String auth, String cidr) {
@@ -302,7 +306,7 @@ class CloudControlIntegrationTest {
                 .header("X-Amz-Target", "CloudApiService.DeleteResource")
                 .body("{\"TypeName\":\"AWS::EC2::VPC\",\"Identifier\":\"" + identifier + "\"}")
                 .when().post("/").then().statusCode(200)
-                .body("ProgressEvent.OperationStatus", org.hamcrest.Matchers.equalTo(status));
+                .body("ProgressEvent.OperationStatus", equalTo(status));
     }
 
     private String awaitIdentifier(String token, String ct) throws InterruptedException {
@@ -311,10 +315,10 @@ class CloudControlIntegrationTest {
 
     private String awaitIdentifier(String token, String ct, String auth) throws InterruptedException {
         for (int i = 0; i < 20; i++) {
-            var request = given().config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+            RequestSpecification request = given().config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
                     .contentType(ct).header("X-Amz-Target", "CloudApiService.GetResourceRequestStatus");
             if (auth != null) request.header("Authorization", auth);
-            var pe = request.body("{\"RequestToken\":\"" + token + "\"}")
+            ExtractableResponse<Response> pe = request.body("{\"RequestToken\":\"" + token + "\"}")
                     .when().post("/").then().statusCode(200).extract();
             if ("SUCCESS".equals(pe.path("ProgressEvent.OperationStatus"))) {
                 return pe.path("ProgressEvent.Identifier");

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -68,8 +69,8 @@ class EventBridgeEcsRunTaskIntegrationTest {
                           "Group": "eb-ecs-group-%s",
                           "NetworkConfiguration": {
                             "awsvpcConfiguration": {
-                              "Subnets": ["subnet-1", "subnet-2"],
-                              "SecurityGroups": ["sg-1"],
+                              "Subnets": ["subnet-default-us-east-1-a", "subnet-default-us-east-1-b"],
+                              "SecurityGroups": ["sg-default-us-east-1"],
                               "AssignPublicIp": "ENABLED"
                             }
                           }
@@ -99,9 +100,9 @@ class EventBridgeEcsRunTaskIntegrationTest {
             .body("Targets[0].EcsParameters.LaunchType", equalTo("FARGATE"))
             .body("Targets[0].EcsParameters.Group", equalTo("eb-ecs-group-" + suffix))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.Subnets",
-                    hasItem("subnet-1"))
+                    hasItem("subnet-default-us-east-1-a"))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.SecurityGroups",
-                    hasItem("sg-1"))
+                    hasItem("sg-default-us-east-1"))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.AssignPublicIp",
                     equalTo("ENABLED"));
 
@@ -198,7 +199,7 @@ class EventBridgeEcsRunTaskIntegrationTest {
             .extract().path("taskDefinition.taskDefinitionArn");
     }
 
-    private static io.restassured.specification.RequestSpecification ecs(String action) {
+    private static RequestSpecification ecs(String action) {
         return given()
                 .contentType(EVENT_BRIDGE_CONTENT_TYPE)
                 .header("X-Amz-Target", ECS_TARGET_PREFIX + action);

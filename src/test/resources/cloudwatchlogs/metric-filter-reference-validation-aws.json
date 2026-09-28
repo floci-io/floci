@@ -1,0 +1,49 @@
+{
+  "provenance": {
+    "verification": "Verified on Live AWS",
+    "operation": "PutMetricFilter",
+    "observedFrom": "2026-09-16T12:16:08Z",
+    "observedThrough": "2026-09-16T12:16:10Z",
+    "cleanupVerifiedAt": "2026-09-16T12:16:11Z",
+    "region": "eu-west-1",
+    "endpoint": "https://logs.eu-west-1.amazonaws.com",
+    "source": "Four synthetic validation probes reported by the parent coordinator",
+    "reference": "https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutMetricFilter.html",
+    "normalization": "Only reported filter/metric transformation members and acceptance/error details are retained. Resource names, account identifiers and unrelated request members are omitted. These are not raw HTTP requests or responses.",
+    "publication": "None. Validation only.",
+    "unmeasured": "Dimension wildcard references and literal asterisks inside quoted property names were not probed."
+  },
+  "cases": [
+    {
+      "id": "A-mentioned-scalar",
+      "filterPattern": "{ $.probe = \"yes\" || $.value = * }",
+      "metricValue": "$.value",
+      "defaultValue": 7,
+      "expected": { "accepted": true }
+    },
+    {
+      "id": "B-unmentioned-scalar",
+      "filterPattern": "{ $.probe = \"yes\" }",
+      "metricValue": "$.value",
+      "defaultValue": 7,
+      "expected": { "accepted": true }
+    },
+    {
+      "id": "C-unmentioned-dimension",
+      "filterPattern": "{ $.probe = \"yes\" }",
+      "metricValue": "1",
+      "dimensions": { "A": "$.a" },
+      "expected": { "accepted": true }
+    },
+    {
+      "id": "D-wildcard-metric-value",
+      "filterPattern": "{ $.values[*] = * }",
+      "metricValue": "$.values[*]",
+      "expected": {
+        "accepted": false,
+        "errorCode": "InvalidParameterException",
+        "message": "Invalid metric transformation: metric value $.values[*] must be a valid number"
+      }
+    }
+  ]
+}

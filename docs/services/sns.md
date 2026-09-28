@@ -80,13 +80,84 @@ aws sqs receive-message \
 
 ## SNS → SQS Fan-Out
 
-Floci supports real SNS → SQS fan-out. When you publish to a topic, all SQS-subscribed queues receive the message immediately.
+Floci supports real SNS → SQS fan-out. When you publish to a topic, every SQS-subscribed queue receives the message.
 
 Supported subscription protocols:
-- `sqs` — delivers to a Floci SQS queue
-- `lambda` — invokes a Floci Lambda function
-- `http` / `https` — posts to an HTTP endpoint
-- `application` — fans out to a mobile push platform endpoint (see [Mobile push](#mobile-push-mock))
+- `sqs`: delivers to a Floci SQS queue
+- `lambda`: invokes a Floci Lambda function
+- `firehose`: puts records to a Floci Firehose delivery stream; `Subscribe` requires a valid IAM
+  `SubscriptionRoleArn` attribute, which is returned by `GetSubscriptionAttributes`
+- `http` / `https`: posts to an HTTP endpoint
+- `application`: fans out to a mobile push platform endpoint (see [Mobile push](#mobile-push-mock))
+
+For `FilterPolicyScope=MessageBody`, nested policy objects descend into JSON objects and arrays.
+An object inside an array matches when one array element satisfies the complete nested policy.
+
+For SQS subscriptions, Floci retries a failed delivery up to three times total, with two immediate
+retries. If all attempts fail and the subscription has a `RedrivePolicy` containing a valid
+`deadLetterTargetArn` for an SQS queue, Floci sends the original notification to that queue. SNS
+`Publish` still returns its message ID after downstream delivery fails. This is a bounded local
+policy; it does not reproduce AWS delivery retry timing or scale.
+
+## HTTP and HTTPS endpoint addresses
+
+Floci posts the `SubscriptionConfirmation` and every notification to a subscribed `http`/`https`
+endpoint itself, so it screens where that request may go.
+
+`Subscribe` resolves the endpoint's host and refuses it with `InvalidParameter` when it resolves to
+a link-local or cloud instance-metadata address (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`).
+This is the check that judges a hostname. Loopback and private addresses stay allowed, since
+delivering to a neighbouring container is the normal case here. An endpoint whose host does not
+resolve yet is accepted, as it is on AWS.
+
+Delivery screens only an endpoint that names an address outright, an IPv4 or bracketed IPv6
+literal, which covers a subscription stored before `Subscribe` began refusing them. **It does not
+resolve a hostname again**, so a hostname that passed `Subscribe` and later resolves to a metadata
+address is not screened at delivery: Floci's HTTP client resolves the name itself when it connects
+and cannot be given the result of an earlier check, so a lookup there could not decide where the
+request goes. Treat the `Subscribe` check as the boundary, not the delivery one.
+
+## Message size
+
+`MaximumMessageSize` is the per-topic limit, in bytes, on a published payload. It accepts `1024`
+to `1048576` (1 MiB) and defaults to `262144` (256 KiB). AWS raised the maximum in September 2026
+but left the default alone, so a topic that never sets the attribute behaves exactly as it did
+before. `GetTopicAttributes` omits the attribute until it is set rather than reporting the
+default.
+
+```bash
+aws sns set-topic-attributes --topic-arn $TOPIC_ARN \
+  --attribute-name MaximumMessageSize --attribute-value 1048576 \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+The limit counts the message body plus, per message attribute, its name, data type and value.
+`Subject` is not counted. `PublishBatch` counts the sum of all its entries against the same
+limit and fails the whole call rather than individual entries.
+
+A topic above `262144` is restricted: at most 100 subscriptions, every one of them `sqs`,
+`firehose` or `lambda`. Floci enforces the protocol rule on `Subscribe` and `SetTopicAttributes`
+alike, and the subscription count on `SetTopicAttributes` only — matching AWS, which lets an
+already-raised topic drift past 100 and catches it the next time the attribute is set. Pending
+confirmations count towards both.
+
+| Action | Condition | Error code | HTTP |
+|---|---|---|---|
+| `CreateTopic`, `SetTopicAttributes` | `MaximumMessageSize` not an integer between 1024 and 1048576 | `InvalidParameter` | 400 |
+| `SetTopicAttributes` | Raised above 262144 with a subscription that is not `sqs`, `firehose` or `lambda` | `InvalidParameter` | 400 |
+| `SetTopicAttributes` | Raised above 262144 with more than 100 subscriptions | `InvalidParameter` | 400 |
+| `Subscribe` | Unsupported protocol on a topic above 262144 | `InvalidParameter` | 400 |
+| `Publish` | Payload exceeds the topic's `MaximumMessageSize` | `InvalidParameter` | 400 |
+| `PublishBatch` | Entries sum to more than the topic's `MaximumMessageSize` | `BatchRequestTooLong` | 400 |
+
+CloudFormation carries the setting through: `AWS::SNS::Topic` forwards `MaximumMessageSize`, and
+an update that drops the property returns the topic to the default.
+
+A raised topic fanning out to SQS needs headroom. The notification envelope wraps the body in a
+few hundred bytes of JSON, so a publish at 1 MiB no longer fits a queue at the SQS maximum and is
+dropped on delivery — silently, as any delivery failure is. Keep the topic below the queue's own
+`MaximumMessageSize`, or subscribe with `RawMessageDelivery=true` so the body is forwarded
+unwrapped.
 
 ## FIFO topics
 

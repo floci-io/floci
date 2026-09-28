@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.pipes;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -118,7 +119,7 @@ public class PipesTargetInvoker {
                 if ((node.isObject() || node.isArray()) && node.isEmpty()) {
                     return null;
                 }
-            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            } catch (JsonProcessingException e) {
                 // Non-JSON textual enrichment response — forward as-is.
             }
             LOG.debugv("Pipe {0}: enrichment {1} produced target payload", pipe.getName(), enrichment);
@@ -147,25 +148,16 @@ public class PipesTargetInvoker {
     }
 
     /**
-     * Extracts a Lambda function name from a bare name, a name with a version/alias qualifier
-     * (e.g. "name:$LATEST"), or a full/partial function ARN
-     * ("arn:aws:lambda:region:acct:function:NAME[:qualifier]"). Taking the last ':'-segment is
-     * wrong for a qualified ARN — it yields the qualifier instead of the name.
+     * Function reference out of a bare name or a full/partial function ARN
+     * ("arn:aws:lambda:region:acct:function:NAME[:qualifier]"). The qualifier stays, so Lambda
+     * invokes the version or alias it names.
      */
     static String lambdaFunctionName(String ref) {
         if (ref == null) {
             return null;
         }
-        String fn = ref;
         int fi = ref.indexOf(":function:");
-        if (fi >= 0) {
-            fn = ref.substring(fi + ":function:".length());
-        }
-        int colon = fn.indexOf(':');
-        if (colon >= 0) {
-            fn = fn.substring(0, colon);
-        }
-        return fn;
+        return fi >= 0 ? ref.substring(fi + ":function:".length()) : ref;
     }
 
     private void invokeSqs(String arn, String payload, String region) {

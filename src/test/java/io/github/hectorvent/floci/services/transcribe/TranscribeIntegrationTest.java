@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.transcribe;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -204,6 +205,63 @@ class TranscribeIntegrationTest {
                     hasItems("list-job-a", "list-job-b"));
     }
 
+    @Test
+    void listTranscriptionJobs_usesNextTokenToAdvancePages() {
+        for (String name : new String[]{"paged-job-a", "paged-job-b"}) {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "Transcribe.StartTranscriptionJob")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"TranscriptionJobName\":\"" + name
+                        + "\",\"Media\":{\"MediaFileUri\":\"s3://b/a.wav\"}}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
+
+        Response firstPage = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Transcribe.ListTranscriptionJobs")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"JobNameContains":"paged-job-","MaxResults":1}""")
+        .when()
+            .post("/");
+
+        firstPage.then()
+            .statusCode(200)
+            .body("TranscriptionJobSummaries", hasSize(1))
+            .body("TranscriptionJobSummaries[0].TranscriptionJobName", equalTo("paged-job-a"))
+            .body("NextToken", equalTo("paged-job-a"));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Transcribe.DeleteTranscriptionJob")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"TranscriptionJobName":"paged-job-a"}""")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Transcribe.ListTranscriptionJobs")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"JobNameContains":"paged-job-","MaxResults":1,"NextToken":"%s"}"""
+                    .formatted(firstPage.jsonPath().getString("NextToken")))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TranscriptionJobSummaries", hasSize(1))
+            .body("TranscriptionJobSummaries[0].TranscriptionJobName", equalTo("paged-job-b"))
+            .body("NextToken", nullValue());
+    }
+
     // ── DeleteTranscriptionJob ───────────────────────────────────────────────
 
     @Test
@@ -379,6 +437,62 @@ class TranscribeIntegrationTest {
             .statusCode(200)
             .body("Vocabularies", hasSize(greaterThanOrEqualTo(2)))
             .body("Vocabularies.VocabularyName", hasItems("list-vocab-a", "list-vocab-b"));
+    }
+
+    @Test
+    void listVocabularies_usesNextTokenToAdvancePages() {
+        for (String name : new String[]{"paged-vocab-a", "paged-vocab-b"}) {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "Transcribe.CreateVocabulary")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"VocabularyName\":\"" + name + "\",\"LanguageCode\":\"en-US\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
+
+        Response firstPage = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Transcribe.ListVocabularies")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"NameContains":"paged-vocab-","MaxResults":1}""")
+        .when()
+            .post("/");
+
+        firstPage.then()
+            .statusCode(200)
+            .body("Vocabularies", hasSize(1))
+            .body("Vocabularies[0].VocabularyName", equalTo("paged-vocab-a"))
+            .body("NextToken", equalTo("paged-vocab-a"));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Transcribe.DeleteVocabulary")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"VocabularyName":"paged-vocab-a"}""")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Transcribe.ListVocabularies")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"NameContains":"paged-vocab-","MaxResults":1,"NextToken":"%s"}"""
+                    .formatted(firstPage.jsonPath().getString("NextToken")))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Vocabularies", hasSize(1))
+            .body("Vocabularies[0].VocabularyName", equalTo("paged-vocab-b"))
+            .body("NextToken", nullValue());
     }
 
     // ── DeleteVocabulary ─────────────────────────────────────────────────────

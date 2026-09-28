@@ -114,7 +114,7 @@ public class RedpandaManager {
         String containerName = ContainerStorageHelper.resourceName(config, "msk", cluster.getVolumeId(), cluster.getClusterName());
 
         // Cleanup stale container
-        lifecycleManager.removeIfExists(containerName);
+        ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, containerName);
 
         // Redpanda embeds broker addresses in Kafka protocol responses (Metadata,
         // FindCoordinator, ...) and clients reconnect directly to whatever address
@@ -163,9 +163,8 @@ public class RedpandaManager {
 
         // Handle persistence mounting
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager, config,
-                    "msk", cluster.getVolumeId(), cluster.getClusterName(),
-                    "/var/lib/redpanda/data");
+            ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager,
+                    resolveVolumeName(cluster), "/var/lib/redpanda/data");
         } else {
             // Legacy host-path mode: host-persistent-path is an absolute path
             String hostDataPath = legacyCompatibleHostPath(cluster).toAbsolutePath().toString();
@@ -280,8 +279,7 @@ public class RedpandaManager {
     }
 
     public void removeClusterStorage(MskCluster cluster) {
-        ContainerStorageHelper.removeStorage(config, lifecycleManager,
-                "msk", cluster.getVolumeId(), cluster.getClusterName());
+        ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, resolveVolumeName(cluster));
     }
 
     private String clusterIdentityKey(MskCluster cluster) {
@@ -302,4 +300,19 @@ public class RedpandaManager {
                 ? legacyPath
                 : scopedPath;
     }
+
+    /**
+     * The cluster's Docker volume name, backfilled once for records written before the field existed:
+     * those predate the {@code floci-aws-} migration, so their data is in the legacy-named volume
+     * and must keep resolving there. Never use the live helper here, which would strand that data
+     * under a freshly created volume.
+     */
+    private String resolveVolumeName(MskCluster cluster) {
+        if (cluster.getDockerVolumeName() == null || cluster.getDockerVolumeName().isBlank()) {
+            cluster.setDockerVolumeName(ContainerStorageHelper.legacyResourceName(
+                    config, "msk", cluster.getVolumeId(), cluster.getClusterName()));
+        }
+        return cluster.getDockerVolumeName();
+    }
+
 }

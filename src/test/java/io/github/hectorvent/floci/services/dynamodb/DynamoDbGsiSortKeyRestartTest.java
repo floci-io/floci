@@ -42,10 +42,10 @@ class DynamoDbGsiSortKeyRestartTest {
         return store;
     }
 
-    private DynamoDbJsonHandler handlerFor(StorageBackend<String, TableDefinition> store) {
+    private NativeDynamoDbJsonHandler handlerFor(StorageBackend<String, TableDefinition> store) {
         DynamoDbService service = new DynamoDbService(
                 store, null, new RegionResolver(REGION, "000000000000"), null, null);
-        return new DynamoDbJsonHandler(service, null, null, mapper);
+        return new NativeDynamoDbJsonHandler(service, null, null, mapper);
     }
 
     private ObjectNode createTableWithGsiSortKeyRequest() {
@@ -82,7 +82,7 @@ class DynamoDbGsiSortKeyRestartTest {
     void otherTablesSurviveEvenWhenOneHasAGsiRangeKey(@TempDir Path tmp) throws Exception {
         Path file = tmp.resolve("dynamodb-tables.json");
         StorageBackend<String, TableDefinition> store = diskStore(file);
-        DynamoDbJsonHandler handler = handlerFor(store);
+        NativeDynamoDbJsonHandler handler = handlerFor(store);
 
         handler.handle("CreateTable", createTableWithGsiSortKeyRequest(), REGION);
         ObjectNode plainTable = mapper.createObjectNode();

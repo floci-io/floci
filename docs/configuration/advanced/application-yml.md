@@ -38,8 +38,11 @@ The block below mirrors `src/main/resources/application.yml`, it's the effective
 floci:
   base-url: "http://localhost:4566"  # Used to build response URLs (SQS QueueUrl, SNS endpoints, etc.)
   # hostname: ""                     # When set, overrides the host in base-url for multi-container Docker
-  default-region: us-east-1
+  default-region: us-east-1           # Also selects the partition (cn-north-1 -> aws-cn)
   default-account-id: "000000000000"
+  partitions:
+    # id: aws                         # Pin the partition explicitly; derived from default-region when unset
+    allow-unknown-regions: false      # true serves a scope region no partition publishes or matches by pattern
 
   storage:
     mode: memory                      # memory | persistent | hybrid | wal
@@ -55,6 +58,8 @@ floci:
       # mount-user: "1001:1001"    # PosixUser: run mounting containers as uid[:gid]
       # mount-group-add: 2000      # supplementary gid added to mounting containers
     wal:
+      # Also the cadence at which journaled stores under persistent mode (CloudWatch Logs events)
+      # fold their .wal file into the store's JSON file.
       compaction-interval-ms: 30000
     services:
       ssm:
@@ -138,6 +143,7 @@ floci:
     lambda:
       enabled: true
       ephemeral: false                        # true = remove container after each invocation
+      docker-flags: ""                        # Extra Docker create flags for Lambda containers
       ecr-base-uri: public.ecr.aws            # Registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
       honour-architectures: false             # true = select the declared Lambda Docker architecture
       default-memory-mb: 128
@@ -193,6 +199,7 @@ floci:
       # default-postgres-image: "registry.example.com/postgres:16-alpine"
       # default-mysql-image: "registry.example.com/mysql:8.0"
       # default-mariadb-image: "registry.example.com/mariadb:11"
+      default-sql-server-image: "mcr.microsoft.com/mssql/server:2022-latest"
 
     rds-data:
       enabled: true
@@ -261,6 +268,11 @@ floci:
     ecs:
       enabled: true
       mock: false                             # true = tasks go to RUNNING without Docker (useful for CI)
+      docker-network: floci-net               # required for task-role credentials; must be user-defined
+      task-role-credentials:
+        enabled: false                        # vend real task IAM role credentials to task containers
+        ttl-seconds: 21600                    # six hours, matching AWS
+        port: 51679                           # Floci-side port; containers always use 169.254.170.2:80
 
     appsync:
       enabled: true

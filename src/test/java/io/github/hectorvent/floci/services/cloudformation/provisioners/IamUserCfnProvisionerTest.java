@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.util.HashMap;
 import java.util.List;
@@ -21,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -146,6 +148,10 @@ class IamUserCfnProvisionerTest {
                 {
                   "UserName": "app-user",
                   "Groups": ["developers", "qa"],
+                  "Tags": [
+                    {"Key": "Environment", "Value": "test"},
+                    {"Key": "Owner", "Value": "platform"}
+                  ],
                   "ManagedPolicyArns": [
                     "arn:aws:iam::aws:policy/ReadOnlyAccess",
                     "arn:aws:iam::aws:policy/PowerUserAccess"
@@ -164,6 +170,7 @@ class IamUserCfnProvisionerTest {
         verify(iam).attachUserPolicy("app-user", "arn:aws:iam::aws:policy/ReadOnlyAccess");
         verify(iam).attachUserPolicy("app-user", "arn:aws:iam::aws:policy/PowerUserAccess");
         verify(iam).putUserPolicy(eq("app-user"), eq("s3-access"), any());
+        verify(iam).tagUser("app-user", Map.of("Environment", "test", "Owner", "platform"));
     }
 
     @Test
@@ -204,6 +211,30 @@ class IamUserCfnProvisionerTest {
     }
 
     @Test
+    void deleteRemovesLoginProfileBeforeDeletingUser() {
+        IamUser user = new IamUser("AIDAuser", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
+        when(iam.getUser("my-user")).thenReturn(user);
+
+        provisioner.delete("AWS::IAM::User", "my-user", "us-east-1");
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).deleteLoginProfile("my-user");
+        order.verify(iam).deleteUser("my-user");
+    }
+
+    @Test
+    void deleteToleratesUserWithoutLoginProfile() {
+        IamUser user = new IamUser("AIDAuser", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
+        when(iam.getUser("my-user")).thenReturn(user);
+        doThrow(new AwsException("NoSuchEntity", "Login Profile for User my-user cannot be found.", 404))
+                .when(iam).deleteLoginProfile("my-user");
+
+        provisioner.delete("AWS::IAM::User", "my-user", "us-east-1");
+
+        verify(iam).deleteUser("my-user");
+    }
+
+    @Test
     void deleteToleratesAlreadyDeletedUser() {
         when(iam.getUser("already-gone"))
                 .thenThrow(new AwsException("NoSuchEntity", "User does not exist", 404));
@@ -222,6 +253,9 @@ class IamUserCfnProvisionerTest {
         existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Drop");
         existing.getInlinePolicies().put("keep-inline", "{}");
         existing.getInlinePolicies().put("drop-inline", "{}");
+        existing.getTags().put("keep-tag", "same");
+        existing.getTags().put("update-tag", "old");
+        existing.getTags().put("drop-tag", "remove-me");
 
         when(iam.createUser(eq("my-user"), eq("/"))).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getUser("my-user")).thenReturn(existing);
@@ -238,6 +272,11 @@ class IamUserCfnProvisionerTest {
                   "UserName": "my-user",
                   "Groups": ["keep-group"],
                   "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Keep"],
+                  "Tags": [
+                    {"Key": "keep-tag", "Value": "same"},
+                    {"Key": "update-tag", "Value": "new"},
+                    {"Key": "add-tag", "Value": "added"}
+                  ],
                   "Policies": [
                     {
                       "PolicyName": "keep-inline",
@@ -253,6 +292,39 @@ class IamUserCfnProvisionerTest {
         verify(iam, never()).removeUserFromGroup("keep-group", "my-user");
         verify(iam, never()).detachUserPolicy("my-user", "arn:aws:iam::aws:policy/Keep");
         verify(iam, never()).deleteUserPolicy("my-user", "keep-inline");
+        verify(iam).tagUser("my-user", Map.of("update-tag", "new", "add-tag", "added"));
+        verify(iam).untagUser("my-user", List.of("drop-tag"));
+    }
+
+    @Test
+    void failedTagReconciliationRestoresPriorTags() {
+        IamUser existing = new IamUser("AIDAuser", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
+        existing.getTags().put("keep-tag", "old");
+        existing.getTags().put("drop-tag", "restore-me");
+        when(iam.createUser(eq("my-user"), eq("/")))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getUser("my-user")).thenReturn(existing);
+        doThrow(new AwsException("ServiceFailure", "tag removal failed", 500))
+                .when(iam).untagUser("my-user", List.of("drop-tag"));
+
+        StackResource r = resource();
+        r.setPhysicalId("my-user");
+        r.getAttributes().put("__FlociUserId", "AIDAuser");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {
+                  "UserName": "my-user",
+                  "Tags": [
+                    {"Key": "keep-tag", "Value": "new"},
+                    {"Key": "add-tag", "Value": "added"}
+                  ]
+                }
+                """), updateCtx("my-user")));
+
+        verify(iam).tagUser("my-user", Map.of("keep-tag", "new", "add-tag", "added"));
+        verify(iam).untagUser("my-user", List.of("drop-tag"));
+        verify(iam).untagUser("my-user", List.of("add-tag"));
+        verify(iam).tagUser("my-user", Map.of("keep-tag", "old", "drop-tag", "restore-me"));
     }
 
     @Test

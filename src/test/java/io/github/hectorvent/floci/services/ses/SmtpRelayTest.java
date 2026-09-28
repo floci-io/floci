@@ -390,6 +390,18 @@ class SmtpRelayTest {
     }
 
     @Test
+    void parseRawHeaders_nestedBeyondTheParser_returnsEmptyRecord() {
+        // mime4j nests a reader per forwarded message and overflows the stack at this depth; the
+        // header pre-parse must answer like any other unparseable message, not kill the request.
+        String raw = "Content-Type: message/rfc822\r\n\r\n".repeat(100_000) + "Subject: deep\r\n\r\nx\r\n";
+
+        SmtpRelay.ParsedRawMessage parsed = SmtpRelay.parseRawMessage(raw);
+        assertNull(parsed.message());
+        assertEquals("", parsed.headers().subject());
+        assertTrue(parsed.headers().to().isEmpty());
+    }
+
+    @Test
     void parseRawHeaders_blank_returnsEmptyRecord() {
         SmtpRelay.RawMessageHeaders h = SmtpRelay.parseRawHeaders(null);
         assertEquals("", h.subject());

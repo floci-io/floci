@@ -33,6 +33,7 @@ class Ec2ImageCatalogTest {
         assertEquals(Set.of(
                 "ami-0abcdef1234567890",
                 "ami-0abcdef1234567891",
+                "ami-amazonlinux2023-arm64",
                 "ami-0abcdef1234567892",
                 "ami-ubuntu2204",
                 "ami-ubuntu2404-arm64",
@@ -44,9 +45,65 @@ class Ec2ImageCatalogTest {
 
         assertTrue(imageCatalog.findByIdOrAlias("ami-amazonlinux2").isPresent());
         assertTrue(imageCatalog.findByIdOrAlias("ami-amazonlinux2023").isPresent());
+        assertTrue(imageCatalog.findByIdOrAlias("ami-amazonlinux2023-arm64").isPresent());
         assertTrue(imageCatalog.findByIdOrAlias("ami-ubuntu2004").isPresent());
         assertTrue(imageCatalog.findByIdOrAlias("ami-ubuntu2404").isPresent());
         assertTrue(imageCatalog.findByIdOrAlias("ami-ubuntu2404-cloud").isPresent());
+    }
+
+    @Test
+    void amazonLinux2023EntriesCoverArm64AndX86_64Architectures() {
+        Ec2ImageCatalog.CatalogImage x86 = imageCatalog.findByIdOrAlias("ami-0abcdef1234567891").orElseThrow();
+        assertEquals("x86_64", x86.architecture);
+        assertEquals("al2023-ami-2023.0.20230315.0-kernel-6.1-x86_64", x86.name);
+        assertEquals(List.of(
+                "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
+                "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64",
+                "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64",
+                "/aws/service/eks/optimized-ami/1.28/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.29/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.30/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.32/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.33/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.34/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.35/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.36/amazon-linux-2023/x86_64/standard/recommended/image_id"),
+                x86.publicParameterNames());
+
+        Ec2ImageCatalog.CatalogImage arm64 = imageCatalog.findByIdOrAlias("ami-amazonlinux2023-arm64").orElseThrow();
+        assertEquals("arm64", arm64.architecture);
+        assertEquals("al2023-ami-2023.0.20230315.0-kernel-6.1-arm64", arm64.name);
+        assertEquals(List.of(
+                "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
+                "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64",
+                "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64",
+                "/aws/service/eks/optimized-ami/1.28/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.29/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.30/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.31/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.32/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.33/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.34/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.35/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.36/amazon-linux-2023/arm64/standard/recommended/image_id"),
+                arm64.publicParameterNames());
+    }
+
+    @Test
+    void amazonLinux2EntriesCapEksOptimizedAmiAt1_32() {
+        Ec2ImageCatalog.CatalogImage amzn2 = imageCatalog.findByIdOrAlias("ami-0abcdef1234567890").orElseThrow();
+        assertEquals("x86_64", amzn2.architecture);
+        assertEquals(List.of(
+                "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2",
+                "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-ebs",
+                "/aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-x86_64-gp2",
+                "/aws/service/eks/optimized-ami/1.28/amazon-linux-2/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.29/amazon-linux-2/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.30/amazon-linux-2/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.31/amazon-linux-2/recommended/image_id",
+                "/aws/service/eks/optimized-ami/1.32/amazon-linux-2/recommended/image_id"),
+                amzn2.publicParameterNames());
     }
 
     @Test
@@ -75,6 +132,7 @@ class Ec2ImageCatalogTest {
     @Test
     void resolverMapsImageArchitectureToDockerPlatform() {
         assertEquals("linux/arm64", amiImageResolver.resolveImage("ami-ubuntu2404-cloud-arm64").dockerPlatform());
+        assertEquals("linux/arm64", amiImageResolver.resolveImage("ami-amazonlinux2023-arm64").dockerPlatform());
         assertEquals("linux/amd64", amiImageResolver.resolveImage("ami-0abcdef1234567891").dockerPlatform());
     }
 

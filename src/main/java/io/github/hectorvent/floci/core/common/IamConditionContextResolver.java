@@ -3,7 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -51,20 +51,22 @@ public class IamConditionContextResolver {
     private static final String BUFFERED_FORM_BODY = "floci.bufferedFormBody";
     private static final String REQUEST_TAG_PREFIX = "aws:RequestTag/";
     private static final String RESOURCE_TAG_PREFIX = "aws:ResourceTag/";
+    public static final String EXISTING_OBJECT_TAG_PREFIX = "s3:ExistingObjectTag/";
+    public static final String REQUEST_OBJECT_TAG_PREFIX = "s3:RequestObjectTag/";
 
-    private final Instance<DynamoDbService> dynamoDbService;
+    private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
 
     @Inject
-    public IamConditionContextResolver(Instance<DynamoDbService> dynamoDbService,
+    public IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
                                        Instance<Ec2Service> ec2Service,
                                        Instance<S3Service> s3Service,
                                        RequestContext requestContext,
                                        EmulatorConfig config) {
-        this.dynamoDbService = dynamoDbService;
+        this.dynamoDbFacade = dynamoDbFacade;
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
         this.requestContext = requestContext;
@@ -81,6 +83,41 @@ public class IamConditionContextResolver {
         };
     }
 
+    public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,
+                                                        String resourceArn, String region,
+                                                        String accountId, String resourceOwnerAccountId) {
+        Map<String, List<String>> conditions = serviceContext == null
+                ? new LinkedHashMap<>()
+                : new LinkedHashMap<>(serviceContext);
+        // aws:ResourceAccount is the account that OWNS the resource, which is not always the
+        // caller's. Some ARNs carry it; S3 bucket and object ARNs deliberately do not, and there
+        // the owner has to come from service state. When neither source knows it, the key is left
+        // out rather than guessed: an absent key fails a Condition that tests it, whereas a wrong
+        // one would silently authorize cross-account access the policy meant to refuse.
+        String resourceAccount = accountFromArn(resourceArn);
+        if (resourceAccount == null || resourceAccount.isBlank()) {
+            resourceAccount = resourceOwnerAccountId;
+        }
+        putIfPresent(conditions, "aws:ResourceAccount", resourceAccount);
+        putIfPresent(conditions, "aws:PrincipalAccount", accountId);
+        putIfPresent(conditions, "aws:RequestedRegion", region);
+        return conditions.isEmpty() ? null : conditions;
+    }
+
+    private static String accountFromArn(String arn) {
+        if (arn == null || !arn.startsWith("arn:")) {
+            return null;
+        }
+        String[] segments = arn.split(":", 6);
+        return segments.length > 4 ? segments[4] : null;
+    }
+
+    private static void putIfPresent(Map<String, List<String>> conditions, String key, String value) {
+        if (value != null && !value.isBlank()) {
+            conditions.put(key, List.of(value));
+        }
+    }
+
     // ── S3 ──────────────────────────────────────────────────────────────────────
 
     private Map<String, List<String>> s3ConditionContext(String action, ContainerRequestContext ctx) {
@@ -89,8 +126,136 @@ public class IamConditionContextResolver {
             case "s3:PutBucketTagging" -> s3PutBucketTaggingConditionContext(ctx);
             case "s3:GetBucketTagging", "s3:DeleteBucketTagging", "s3:DeleteBucket" ->
                     s3BucketResourceTagConditionContext(ctx);
+            // Object tags. Which action is given which key is what real AWS was measured to do,
+            // not what reads naturally: s3:DeleteObject is given neither key, and s3:PutObject is
+            // given the tags of the REQUEST only, never those of an object it is about to
+            // overwrite. See S3ObjectTagConditionEnforcementIntegrationTest.
+            //
+            // s3:GetObjectVersion is deliberately absent. IamActionRegistry authorizes a GET
+            // carrying ?versionId= as s3:GetObject, and IamEnforcementFilter is the only caller
+            // of resolve, so an arm for it would never be reached. The versionId is read from the
+            // request instead, below.
+            case "s3:GetObject", "s3:GetObjectTagging", "s3:GetObjectAcl",
+                 "s3:PutObjectAcl", "s3:DeleteObjectTagging" -> s3ExistingObjectTagConditionContext(ctx);
+            case "s3:PutObject" -> s3RequestObjectTagConditionContext(ctx);
+            case "s3:PutObjectTagging" -> merge(s3ExistingObjectTagConditionContext(ctx),
+                    s3PutObjectTaggingBodyConditionContext(ctx));
             default -> null;
         };
+    }
+
+    /**
+     * {@code s3:ExistingObjectTag/<key>} from the tags of the version this request targets. An
+     * object that does not exist, or has no tags, offers no keys, so a {@code StringEquals} on one
+     * does not match and an allow conditioned on it does not apply.
+     *
+     * <p>The {@code versionId} query parameter decides which version is read. Falling back to the
+     * current version would authorize a read of an older version against tags it does not carry,
+     * which lets a request through that the policy refuses.
+     */
+    private Map<String, List<String>> s3ExistingObjectTagConditionContext(ContainerRequestContext ctx) {
+        if (ctx.getUriInfo() == null || !s3Service.isResolvable()) {
+            return null;
+        }
+        String path = ctx.getUriInfo().getPath();
+        String bucket = s3BucketName(path);
+        String key = s3ObjectKey(path);
+        if (bucket == null || key == null) {
+            return null;
+        }
+        String versionId = ctx.getUriInfo().getQueryParameters().getFirst("versionId");
+        Map<String, String> tags;
+        try {
+            tags = s3Service.get().getObjectTagging(bucket, key, versionId);
+        } catch (RuntimeException e) {
+            LOG.debugv(e, "Could not read object tags for the IAM condition context: {0}/{1} version {2}",
+                    bucket, key, versionId);
+            return null;
+        }
+        if (tags == null || tags.isEmpty()) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        tags.forEach((k, v) -> conditions.put(EXISTING_OBJECT_TAG_PREFIX + k, List.of(v)));
+        return conditions;
+    }
+
+    /**
+     * {@code s3:RequestObjectTag/<key>} from a PutObject's {@code x-amz-tagging} header, which the
+     * S3 model documents as a URL query parameter encoding of the tag-set.
+     */
+    private Map<String, List<String>> s3RequestObjectTagConditionContext(ContainerRequestContext ctx) {
+        String header = ctx.getHeaderString("x-amz-tagging");
+        if (header == null || header.isBlank()) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        for (String pair : header.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq <= 0) {
+                continue;
+            }
+            String name = urlDecode(pair.substring(0, eq));
+            String value = urlDecode(pair.substring(eq + 1));
+            if (name == null || value == null) {
+                continue;
+            }
+            conditions.put(REQUEST_OBJECT_TAG_PREFIX + name, List.of(value));
+        }
+        return conditions.isEmpty() ? null : conditions;
+    }
+
+    /** {@code s3:RequestObjectTag/<key>} from the {@code <Tagging>} XML body of PutObjectTagging. */
+    private Map<String, List<String>> s3PutObjectTaggingBodyConditionContext(ContainerRequestContext ctx) {
+        byte[] body = bufferEntity(ctx);
+        if (body == null || body.length == 0) {
+            return null;
+        }
+        Map<String, String> tags = XmlParser.extractPairs(
+                new String(body, StandardCharsets.UTF_8), "Tag", "Key", "Value");
+        if (tags.isEmpty()) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        tags.forEach((k, v) -> conditions.put(REQUEST_OBJECT_TAG_PREFIX + k, List.of(v)));
+        return conditions;
+    }
+
+    private static Map<String, List<String>> merge(Map<String, List<String>> a, Map<String, List<String>> b) {
+        if (a == null) {
+            return b;
+        }
+        if (b == null) {
+            return a;
+        }
+        Map<String, List<String>> merged = new LinkedHashMap<>(a);
+        merged.putAll(b);
+        return merged;
+    }
+
+    /**
+     * Null for a value {@code URLDecoder} refuses, such as the {@code %zz} of a malformed
+     * {@code x-amz-tagging} header. The caller drops the pair rather than letting the
+     * {@code IllegalArgumentException} out of the filter, where it becomes a 500 in place of the
+     * 400 {@code InvalidTag} the handler returns for the same header.
+     */
+    private static String urlDecode(String value) {
+        try {
+            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            LOG.debugv(e, "Undecodable tag component in the IAM condition context: {0}", value);
+            return null;
+        }
+    }
+
+    /** The object key of a path-style (or filter-rewritten) S3 path, null for a bucket-level one. */
+    private static String s3ObjectKey(String path) {
+        String stripped = path.startsWith("/") ? path.substring(1) : path;
+        int slash = stripped.indexOf('/');
+        if (slash < 0 || slash == stripped.length() - 1) {
+            return null;
+        }
+        return stripped.substring(slash + 1);
     }
 
     Map<String, List<String>> s3BucketListConditionContext(MultivaluedMap<String, String> queryParameters) {
@@ -364,18 +529,19 @@ public class IamConditionContextResolver {
 
     /**
      * Looks up the table whose key schema names the partition key. Resolved lazily through
-     * Instance so core.common keeps no hard dependency on the DynamoDB service, and via
+     * Instance so core.common keeps no hard dependency on the DynamoDB facade, and via
      * {@code findTable} rather than {@code describeTable} so the O(items) item-count refresh
      * never runs on the enforcement hot path.
      */
     private TableDefinition describeTargetTable(JsonNode body) {
         String tableName = targetTableName(body);
-        if (tableName == null || !dynamoDbService.isResolvable()) {
+        if (tableName == null || !dynamoDbFacade.isResolvable()) {
             return null;
         }
         String region = requestContext.getRegion() == null
                 ? config.defaultRegion() : requestContext.getRegion();
-        return dynamoDbService.get().findTable(tableName, region).orElse(null);
+        DynamoDbFacade dynamoDb = dynamoDbFacade.get();
+        return dynamoDb.tables().findTable(dynamoDb.scope(region), tableName).orElse(null);
     }
 
     /**

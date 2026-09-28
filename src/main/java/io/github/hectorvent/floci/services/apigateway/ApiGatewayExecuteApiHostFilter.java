@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -101,7 +103,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext requestContext) {
-        String host = requestContext.getHeaderString("Host");
+        String host = RequestHost.of(requestContext);
         if (host == null) {
             return;
         }
@@ -247,7 +249,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
         String endpointHost = tail.substring(firstDot + 1);
         if ("localhost".equalsIgnoreCase(endpointHost)
-                || "amazonaws.com".equalsIgnoreCase(endpointHost)
+                || AwsPartitions.isDnsSuffix(endpointHost)
                 || (baseHostname != null && baseHostname.equalsIgnoreCase(endpointHost))) {
             return matcher.group(1).toLowerCase(Locale.ROOT);
         }

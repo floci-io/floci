@@ -87,6 +87,7 @@ class ApiGatewayApiKeyCfnProvisionerTest {
                 .thenReturn(key("abc123", "my-key", "0123456789abcdef0123", false, "a key", Map.of("team", "core")));
         ObjectNode props = tags("team", "core")
                 .put("Name", "my-key")
+                .put("CustomerId", "marketplace-customer-1")
                 .put("Description", "a key")
                 .put("Enabled", "false")
                 .put("GenerateDistinctId", "true")
@@ -101,6 +102,7 @@ class ApiGatewayApiKeyCfnProvisionerTest {
         ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
         verify(apiGateway).createApiKey(eq(REGION), request.capture());
         assertEquals("my-key", request.getValue().get("name"));
+        assertEquals("marketplace-customer-1", request.getValue().get("customerId"));
         assertEquals("a key", request.getValue().get("description"));
         assertEquals(Boolean.FALSE, request.getValue().get("enabled"));
         assertEquals(Boolean.TRUE, request.getValue().get("generateDistinctId"));
@@ -126,9 +128,14 @@ class ApiGatewayApiKeyCfnProvisionerTest {
     @Test
     void updatePatchesDescriptionAndEnabledInPlace() {
         ApiKey existing = key("abc123", "my-key", "abc123", false, "old", Map.of());
+        existing.setCustomerId("marketplace-customer-1");
         when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
         when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenReturn(existing);
-        ObjectNode props = mapper.createObjectNode().put("Name", "my-key").put("Description", "new").put("Enabled", "true");
+        ObjectNode props = mapper.createObjectNode()
+                .put("Name", "my-key")
+                .put("CustomerId", "marketplace-customer-2")
+                .put("Description", "new")
+                .put("Enabled", "true");
         StackResource r = resource("abc123");
 
         provisioner.provision(r, props, ctx("abc123"));
@@ -141,6 +148,8 @@ class ApiGatewayApiKeyCfnProvisionerTest {
                 "/description".equals(op.get("path")) && "new".equals(op.get("value"))));
         assertTrue(patches.getValue().stream().anyMatch(op ->
                 "/enabled".equals(op.get("path")) && "true".equals(op.get("value"))));
+        assertTrue(patches.getValue().stream().anyMatch(op ->
+                "/customerId".equals(op.get("path")) && "marketplace-customer-2".equals(op.get("value"))));
         assertEquals("abc123", r.getPhysicalId());
         assertEquals("abc123", r.getAttributes().get("APIKeyId"));
     }

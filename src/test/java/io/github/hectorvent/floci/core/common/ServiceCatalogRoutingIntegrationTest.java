@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayController;
+import io.github.hectorvent.floci.services.s3.S3Controller;
 import io.github.hectorvent.floci.services.securityadmin.SecurityAdminController;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -80,6 +82,13 @@ class ServiceCatalogRoutingIntegrationTest {
         assertTrue(catalog.byResourceClass(SecurityAdminController.class).isEmpty());
         assertEquals("macie2", catalog.byCredentialScope("macie2").orElseThrow().externalKey());
         assertEquals("guardduty", catalog.byCredentialScope("guardduty").orElseThrow().externalKey());
+    }
+
+    @Test
+    void iamEnforcementCanResolveRestServicesFromMatchedRoutes() {
+        assertEquals("s3", catalog.byResourceClass(S3Controller.class).orElseThrow().externalKey());
+        assertEquals("apigateway",
+                catalog.byResourceClass(ApiGatewayController.class).orElseThrow().externalKey());
     }
 
     @Test

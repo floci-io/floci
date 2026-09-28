@@ -4,10 +4,12 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import com.github.dockerjava.api.model.AccessMode;
 import com.github.dockerjava.api.model.Bind;
+import com.github.dockerjava.api.model.DeviceRequest;
 import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Volume;
+import com.github.dockerjava.api.model.VolumesFrom;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -65,6 +67,26 @@ public class ContainerBuilder {
         return new Builder(resolveImage(image), config, dockerHostResolver, embeddedDnsServer, currentContainerNetworkResolver);
     }
 
+    /**
+     * The Docker network a spec built with {@link Builder#withDockerNetwork} would land on: the
+     * service's own setting, else the global default, else the network Floci itself is attached
+     * to. Exposed because a caller occasionally needs that name before it has a spec to read it
+     * from, for instance to allocate an address on the network the container is about to join.
+     */
+    public Optional<String> resolveDockerNetwork(Optional<String> serviceNetwork) {
+        return resolveDockerNetwork(serviceNetwork, config, currentContainerNetworkResolver);
+    }
+
+    private static Optional<String> resolveDockerNetwork(Optional<String> serviceNetwork, EmulatorConfig config,
+                                                         CurrentContainerNetworkResolver currentContainerNetworkResolver) {
+        return serviceNetwork
+                .or(() -> config.services().dockerNetwork())
+                .filter(n -> !n.isBlank())
+                .or(() -> currentContainerNetworkResolver != null
+                        ? currentContainerNetworkResolver.resolveNetworkName()
+                        : Optional.empty());
+    }
+
     public String resolveImage(String image) {
         return resolveImage(image, configuredImageRegistryBase(config));
     }
@@ -102,6 +124,17 @@ public class ContainerBuilder {
      * Fluent builder for constructing ContainerSpec instances.
      */
     public static class Builder {
+        /** Docker's capability name for a GPU, as used by {@code docker run --gpus}. */
+        private static final List<List<String>> GPU_CAPABILITY = List.of(List.of("gpu"));
+        /** Count understood by the daemon as "every device it has", i.e. {@code --gpus all}. */
+        private static final int ALL_DEVICES = -1;
+        /**
+         * Device-request driver that selects a Container Device Interface device by name.
+         * Podman resolves this on its Docker-compatible create API (containers/podman#19338);
+         * Docker's own NVIDIA path uses the count/id form instead.
+         */
+        private static final String CDI_DRIVER = "cdi";
+
         private final String image;
         private final EmulatorConfig config;
         private final DockerHostResolver dockerHostResolver;
@@ -114,12 +147,17 @@ public class ContainerBuilder {
         private List<String> entrypoint;
         private String workingDir;
         private Long memoryBytes;
+        private Long nanoCpus;
+        private Integer cpuShares;
+        private boolean readonlyRootfs;
         private final Map<Integer, Integer> portBindings = new HashMap<>();
         private final List<Integer> loopbackPortBindings = new ArrayList<>();
+        private final Map<Integer, String> portBindingHostIps = new HashMap<>();
         private final List<Integer> exposedPorts = new ArrayList<>();
         private String networkMode;
         private final List<Mount> mounts = new ArrayList<>();
         private final List<Bind> binds = new ArrayList<>();
+        private final List<VolumesFrom> volumesFrom = new ArrayList<>();
         private final List<String> extraHosts = new ArrayList<>();
         private final Map<String, String> labels = new HashMap<>();
         private LogConfig logConfig;
@@ -128,6 +166,8 @@ public class ContainerBuilder {
         private String user;
         private final List<String> groupAdd = new ArrayList<>();
         private final List<String> dnsServers = new ArrayList<>();
+        private final List<String> linkLocalIps = new ArrayList<>();
+        private final List<DeviceRequest> deviceRequests = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -212,11 +252,50 @@ public class ContainerBuilder {
         }
 
         /**
+         * Caps the container at a fraction of the host's CPUs, expressed the way ECS expresses it:
+         * 1024 CPU units is one vCPU.
+         */
+        public Builder withCpuUnits(int cpuUnits) {
+            this.nanoCpus = cpuUnits * 1_000_000_000L / 1024L;
+            return this;
+        }
+
+        /**
+         * Sets the container's relative CPU weight, which is what a container-level {@code cpu}
+         * means when several containers share a task's CPU allocation.
+         */
+        public Builder withCpuShares(int cpuShares) {
+            this.cpuShares = cpuShares;
+            return this;
+        }
+
+        /** Mounts the container's own filesystem read only. */
+        public Builder withReadonlyRootfs() {
+            this.readonlyRootfs = true;
+            return this;
+        }
+
+        /**
          * Adds a port binding from container port to a specific host port.
          */
         public Builder withPortBinding(int containerPort, int hostPort) {
             this.portBindings.put(containerPort, hostPort);
             this.exposedPorts.add(containerPort);
+            return this;
+        }
+
+        /**
+         * Adds a port binding to a specific host port on a specific host interface.
+         *
+         * <p>Use this for a port whose reachability is an operator decision rather than a fixed
+         * property of the container: the caller passes the configured address through, and a null
+         * or blank one falls back to Docker's own default of publishing on every interface.
+         */
+        public Builder withPortBinding(int containerPort, int hostPort, String hostIp) {
+            withPortBinding(containerPort, hostPort);
+            if (hostIp != null && !hostIp.isBlank()) {
+                this.portBindingHostIps.put(containerPort, hostIp.strip());
+            }
             return this;
         }
 
@@ -259,18 +338,26 @@ public class ContainerBuilder {
         }
 
         /**
+         * Adds a link-local IPv4 address to the container's endpoint on the configured Docker
+         * network, which must be user-defined. Only that one network is supported. The spec is
+         * rejected at {@link #build()} when the address or the network is not valid for this.
+         * Docker does not check that an address is unique on the network, so callers allocate them.
+         */
+        public Builder withLinkLocalIp(String ip) {
+            if (ip != null && !ip.isBlank() && !linkLocalIps.contains(ip.trim())) {
+                linkLocalIps.add(ip.trim());
+            }
+            return this;
+        }
+
+        /**
          * Sets the Docker network from a service-specific Optional, falling back to
          * the global services.dockerNetwork() if not present.
          * This is the standard pattern for Floci container services.
          */
         public Builder withDockerNetwork(Optional<String> serviceNetwork) {
-            Optional<String> configuredNetwork = serviceNetwork
-                    .or(() -> config.services().dockerNetwork())
-                    .filter(n -> !n.isBlank())
-                    .or(() -> currentContainerNetworkResolver != null
-                            ? currentContainerNetworkResolver.resolveNetworkName()
-                            : Optional.empty());
-            configuredNetwork.ifPresent(n -> this.networkMode = n);
+            ContainerBuilder.resolveDockerNetwork(serviceNetwork, config, currentContainerNetworkResolver)
+                    .ifPresent(n -> this.networkMode = n);
             return this;
         }
 
@@ -303,6 +390,14 @@ public class ContainerBuilder {
                     .withSource(volumeName)
                     .withTarget(containerPath)
                     .withReadOnly(readOnly));
+            return this;
+        }
+
+        /**
+         * Inherits every volume declared by another container.
+         */
+        public Builder withVolumesFrom(String sourceContainerId, boolean readOnly) {
+            volumesFrom.add(new VolumesFrom(sourceContainerId, readOnly ? AccessMode.ro : AccessMode.rw));
             return this;
         }
 
@@ -420,6 +515,118 @@ public class ContainerBuilder {
         }
 
         /**
+         * Requests {@code count} GPUs, the equivalent of {@code docker run --gpus <count>}.
+         * The daemon chooses which devices. Prefer {@link #withGpuDeviceIds(List)} or
+         * {@link #withCdiDevices(List)} when the caller has to pin specific hardware.
+         *
+         * <p>Docker only. Podman accepts this form on its Docker-compatible API and then
+         * starts the container with no device attached (containers/podman#22645), so a
+         * caller that may be talking to Podman should use {@link #withCdiDevices(List)},
+         * whose failure mode is a refused start rather than a silent CPU-only container.
+         *
+         * @param count how many GPUs to request; must be at least one
+         * @throws IllegalArgumentException if {@code count} is below one
+         * @throws IllegalStateException if a device request was already made
+         */
+        public Builder withGpuCount(int count) {
+            if (count < 1) {
+                throw new IllegalArgumentException(
+                        "GPU count must be at least 1, or use withAllGpus(); got " + count);
+            }
+            requireNoExistingDeviceRequest();
+            deviceRequests.add(new DeviceRequest()
+                    .withCount(count)
+                    .withCapabilities(GPU_CAPABILITY));
+            return this;
+        }
+
+        /**
+         * Requests every GPU the daemon exposes, the equivalent of {@code docker run --gpus all}.
+         * Docker only, with the same Podman caveat as {@link #withGpuCount(int)}.
+         *
+         * @throws IllegalStateException if a device request was already made
+         */
+        public Builder withAllGpus() {
+            requireNoExistingDeviceRequest();
+            deviceRequests.add(new DeviceRequest()
+                    .withCount(ALL_DEVICES)
+                    .withCapabilities(GPU_CAPABILITY));
+            return this;
+        }
+
+        /**
+         * Requests specific GPUs by daemon-assigned id, the equivalent of
+         * {@code docker run --gpus '"device=0,GPU-<uuid>"'}. Ids are indices or vendor UUIDs.
+         *
+         * <p>Indices are not stable across hosts or reboots, so a caller pinning hardware
+         * should prefer a UUID.
+         *
+         * @param deviceIds device ids to request; must be non-empty and individually non-blank
+         * @throws IllegalArgumentException if the list is empty or holds a blank id
+         * @throws IllegalStateException if a device request was already made
+         */
+        public Builder withGpuDeviceIds(List<String> deviceIds) {
+            requireUsableIds(deviceIds, "GPU device id");
+            requireNoExistingDeviceRequest();
+            // Count and ids are alternatives in Docker's API, and sending both is rejected
+            // by the daemon, so this form deliberately leaves the count unset.
+            deviceRequests.add(new DeviceRequest()
+                    .withDeviceIds(List.copyOf(deviceIds))
+                    .withCapabilities(GPU_CAPABILITY));
+            return this;
+        }
+
+        /**
+         * Requests devices by Container Device Interface name, such as
+         * {@code nvidia.com/gpu=GPU-<uuid>}. CDI is how a Podman daemon exposes accelerators
+         * over its Docker-compatible API, and it is not GPU-specific: the name identifies
+         * whatever device the host's CDI specs describe.
+         *
+         * <p>No capability is attached, because the CDI name already selects the device;
+         * the daemon resolves it against the host's CDI specs and fails the container start
+         * if it cannot.
+         *
+         * @param cdiDeviceNames fully-qualified CDI names, each {@code <vendor>/<class>=<name>}
+         * @throws IllegalArgumentException if the list is empty, or a name is blank or unqualified
+         * @throws IllegalStateException if a device request was already made
+         */
+        public Builder withCdiDevices(List<String> cdiDeviceNames) {
+            requireUsableIds(cdiDeviceNames, "CDI device name");
+            for (String name : cdiDeviceNames) {
+                // Catches the common mistake of passing a device path such as /dev/nvidia0,
+                // which the daemon would otherwise reject with an unresolvable-device error
+                // that does not say what was actually wrong with the value.
+                if (!name.contains("/") || !name.contains("=")) {
+                    throw new IllegalArgumentException(
+                            "CDI device name must be fully qualified as <vendor>/<class>=<name>; got " + name);
+                }
+            }
+            requireNoExistingDeviceRequest();
+            deviceRequests.add(new DeviceRequest()
+                    .withDriver(CDI_DRIVER)
+                    .withDeviceIds(List.copyOf(cdiDeviceNames)));
+            return this;
+        }
+
+        private void requireNoExistingDeviceRequest() {
+            if (!deviceRequests.isEmpty()) {
+                throw new IllegalStateException(
+                        "A device request is already set; count, device ids and CDI names are alternatives");
+            }
+        }
+
+        private static void requireUsableIds(List<String> ids, String description) {
+            if (ids == null || ids.isEmpty()) {
+                throw new IllegalArgumentException("At least one " + description + " is required");
+            }
+            for (String id : ids) {
+                if (id == null || id.isBlank()) {
+                    throw new IllegalArgumentException("A " + description + " must not be blank");
+                }
+            }
+        }
+
+        /**
          * Injects Floci's embedded DNS server into the container so virtual-hosted
          * S3 hostnames (my-bucket.localhost.floci.io) resolve to Floci's Docker
          * network IP. No-op when the embedded DNS server is not running.
@@ -442,6 +649,14 @@ public class ContainerBuilder {
             return this;
         }
 
+        /** Adds a DNS server to the container configuration. */
+        public Builder withDnsServer(String dnsServer) {
+            if (dnsServer != null && !dnsServer.isBlank()) {
+                dnsServers.add(dnsServer);
+            }
+            return this;
+        }
+
         /**
          * Builds the immutable ContainerSpec.
          */
@@ -459,6 +674,7 @@ public class ContainerBuilder {
                     networkMode,
                     List.copyOf(mounts),
                     List.copyOf(binds),
+                    List.copyOf(volumesFrom),
                     List.copyOf(extraHosts),
                     Map.copyOf(labels),
                     logConfig,
@@ -467,7 +683,13 @@ public class ContainerBuilder {
                     List.copyOf(dnsServers),
                     workingDir,
                     user,
-                    List.copyOf(groupAdd)
+                    List.copyOf(groupAdd),
+                    List.copyOf(deviceRequests),
+                    nanoCpus,
+                    cpuShares,
+                    readonlyRootfs,
+                    List.copyOf(linkLocalIps),
+                    Map.copyOf(portBindingHostIps)
             );
         }
     }

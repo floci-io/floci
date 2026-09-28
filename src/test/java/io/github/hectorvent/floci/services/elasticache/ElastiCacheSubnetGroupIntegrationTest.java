@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -8,6 +9,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.matchesPattern;
+import static org.hamcrest.Matchers.not;
 
 /**
  * Cache subnet groups over the Query protocol.
@@ -30,14 +33,14 @@ class ElastiCacheSubnetGroupIntegrationTest {
     private static String secondSubnet;
     private static String vpcId;
 
-    private static io.restassured.specification.RequestSpecification elasticache(String action) {
+    private static RequestSpecification elasticache(String action) {
         return given().header("Authorization", EC_AUTH)
                 .formParam("Action", action)
                 .formParam("Version", "2015-02-02");
     }
 
     private static String ec2(String region, String action, String... formParams) {
-        var request = given().header("Authorization", EC2_AUTH.formatted(region))
+        RequestSpecification request = given().header("Authorization", EC2_AUTH.formatted(region))
                 .formParam("Action", action)
                 .formParam("Version", "2016-11-15");
         for (int i = 0; i < formParams.length; i += 2) {
@@ -80,7 +83,7 @@ class ElastiCacheSubnetGroupIntegrationTest {
             .body(containsString(":subnetgroup:" + GROUP + "</ARN>"))
             // In the order they were given: the subnets are read back from a store whose scan
             // order is its own, so the group would otherwise report them in an arbitrary order.
-            .body(org.hamcrest.Matchers.matchesPattern(
+            .body(matchesPattern(
                     "(?s).*<SubnetIdentifier>" + firstSubnet + "</SubnetIdentifier>.*"
                             + "<SubnetIdentifier>" + secondSubnet + "</SubnetIdentifier>.*"));
     }
@@ -157,7 +160,7 @@ class ElastiCacheSubnetGroupIntegrationTest {
         .when().post("/")
         .then()
             .statusCode(200)
-            .body(org.hamcrest.Matchers.not(containsString(secondSubnet)));
+            .body(not(containsString(secondSubnet)));
     }
 
     @Test

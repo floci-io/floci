@@ -3,15 +3,14 @@ package io.github.hectorvent.floci.services.cur;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SynchronousBillingEmissionProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -35,7 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
  * {@link ParquetEmitterIntegrationTest} for prerequisites.
  */
 @QuarkusTest
-@TestProfile(CurEmissionIntegrationTest.SyncProfile.class)
+@TestProfile(SynchronousBillingEmissionProfile.class)
 @EnabledIfEnvironmentVariable(named = "FLOCI_DUCK_CROSS_CONTAINER_TEST", matches = "1|true|yes")
 class CurEmissionIntegrationTest {
 
@@ -44,22 +43,6 @@ class CurEmissionIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/cur/aws4_request";
     private static final String S3_AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/s3/aws4_request";
-
-    /**
-     * Wires the full sync path: emit-mode=synchronous, fixed Floci HTTP port so
-     * the DuckDB sidecar can reach Floci S3 over the network.
-     */
-    public static final class SyncProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            Map<String, String> o = new HashMap<>();
-            o.put("quarkus.http.test-port", "4566");
-            o.put("floci.base-url", "http://localhost:4566");
-            o.put("floci.services.cur.emit-mode", "synchronous");
-            o.put("floci.services.bcm-data-exports.emit-mode", "synchronous");
-            return o;
-        }
-    }
 
     @BeforeAll
     static void configureRestAssured() {

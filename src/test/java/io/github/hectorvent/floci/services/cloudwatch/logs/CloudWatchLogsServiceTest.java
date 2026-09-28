@@ -32,6 +32,7 @@ class CloudWatchLogsServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 10000,
                 new RegionResolver("us-east-1", "000000000000")
         );
@@ -80,6 +81,7 @@ class CloudWatchLogsServiceTest {
                 new AccountAwareStorageBackend<>(rawStreams, null, "000000000000"),
                 new AccountAwareStorageBackend<>(rawEvents, null, "000000000000"),
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
                 10_000, new RegionResolver(REGION, "000000000000"));
         String accountA = "111111111111";
         String accountB = "222222222222";
@@ -120,6 +122,7 @@ class CloudWatchLogsServiceTest {
                 new AccountAwareStorageBackend<>(rawStreams, null, accountB),
                 new AccountAwareStorageBackend<>(rawEvents, null, accountB),
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
                 10_000, new RegionResolver(REGION, accountB));
         long now = System.currentTimeMillis();
         long twoDaysAgo = now - 2 * 86_400_000L;
@@ -153,6 +156,7 @@ class CloudWatchLogsServiceTest {
                 new AccountAwareStorageBackend<>(rawGroups, null, accountB),
                 new AccountAwareStorageBackend<>(rawStreams, null, accountB),
                 new AccountAwareStorageBackend<>(rawEvents, null, accountB),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, accountB),
                 10_000, 2, new RegionResolver(REGION, accountB));
 
@@ -240,6 +244,7 @@ class CloudWatchLogsServiceTest {
 
     private static CloudWatchLogsService serviceWithStoredEventCeiling(int maxStoredEvents) {
         return new CloudWatchLogsService(
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -798,6 +803,30 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void getStoredBytesForLogGroupSumsStreamBytesAndIgnoresOtherGroups() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        service.createLogStream("/app/logs", "stream-2", REGION);
+        service.createLogGroup("/app/other", null, null, REGION);
+        service.createLogStream("/app/other", "stream-1", REGION);
+
+        long now = System.currentTimeMillis();
+        service.putLogEvents("/app/logs", "stream-1",
+                List.of(Map.of("timestamp", now, "message", "one")), REGION);
+        service.putLogEvents("/app/logs", "stream-2",
+                List.of(Map.of("timestamp", now + 1, "message", "two")), REGION);
+        service.putLogEvents("/app/other", "stream-1",
+                List.of(Map.of("timestamp", now + 2, "message", "other")), REGION);
+
+        long expected = service.describeLogStreams("/app/logs", null, REGION).stream()
+                .mapToLong(LogStream::getStoredBytes)
+                .sum();
+        assertTrue(expected > 0);
+        assertEquals(expected, service.getStoredBytesForLogGroup("/app/logs", REGION));
+        assertEquals(0, service.getStoredBytesForLogGroup("/app/empty", REGION));
+    }
+
+    @Test
     void putLogEventsUpdatesStreamMetadata() {
         service.createLogGroup("/app/logs", null, null, REGION);
         service.createLogStream("/app/logs", "stream-1", REGION);
@@ -814,8 +843,52 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void putLogEventsStoresTheBatchWithOneBackendWrite() {
+        String accountId = "111111111111";
+        CountingStorageBackend<String, LogEvent> rawEvents = new CountingStorageBackend<>();
+        CloudWatchLogsService batchService = new CloudWatchLogsService(
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
+                new AccountAwareStorageBackend<>(rawEvents, null, "000000000000"),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"),
+                10_000,
+                new RegionResolver(REGION, "000000000000"));
+        batchService.createLogGroupForAccount(accountId, "/app/logs", null, null, REGION);
+        batchService.createLogStreamForAccount(accountId, "/app/logs", "stream-1", REGION);
+
+        batchService.putLogEventsForAccount(accountId, "/app/logs", "stream-1", List.of(
+                Map.of("timestamp", 1_000L, "message", "first"),
+                Map.of("timestamp", 2_000L, "message", "second"),
+                Map.of("timestamp", 3_000L, "message", "third")), REGION);
+
+        assertEquals(1, rawEvents.putAllCalls);
+        assertEquals(0, rawEvents.putCalls);
+        assertEquals(3, rawEvents.keys().size());
+        assertTrue(rawEvents.keys().stream().allMatch(key -> key.startsWith(accountId + "/")));
+    }
+
+    private static final class CountingStorageBackend<K, V> extends InMemoryStorage<K, V> {
+        private int putCalls;
+        private int putAllCalls;
+
+        @Override
+        public void put(K key, V value) {
+            putCalls++;
+            super.put(key, value);
+        }
+
+        @Override
+        public void putAll(Map<K, V> entries) {
+            putAllCalls++;
+            entries.forEach((key, value) -> super.put(key, value));
+        }
+    }
+
+    @Test
     void maxEventsPerQueryIsRespected() {
         CloudWatchLogsService limitedService = new CloudWatchLogsService(
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -900,6 +973,7 @@ class CloudWatchLogsServiceTest {
     @Test
     void getLogEventsPagesForwardWithAnUnboundedMaxEventsPerQuery() {
         CloudWatchLogsService unboundedService = new CloudWatchLogsService(
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -1002,6 +1076,53 @@ class CloudWatchLogsServiceTest {
         assertEquals("msg-4", result.events().get(2).getMessage());
         assertEquals("b/2", result.nextBackwardToken());
         assertEquals("f/5", result.nextForwardToken());
+    }
+
+    @Test
+    void getLogEventsNarrowWindowPaginatesOnlyMatchingEventsAcrossManyOutOfWindowEvents() {
+        // The window must be applied before pagination, not after: 6 in-window matches
+        // surrounded by 200 out-of-window events must page exactly like a 6-event stream.
+        // A refactor that paginates the full scan before filtering would return the wrong
+        // messages here and drift the tokens off the match count.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        long base = System.currentTimeMillis();
+        putEvents("/app/logs", "stream-1", base, 200);
+
+        long startTime = base + 97;
+        long endTime = base + 102;
+
+        CloudWatchLogsService.LogEventsResult page1 = service.getLogEvents(
+                "/app/logs", "stream-1", startTime, endTime, 2, true, null, REGION);
+        assertEquals(List.of("msg-97", "msg-98"),
+                page1.events().stream().map(LogEvent::getMessage).toList());
+        assertEquals("f/2", page1.nextForwardToken());
+
+        CloudWatchLogsService.LogEventsResult page2 = service.getLogEvents(
+                "/app/logs", "stream-1", startTime, endTime, 2, true, page1.nextForwardToken(), REGION);
+        assertEquals(List.of("msg-99", "msg-100"),
+                page2.events().stream().map(LogEvent::getMessage).toList());
+        assertEquals("f/4", page2.nextForwardToken());
+
+        CloudWatchLogsService.LogEventsResult page3 = service.getLogEvents(
+                "/app/logs", "stream-1", startTime, endTime, 2, true, page2.nextForwardToken(), REGION);
+        assertEquals(List.of("msg-101", "msg-102"),
+                page3.events().stream().map(LogEvent::getMessage).toList());
+        assertEquals("f/6", page3.nextForwardToken());
+
+        CloudWatchLogsService.LogEventsResult atEnd = service.getLogEvents(
+                "/app/logs", "stream-1", startTime, endTime, 2, true, page3.nextForwardToken(), REGION);
+        assertEquals(0, atEnd.events().size());
+        assertEquals("f/6", atEnd.nextForwardToken(), "token must echo back to signal end of the window");
+
+        // startFromHead=false with no token must start from the tail of the *filtered*
+        // window, not the tail of the full 200-event stream.
+        CloudWatchLogsService.LogEventsResult tail = service.getLogEvents(
+                "/app/logs", "stream-1", startTime, endTime, 2, false, null, REGION);
+        assertEquals(List.of("msg-101", "msg-102"),
+                tail.events().stream().map(LogEvent::getMessage).toList());
+        assertEquals("b/4", tail.nextBackwardToken());
+        assertEquals("f/6", tail.nextForwardToken());
     }
 
     @Test
@@ -1130,6 +1251,38 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void filterLogEventsNarrowWindowPaginatesOnlyMatchingEventsAcrossManyOutOfWindowEvents() {
+        // Same guard as GetLogEvents: the window must be applied before pagination, so 6
+        // in-window matches surrounded by 200 out-of-window events page like a 6-event scan,
+        // not like the full one.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        long base = System.currentTimeMillis();
+        putEvents("/app/logs", "stream-1", base, 200);
+
+        long startTime = base + 97;
+        long endTime = base + 102;
+
+        CloudWatchLogsService.FilteredLogEventsResult page1 = service.filterLogEvents(
+                "/app/logs", null, startTime, endTime, null, 2, null, REGION);
+        assertEquals(List.of("msg-97", "msg-98"),
+                page1.events().stream().map(f -> f.event().getMessage()).toList());
+        assertEquals("f/2", page1.nextToken());
+
+        CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
+                "/app/logs", null, startTime, endTime, null, 2, page1.nextToken(), REGION);
+        assertEquals(List.of("msg-99", "msg-100"),
+                page2.events().stream().map(f -> f.event().getMessage()).toList());
+        assertEquals("f/4", page2.nextToken());
+
+        CloudWatchLogsService.FilteredLogEventsResult page3 = service.filterLogEvents(
+                "/app/logs", null, startTime, endTime, null, 2, page2.nextToken(), REGION);
+        assertEquals(List.of("msg-101", "msg-102"),
+                page3.events().stream().map(f -> f.event().getMessage()).toList());
+        assertNull(page3.nextToken(), "a page that exactly exhausts the matches is the last one");
+    }
+
+    @Test
     void filterLogEventsPaginatesAcrossStreamsKeepingAttribution() {
         service.createLogGroup("/app/logs", null, null, REGION);
         service.createLogStream("/app/logs", "stream-1", REGION);
@@ -1195,6 +1348,7 @@ class CloudWatchLogsServiceTest {
     @Test
     void filterLogEventsNeverEmitsACursorThatCannotAdvance() {
         CloudWatchLogsService capped = new CloudWatchLogsService(
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),

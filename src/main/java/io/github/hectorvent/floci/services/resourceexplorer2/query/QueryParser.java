@@ -43,7 +43,7 @@ public final class QueryParser {
         if (!query.keywords().isEmpty()) {
             throw new IllegalArgumentException(
                     "ListResources FilterString does not support free-form text. " +
-                    "Use only filter prefixes (e.g., service:ec2, region:us-east-1).");
+                    "Use only filter prefixes (e.g., service:ec2, region:us-east-1)."); // partition-literal: AWS's message text
         }
         return query;
     }

@@ -91,6 +91,25 @@ class SchedulerExpressionParserTest {
     }
 
     @Test
+    void cronSkipsNonexistentLocalTimeDuringSpringForward() {
+        // Los Angeles advances from 01:59 to 03:00 on 2026-03-08.
+        assertEquals(Instant.parse("2026-03-09T09:30:00Z"),
+                SchedulerExpressionParser.nextCronFire("cron(30 2 * * ? *)",
+                        Instant.parse("2026-03-08T09:00:00Z"), "America/Los_Angeles"));
+    }
+
+    @Test
+    void cronRunsOnlyOnceDuringFallBack() {
+        // 01:30 happens twice on 2026-11-01; AWS invokes only at its first occurrence.
+        String expression = "cron(30 1 * * ? *)";
+        Instant first = SchedulerExpressionParser.nextCronFire(expression,
+                Instant.parse("2026-11-01T07:00:00Z"), "America/Los_Angeles");
+        assertEquals(Instant.parse("2026-11-01T08:30:00Z"), first);
+        assertEquals(Instant.parse("2026-11-02T09:30:00Z"),
+                SchedulerExpressionParser.nextCronFire(expression, first, "America/Los_Angeles"));
+    }
+
+    @Test
     void nextCronFireRejectsWrongFieldCount() {
         Instant from = Instant.now();
         assertThrows(IllegalArgumentException.class,

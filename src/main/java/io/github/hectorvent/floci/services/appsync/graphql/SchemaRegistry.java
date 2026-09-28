@@ -1,62 +1,34 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
-import graphql.GraphQL;
-import graphql.execution.AsyncExecutionStrategy;
-import graphql.execution.AsyncSerialExecutionStrategy;
-import graphql.execution.SubscriptionExecutionStrategy;
-import graphql.schema.GraphQLSchema;
-import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthFieldWrapper;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
 
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * In-memory {@code apiId -> raw SDL} cache for the AppSync data-plane path (issue #2917).
+ *
+ * <p>Used to exist to hold a compiled {@code GraphQLSchema}/{@code GraphQL} engine per API:
+ * that compilation now happens inside the (stateless) GraphQL sidecar on every call, so there's
+ * nothing to compile or cache here beyond the raw SDL text itself. This still exists, rather
+ * than reading {@code schemaStore} directly, so the data-plane execute path has a simple
+ * non-account-scoped lookup by {@code apiId}, the same shape the durable store doesn't
+ * naturally give a single request.
+ */
 @ApplicationScoped
 public class SchemaRegistry {
-    private final Map<String, GraphQLSchema> schemas = new ConcurrentHashMap<>();
-    private final Map<String, GraphQL> engines = new ConcurrentHashMap<>();
-    private final AppSyncSchemaParser appSyncSchemaParser;
-    private final AuthFieldWrapper authFieldWrapper;
-
-    public SchemaRegistry(AppSyncSchemaParser appSyncSchemaParser) {
-        this(appSyncSchemaParser, null);
-    }
-
-    @Inject
-    public SchemaRegistry(AppSyncSchemaParser appSyncSchemaParser, AuthFieldWrapper authFieldWrapper) {
-        this.appSyncSchemaParser = appSyncSchemaParser;
-        this.authFieldWrapper = authFieldWrapper;
-    }
+    private final Map<String, String> sdls = new ConcurrentHashMap<>();
 
     public void register(String apiId, String sdl) {
-        GraphQLSchema schema = appSyncSchemaParser.parse(sdl);
-        if (authFieldWrapper != null) {
-            schema = authFieldWrapper.wrap(schema);
-        }
-        schemas.put(apiId, schema);
-        engines.put(apiId, buildGraphQL(schema));
+        sdls.put(apiId, sdl);
     }
 
-    public Optional<GraphQLSchema> getSchema(String apiId) {
-        return Optional.ofNullable(schemas.get(apiId));
-    }
-
-    public Optional<GraphQL> getGraphQL(String apiId) {
-        return Optional.ofNullable(engines.get(apiId));
+    public Optional<String> getSdl(String apiId) {
+        return Optional.ofNullable(sdls.get(apiId));
     }
 
     public void remove(String apiId) {
-        schemas.remove(apiId);
-        engines.remove(apiId);
-    }
-
-    public static GraphQL buildGraphQL(GraphQLSchema schema) {
-        return GraphQL.newGraphQL(schema)
-                .queryExecutionStrategy(new AsyncExecutionStrategy())
-                .mutationExecutionStrategy(new AsyncSerialExecutionStrategy())
-                .subscriptionExecutionStrategy(new SubscriptionExecutionStrategy())
-                .build();
+        sdls.remove(apiId);
     }
 }

@@ -7,6 +7,8 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -38,7 +40,7 @@ class PreSignedUrlFilterTest {
     @Test
     void resolveSecretKeyRejectsUnregisteredNumericAccessKeyId() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithAccessKey("AKIDUNRELATED", "unrelated-secret");
-        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService, null);
 
         assertNull(resolveSecretKey(filter, "123456789012"));
     }
@@ -47,7 +49,7 @@ class PreSignedUrlFilterTest {
     void temporaryCredentialRequiresMatchingSessionToken() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
                 "ASIAS3EXAMPLE", "temporary-secret", "issued-token", java.time.Instant.now().plusSeconds(3600));
-        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService, null);
 
         assertEquals("temporary-secret", resolveSecretKey(filter, "ASIAS3EXAMPLE", "issued-token"));
         assertNull(resolveSecretKey(filter, "ASIAS3EXAMPLE", null));
@@ -58,7 +60,7 @@ class PreSignedUrlFilterTest {
     void temporaryCredentialIsRejectedAfterExpiration() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
                 "ASIAS3EXPIRED", "temporary-secret", "issued-token", java.time.Instant.now().minusSeconds(1));
-        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService);
+        PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService, null);
 
         assertNull(resolveSecretKey(filter, "ASIAS3EXPIRED", "issued-token"));
     }
@@ -141,5 +143,50 @@ class PreSignedUrlFilterTest {
         assertEquals(
                 "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20260101T000000Z",
                 PreSignedUrlFilter.buildCanonicalQueryString(params));
+    }
+
+    @Test
+    void identifiesUnsignedChecksumHeadersCaseInsensitively() {
+        assertEquals(
+                List.of(
+                        "x-amz-checksum-algorithm",
+                        "x-amz-checksum-crc32",
+                        "x-amz-checksum-crc32c",
+                        "x-amz-checksum-crc64nvme",
+                        "x-amz-checksum-sha1",
+                        "x-amz-checksum-sha256",
+                        "x-amz-sdk-checksum-algorithm"),
+                PreSignedUrlFilter.unsignedChecksumHeaders(
+                        Set.of(
+                                "Host",
+                                "X-Amz-Checksum-Algorithm",
+                                "X-Amz-Checksum-CRC32",
+                                "X-Amz-Checksum-CRC32C",
+                                "X-Amz-Checksum-CRC64NVME",
+                                "X-Amz-Checksum-SHA1",
+                                "X-Amz-Checksum-SHA256",
+                                "X-Amz-SDK-Checksum-Algorithm"),
+                        "host"));
+    }
+
+    @Test
+    void acceptsChecksumHeadersIncludedInSignedHeaders() {
+        assertEquals(
+                List.of(),
+                PreSignedUrlFilter.unsignedChecksumHeaders(
+                        Set.of("host", "x-amz-checksum-algorithm", "x-amz-checksum-crc32",
+                                "x-amz-checksum-sha256", "x-amz-sdk-checksum-algorithm"),
+                        "host;x-amz-checksum-algorithm;x-amz-checksum-crc32;"
+                                + "x-amz-checksum-sha256;x-amz-sdk-checksum-algorithm"));
+    }
+
+    @Test
+    void ignoresHeadersOutsideChecksumFamily() {
+        assertEquals(
+                List.of(),
+                PreSignedUrlFilter.unsignedChecksumHeaders(
+                        Set.of("content-type", "user-agent", "x-amz-content-sha256",
+                                "x-amz-user-agent", "x-amz-checksum-type"),
+                        "host"));
     }
 }

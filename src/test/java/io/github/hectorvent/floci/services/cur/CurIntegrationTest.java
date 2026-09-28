@@ -2,37 +2,28 @@ package io.github.hectorvent.floci.services.cur;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.TestProfile;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
 /**
- * Integration tests for the CUR management plane. Each test runs against a
- * dedicated profile so report-store state is isolated from sibling tests.
+ * Integration tests for the CUR management plane. These run on the default test profile, so the
+ * report store is shared with every other class in that profile group. What keeps the tests
+ * independent is that each one uses its own report name and asserts on membership
+ * ({@code hasItem}, {@code not(hasItem)}) rather than on how many definitions exist. An assertion
+ * on the size of {@code ReportDefinitions} would not be safe here.
  *
  * Protocol: JSON 1.1 — Content-Type: application/x-amz-json-1.1,
  * X-Amz-Target: AWSOrigamiServiceGatewayService.&lt;Action&gt;
  */
 @QuarkusTest
-@TestProfile(CurIntegrationTest.IsolatedProfile.class)
 class CurIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/cur/aws4_request";
-
-    public static final class IsolatedProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.storage.mode", "memory");
-        }
-    }
 
     @BeforeAll
     static void configureRestAssured() {

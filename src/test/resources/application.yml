@@ -21,6 +21,8 @@ floci:
       helper-image: floci/network-helper:local
   default-region: us-east-1
   default-account-id: "000000000000"
+  partitions:
+    allow-unknown-regions: false
   ai-mock-config-file: ${AI_MOCK_CONFIG:src/test/resources/fixtures/ai-mock-config.json}
   storage:
     mode: memory
@@ -137,10 +139,13 @@ floci:
       global-bucket-namespace: false
     dynamodb:
       enabled: true
+      vector-index-allocation-seconds: 0
+      vector-index-backfill-seconds: 0
     sns:
       enabled: true
     lambda:
       enabled: true
+      docker-flags: ""
       honour-architectures: false
       zip-max-entries: 100000
       # aws-config-path:
@@ -187,6 +192,7 @@ floci:
       enabled: true
       default-port: 5439
       image-version: postgres:15-alpine
+      poll-interval-ms: 1000
       proxy-base-port: 7100
       proxy-max-port: 7199
       default-credential-duration-seconds: 900
@@ -198,15 +204,20 @@ floci:
       mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
+      default-sql-server-image: "mcr.microsoft.com/mssql/server:2022-latest"
       proxy-handshake-timeout-millis: 10000
       proxy-backend-connect-timeout-millis: 5000
       proxy-max-connections: 100
+      aurora-auto-pause-enabled: true
+      aurora-resume-delay-millis: 0
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
     redshift-data:
       enabled: true
       result-ttl-hours: 24
+    redshift-serverless:
+      enabled: true
     neptune:
       enabled: true
       proxy-base-port: 8182
@@ -232,6 +243,7 @@ floci:
       default-recovery-window-days: 30
     kinesis:
       enabled: true
+      list-shards-next-token-ttl-millis: 300000
     firehose:
       enabled: true
       tick-interval-seconds: 10
@@ -245,12 +257,16 @@ floci:
       enabled: true
       allow-plaintext-http: true
       mock-config-file: ${SFN_MOCK_CONFIG:src/test/resources/fixtures/sfn-mock-config.json}
+      max-wait-seconds: 30
     swf:
       enabled: true
       timeout-sweep-enabled: true
       timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
+      # Pinned to the shipped default: the retention tests advance the test clock past this
+      # window by name, so the value they assume is spelled out rather than inherited.
+      deleted-stack-retention-seconds: 30
       # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
       # does. Set true to fall back to the built-in stub handler instead (issue #2648).
       allow-stub-lambda-code: false
@@ -273,6 +289,8 @@ floci:
       proxy-base-port: 9400
       proxy-max-port: 9499
     ec2:
+      # Optional complete catalog override for locally built guest images.
+      image-catalog-path: ${FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH:}
       enabled: true
       imds-port: 9169
       ssh-port-range-start: 2200
@@ -282,7 +300,10 @@ floci:
       app-port-range-end: 30999
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
+      volume-block-devices: false
+      volume-helper-image: alpine:3.21
       mock: true
+      instance-resource-limits: true
       aws-faithful-private-ip: false
       # container-ips-routable: true  # see src/main/resources/application.yml
       # Off explicitly, not merely by implication of mock: true above. Tests must not create or
@@ -300,6 +321,7 @@ floci:
       enabled: true
     ecr:
       enabled: true
+      tls-uri: false
     ui:
       enabled: true
     bedrock:
@@ -311,6 +333,8 @@ floci:
       mock: true
       ecr-registry-mirror: true
       imds: false
+      irsa-signing-key: true
+      embedded-dns: true
     mwaa:
       enabled: true
       mock: true
@@ -329,6 +353,18 @@ floci:
     sagemaker:
       enabled: true
       # docker-network: floci-network
+      gpu:
+        # Off by default: an existing deployment keeps launching CPU-only
+        # containers. How many GPUs an ml.* type has is shipped in
+        # sagemaker/instance-type-catalog.yaml; this is only about which of
+        # this machine's devices Floci may hand out.
+        enabled: false
+        # cdi | device-ids | count. Podman resolves only cdi, and accepts
+        # count while attaching no device, so cdi fails loudly instead.
+        mode: cdi
+        # Required for cdi and device-ids modes; unset allows no device.
+        # devices:
+        #   - nvidia.com/gpu=GPU-<uuid>
     batch:
       enabled: true
       runner-mode: immediate
@@ -336,6 +372,7 @@ floci:
       enabled: true
     codepipeline:
       enabled: true
+      source-poll-interval-ms: 100   # a shorter cycle so the "did not trigger" tests wait less
     autoscaling:
       enabled: true
     applicationautoscaling:
@@ -368,6 +405,9 @@ floci:
       emit-mode: off
     bcm-pricing-calculator:
       enabled: true
+    timestream-influxdb:
+      enabled: true
+      mock: true
     bcm-data-exports:
       enabled: true
       emit-mode: off
@@ -456,6 +496,8 @@ floci:
       enabled: true
     appintegrations:
       enabled: true
+    dlm:
+      enabled: true
     cognitoidentity:
       enabled: true
     globalaccelerator:
@@ -484,7 +526,6 @@ floci:
       enabled: true
     verifiedpermissions:
       enabled: true
-      cedar-url: http://127.0.0.1:18180
     ram:
       enabled: true
     codegurureviewer:
@@ -492,4 +533,6 @@ floci:
     codeartifact:
       enabled: true
     marketplace:
+      enabled: true
+    dms:
       enabled: true

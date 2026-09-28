@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
-import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -17,6 +16,7 @@ public class DynamoDbTtlService {
 
     private final DynamoDbService dynamoDbService;
     private final ScheduledExecutorService scheduler;
+    private boolean paused;
 
     @Inject
     public DynamoDbTtlService(DynamoDbService dynamoDbService) {
@@ -28,14 +28,35 @@ public class DynamoDbTtlService {
         });
     }
 
-    @PostConstruct
-    void init() {
-        scheduler.scheduleAtFixedRate(dynamoDbService::deleteExpiredItems, 60, 60, TimeUnit.SECONDS);
+    public void start() {
+        scheduler.scheduleAtFixedRate(this::sweep, 60, 60, TimeUnit.SECONDS);
         LOG.infov("DynamoDB TTL sweeper scheduled (60s interval)");
     }
 
+    synchronized void sweep() {
+        if (paused) {
+            return;
+        }
+        try {
+            dynamoDbService.deleteExpiredItems();
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "DynamoDB TTL sweep failed; retrying on the next run");
+        }
+    }
+
+    /** Skips sweeps until {@link #resume()}, first waiting for a sweep already running to finish. */
+    public synchronized void pause() {
+        paused = true;
+    }
+
+    public synchronized void resume() {
+        paused = false;
+    }
+
+    /** Stops sweeping for good, first waiting for a sweep already running to finish. */
     @PreDestroy
-    void shutdown() {
+    public void stop() {
+        pause();
         scheduler.shutdownNow();
     }
 }

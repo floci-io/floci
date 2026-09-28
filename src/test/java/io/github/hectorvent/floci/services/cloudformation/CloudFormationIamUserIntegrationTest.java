@@ -95,6 +95,54 @@ class CloudFormationIamUserIntegrationTest {
     }
 
     @Test
+    void deleteStackDeletesUserWithLoginProfileCreatedOutOfBand() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String userName = "probe-profile-user-" + suffix;
+        String stackName = "cfn-profile-stack-" + suffix;
+
+        String template = """
+                {
+                  "Resources": {
+                    "ProfileUser": {
+                      "Type": "AWS::IAM::User",
+                      "Properties": {
+                        "UserName": "%s"
+                      }
+                    }
+                  }
+                }
+                """.formatted(userName);
+
+        String stackId = createStack(stackName, template);
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateLoginProfile")
+            .formParam("UserName", userName)
+            .formParam("Password", "Sup3r$ecret!")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        deleteStack(stackName);
+        awaitStackStatus(stackId, "DELETE_COMPLETE");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "GetUser")
+            .formParam("UserName", userName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("NoSuchEntity"));
+    }
+
+    @Test
     void deleteStackDeletesUserWithGeneratedName() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-genuser-stack-" + suffix;
@@ -301,6 +349,69 @@ class CloudFormationIamUserIntegrationTest {
         awaitStackStatus(stackId, "DELETE_COMPLETE");
     }
 
+    @Test
+    void createAndUpdateStackReconcilesUserTags() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String userName = "tagged-user-" + suffix;
+        String stackName = "cfn-tagged-user-stack-" + suffix;
+
+        String createTemplate = """
+                {
+                  "Resources": {
+                    "TaggedUser": {
+                      "Type": "AWS::IAM::User",
+                      "Properties": {
+                        "UserName": "%s",
+                        "Tags": [
+                          {"Key": "Environment", "Value": "test"},
+                          {"Key": "Owner", "Value": "platform"}
+                        ]
+                      }
+                    }
+                  }
+                }
+                """.formatted(userName);
+
+        String stackId = createStack(stackName, createTemplate);
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+
+        String createdTags = listUserTags(userName);
+        assertThat(createdTags, containsString("<Key>Environment</Key>"));
+        assertThat(createdTags, containsString("<Value>test</Value>"));
+        assertThat(createdTags, containsString("<Key>Owner</Key>"));
+        assertThat(createdTags, containsString("<Value>platform</Value>"));
+
+        String updateTemplate = """
+                {
+                  "Resources": {
+                    "TaggedUser": {
+                      "Type": "AWS::IAM::User",
+                      "Properties": {
+                        "UserName": "%s",
+                        "Tags": [
+                          {"Key": "Environment", "Value": "production"},
+                          {"Key": "Team", "Value": "identity"}
+                        ]
+                      }
+                    }
+                  }
+                }
+                """.formatted(userName);
+
+        updateStack(stackName, updateTemplate);
+        awaitStackStatus(stackId, "UPDATE_COMPLETE");
+
+        String updatedTags = listUserTags(userName);
+        assertThat(updatedTags, containsString("<Key>Environment</Key>"));
+        assertThat(updatedTags, containsString("<Value>production</Value>"));
+        assertThat(updatedTags, containsString("<Key>Team</Key>"));
+        assertThat(updatedTags, containsString("<Value>identity</Value>"));
+        assertThat(updatedTags, org.hamcrest.Matchers.not(containsString("<Key>Owner</Key>")));
+
+        deleteStack(stackName);
+        awaitStackStatus(stackId, "DELETE_COMPLETE");
+    }
+
     private static String createStack(String stackName, String template) {
         return cfnQuery("CreateStack", stackName, template)
                 .then()
@@ -337,6 +448,20 @@ class CloudFormationIamUserIntegrationTest {
 
     private static String describeStacks(String stackId) {
         return cfnQuery("DescribeStacks", stackId).then().statusCode(200).extract().asString();
+    }
+
+    private static String listUserTags(String userName) {
+        return given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", IAM_AUTH)
+                .formParam("Action", "ListUserTags")
+                .formParam("UserName", userName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .asString();
     }
 
     private static Response cfnQuery(String action, String stackName) {

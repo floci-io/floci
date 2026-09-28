@@ -1,17 +1,21 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.*;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
+import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
-import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
-import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
+import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
+import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedJob;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -22,8 +26,14 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -35,19 +45,30 @@ import java.util.stream.Stream;
 public class IamQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(IamQueryHandler.class);
+    private static final int MAX_TAG_LIST_MEMBERS = 50;
+    private static final int MAX_TAG_KEY_LENGTH = 128;
+    private static final int MAX_TAG_VALUE_LENGTH = 256;
+    private static final Pattern TAG_KEY_PATTERN = Pattern.compile("[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]+");
+    private static final Pattern TAG_VALUE_PATTERN = Pattern.compile("[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*");
 
     private final IamService iamService;
     private final IamPolicyEvaluator policyEvaluator;
     private final AccountResolver accountResolver;
     private final SAMLProviderService samlProviderService;
+    private final ServiceLastAccessedService serviceLastAccessedService;
+    private final RegionResolver regionResolver;
 
     @Inject
     public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
-                           AccountResolver accountResolver, SAMLProviderService samlProviderService) {
+                           AccountResolver accountResolver, SAMLProviderService samlProviderService,
+                           ServiceLastAccessedService serviceLastAccessedService,
+                           RegionResolver regionResolver) {
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
         this.accountResolver = accountResolver;
         this.samlProviderService = samlProviderService;
+        this.serviceLastAccessedService = serviceLastAccessedService;
+        this.regionResolver = regionResolver;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String authorization) {
@@ -65,12 +86,20 @@ public class IamQueryHandler {
             case "UntagUser" -> handleUntagUser(params);
             case "ListUserTags" -> handleListUserTags(params);
             case "ListMFADevices" -> handleListMFADevices(params);
-            case "GetLoginProfile" -> handleGetLoginProfile(params);
+            case "CreateLoginProfile" -> handleCreateLoginProfile(params, authorization);
+            case "GetLoginProfile" -> handleGetLoginProfile(params, authorization);
+            case "UpdateLoginProfile" -> handleUpdateLoginProfile(params);
+            case "DeleteLoginProfile" -> handleDeleteLoginProfile(params, authorization);
 
             // Identity providers & server certificates
             case "ListSAMLProviders" -> handleListSAMLProviders(authorization);
             case "CreateSAMLProvider" -> handleCreateSAMLProvider(params, authorization);
             case "GetSAMLProvider" -> handleGetSAMLProvider(params, authorization);
+            case "UpdateSAMLProvider" -> handleUpdateSAMLProvider(params, authorization);
+            case "DeleteSAMLProvider" -> handleDeleteSAMLProvider(params, authorization);
+            case "TagSAMLProvider" -> handleTagSAMLProvider(params, authorization);
+            case "UntagSAMLProvider" -> handleUntagSAMLProvider(params, authorization);
+            case "ListSAMLProviderTags" -> handleListSAMLProviderTags(params, authorization);
             case "ListOpenIDConnectProviders" -> handleListOpenIDConnectProviders(params);
             case "CreateOpenIDConnectProvider" -> handleCreateOpenIDConnectProvider(params);
             case "GetOpenIDConnectProvider" -> handleGetOpenIDConnectProvider(params);
@@ -118,6 +147,7 @@ public class IamQueryHandler {
             case "UntagRole" -> handleUntagRole(params);
             case "TagInstanceProfile" -> handleTagInstanceProfile(params);
             case "UntagInstanceProfile" -> handleUntagInstanceProfile(params);
+            case "ListInstanceProfileTags" -> handleListInstanceProfileTags(params);
             case "ListRoleTags" -> handleListRoleTags(params);
 
             // Managed Policies
@@ -127,6 +157,9 @@ public class IamQueryHandler {
             case "ListPolicies" -> handleListPolicies(params);
             case "ListEntitiesForPolicy" -> handleListEntitiesForPolicy(params);
             case "GetAccountSummary" -> handleGetAccountSummary(params);
+            case "GetAccountAuthorizationDetails" -> handleGetAccountAuthorizationDetails(params);
+            case "GenerateCredentialReport" -> handleGenerateCredentialReport(params);
+            case "GetCredentialReport" -> handleGetCredentialReport(params);
             case "CreatePolicyVersion" -> handleCreatePolicyVersion(params);
             case "GetPolicyVersion" -> handleGetPolicyVersion(params);
             case "DeletePolicyVersion" -> handleDeletePolicyVersion(params);
@@ -199,6 +232,16 @@ public class IamQueryHandler {
 
             // Policy Simulation
             case "SimulatePrincipalPolicy" -> handleSimulatePrincipalPolicy(params);
+            case "SimulateCustomPolicy" -> handleSimulateCustomPolicy(params);
+            case "GetContextKeysForCustomPolicy" -> handleGetContextKeysForCustomPolicy(params);
+            case "GetContextKeysForPrincipalPolicy" -> handleGetContextKeysForPrincipalPolicy(params);
+
+            // Last-Accessed Reporting (Access Advisor)
+            case "GenerateServiceLastAccessedDetails" -> handleGenerateServiceLastAccessedDetails(params, authorization);
+            case "GetServiceLastAccessedDetails" -> handleGetServiceLastAccessedDetails(params, authorization);
+            case "GetServiceLastAccessedDetailsWithEntities" ->
+                    handleGetServiceLastAccessedDetailsWithEntities(params, authorization);
+            case "ListPoliciesGrantingServiceAccess" -> handleListPoliciesGrantingServiceAccess(params, authorization);
 
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.IAM, 400);
@@ -215,7 +258,7 @@ public class IamQueryHandler {
     private Response handleCreateUser(MultivaluedMap<String, String> params) {
         String userName = getParam(params, "UserName");
         String path = getParam(params, "Path");
-        Map<String, String> tags = extractTags(params);
+        Map<String, String> tags = extractTags(params, true);
         IamUser user = iamService.createUser(userName, path);
         if (!tags.isEmpty()) iamService.tagUser(userName, tags);
         user = iamService.getUser(userName);
@@ -276,7 +319,7 @@ public class IamQueryHandler {
 
     private Response handleTagUser(MultivaluedMap<String, String> params) {
         String userName = getParam(params, "UserName");
-        iamService.tagUser(userName, extractTags(params));
+        iamService.tagUser(userName, extractTags(params, true));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagUser", AwsNamespaces.IAM)).build();
     }
 
@@ -305,16 +348,48 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("ListMFADevices", AwsNamespaces.IAM, result)).build();
     }
 
-    private Response handleGetLoginProfile(MultivaluedMap<String, String> params) {
-        // Login profiles (console passwords) are not modeled. Per the IAM API,
-        // GetLoginProfile returns NoSuchEntity (HTTP 404) when a user has no console
-        // password — a documented, expected result that callers branch on. We must
-        // return that exact error, not an empty 200 or an UnsupportedOperation 400,
-        // which clients would treat as a real failure rather than "no profile".
+    private Response handleCreateLoginProfile(MultivaluedMap<String, String> params, String authorization) {
+        String userName = resolveUserName(params, authorization);
+        String password = getParam(params, "Password");
+        if (password == null) {
+            throw new AwsException("ValidationError", "The request must contain the parameter Password.", 400);
+        }
+        boolean passwordResetRequired = getBooleanParam(params, "PasswordResetRequired", false);
+        LoginProfile profile = iamService.createLoginProfile(userName, password, passwordResetRequired);
+        String result = new XmlBuilder().start("LoginProfile").raw(loginProfileXml(profile)).end("LoginProfile").build();
+        return Response.ok(AwsQueryResponse.envelope("CreateLoginProfile", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleGetLoginProfile(MultivaluedMap<String, String> params, String authorization) {
+        String userName = resolveUserName(params, authorization);
+        LoginProfile profile = iamService.getLoginProfile(userName);
+        String result = new XmlBuilder().start("LoginProfile").raw(loginProfileXml(profile)).end("LoginProfile").build();
+        return Response.ok(AwsQueryResponse.envelope("GetLoginProfile", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleUpdateLoginProfile(MultivaluedMap<String, String> params) {
         String userName = getParam(params, "UserName");
-        return AwsQueryResponse.error("NoSuchEntity",
-                "Login Profile for User " + (userName != null ? userName : "") + " cannot be found.",
-                AwsNamespaces.IAM, 404);
+        if (userName == null) {
+            throw new AwsException("ValidationError", "The request must contain the parameter UserName.", 400);
+        }
+        String password = getParam(params, "Password");
+        Boolean passwordResetRequired = getOptionalBooleanParam(params, "PasswordResetRequired");
+        iamService.updateLoginProfile(userName, password, passwordResetRequired);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateLoginProfile", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleDeleteLoginProfile(MultivaluedMap<String, String> params, String authorization) {
+        String userName = resolveUserName(params, authorization);
+        iamService.deleteLoginProfile(userName);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteLoginProfile", AwsNamespaces.IAM)).build();
+    }
+
+    private String loginProfileXml(LoginProfile profile) {
+        return new XmlBuilder()
+                .elem("PasswordResetRequired", profile.isPasswordResetRequired())
+                .elem("UserName", profile.getUserName())
+                .elem("CreateDate", isoDate(profile.getCreateDate()))
+                .build();
     }
 
     private Response handleListSAMLProviders(String authorization) {
@@ -327,10 +402,12 @@ public class IamQueryHandler {
     }
 
     private Response handleCreateSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
-        SAMLProvider provider = samlProviderService.create(accountResolver.resolve(authorization),
-                getParam(params, "Name"), getParam(params, "SAMLMetadataDocument"));
+        SAMLProvider provider = samlProviderService.create(regionResolver.getPartition(),
+                accountResolver.resolve(authorization), getParam(params, "Name"),
+                getParam(params, "SAMLMetadataDocument"), extractTags(params, false));
         return Response.ok(AwsQueryResponse.envelope("CreateSAMLProvider", AwsNamespaces.IAM,
-                new XmlBuilder().elem("SAMLProviderArn", provider.getArn()).build())).build();
+                new XmlBuilder().elem("SAMLProviderArn", provider.getArn())
+                        .raw(tagsElement(new TreeMap<>(provider.getTags()))).build())).build();
     }
 
     private Response handleGetSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
@@ -341,7 +418,43 @@ public class IamQueryHandler {
                 + provider.getCertificate() + "</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor></md:EntityDescriptor>";
         return Response.ok(AwsQueryResponse.envelope("GetSAMLProvider", AwsNamespaces.IAM,
                 new XmlBuilder().elem("SAMLProviderArn", provider.getArn()).elem("CreateDate", isoDate(provider.getCreateDate()))
-                        .elem("ValidUntil", isoDate(provider.getCreateDate().plusSeconds(31536000))).elem("SAMLMetadataDocument", metadata).build())).build();
+                        .elem("ValidUntil", isoDate(provider.getCreateDate().plusSeconds(31536000))).elem("SAMLMetadataDocument", metadata)
+                        .raw(tagsElement(new TreeMap<>(provider.getTags()))).build())).build();
+    }
+
+    private Response handleUpdateSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        SAMLProvider provider = samlProviderService.update(accountId,
+                getParam(params, "SAMLProviderArn"), getParam(params, "SAMLMetadataDocument"));
+        return Response.ok(AwsQueryResponse.envelope("UpdateSAMLProvider", AwsNamespaces.IAM,
+                new XmlBuilder().elem("SAMLProviderArn", provider.getArn()).build())).build();
+    }
+
+    private Response handleDeleteSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        samlProviderService.delete(accountId, getParam(params, "SAMLProviderArn"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteSAMLProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleTagSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        samlProviderService.tag(accountId, getParam(params, "SAMLProviderArn"), extractTags(params, false));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("TagSAMLProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleUntagSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        samlProviderService.untag(accountId, getParam(params, "SAMLProviderArn"), extractTagKeys(params));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UntagSAMLProvider", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleListSAMLProviderTags(MultivaluedMap<String, String> params, String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        Map<String, String> tags = new TreeMap<>(
+                samlProviderService.listTags(accountId, getParam(params, "SAMLProviderArn")));
+        String result = new XmlBuilder().start("Tags").raw(tagsXml(tags)).end("Tags")
+                .elem("IsTruncated", false).build();
+        return Response.ok(AwsQueryResponse.envelope("ListSAMLProviderTags", AwsNamespaces.IAM, result)).build();
     }
 
     // ListOpenIDConnectProviders is not paginated and carries only ARNs — the client fetches
@@ -360,7 +473,7 @@ public class IamQueryHandler {
                 getParam(params, "Url"),
                 getMemberList(params, "ClientIDList"),
                 getMemberList(params, "ThumbprintList"),
-                extractTags(params));
+                extractTags(params, false));
         var xml = new XmlBuilder().elem("OpenIDConnectProviderArn", provider.getArn());
         if (!provider.getTags().isEmpty()) {
             xml.start("Tags").raw(tagsXml(provider.getTags())).end("Tags");
@@ -417,7 +530,7 @@ public class IamQueryHandler {
     }
 
     private Response handleTagOpenIDConnectProvider(MultivaluedMap<String, String> params) {
-        iamService.tagOpenIDConnectProvider(getParam(params, "OpenIDConnectProviderArn"), extractTags(params));
+        iamService.tagOpenIDConnectProvider(getParam(params, "OpenIDConnectProviderArn"), extractTags(params, false));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagOpenIDConnectProvider", AwsNamespaces.IAM)).build();
     }
 
@@ -565,6 +678,15 @@ public class IamQueryHandler {
         return parseStrictBoolean(name, value);
     }
 
+    /** Unlike {@link #getBooleanParam}, absence is meaningful here: it must not collapse to a default. */
+    private Boolean getOptionalBooleanParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        return parseStrictBoolean(name, value);
+    }
+
     private boolean parseStrictBoolean(String name, String value) {
         if ("true".equalsIgnoreCase(value)) {
             return true;
@@ -659,7 +781,7 @@ public class IamQueryHandler {
         String trustPolicy = getParam(params, "AssumeRolePolicyDocument");
         String description = getParam(params, "Description");
         int maxSession = getIntParam(params, "MaxSessionDuration", 3600);
-        Map<String, String> tags = extractTags(params);
+        Map<String, String> tags = extractTags(params, true);
         IamRole role = iamService.createRole(roleName, path, trustPolicy, description, maxSession, tags);
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("CreateRole", AwsNamespaces.IAM, result)).build();
@@ -721,7 +843,7 @@ public class IamQueryHandler {
     }
 
     private Response handleTagRole(MultivaluedMap<String, String> params) {
-        iamService.tagRole(getParam(params, "RoleName"), extractTags(params));
+        iamService.tagRole(getParam(params, "RoleName"), extractTags(params, true));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagRole", AwsNamespaces.IAM)).build();
     }
 
@@ -746,7 +868,7 @@ public class IamQueryHandler {
         String path = getParam(params, "Path");
         String description = getParam(params, "Description");
         String document = getParam(params, "PolicyDocument");
-        Map<String, String> tags = extractTags(params);
+        Map<String, String> tags = extractTags(params, false);
         IamPolicy policy = iamService.createPolicy(policyName, path, description, document, tags);
         String result = new XmlBuilder().start("Policy").raw(policyXml(policy, true)).end("Policy").build();
         return Response.ok(AwsQueryResponse.envelope("CreatePolicy", AwsNamespaces.IAM, result)).build();
@@ -804,6 +926,158 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("GetAccountSummary", AwsNamespaces.IAM, xml.build())).build();
     }
 
+    private Response handleGenerateCredentialReport(MultivaluedMap<String, String> params) {
+        IamService.CredentialReportGeneration generation = iamService.generateCredentialReport();
+        // State before Description: GenerateCredentialReportResponse's member order in the
+        // wire model, and the order AWS's own documented example emits them in.
+        String result = new XmlBuilder()
+                .elem("State", generation.state())
+                .elem("Description", generation.description())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("GenerateCredentialReport", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleGetCredentialReport(MultivaluedMap<String, String> params) {
+        IamService.CredentialReportContent content = iamService.getCredentialReport();
+        String result = new XmlBuilder()
+                .elem("Content", content.base64Content())
+                .elem("ReportFormat", content.reportFormat())
+                .elem("GeneratedTime", isoDate(content.generatedTime()))
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("GetCredentialReport", AwsNamespaces.IAM, result)).build();
+    }
+
+    // Filter, MaxItems and Marker are not honored: every user, group, role and relevant policy
+    // is always returned in one response, matching this handler's general convention elsewhere
+    // (ListInstanceProfiles, SimulatePrincipalPolicy, ...) of not implementing pagination.
+    private Response handleGetAccountAuthorizationDetails(MultivaluedMap<String, String> params) {
+        IamService.AccountAuthorizationDetails details = iamService.getAccountAuthorizationDetails();
+
+        XmlBuilder xml = new XmlBuilder().start("UserDetailList");
+        for (IamUser user : details.users()) {
+            xml.start("member").raw(userDetailXml(user)).end("member");
+        }
+        xml.end("UserDetailList").start("GroupDetailList");
+        for (IamGroup group : details.groups()) {
+            xml.start("member").raw(groupDetailXml(group)).end("member");
+        }
+        xml.end("GroupDetailList").start("RoleDetailList");
+        for (IamRole role : details.roles()) {
+            xml.start("member").raw(roleDetailXml(role)).end("member");
+        }
+        xml.end("RoleDetailList").start("Policies");
+        for (IamPolicy policy : details.policies()) {
+            xml.start("member")
+               .raw(managedPolicyDetailXml(policy, details.attachmentCounts(), details.permissionsBoundaryUsageCounts()))
+               .end("member");
+        }
+        xml.end("Policies").elem("IsTruncated", false);
+        return Response.ok(AwsQueryResponse.envelope("GetAccountAuthorizationDetails", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private String userDetailXml(IamUser u) {
+        XmlBuilder xml = new XmlBuilder()
+                .raw(userXml(u, true))
+                .raw(policyDetailListXml("UserPolicyList", u.getInlinePolicies()))
+                .start("GroupList");
+        for (String groupName : u.getGroupNames()) {
+            xml.elem("member", groupName);
+        }
+        return xml.end("GroupList")
+                .raw(attachedManagedPoliciesXml(iamService.listAttachedUserPolicies(u.getUserName(), null)))
+                .raw(permissionsBoundaryXml(u.getPermissionsBoundaryArn()))
+                .build();
+    }
+
+    private String groupDetailXml(IamGroup g) {
+        return new XmlBuilder()
+                .raw(groupXml(g))
+                .raw(policyDetailListXml("GroupPolicyList", g.getInlinePolicies()))
+                .raw(attachedManagedPoliciesXml(iamService.listAttachedGroupPolicies(g.getGroupName(), null)))
+                .build();
+    }
+
+    // RoleDetail is not the same subset as ListRoles's Role type: it carries
+    // AssumeRolePolicyDocument (which ListRoles also carries) but, per the wire model, never
+    // MaxSessionDuration or Description, so this does not reuse roleXml's general fragment.
+    private String roleDetailXml(IamRole r) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("Path", r.getPath())
+                .elem("RoleName", r.getRoleName())
+                .elem("RoleId", r.getRoleId())
+                .elem("Arn", r.getArn())
+                .elem("CreateDate", isoDate(r.getCreateDate()))
+                .elem("AssumeRolePolicyDocument", r.getAssumeRolePolicyDocument())
+                .raw(tagsElement(r.getTags()))
+                .start("InstanceProfileList");
+        for (InstanceProfile profile : iamService.listInstanceProfilesForRole(r.getRoleName())) {
+            xml.start("member").raw(instanceProfileXml(profile, true)).end("member");
+        }
+        return xml.end("InstanceProfileList")
+                .raw(policyDetailListXml("RolePolicyList", r.getInlinePolicies()))
+                .raw(attachedManagedPoliciesXml(iamService.listAttachedRolePolicies(r.getRoleName(), null)))
+                .raw(permissionsBoundaryXml(r.getPermissionsBoundaryArn()))
+                .build();
+    }
+
+    // AttachmentCount and PermissionsBoundaryUsageCount come from the caller's account-scoped
+    // scan (see IamService.getAccountAuthorizationDetails), not IamPolicy.getAttachmentCount():
+    // for an AWS-managed policy that field is shared process-wide across every account.
+    private String managedPolicyDetailXml(IamPolicy p, Map<String, Integer> attachmentCounts,
+                                           Map<String, Integer> permissionsBoundaryUsageCounts) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("PolicyName", p.getPolicyName())
+                .elem("PolicyId", p.getPolicyId())
+                .elem("Arn", p.getArn())
+                .elem("Path", p.getPath())
+                .elem("DefaultVersionId", p.getDefaultVersionId())
+                .elem("AttachmentCount", (long) attachmentCounts.getOrDefault(p.getArn(), 0))
+                .elem("PermissionsBoundaryUsageCount",
+                        (long) permissionsBoundaryUsageCounts.getOrDefault(p.getArn(), 0))
+                .elem("IsAttachable", true)
+                .elem("Description", p.getDescription())
+                .elem("CreateDate", isoDate(p.getCreateDate()))
+                .elem("UpdateDate", isoDate(p.getUpdateDate()))
+                .start("PolicyVersionList");
+        for (PolicyVersion version : p.getVersions().values()) {
+            xml.start("member").raw(policyVersionXml(version)).end("member");
+        }
+        return xml.end("PolicyVersionList").build();
+    }
+
+    private String policyDetailListXml(String wrapperName, Map<String, String> inlinePolicies) {
+        XmlBuilder xml = new XmlBuilder().start(wrapperName);
+        for (Map.Entry<String, String> entry : inlinePolicies.entrySet()) {
+            xml.start("member")
+               .elem("PolicyName", entry.getKey())
+               .elem("PolicyDocument", entry.getValue())
+               .end("member");
+        }
+        return xml.end(wrapperName).build();
+    }
+
+    private String attachedManagedPoliciesXml(List<IamPolicy> attached) {
+        XmlBuilder xml = new XmlBuilder().start("AttachedManagedPolicies");
+        for (IamPolicy p : attached) {
+            xml.start("member")
+               .elem("PolicyName", p.getPolicyName())
+               .elem("PolicyArn", p.getArn())
+               .end("member");
+        }
+        return xml.end("AttachedManagedPolicies").build();
+    }
+
+    private String permissionsBoundaryXml(String boundaryArn) {
+        if (boundaryArn == null) {
+            return "";
+        }
+        return new XmlBuilder().start("PermissionsBoundary")
+                .elem("PermissionsBoundaryType", "Policy")
+                .elem("PermissionsBoundaryArn", boundaryArn)
+                .end("PermissionsBoundary")
+                .build();
+    }
+
     private Response handleCreatePolicyVersion(MultivaluedMap<String, String> params) {
         String policyArn = getParam(params, "PolicyArn");
         String document = getParam(params, "PolicyDocument");
@@ -841,7 +1115,7 @@ public class IamQueryHandler {
     }
 
     private Response handleTagPolicy(MultivaluedMap<String, String> params) {
-        iamService.tagPolicy(getParam(params, "PolicyArn"), extractTags(params));
+        iamService.tagPolicy(getParam(params, "PolicyArn"), extractTags(params, false));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagPolicy", AwsNamespaces.IAM)).build();
     }
 
@@ -1109,15 +1383,20 @@ public class IamQueryHandler {
     // =========================================================================
 
     private Response handleCreateInstanceProfile(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = extractTags(params, false);
         InstanceProfile profile = iamService.createInstanceProfile(
                 getParam(params, "InstanceProfileName"), getParam(params, "Path"));
-        String result = new XmlBuilder().start("InstanceProfile").raw(instanceProfileXml(profile)).end("InstanceProfile").build();
+        if (!tags.isEmpty()) {
+            iamService.tagInstanceProfile(profile.getInstanceProfileName(), tags);
+            profile = iamService.getInstanceProfile(profile.getInstanceProfileName());
+        }
+        String result = new XmlBuilder().start("InstanceProfile").raw(instanceProfileXml(profile, true)).end("InstanceProfile").build();
         return Response.ok(AwsQueryResponse.envelope("CreateInstanceProfile", AwsNamespaces.IAM, result)).build();
     }
 
     private Response handleGetInstanceProfile(MultivaluedMap<String, String> params) {
         InstanceProfile profile = iamService.getInstanceProfile(getParam(params, "InstanceProfileName"));
-        String result = new XmlBuilder().start("InstanceProfile").raw(instanceProfileXml(profile)).end("InstanceProfile").build();
+        String result = new XmlBuilder().start("InstanceProfile").raw(instanceProfileXml(profile, true)).end("InstanceProfile").build();
         return Response.ok(AwsQueryResponse.envelope("GetInstanceProfile", AwsNamespaces.IAM, result)).build();
     }
 
@@ -1130,7 +1409,8 @@ public class IamQueryHandler {
         List<InstanceProfile> profiles = iamService.listInstanceProfiles(getParam(params, "PathPrefix"));
         var xml = new XmlBuilder().start("InstanceProfiles");
         for (InstanceProfile p : profiles) {
-            xml.start("member").raw(instanceProfileXml(p)).end("member");
+            // Documented listing subset: tags are omitted here, unlike GetInstanceProfile.
+            xml.start("member").raw(instanceProfileXml(p, false)).end("member");
         }
         xml.end("InstanceProfiles").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListInstanceProfiles", AwsNamespaces.IAM, xml.build())).build();
@@ -1150,7 +1430,7 @@ public class IamQueryHandler {
         List<InstanceProfile> profiles = iamService.listInstanceProfilesForRole(getParam(params, "RoleName"));
         var xml = new XmlBuilder().start("InstanceProfiles");
         for (InstanceProfile p : profiles) {
-            xml.start("member").raw(instanceProfileXml(p)).end("member");
+            xml.start("member").raw(instanceProfileXml(p, true)).end("member");
         }
         xml.end("InstanceProfiles").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListInstanceProfilesForRole", AwsNamespaces.IAM, xml.build())).build();
@@ -1189,16 +1469,50 @@ public class IamQueryHandler {
     private Response handleSimulatePrincipalPolicy(MultivaluedMap<String, String> params) {
         String policySourceArn = getParam(params, "PolicySourceArn");
         CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
+        List<String> actionNames = requireActionNames(params);
+        List<String> resourceArns = extractResourceArnsOrWildcard(params);
+        Map<String, List<String>> context = extractContextEntries(params);
+        String result = simulationResultsXml(caller, actionNames, resourceArns, context);
+        return Response.ok(AwsQueryResponse.envelope("SimulatePrincipalPolicy", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleSimulateCustomPolicy(MultivaluedMap<String, String> params) {
+        List<String> policyInputList = requirePolicyInputList(params);
+        List<String> actionNames = requireActionNames(params);
+        List<String> resourceArns = extractResourceArnsOrWildcard(params);
+        Map<String, List<String>> context = extractContextEntries(params);
+        // AWS accepts only one permissions boundary document per simulation; a request that
+        // provides more than one is not modeled and only the first is applied.
+        List<String> boundaryInputList = extractIndexedValues(params, "PermissionsBoundaryPolicyInputList.member");
+        String boundaryDocument = boundaryInputList.isEmpty() ? null : boundaryInputList.get(0);
+        CallerContext caller = new CallerContext(policyInputList, null, boundaryDocument);
+        String result = simulationResultsXml(caller, actionNames, resourceArns, context);
+        return Response.ok(AwsQueryResponse.envelope("SimulateCustomPolicy", AwsNamespaces.IAM, result)).build();
+    }
+
+    private List<String> requireActionNames(MultivaluedMap<String, String> params) {
         List<String> actionNames = extractIndexedValues(params, "ActionNames.member");
         if (actionNames.isEmpty()) {
             throw new AwsException("ValidationError", "At least one ActionNames member is required.", 400);
         }
-        List<String> resourceArns = extractIndexedValues(params, "ResourceArns.member");
-        if (resourceArns.isEmpty()) {
-            resourceArns = List.of("*");
-        }
-        Map<String, List<String>> context = extractContextEntries(params);
+        return actionNames;
+    }
 
+    private List<String> requirePolicyInputList(MultivaluedMap<String, String> params) {
+        List<String> policyInputList = extractIndexedValues(params, "PolicyInputList.member");
+        if (policyInputList.isEmpty()) {
+            throw new AwsException("ValidationError", "At least one PolicyInputList member is required.", 400);
+        }
+        return policyInputList;
+    }
+
+    private List<String> extractResourceArnsOrWildcard(MultivaluedMap<String, String> params) {
+        List<String> resourceArns = extractIndexedValues(params, "ResourceArns.member");
+        return resourceArns.isEmpty() ? List.of("*") : resourceArns;
+    }
+
+    private String simulationResultsXml(CallerContext caller, List<String> actionNames,
+                                         List<String> resourceArns, Map<String, List<String>> context) {
         XmlBuilder results = new XmlBuilder().start("EvaluationResults");
         for (String actionName : actionNames) {
             for (String resourceArn : resourceArns) {
@@ -1213,10 +1527,464 @@ public class IamQueryHandler {
                         .end("member");
             }
         }
-        String result = results.end("EvaluationResults")
+        return results.end("EvaluationResults")
                 .elem("IsTruncated", false)
                 .build();
-        return Response.ok(AwsQueryResponse.envelope("SimulatePrincipalPolicy", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleGetContextKeysForCustomPolicy(MultivaluedMap<String, String> params) {
+        List<String> policyInputList = requirePolicyInputList(params);
+        List<String> keys = policyEvaluator.contextKeysReferencedIn(policyInputList);
+        return Response.ok(AwsQueryResponse.envelope("GetContextKeysForCustomPolicy", AwsNamespaces.IAM,
+                contextKeyNamesXml(keys))).build();
+    }
+
+    private Response handleGetContextKeysForPrincipalPolicy(MultivaluedMap<String, String> params) {
+        String policySourceArn = getParam(params, "PolicySourceArn");
+        CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
+        List<String> allDocuments = new ArrayList<>(caller.identityPolicies());
+        allDocuments.addAll(extractIndexedValues(params, "PolicyInputList.member"));
+        List<String> keys = policyEvaluator.contextKeysReferencedIn(allDocuments);
+        return Response.ok(AwsQueryResponse.envelope("GetContextKeysForPrincipalPolicy", AwsNamespaces.IAM,
+                contextKeyNamesXml(keys))).build();
+    }
+
+    // =========================================================================
+    // Last-Accessed Reporting (Access Advisor)
+    // =========================================================================
+
+    /**
+     * Generates the report now and stores it with the job. AWS fixes a report at generation time
+     * and the readers below only retrieve it, so the service list and the entities are captured
+     * here rather than recomputed per read. The ARN is resolved first, because AWS answers
+     * {@code NoSuchEntity} for one that names nothing.
+     */
+    private Response handleGenerateServiceLastAccessedDetails(MultivaluedMap<String, String> params,
+                                                              String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        String arn = requireParam(params, "Arn");
+        AccessAdvisorTarget target = resolveAccessAdvisorTarget(accountId, arn);
+        IamPolicyEvaluator.GrantedServices granted =
+                policyEvaluator.servicesGrantedBy(target.policyDocuments());
+        ServiceLastAccessedJob job = serviceLastAccessedService.generate(accountId, arn,
+                params.getFirst("Granularity"), new TreeSet<>(granted.namespaces()).stream().toList(),
+                target.entities());
+        return Response.ok(AwsQueryResponse.envelope("GenerateServiceLastAccessedDetails", AwsNamespaces.IAM,
+                new XmlBuilder().elem("JobId", job.getJobId()).build())).build();
+    }
+
+    /**
+     * AWS lists a service the entity could reach even when it was never used, leaving
+     * {@code LastAuthenticated} and {@code TotalAuthenticatedEntities} null in that case rather
+     * than omitting the service. Floci records no access, so every entry here is that "no attempt"
+     * shape, over the service list captured when the job ran.
+     */
+    private Response handleGetServiceLastAccessedDetails(MultivaluedMap<String, String> params,
+                                                         String authorization) {
+        ServiceLastAccessedJob job = serviceLastAccessedService.get(
+                accountResolver.resolve(authorization), requireParam(params, "JobId"));
+        Page<String> page = paginate(job.getServiceNamespaces(), params);
+        XmlBuilder xml = new XmlBuilder()
+                .elem("JobStatus", "COMPLETED")
+                .elem("JobType", job.getGranularity())
+                .elem("JobCreationDate", isoDate(job.getJobCreationDate()))
+                .elem("JobCompletionDate", isoDate(job.getJobCompletionDate()))
+                .start("ServicesLastAccessed");
+        for (String namespace : page.items()) {
+            // ServiceName is a required member and AWS carries a display name ("Amazon S3") that
+            // Floci has no mapping for, so the namespace stands in for it.
+            xml.start("member")
+               .elem("ServiceName", namespace)
+               .elem("ServiceNamespace", namespace)
+               .end("member");
+        }
+        xml.end("ServicesLastAccessed").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("GetServiceLastAccessedDetails", AwsNamespaces.IAM,
+                xml.build())).build();
+    }
+
+    /**
+     * Lists the entities that could have reached the service through the reported ARN's
+     * permissions, which AWS derives from policy content rather than from usage: a group report
+     * yields the group's users, a policy report the users and roles it is attached to, and a user
+     * or role report that entity itself. {@code LastAuthenticated} stays absent throughout, since
+     * Floci records no access.
+     */
+    private Response handleGetServiceLastAccessedDetailsWithEntities(MultivaluedMap<String, String> params,
+                                                                     String authorization) {
+        ServiceLastAccessedJob job = serviceLastAccessedService.get(
+                accountResolver.resolve(authorization), requireParam(params, "JobId"));
+        String namespace = requireParam(params, "ServiceNamespace");
+        // The report named the services it covers, so an entity is only reported for one of those.
+        List<ServiceLastAccessedEntity> reported = job.getServiceNamespaces().contains(namespace)
+                ? job.getEntities() : List.of();
+        Page<ServiceLastAccessedEntity> page = paginate(reported, params);
+        XmlBuilder xml = new XmlBuilder()
+                .elem("JobStatus", "COMPLETED")
+                .elem("JobCreationDate", isoDate(job.getJobCreationDate()))
+                .elem("JobCompletionDate", isoDate(job.getJobCompletionDate()))
+                .start("EntityDetailsList");
+        for (ServiceLastAccessedEntity entity : page.items()) {
+            xml.start("member").start("EntityInfo")
+               .elem("Arn", entity.getArn())
+               .elem("Name", entity.getName())
+               .elem("Type", entity.getType())
+               .elem("Id", entity.getId())
+               .elem("Path", entity.getPath())
+               .end("EntityInfo").end("member");
+        }
+        xml.end("EntityDetailsList").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("GetServiceLastAccessedDetailsWithEntities",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * Unlike the Access Advisor jobs above, this one needs no usage history and no job: AWS defines
+     * it purely over permissions-policy logic, so it is answered from the identity's policies as
+     * they stand.
+     */
+    private Response handleListPoliciesGrantingServiceAccess(MultivaluedMap<String, String> params,
+                                                             String authorization) {
+        String accountId = accountResolver.resolve(authorization);
+        String arn = requireParam(params, "Arn");
+        List<String> namespaces = getMemberList(params, "ServiceNamespaces");
+        if (namespaces.isEmpty()) {
+            throw new AwsException("InvalidInput",
+                    "The request must include at least one service namespace.", 400);
+        }
+        List<GrantingPolicy> candidates = policiesForIdentity(accountId, arn);
+        // The response list carries one entry per requested namespace, so that is what a Marker
+        // walks through.
+        Page<String> page = paginateByMarker(namespaces, params);
+        XmlBuilder xml = new XmlBuilder().start("PoliciesGrantingServiceAccess");
+        for (String namespace : page.items()) {
+            xml.start("member").elem("ServiceNamespace", namespace).start("Policies");
+            for (GrantingPolicy candidate : candidates) {
+                if (policyEvaluator.grantsServiceAccess(candidate.document(), namespace)) {
+                    xml.start("member")
+                       .elem("PolicyName", candidate.policyName())
+                       .elem("PolicyType", candidate.policyType());
+                    if (candidate.policyArn() != null) {
+                        xml.elem("PolicyArn", candidate.policyArn());
+                    } else {
+                        xml.elem("EntityType", candidate.entityType())
+                           .elem("EntityName", candidate.entityName());
+                    }
+                    xml.end("member");
+                }
+            }
+            xml.end("Policies").end("member");
+        }
+        xml.end("PoliciesGrantingServiceAccess").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListPoliciesGrantingServiceAccess",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /** One page of a response list, plus the marker that continues it. */
+    private record Page<T>(List<T> items, boolean truncated, String marker) {}
+
+    /**
+     * Applies {@code MaxItems} and {@code Marker}. The marker is the index the next page starts at,
+     * which is all a caller is meant to do with it: AWS documents it as opaque and only ever hands
+     * back one it produced itself.
+     */
+    private <T> Page<T> paginate(List<T> items, MultivaluedMap<String, String> params) {
+        return paginate(items, params, true);
+    }
+
+    /**
+     * Marker-only pagination, for {@code ListPoliciesGrantingServiceAccess}: its request models
+     * {@code Marker} but no {@code MaxItems}, and honouring a member AWS does not declare would be
+     * inventing one.
+     */
+    private <T> Page<T> paginateByMarker(List<T> items, MultivaluedMap<String, String> params) {
+        return paginate(items, params, false);
+    }
+
+    private <T> Page<T> paginate(List<T> items, MultivaluedMap<String, String> params, boolean maxItemsModeled) {
+        // Every input is validated before the bounds check, so a malformed request is rejected
+        // rather than answered emptily just because the marker happens to sit past the end.
+        int from = markerIndex(params);
+        // Validated only when actually supplied: an absent MaxItems means "no limit", which is not
+        // the same as a limit of zero, and an empty report would otherwise fail its own check.
+        int limit = items.size();
+        if (maxItemsModeled) {
+            String raw = params.getFirst("MaxItems");
+            if (raw != null && !raw.isBlank()) {
+                try {
+                    limit = Integer.parseInt(raw.trim());
+                } catch (NumberFormatException e) {
+                    throw new AwsException("InvalidInput",
+                            "The value " + raw + " at 'maxItems' is not a number.", 400);
+                }
+                if (limit < 1) {
+                    throw new AwsException("ValidationError",
+                            "Value at 'maxItems' failed to satisfy constraint: "
+                                    + "Member must have value greater than or equal to 1", 400);
+                }
+            }
+        }
+        if (from >= items.size()) {
+            return new Page<>(List.of(), false, null);
+        }
+        // Counted from the remaining items rather than added to the offset, so a large MaxItems
+        // cannot overflow into a negative index.
+        int to = from + Math.min(limit, items.size() - from);
+        boolean truncated = to < items.size();
+        return new Page<>(List.copyOf(items.subList(from, to)), truncated,
+                truncated ? Integer.toString(to) : null);
+    }
+
+    /** The index a {@code Marker} resumes at. Only a marker this handler produced is valid. */
+    private int markerIndex(MultivaluedMap<String, String> params) {
+        String marker = params.getFirst("Marker");
+        if (marker == null || marker.isBlank()) {
+            return 0;
+        }
+        int index;
+        try {
+            index = Integer.parseInt(marker.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidInput", "The marker " + marker + " is not valid.", 400);
+        }
+        if (index < 0) {
+            throw new AwsException("InvalidInput", "The marker " + marker + " is not valid.", 400);
+        }
+        return index;
+    }
+
+    /**
+     * One candidate policy for {@code ListPoliciesGrantingServiceAccess}. A managed policy carries
+     * its ARN; an inline policy has none and is identified by the entity holding it instead.
+     */
+    private record GrantingPolicy(String policyName, String policyType, String policyArn,
+                                  String entityType, String entityName, String document) {
+
+        static GrantingPolicy managed(IamPolicy policy, String document) {
+            return new GrantingPolicy(policy.getPolicyName(), "MANAGED", policy.getArn(), null, null, document);
+        }
+
+        static GrantingPolicy inline(String policyName, String entityType, String entityName, String document) {
+            return new GrantingPolicy(policyName, "INLINE", null, entityType, entityName, document);
+        }
+    }
+
+    /** What an Access Advisor ARN resolves to: the policies to report on, and who holds them. */
+    private record AccessAdvisorTarget(List<String> policyDocuments, List<ServiceLastAccessedEntity> entities) {}
+
+    /**
+     * Resolves an Access Advisor ARN to the permissions it stands for and the principals holding
+     * them. AWS accepts a user, group, role or managed-policy ARN, and reports the entities that
+     * could have used those permissions: a group's users, a policy's attached users and roles, or
+     * the named entity itself.
+     */
+    private AccessAdvisorTarget resolveAccessAdvisorTarget(String accountId, String arn) {
+        IamArn parsed = requireIamArn(accountId, arn);
+        return switch (parsed.type()) {
+            case "user" -> {
+                IamUser user = requireMatchingArn(iamService.getUser(parsed.name()).getArn(), arn,
+                        iamService.getUser(parsed.name()));
+                yield new AccessAdvisorTarget(identityPolicyDocuments(accountId, arn), List.of(entityOf(user)));
+            }
+            case "role" -> {
+                IamRole role = requireMatchingArn(iamService.getRole(parsed.name()).getArn(), arn,
+                        iamService.getRole(parsed.name()));
+                yield new AccessAdvisorTarget(identityPolicyDocuments(accountId, arn), List.of(entityOf(role)));
+            }
+            case "group" -> {
+                IamGroup group = requireMatchingArn(iamService.getGroup(parsed.name()).getArn(), arn,
+                        iamService.getGroup(parsed.name()));
+                List<ServiceLastAccessedEntity> members = new ArrayList<>();
+                for (String member : group.getUserNames()) {
+                    // A looked-up-by-name member can be gone by now, since the membership list is a
+                    // snapshot: leave that user out rather than failing a report for a group that
+                    // does exist.
+                    iamService.findUser(member).ifPresent(user -> members.add(entityOf(user)));
+                }
+                yield new AccessAdvisorTarget(identityPolicyDocuments(accountId, arn), members);
+            }
+            case "policy" -> {
+                IamPolicy policy = iamService.getPolicy(arn);
+                IamService.PolicyEntities holders = iamService.listEntitiesForPolicy(arn);
+                // A user reached through an attached group could have used the policy exactly as a
+                // directly attached one could, so AWS reports it too. Keyed by ARN because a user
+                // that is both attached directly and a member of an attached group is one entity,
+                // not two.
+                Map<String, ServiceLastAccessedEntity> byArn = new LinkedHashMap<>();
+                for (IamUser user : holders.users()) {
+                    byArn.putIfAbsent(user.getArn(), entityOf(user));
+                }
+                for (IamGroup group : holders.groups()) {
+                    for (String member : group.getUserNames()) {
+                        // Same reason as the group branch above: a member named by the snapshot may
+                        // already be deleted, and that must not fail a report for a live policy.
+                        iamService.findUser(member)
+                                .ifPresent(user -> byArn.putIfAbsent(user.getArn(), entityOf(user)));
+                    }
+                }
+                for (IamRole role : holders.roles()) {
+                    byArn.putIfAbsent(role.getArn(), entityOf(role));
+                }
+                yield new AccessAdvisorTarget(List.of(defaultPolicyDocument(policy)),
+                        List.copyOf(byArn.values()));
+            }
+            default -> throw new AwsException("InvalidInput",
+                    "The ARN " + arn + " must identify an IAM user, group, role, or policy.", 400);
+        };
+    }
+
+    private ServiceLastAccessedEntity entityOf(IamUser user) {
+        return new ServiceLastAccessedEntity(user.getArn(), user.getUserName(), "USER",
+                user.getUserId(), user.getPath());
+    }
+
+    private ServiceLastAccessedEntity entityOf(IamRole role) {
+        return new ServiceLastAccessedEntity(role.getArn(), role.getRoleName(), "ROLE",
+                role.getRoleId(), role.getPath());
+    }
+
+    /**
+     * Rejects an ARN whose path does not match the resolved entity's own. A name is unique within
+     * an account, so the lookup finds the right entity, but an ARN carrying the wrong path names
+     * nothing in AWS and must not resolve here either.
+     */
+    private <T> T requireMatchingArn(String resolvedArn, String requestedArn, T entity) {
+        if (!requestedArn.equals(resolvedArn)) {
+            throw new AwsException("NoSuchEntity", "The ARN " + requestedArn + " cannot be found.", 404);
+        }
+        return entity;
+    }
+
+    /** An IAM ARN split into the parts needed to resolve it, with the account already checked. */
+    private record IamArn(String type, String name) {}
+
+    /**
+     * Parses an IAM ARN and rejects one belonging to another account. Without that check a name is
+     * looked up in the caller's own account, so an ARN naming a different account would silently
+     * report a same-named local identity instead.
+     */
+    private IamArn requireIamArn(String accountId, String arn) {
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(arn);
+        } catch (RuntimeException e) {
+            throw new AwsException("InvalidInput", "The ARN " + arn + " is not a valid ARN.", 400);
+        }
+        if (!"iam".equals(parsed.service())) {
+            throw new AwsException("InvalidInput", "The ARN " + arn + " is not a valid IAM ARN.", 400);
+        }
+        // An AWS-managed policy carries the literal "aws" in the account field
+        // (arn:aws:iam::aws:policy/...) and is served from the global catalog, so it is not a
+        // foreign account and must not be rejected as one.
+        boolean awsManaged = "aws".equals(parsed.accountId());
+        if (!awsManaged && parsed.accountId() != null && !parsed.accountId().isEmpty()
+                && !parsed.accountId().equals(accountId)) {
+            throw new AwsException("NoSuchEntity", "The ARN " + arn + " cannot be found.", 404);
+        }
+        String resource = parsed.resource();
+        if (awsManaged && !resource.startsWith("policy/")) {
+            throw new AwsException("InvalidInput", "The ARN " + arn + " is not a valid IAM ARN.", 400);
+        }
+        int slash = resource.indexOf('/');
+        if (slash < 0) {
+            throw new AwsException("InvalidInput",
+                    "The ARN " + arn + " must identify an IAM user, group, role, or policy.", 400);
+        }
+        return new IamArn(resource.substring(0, slash), resource.substring(resource.lastIndexOf('/') + 1));
+    }
+
+    /**
+     * The policies AWS says {@code ListPoliciesGrantingServiceAccess} considers for each identity
+     * type: a user also inherits its groups' policies, while a group or role contributes only its
+     * own. Permissions boundaries are deliberately excluded, as the documentation requires.
+     */
+    private List<GrantingPolicy> policiesForIdentity(String accountId, String arn) {
+        IamArn parsed = requireIamArn(accountId, arn);
+        return switch (parsed.type()) {
+            case "user" -> {
+                IamUser user = iamService.getUser(parsed.name());
+                requireMatchingArn(user.getArn(), arn, user);
+                List<GrantingPolicy> policies = new ArrayList<>();
+                collectUserPolicies(user.getUserName(), policies);
+                for (IamGroup group : iamService.listGroupsForUser(user.getUserName())) {
+                    collectGroupPolicies(group.getGroupName(), policies);
+                }
+                yield policies;
+            }
+            case "group" -> {
+                IamGroup group = iamService.getGroup(parsed.name());
+                requireMatchingArn(group.getArn(), arn, group);
+                List<GrantingPolicy> policies = new ArrayList<>();
+                collectGroupPolicies(group.getGroupName(), policies);
+                yield policies;
+            }
+            case "role" -> {
+                IamRole role = iamService.getRole(parsed.name());
+                requireMatchingArn(role.getArn(), arn, role);
+                List<GrantingPolicy> policies = new ArrayList<>();
+                for (IamPolicy policy : iamService.listAttachedRolePolicies(role.getRoleName(), null)) {
+                    policies.add(GrantingPolicy.managed(policy, defaultPolicyDocument(policy)));
+                }
+                for (String policyName : iamService.listRolePolicies(role.getRoleName())) {
+                    policies.add(GrantingPolicy.inline(policyName, "ROLE", role.getRoleName(),
+                            iamService.getRolePolicy(role.getRoleName(), policyName)));
+                }
+                yield policies;
+            }
+            default -> throw new AwsException("InvalidInput",
+                    "The ARN " + arn + " must identify an IAM user, group, or role.", 400);
+        };
+    }
+
+    private void collectUserPolicies(String userName, List<GrantingPolicy> policies) {
+        for (IamPolicy policy : iamService.listAttachedUserPolicies(userName, null)) {
+            policies.add(GrantingPolicy.managed(policy, defaultPolicyDocument(policy)));
+        }
+        for (String policyName : iamService.listUserPolicies(userName)) {
+            policies.add(GrantingPolicy.inline(policyName, "USER", userName,
+                    iamService.getUserPolicy(userName, policyName)));
+        }
+    }
+
+    private void collectGroupPolicies(String groupName, List<GrantingPolicy> policies) {
+        for (IamPolicy policy : iamService.listAttachedGroupPolicies(groupName, null)) {
+            policies.add(GrantingPolicy.managed(policy, defaultPolicyDocument(policy)));
+        }
+        for (String policyName : iamService.listGroupPolicies(groupName)) {
+            policies.add(GrantingPolicy.inline(policyName, "GROUP", groupName,
+                    iamService.getGroupPolicy(groupName, policyName)));
+        }
+    }
+
+    /** The documents behind an identity ARN, reusing the scoping rules above. */
+    private List<String> identityPolicyDocuments(String accountId, String arn) {
+        List<String> documents = new ArrayList<>();
+        for (GrantingPolicy candidate : policiesForIdentity(accountId, arn)) {
+            documents.add(candidate.document());
+        }
+        return documents;
+    }
+
+    /** A managed policy grants through whichever version is current, so only that one is read. */
+    private String defaultPolicyDocument(IamPolicy policy) {
+        return iamService.getPolicyVersion(policy.getArn(), policy.getDefaultVersionId()).getDocument();
+    }
+
+    private String contextKeyNamesXml(List<String> keys) {
+        XmlBuilder xml = new XmlBuilder().start("ContextKeyNames");
+        for (String key : keys) {
+            xml.elem("member", key);
+        }
+        return xml.end("ContextKeyNames").build();
     }
 
     // =========================================================================
@@ -1317,7 +2085,13 @@ public class IamQueryHandler {
         return xml.elem("CreateDate", isoDate(k.getCreateDate())).build();
     }
 
-    private String instanceProfileXml(InstanceProfile p) {
+    // detailed is per-operation, not per-profile, mirroring roleXml/userXml/policyXml:
+    // ListInstanceProfiles documents itself as a listing subset ("this operation does not
+    // return tags, even though they are an attribute of the returned object"), the same note
+    // ListRoles carries. GetInstanceProfile, CreateInstanceProfile, ListInstanceProfilesForRole
+    // and the InstanceProfileList embedded in GetAccountAuthorizationDetails's RoleDetail carry
+    // no such note, so they stay detailed.
+    private String instanceProfileXml(InstanceProfile p, boolean detailed) {
         var xml = new XmlBuilder()
                 .elem("InstanceProfileName", p.getInstanceProfileName())
                 .elem("InstanceProfileId", p.getInstanceProfileId())
@@ -1331,7 +2105,8 @@ public class IamQueryHandler {
                 xml.start("member").raw(roleXml(role, false)).end("member");
             } catch (AwsException ignored) {}
         }
-        return xml.end("Roles").build();
+        xml.end("Roles");
+        return xml.raw(detailed ? tagsElement(p.getTags()) : "").build();
     }
 
     private String attachedPoliciesXml(List<IamPolicy> policyList) {
@@ -1384,15 +2159,85 @@ public class IamQueryHandler {
     // Parameter parsing helpers
     // =========================================================================
 
-    private Map<String, String> extractTags(MultivaluedMap<String, String> params) {
-        Map<String, String> tags = new HashMap<>();
+    /**
+     * Every IAM request that carries tags types them as {@code tagListType}, whose {@code max: 50}
+     * binds the members as sent, so the count is taken here, before the map collapses repeated keys.
+     * Duplicate keys in the request are rejected with InvalidInput (case-insensitively for users and
+     * roles, and case-sensitively for other IAM resource types).
+     */
+    private Map<String, String> extractTags(MultivaluedMap<String, String> params, boolean caseInsensitiveKeys) {
+        List<Map.Entry<String, String>> members = new ArrayList<>();
         for (int i = 1; ; i++) {
             String key = params.getFirst("Tags.member." + i + ".Key");
             String value = params.getFirst("Tags.member." + i + ".Value");
-            if (key == null) break;
-            tags.put(key, value != null ? value : "");
+            if (key == null) {
+                break;
+            }
+            members.add(Map.entry(key, value != null ? value : ""));
+        }
+        checkListLength(members.size(), "tags");
+        Set<String> seenKeys = new HashSet<>();
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 0; i < members.size(); i++) {
+            String key = members.get(i).getKey();
+            String value = members.get(i).getValue();
+            String at = "tags." + (i + 1) + ".member";
+            String keyViolation = tagKeyViolation(key);
+            if (keyViolation != null) {
+                throw tagValidationError(key, at + ".key", keyViolation);
+            }
+            if (value.codePointCount(0, value.length()) > MAX_TAG_VALUE_LENGTH) {
+                throw tagValidationError(value, at + ".value",
+                        "Member must have length less than or equal to " + MAX_TAG_VALUE_LENGTH);
+            }
+            if (!TAG_VALUE_PATTERN.matcher(value).matches()) {
+                throw tagValidationError(value, at + ".value",
+                        "Member must satisfy regular expression pattern: " + TAG_VALUE_PATTERN.pattern());
+            }
+            if (caseInsensitiveKeys) {
+                for (String seenKey : seenKeys) {
+                    if (seenKey.equalsIgnoreCase(key)) {
+                        throw new AwsException("InvalidInput",
+                                "Duplicate tag keys found. Please note that Tag keys are case insensitive.", 400);
+                    }
+                }
+                seenKeys.add(key);
+            } else {
+                if (!seenKeys.add(key)) {
+                    throw new AwsException("InvalidInput", "Duplicate tag keys found.", 400);
+                }
+            }
+            tags.put(key, value);
         }
         return tags;
+    }
+
+    private static void checkListLength(int members, String param) {
+        if (members > MAX_TAG_LIST_MEMBERS) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at '" + param + "' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to " + MAX_TAG_LIST_MEMBERS, 400);
+        }
+    }
+
+    /** Returns the {@code tagKeyType} constraint the key breaks, or null when it is valid. */
+    private static String tagKeyViolation(String key) {
+        if (key.isEmpty()) {
+            return "Member must have length greater than or equal to 1";
+        }
+        if (key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH) {
+            return "Member must have length less than or equal to " + MAX_TAG_KEY_LENGTH;
+        }
+        if (!TAG_KEY_PATTERN.matcher(key).matches()) {
+            return "Member must satisfy regular expression pattern: " + TAG_KEY_PATTERN.pattern();
+        }
+        return null;
+    }
+
+    private static AwsException tagValidationError(String value, String at, String constraint) {
+        return new AwsException("ValidationError",
+                "1 validation error detected: Value '" + value + "' at '" + at + "' failed to satisfy constraint: "
+                        + constraint, 400);
     }
 
     private List<String> getMemberList(MultivaluedMap<String, String> params, String name) {
@@ -1411,6 +2256,14 @@ public class IamQueryHandler {
             String key = params.getFirst("TagKeys.member." + i);
             if (key == null) break;
             keys.add(key);
+        }
+        checkListLength(keys.size(), "tagKeys");
+        for (String key : keys) {
+            String violation = tagKeyViolation(key);
+            if (violation != null) {
+                throw tagValidationError(keys.toString(), "tagKeys",
+                        "Member must satisfy constraint: [" + violation + "]");
+            }
         }
         return keys;
     }
@@ -1449,6 +2302,21 @@ public class IamQueryHandler {
         return params.getFirst(name);
     }
 
+    /**
+     * A required request member. {@link #getParam} returns null for an absent one, which lets a
+     * malformed request read as a valid empty answer, so anything the model marks required is read
+     * through here instead.
+     */
+    private String requireParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null || value.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "Value null at '" + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                            + "' failed to satisfy constraint: Member must not be null", 400);
+        }
+        return value;
+    }
+
     private int getIntParam(MultivaluedMap<String, String> params, String name, int defaultValue) {
         String value = params.getFirst(name);
         if (value == null) return defaultValue;
@@ -1469,12 +2337,21 @@ public class IamQueryHandler {
     }
 
     private Response handleTagInstanceProfile(MultivaluedMap<String, String> params) {
-        iamService.tagInstanceProfile(getParam(params, "InstanceProfileName"), extractTags(params));
+        iamService.tagInstanceProfile(getParam(params, "InstanceProfileName"), extractTags(params, false));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagInstanceProfile", AwsNamespaces.IAM)).build();
     }
 
     private Response handleUntagInstanceProfile(MultivaluedMap<String, String> params) {
         iamService.untagInstanceProfile(getParam(params, "InstanceProfileName"), extractTagKeys(params));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UntagInstanceProfile", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleListInstanceProfileTags(MultivaluedMap<String, String> params) {
+        String instanceProfileName = getParam(params, "InstanceProfileName");
+        // AWS documents the result as sorted by tag key.
+        Map<String, String> tags = new TreeMap<>(iamService.listInstanceProfileTags(instanceProfileName));
+        String result = new XmlBuilder().start("Tags").raw(tagsXml(tags)).end("Tags")
+                .elem("IsTruncated", false).build();
+        return Response.ok(AwsQueryResponse.envelope("ListInstanceProfileTags", AwsNamespaces.IAM, result)).build();
     }
 }

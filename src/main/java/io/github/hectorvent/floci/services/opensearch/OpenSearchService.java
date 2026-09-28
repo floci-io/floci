@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.opensearch;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -76,7 +78,7 @@ public class OpenSearchService implements ResourceProvider {
     @PreDestroy
     public void shutdown() {
         poller.shutdownNow();
-        if (!config.services().opensearch().mock()) {
+        if (!config.services().opensearch().mock() && !config.services().opensearch().keepRunningOnShutdown()) {
             for (Domain domain : allDomains()) {
                 domainManager.stopDomain(domain);
             }
@@ -130,6 +132,10 @@ public class OpenSearchService implements ResourceProvider {
         domain.setEndpoint("");
         domain.setCreatedAt(Instant.now());
         domain.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
+        // Stamp the volume name now, with the current prefix, so it is persisted rather than
+        // recomputed later. Only records predating this field fall back to the legacy name.
+        domain.setDockerVolumeName(ContainerStorageHelper.resourceName(
+                config, "opensearch", domain.getVolumeId(), domain.getDomainName()));
 
         if (clusterConfig != null) {
             domain.setClusterConfig(clusterConfig);
@@ -144,16 +150,36 @@ public class OpenSearchService implements ResourceProvider {
 
         if (config.services().opensearch().mock()) {
             domain.setProcessing(false);
+            domain.setEndpoint(synthesizedEndpoint(domainName, region));
         } else {
             domain.setProcessing(true);
             if (!domainManager.tryStartDomain(domain)) {
                 domain.setProcessing(false);
+                domain.setEndpoint(synthesizedEndpoint(domainName, region));
             }
         }
 
         domainStore.put(domainName, domain);
         LOG.infov("Created OpenSearch domain: {0}", domainName);
         return domain;
+    }
+
+    /**
+     * The endpoint reported for a domain with no container behind it. Two cases reach this: the
+     * service is mocked, and no Docker daemon is reachable, which is the only condition under which
+     * {@link OpenSearchDomainManager#tryStartDomain} returns false rather than rethrowing.
+     *
+     * <p>It reports an AWS-shaped endpoint in place of a blank one,
+     * {@code search-<domain>-<suffix>.<region>.es.<dnsSuffix>}, taking the DNS suffix from the
+     * region's partition rather than assuming the commercial one, with the name suffix derived from the
+     * domain name so it survives a restart. A domain reporting {@code Processing false} alongside
+     * {@code Endpoint ""} describes a state AWS never returns, and a client that reads the endpoint
+     * to address the domain gets an empty string to connect to.
+     */
+    private static String synthesizedEndpoint(String domainName, String region) {
+        String suffix = Integer.toHexString(domainName.hashCode() & 0x7fffffff);
+        return "search-" + domainName + "-" + suffix + "." + region + ".es."
+                + AwsRegions.dnsSuffixFor(region);
     }
 
     public Domain describeDomain(String domainName) {

@@ -35,7 +35,7 @@ import java.util.regex.Pattern;
 /**
  * CloudFormation provisioning for EventBridge: {@code AWS::Events::Rule},
  * {@code AWS::Events::EventBus} and {@code AWS::Events::EventBusPolicy}. Extracted from
- * {@code CloudFormationResourceProvisioner}.
+ * the former CloudFormation monolith.
  *
  * <p>Two of these types need the resource's stored attributes to delete, not just the physical
  * id, so they are served by the {@link #delete(StackResource, String)} override rather than the
@@ -141,6 +141,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                 state, description, roleArn, Map.of(), ctx.region());
         r.setPhysicalId(ruleName);
         r.getAttributes().put("Arn", rule.getArn());
+        r.getAttributes().put("RuleName", ruleName);
         // A rule on a custom bus is keyed by that bus; remember it so the resource delete can target
         // the right bus (the physical id is only the rule name, which resolves to the default bus).
         if (busName != null && !busName.isBlank()) {
@@ -636,7 +637,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
 
     private void provisionEventBusPolicy(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String busName = resolveOrDefault(props, "EventBusName", ctx, "default");
+        String busName = ctx.resolveOrDefault(props, "EventBusName", "default");
         String statementId = ctx.resolveOptional(props, "StatementId");
         if (statementId == null || statementId.isBlank()) {
             throw new AwsException("ValidationException", "EventBusPolicy StatementId is required.", 400);
@@ -727,10 +728,6 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         CfnDeletes.safeDelete("Event bus policy statement", physicalId,
                 () -> eventBridgeService.removePermission(busName, statementId, false, region),
                 "ResourceNotFoundException");
-    }
-    private static String resolveOrDefault(JsonNode props, String name, ProvisionContext ctx, String defaultValue) {
-        String value = ctx.resolveOptional(props, name);
-        return (value != null && !value.isBlank()) ? value : defaultValue;
     }
 
     /** Copied from the monolith: the shared original serves six other callers and stays there. */

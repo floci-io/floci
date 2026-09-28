@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -87,7 +88,7 @@ class EcsContainerManagerVolumesTest {
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
                 containerDetector, config, regionResolver, awsEnv, ssmService, secretsManagerService,
-                ecrRegistryManager, new HostVolumePolicy(config));
+                mock(S3Service.class), ecrRegistryManager, new HostVolumePolicy(config));
     }
 
     @Test
@@ -158,10 +159,12 @@ class EcsContainerManagerVolumesTest {
 
         manager.startTask(task, taskDef, List.of(), "us-east-1");
 
+        // Each EFS volume -> a shared local Docker named volume under the current prefix (no
+        // legacy-named volume exists here), read-write or read-only per the mountPoint.
         verify(builder, times(1)).withNamedVolume(
-                EcsContainerManager.efsVolumeName("fs-0123456789abcdef0", null, "/dps"), "/mnt/efs", false);
+                "floci-aws-" + EcsContainerManager.efsVolumeToken("fs-0123456789abcdef0", null, "/dps"), "/mnt/efs", false);
         verify(builder, times(1)).withNamedVolume(
-                EcsContainerManager.efsVolumeName("fs-00000000000000001", null, null), "/mnt/shared", true);
+                "floci-aws-" + EcsContainerManager.efsVolumeToken("fs-00000000000000001", null, null), "/mnt/shared", true);
 
         // EFS volumes are never bind-mounted as host paths.
         verify(builder, never()).withBind(any(), any());
@@ -182,7 +185,7 @@ class EcsContainerManagerVolumesTest {
         EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
                 mock(RegionResolver.class), awsEnv, mock(SsmService.class),
-                mock(SecretsManagerService.class), ecrRegistryManager, new HostVolumePolicy(cfg));
+                mock(SecretsManagerService.class), mock(S3Service.class), ecrRegistryManager, new HostVolumePolicy(cfg));
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
@@ -201,7 +204,7 @@ class EcsContainerManagerVolumesTest {
         configured.startTask(task, taskDef, List.of(), "us-east-1");
 
         verify(lifecycleManager, times(1)).ensureSharedVolume(
-                EcsContainerManager.efsVolumeName("fs-abc", null, "/dps"),
+                "floci-aws-" + EcsContainerManager.efsVolumeToken("fs-abc", null, "/dps"),
                 OptionalInt.of(1001), OptionalInt.of(1001), Optional.of("2775"), "busybox:stable");
     }
 
@@ -217,7 +220,8 @@ class EcsContainerManagerVolumesTest {
         EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
                 mock(RegionResolver.class), awsEnv, mock(SsmService.class),
-                mock(SecretsManagerService.class), ecrRegistryManager, new HostVolumePolicy(cfg));
+                mock(SecretsManagerService.class), mock(S3Service.class),
+                ecrRegistryManager, new HostVolumePolicy(cfg));
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");

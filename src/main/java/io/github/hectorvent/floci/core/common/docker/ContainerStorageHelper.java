@@ -26,6 +26,25 @@ public final class ContainerStorageHelper {
 
     static final String CLOUD = "aws";
 
+    /**
+     * The base name this emulator owns, without a trailing separator. Each Floci emulator takes
+     * its own cloud token so several can share one Docker daemon without colliding on names or
+     * on {@code docker volume prune} filters.
+     */
+    public static final String NAME_PREFIX = "floci-" + CLOUD;
+
+    /** {@link #NAME_PREFIX} with its separator, the literal prefix of every name produced here. */
+    static final String CONTAINER_PREFIX = NAME_PREFIX + "-";
+
+    /**
+     * The prefix this emulator used before it took the shared {@code floci-<cloud>-} convention.
+     *
+     * <p>Frozen forever. It exists only so resources created by earlier versions, above all
+     * data-bearing Docker volumes, keep resolving to the names their data actually lives under.
+     * Never change it, and never use it to name a newly created resource.
+     */
+    static final String LEGACY_PREFIX = "floci-";
+
     private ContainerStorageHelper() {}
 
     /**
@@ -38,18 +57,59 @@ public final class ContainerStorageHelper {
     }
 
     public static String resourceName(EmulatorConfig config, String service, String volumeId, String fallbackId) {
-        return dockerName(config, "floci-" + service + "-" + (volumeId != null ? volumeId : fallbackId));
+        return dockerName(config, service + "-" + (volumeId != null ? volumeId : fallbackId));
     }
 
+    /**
+     * Prefixes {@code baseName} with {@code floci-aws-} and the configured resource namespace,
+     * which lands after the cloud token: {@code floci-aws-<namespace>-<base>}.
+     *
+     * <p>A name that already carries a prefix, current or legacy, is normalised rather than
+     * prefixed a second time. That is what lets a container be named after the legacy volume it
+     * mounts: pre-migration volumes keep their old name forever, while their containers, which
+     * are disposable, always take the current one.
+     */
     public static String dockerName(EmulatorConfig config, String baseName) {
+        return applyPrefix(CONTAINER_PREFIX, config, baseName);
+    }
+
+    /**
+     * {@link #resourceName(EmulatorConfig, String, String, String)} as it behaved before the
+     * {@code floci-aws-} migration. Only for resolving resources an earlier version created;
+     * never for naming a new one.
+     */
+    public static String legacyResourceName(
+            EmulatorConfig config, String service, String volumeId, String fallbackId) {
+        return legacyDockerName(config, service + "-" + (volumeId != null ? volumeId : fallbackId));
+    }
+
+    /**
+     * {@link #dockerName(EmulatorConfig, String)} as it behaved before the {@code floci-aws-}
+     * migration. Only for resolving resources an earlier version created; never for naming a
+     * new one.
+     */
+    public static String legacyDockerName(EmulatorConfig config, String baseName) {
+        return applyPrefix(LEGACY_PREFIX, config, baseName);
+    }
+
+    private static String applyPrefix(String prefix, EmulatorConfig config, String baseName) {
+        String base = stripPrefix(baseName);
         String namespace = resourceNamespace(config);
-        if (namespace.isBlank()) {
-            return baseName;
+        if (namespace.isBlank() || base.startsWith(namespace + "-")) {
+            return prefix + base;
         }
-        if (baseName.startsWith("floci-")) {
-            return "floci-" + namespace + "-" + baseName.substring("floci-".length());
+        return prefix + namespace + "-" + base;
+    }
+
+    /** Removes whichever prefix {@code baseName} carries, so prefixing is idempotent. */
+    private static String stripPrefix(String baseName) {
+        if (baseName.startsWith(CONTAINER_PREFIX)) {
+            return baseName.substring(CONTAINER_PREFIX.length());
         }
-        return "floci-" + namespace + "-" + baseName;
+        if (baseName.startsWith(LEGACY_PREFIX)) {
+            return baseName.substring(LEGACY_PREFIX.length());
+        }
+        return baseName;
     }
 
     /**
@@ -176,19 +236,22 @@ public final class ContainerStorageHelper {
     }
 
     /**
-     * Ensures the named volume exists and mounts it to {@code internalMount} in the container.
-     * Must only be called when {@link #isNamedVolumeMode} returns {@code true}.
+     * Removes a stale container by name, including one an earlier version left under the legacy
+     * prefix.
+     *
+     * <p>A container surviving from before the {@code floci-aws-} migration still holds its data
+     * volume's lock, so a start that only cleared the current name would fail to acquire it. Both
+     * names are cleared, and neither being present is fine.
      */
-    public static void applyStorage(
-            ContainerBuilder.Builder builder,
-            ContainerLifecycleManager lifecycleManager,
+    public static void removeStaleContainer(
             EmulatorConfig config,
-            String service,
-            String volumeId,
-            String fallbackId,
-            String internalMount) {
-        String volumeName = resourceName(config, service, volumeId, fallbackId);
-        applyNamedVolume(builder, lifecycleManager, volumeName, internalMount);
+            ContainerLifecycleManager lifecycleManager,
+            String containerName) {
+        lifecycleManager.removeIfExists(containerName);
+        String legacyName = legacyDockerName(config, containerName);
+        if (!legacyName.equals(containerName)) {
+            lifecycleManager.removeIfExists(legacyName);
+        }
     }
 
     /** Mounts a persisted, exact Docker volume name without applying namespace rules again. */

@@ -139,8 +139,15 @@ class Ec2PortForwardManagerTest {
 
     @Test
     void forwardContainerNameIsDeterministic() {
+        assertEquals("floci-aws-ec2-fwd-i-123-80",
+                Ec2PortForwardManager.forwardContainerName(null, "i-123", 80));
+    }
+
+    @Test
+    void legacyForwardContainerNameKeepsThePreMigrationShape() {
+        // Frozen: it is how a sidecar created before the rename is found and cleared.
         assertEquals("floci-ec2-fwd-i-123-80",
-                Ec2PortForwardManager.forwardContainerName("i-123", 80));
+                Ec2PortForwardManager.legacyForwardContainerName(null, "i-123", 80));
     }
 
     @Test

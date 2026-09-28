@@ -107,6 +107,16 @@ class IamEnforcementFilterUnitTest {
     }
 
     @Test
+    void parseObjectArn_acceptsEveryPartition() {
+        assertArrayEquals(new String[] { "audit-source", "documents/hello.txt" },
+                IamEnforcementFilter.parseS3Resource("arn:aws-cn:s3:::audit-source/documents/hello.txt"));
+        assertArrayEquals(new String[] { "audit-source", null },
+                IamEnforcementFilter.parseS3Resource("arn:aws-us-gov:s3:::audit-source"));
+        assertArrayEquals(new String[] { "b", "k" },
+                IamEnforcementFilter.parseS3Resource("arn:aws-iso-b:s3:::b/k"));
+    }
+
+    @Test
     void parseStarArn_returnsNulls() {
         assertArrayEquals(new String[] { null, null },
                 IamEnforcementFilter.parseS3Resource("arn:aws:s3:::*"));

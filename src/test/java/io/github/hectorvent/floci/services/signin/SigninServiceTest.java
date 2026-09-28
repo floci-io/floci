@@ -57,6 +57,8 @@ class SigninServiceTest {
         RegionResolver region = mock(RegionResolver.class);
         accountId = new AtomicReference<>(ACCOUNT_A);
         when(region.getAccountId()).thenAnswer(ignored -> accountId.get());
+        when(region.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
+                "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
         clock = new MutableClock();
         service = new SigninService(iam, region, new ObjectMapper(), clock);
     }

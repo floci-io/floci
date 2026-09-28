@@ -1,18 +1,22 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
-import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasSize;
-import static org.hamcrest.Matchers.notNullValue;
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.MatcherAssert;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
-import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
-import io.quarkus.test.junit.QuarkusTest;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.notNullValue;
 
 /**
  * Integration tests for EventBridge ARN-based EventBusName support.
@@ -236,8 +240,8 @@ class EventBridgeArnIntegrationTest {
      * classes share one emulator, and a non-commercial ARN left behind fails the cross-service
      * scan in ResourceExplorer2IntegrationTest.
      */
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({
+    @ParameterizedTest
+    @CsvSource({
             "us-east-1,      arn:aws:events:",
             "us-gov-west-1,  arn:aws-us-gov:events:",
             "cn-north-1,     arn:aws-cn:events:"})
@@ -256,7 +260,7 @@ class EventBridgeArnIntegrationTest {
                 .then().statusCode(200)
                 .extract().jsonPath().getString("EventBusArn");
 
-        org.hamcrest.MatcherAssert.assertThat(busArn, org.hamcrest.Matchers.startsWith(expectedArnPrefix));
+        MatcherAssert.assertThat(busArn, Matchers.startsWith(expectedArnPrefix));
 
         try {
             given()

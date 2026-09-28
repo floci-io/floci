@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -817,7 +818,7 @@ public class MarketplaceService implements Resettable {
     }
 
     private String arn(String region, String resource) {
-        return "arn:aws:aws-marketplace:" + region + ":" + accountId() + ":" + resource;
+        return AwsArnUtils.Arn.of("aws-marketplace", region, accountId(), resource).toString();
     }
 
     private String accountId() {

@@ -1,5 +1,9 @@
 package io.github.hectorvent.floci.services.resourceexplorer2;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsArnUtils.Arn;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
@@ -1503,8 +1507,14 @@ class ResourceExplorer2IntegrationTest {
             for (var resource : resources) {
                 String arn = (String) resource.get("Arn");
                 String service = (String) resource.get("Service");
-                assertTrue(arn.startsWith("arn:aws:"),
-                        "ARN must start with arn:aws:, got: " + arn);
+                Arn parsed = AwsArnUtils.parse(arn);
+                // A regionless ARN (an S3 bucket) is in the partition of the region the resource
+                // lives in, which the listing reports; a global one ("global") says nothing.
+                String region = parsed.region().isEmpty() ? (String) resource.get("Region") : parsed.region();
+                if (AwsPartitions.isPublishedRegion(region)) {
+                    assertEquals(AwsRegions.partitionFor(region), parsed.partition(),
+                            "ARN partition must be the one its region belongs to, got: " + arn);
+                }
                 assertTrue(arn.contains(service),
                         "ARN should contain service '" + service + "', got: " + arn);
             }

@@ -130,8 +130,8 @@ public class ConnectService implements TagHandler {
         instance.setInstanceAlias(instanceAlias);
         instance.setDirectoryId(directoryId);
         instance.setCreatedTime(Instant.now());
-        instance.setServiceRole("arn:aws:iam::" + regionResolver.getAccountId()
-                + ":role/aws-service-role/connect.amazonaws.com/AWSServiceRoleForAmazonConnect_" + instanceId);
+        instance.setServiceRole(regionResolver.buildGlobalArn("iam",
+                "role/aws-service-role/connect.amazonaws.com/AWSServiceRoleForAmazonConnect_" + instanceId));
         instance.setInboundCallsEnabled(inboundCallsEnabled);
         instance.setOutboundCallsEnabled(outboundCallsEnabled);
         if (instanceAlias != null) {

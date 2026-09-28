@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -64,7 +65,7 @@ public class ServiceCatalogService {
         String id = id("port");
         ObjectNode portfolio = copy(request);
         portfolio.put("Id", id);
-        portfolio.put("ARN", "arn:aws:catalog:" + region + ":" + accountId + ":portfolio/" + id);
+        portfolio.put("ARN", AwsArnUtils.Arn.of("catalog", region, accountId, "portfolio/" + id).toString());
         portfolio.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
         portfolioStore.put(id, portfolio);
         return portfolio.deepCopy();
@@ -93,8 +94,8 @@ public class ServiceCatalogService {
         if (!exists) {
             ObjectNode portfolio = objectMapper.createObjectNode();
             portfolio.put("Id", CONTROL_TOWER_PORTFOLIO_ID);
-            portfolio.put("ARN", "arn:aws:catalog:" + region + ":" + accountId
-                    + ":portfolio/" + CONTROL_TOWER_PORTFOLIO_ID);
+            portfolio.put("ARN", AwsArnUtils.Arn.of("catalog", region, accountId,
+                    "portfolio/" + CONTROL_TOWER_PORTFOLIO_ID).toString());
             portfolio.put("DisplayName", CONTROL_TOWER_PORTFOLIO_NAME);
             portfolio.put("ProviderName", CONTROL_TOWER_PROVIDER_NAME);
             portfolio.put("Description", "AWS Control Tower Account Factory Portfolio");
@@ -104,8 +105,8 @@ public class ServiceCatalogService {
         if (productStore.get(CONTROL_TOWER_PRODUCT_ID).isEmpty()) {
             ObjectNode product = objectMapper.createObjectNode();
             product.put("Id", CONTROL_TOWER_PRODUCT_ID);
-            product.put("ARN", "arn:aws:catalog:" + region + ":" + accountId
-                    + ":product/" + CONTROL_TOWER_PRODUCT_ID);
+            product.put("ARN", AwsArnUtils.Arn.of("catalog", region, accountId,
+                    "product/" + CONTROL_TOWER_PRODUCT_ID).toString());
             product.put("Name", CONTROL_TOWER_PRODUCT_NAME);
             product.put("Owner", CONTROL_TOWER_PROVIDER_NAME);
             product.put("Type", "CLOUD_FORMATION_TEMPLATE");
@@ -149,7 +150,7 @@ public class ServiceCatalogService {
         String id = id("prod");
         ObjectNode product = copy(request);
         product.put("Id", id);
-        product.put("ARN", "arn:aws:catalog:" + region + ":" + accountId + ":product/" + id);
+        product.put("ARN", AwsArnUtils.Arn.of("catalog", region, accountId, "product/" + id).toString());
         product.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
         ArrayNode artifactIds = product.putArray("ProvisioningArtifactIds");
         ArrayNode artifactNames = product.putArray("ProvisioningArtifactNames");
@@ -210,8 +211,8 @@ public class ServiceCatalogService {
         String provisionedId = id("pp");
         ObjectNode provisioned = objectMapper.createObjectNode();
         provisioned.put("Id", provisionedId);
-        provisioned.put("Arn", "arn:aws:servicecatalog:" + region + ":" + accountId
-                + ":provisionedproduct/" + provisionedId);
+        provisioned.put("Arn", AwsArnUtils.Arn.of("servicecatalog", region, accountId,
+                "provisionedproduct/" + provisionedId).toString());
         provisioned.put("Name", name);
         if (CONTROL_TOWER_PRODUCT_ID.equals(productId)) {
             provisioned.put("Type", "CONTROL_TOWER_ACCOUNT");
@@ -657,7 +658,7 @@ public class ServiceCatalogService {
         String newId = id("prod");
         ObjectNode product = source.deepCopy();
         product.put("Id", newId);
-        product.put("ARN", "arn:aws:catalog:" + region + ":" + accountId + ":product/" + newId);
+        product.put("ARN", AwsArnUtils.Arn.of("catalog", region, accountId, "product/" + newId).toString());
         product.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
         String targetName = text(request, "TargetProductName");
         if (targetName != null && !targetName.isBlank()) {
@@ -1153,8 +1154,8 @@ public class ServiceCatalogService {
         String provisionedId = id("pp");
         ObjectNode provisioned = objectMapper.createObjectNode();
         provisioned.put("Id", provisionedId);
-        provisioned.put("Arn", "arn:aws:servicecatalog:" + region + ":" + accountId
-                + ":provisionedproduct/" + provisionedId);
+        provisioned.put("Arn", AwsArnUtils.Arn.of("servicecatalog", region, accountId,
+                "provisionedproduct/" + provisionedId).toString());
         provisioned.put("Name", provisionedProductName);
         provisioned.put("Type", "IMPORTED");
         provisioned.put("Status", "AVAILABLE");

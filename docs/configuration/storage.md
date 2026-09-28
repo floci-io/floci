@@ -7,7 +7,7 @@ Floci supports four storage backends. You can set a global default and override 
 | Mode | Data survives restart | Write performance | Use case |
 |---|---|---|---|
 | `memory` | No | Fastest | Unit tests, CI pipelines |
-| `persistent` | Yes | Synchronous disk write on every change | Development with durable state |
+| `persistent` | Yes | Synchronous disk write on every change; append-heavy stores are journaled (see below) | Development with durable state |
 | `hybrid` | Yes | In-memory reads, async flush to disk | General local development |
 | `wal` | Yes | Append-only write-ahead log with compaction | High-write workloads |
 
@@ -21,6 +21,18 @@ Floci supports four storage backends. You can set a global default and override 
 
 !!! note "Code default vs shipped default"
     The Java `@WithDefault` for `storage.mode` is `hybrid`, but the published Docker image ships with `memory` set in `application.yml`. Running the stock image gives you `memory` unless you set `FLOCI_STORAGE_MODE`.
+
+### Journaled stores under `persistent` mode
+
+Most stores under `persistent` mode are rewritten in full on every change, which keeps the file
+current after every call but makes the cost of one write grow with the size of the store.
+Append-heavy stores are journaled instead: a change is appended to a `.wal` file next to the
+store, and the store's JSON file is rewritten from memory on the `FLOCI_STORAGE_WAL_COMPACTION_INTERVAL_MS`
+cadence and at shutdown, and only when something changed. Today this applies to CloudWatch Logs
+events (`cwlogs-events.json` with `cwlogs-events.wal`). After a clean shutdown the JSON file holds
+every event; while Floci runs it can be up to one compaction interval behind, and the journal is
+replayed on the next start. An existing `cwlogs-events.json` from an older version is picked up as
+the first snapshot without any migration.
 
 ## Per-Service Override
 
@@ -39,7 +51,7 @@ When not set for a service, it inherits `FLOCI_STORAGE_MODE`. Only override when
 | `FLOCI_STORAGE_SERVICES_LAMBDA_MODE` | global default | Lambda storage mode |
 | `FLOCI_STORAGE_SERVICES_LAMBDA_FLUSH_INTERVAL_MS` | `5000` | Lambda flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_CLOUDWATCHLOGS_MODE` | global default | CloudWatch Logs storage mode |
-| `FLOCI_STORAGE_SERVICES_CLOUDWATCHLOGS_FLUSH_INTERVAL_MS` | `5000` | CloudWatch Logs flush interval (ms) |
+| `FLOCI_STORAGE_SERVICES_CLOUDWATCHLOGS_FLUSH_INTERVAL_MS` | `15000` | CloudWatch Logs flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_CLOUDWATCHMETRICS_MODE` | global default | CloudWatch Metrics storage mode |
 | `FLOCI_STORAGE_SERVICES_CLOUDWATCHMETRICS_FLUSH_INTERVAL_MS` | `5000` | CloudWatch Metrics flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_SECRETSMANAGER_MODE` | global default | Secrets Manager storage mode |
@@ -55,7 +67,7 @@ When not set for a service, it inherits `FLOCI_STORAGE_MODE`. Only override when
 !!! note "RDS storage mode"
     `FLOCI_STORAGE_SERVICES_RDS_MODE` controls Floci's own metadata persistence for RDS, not the
     DB container volumes. In all modes, each DB instance or cluster gets a named Docker volume
-    (`floci-rds-{volumeId}`). In `memory` mode the volume is automatically removed when the
+    (`floci-aws-rds-{volumeId}`). In `memory` mode the volume is automatically removed when the
     instance is deleted. In other modes the volume is retained unless
     `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
 
@@ -130,11 +142,31 @@ Each resource gets a `volumeId` (a 6-character hex string, e.g. `a1b2c3`) genera
 time and stored in the resource model. The container name and volume name both use this suffix:
 
 ```
-floci-rds-a1b2c3         # RDS instance container and volume
-floci-opensearch-b4c5d6  # OpenSearch domain container and volume
-floci-msk-e7f8a9         # MSK cluster container and volume
-floci-ecr-registry-data  # ECR shared registry volume (singleton)
+floci-aws-rds-a1b2c3         # RDS instance container and volume
+floci-aws-opensearch-b4c5d6  # OpenSearch domain container and volume
+floci-aws-msk-e7f8a9         # MSK cluster container and volume
+floci-aws-ecr-registry-data  # ECR shared registry volume (singleton)
 ```
+
+### Upgrading from a version that used the `floci-` prefix
+
+Floci once named containers and volumes `floci-<service>-<id>`. Every Floci emulator shared that
+prefix, so two of them on one Docker daemon could collide, and `docker volume prune --filter
+label=floci=true` reached all of them at once. Each emulator now owns a prefix of its own, and this
+one uses `floci-aws-`.
+
+**Existing data is not moved and not lost.** A resource created before the change keeps its
+`floci-` volume, and Floci records that name so it keeps resolving to it across future upgrades.
+Its container is recreated under the new prefix, which is safe because containers hold no data.
+Volumes with no record to consult, such as the ECR registry and EFS file systems, are found by
+checking for the old name first.
+
+Two consequences worth knowing:
+
+- **Scripts that name containers must be updated**, for example `docker exec floci-rds-<id>`, and
+  so must anything resolving a container by DNS on the Docker network.
+- **Downgrading does not migrate back.** A resource created after the upgrade records a
+  `floci-aws-` name that an older build will not look for.
 
 Volumes are labelled `floci=true` so you can manage them with standard Docker commands:
 

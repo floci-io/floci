@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.appsync.AppSyncGraphqlSidecarProfile;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -15,7 +18,6 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Deploys the AppSync shape a Serverless Framework {@code appSync:} block compiles to: an API with
@@ -29,9 +31,19 @@ import static org.junit.jupiter.api.Assertions.fail;
  * built on, {@code GraphQlApi.ApiId} and {@code FunctionConfiguration.FunctionId}: an unset
  * attribute resolves to the literal string {@code "LogicalId.Attr"} and every dependent resource
  * would then be wired to that text instead of an id.
+ *
+ * <p>Runs against the real GraphQL sidecar image, started by {@code GraphqlSidecarManager}: the
+ * schema deploy above needs it, and the shared profile namespaces the container so a local run
+ * never touches a developer's own running sidecar, and skips (rather than fails) without Docker.
  */
 @QuarkusTest
+@TestProfile(AppSyncGraphqlSidecarProfile.class)
 class AppSyncCfnIntegrationTest {
+
+    @BeforeAll
+    static void requireDockerAndTheSidecarImage() {
+        AppSyncGraphqlSidecarProfile.requireDockerAndTheSidecarImage();
+    }
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260905/us-east-1/cloudformation/aws4_request";
@@ -137,7 +149,7 @@ class AppSyncCfnIntegrationTest {
         """;
 
     @Test
-    void createUpdateAndDeleteAnAppSyncApi() throws InterruptedException {
+    void createUpdateAndDeleteAnAppSyncApi() {
         cloudFormation("CreateStack", Map.of("FieldLogLevel", "ERROR"));
         String created = describeStacks("CREATE_COMPLETE");
 
@@ -216,7 +228,7 @@ class AppSyncCfnIntegrationTest {
             .body("resolver.pipelineConfig.functions[0]", equalTo(functionId));
 
         cloudFormation("DeleteStack", Map.of());
-        awaitStackDeleted();
+        CfnStackWaits.awaitStackDeleted(STACK);
 
         appSync("/v1/apis/" + apiId).statusCode(404);
     }
@@ -248,25 +260,6 @@ class AppSyncCfnIntegrationTest {
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();
-    }
-
-    private static void awaitStackDeleted() throws InterruptedException {
-        for (int i = 0; i < 200; i++) {
-            String body = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", STACK)
-            .when().post("/").then().extract().asString();
-            if (body.contains("does not exist")) {
-                return;
-            }
-            if (body.contains("<StackStatus>DELETE_FAILED</StackStatus>")) {
-                fail("stack delete failed: " + body);
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + STACK + " was not deleted within the timeout");
     }
 
     private static String outputValue(String xml, String key) {

@@ -1,12 +1,10 @@
 package io.github.hectorvent.floci.services.rds;
 
+import io.github.hectorvent.floci.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
@@ -20,15 +18,8 @@ import static org.hamcrest.Matchers.containsString;
  * reports EngineMode (defaulting to provisioned) in DescribeDBClusters, same as StorageEncrypted.
  */
 @QuarkusTest
-@TestProfile(RdsClusterEngineModeStorageEncryptedIntegrationTest.NoContainersProfile.class)
+@TestProfile(RdsMockProfile.class)
 class RdsClusterEngineModeStorageEncryptedIntegrationTest {
-
-    public static class NoContainersProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.rds.mock", "true");
-        }
-    }
 
     private static final String ID = "engine-mode-cluster";
     private static final String NON_AURORA_ID = "engine-mode-non-aurora-cluster";

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -162,7 +163,7 @@ class EventBridgeBatchIntegrationTest {
             .extract().path("jobDefinitionArn");
     }
 
-    private static io.restassured.specification.RequestSpecification givenBatchJson(String body) {
+    private static RequestSpecification givenBatchJson(String body) {
         return given()
                 .header("Authorization", BATCH_AUTH)
                 .contentType("application/json")

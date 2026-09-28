@@ -2,13 +2,10 @@ package io.github.hectorvent.floci.services.cloudtrail;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -22,9 +19,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * This is the reproduction case for the CloudTrail circular-logging cost problem: excluding the
  * trail's own destination bucket via {@code resources.ARN notStartsWith} stops the trail from
  * recording its own delivery writes.
+ *
+ * <p>Delivery is driven explicitly through {@link CloudTrailLogWriter#flushNow()} rather than by
+ * the background flush, which the configured {@code cloudtrail.flush-interval-seconds} of an hour
+ * keeps out of the way. Every bucket and trail name here carries a random suffix and the
+ * assertions match on those names, so the class does not need an application of its own.
  */
 @QuarkusTest
-@TestProfile(CloudTrailAdvancedSelectorsIntegrationTest.IsolatedProfile.class)
 class CloudTrailAdvancedSelectorsIntegrationTest {
 
     private static final String CT_TARGET = "CloudTrail_20131101.";
@@ -32,13 +33,6 @@ class CloudTrailAdvancedSelectorsIntegrationTest {
 
     @Inject
     CloudTrailLogWriter writer;
-
-    public static final class IsolatedProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.cloudtrail.flush-interval-seconds", "3600");
-        }
-    }
 
     @BeforeAll
     static void configureRestAssured() {

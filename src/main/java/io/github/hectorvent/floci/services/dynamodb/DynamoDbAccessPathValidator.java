@@ -306,7 +306,7 @@ final class DynamoDbAccessPathValidator {
         validateCompositeSortKeyConditions(sortKeys, sortKeyEqualities);
     }
 
-    private static String attributeType(TableDefinition table, String attribute) {
+    static String attributeType(TableDefinition table, String attribute) {
         List<AttributeDefinition> definitions = table.getAttributeDefinitions();
         if (definitions == null) {
             throw validationException(KEY_TYPE_MISMATCH);

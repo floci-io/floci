@@ -65,12 +65,21 @@ class CloudWatchMetricsJsonHandlerTest {
     private Response putMetric(String namespace, String metricName,
                                 String dimName, String dimValue,
                                 double value, Instant timestamp) {
+        return putMetric(namespace, metricName, dimName, dimValue, value, timestamp, null);
+    }
+
+    private Response putMetric(String namespace, String metricName,
+                                String dimName, String dimValue,
+                                double value, Instant timestamp, String unit) {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("Namespace", namespace);
-        var datum = req.putArray("MetricData").addObject();
+        ObjectNode datum = req.putArray("MetricData").addObject();
         datum.put("MetricName", metricName);
         datum.put("Value", value);
         datum.put("Timestamp", sdkTimestamp(timestamp));
+        if (unit != null) {
+            datum.put("Unit", unit);
+        }
         datum.putArray("Dimensions").addObject()
                 .put("Name", dimName).put("Value", dimValue);
         return handler.handle("PutMetricData", req, REGION);
@@ -79,6 +88,28 @@ class CloudWatchMetricsJsonHandlerTest {
     private ObjectNode getStats(String namespace, String metricName,
                                  String dimName, String dimValue,
                                  Instant startTime, Instant endTime, int period) {
+        return getStatsWithUnit(namespace, metricName, dimName, dimValue,
+                startTime, endTime, period, null, false);
+    }
+
+    private ObjectNode getStats(String namespace, String metricName,
+                                 String dimName, String dimValue,
+                                 Instant startTime, Instant endTime, int period, String unit) {
+        return getStatsWithUnit(namespace, metricName, dimName, dimValue,
+                startTime, endTime, period, unit, false);
+    }
+
+    private ObjectNode getStatsWithExplicitNullUnit(String namespace, String metricName,
+                                                     String dimName, String dimValue,
+                                                     Instant startTime, Instant endTime, int period) {
+        return getStatsWithUnit(namespace, metricName, dimName, dimValue,
+                startTime, endTime, period, null, true);
+    }
+
+    private ObjectNode getStatsWithUnit(String namespace, String metricName,
+                                         String dimName, String dimValue,
+                                         Instant startTime, Instant endTime, int period,
+                                         String unit, boolean explicitNull) {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("Namespace", namespace);
         req.put("MetricName", metricName);
@@ -88,6 +119,11 @@ class CloudWatchMetricsJsonHandlerTest {
         req.putArray("Dimensions").addObject()
                 .put("Name", dimName).put("Value", dimValue);
         req.putArray("Statistics").add("Sum");
+        if (explicitNull) {
+            req.putNull("Unit");
+        } else if (unit != null) {
+            req.put("Unit", unit);
+        }
         Response resp = handler.handle("GetMetricStatistics", req, REGION);
         assertEquals(200, resp.getStatus());
         return (ObjectNode) resp.getEntity();
@@ -224,5 +260,71 @@ class CloudWatchMetricsJsonHandlerTest {
                 EPOCH_NOW.minusSeconds(10), EPOCH_NOW.plusSeconds(10), 60);
         assertEquals(0, oldResult.get("Datapoints").size(),
                 "metric from 24h ago must not be returned for a 20-second window around now");
+    }
+
+    @Test
+    void getMetricStatistics_jsonHonorsUnitFilter() {
+        putMetric("NS", "M", "type", "current", 10.0, EPOCH_NOW, "Count");
+        putMetric("NS", "M", "type", "current", 20.0, EPOCH_NOW, "Bytes");
+
+        ObjectNode count = getStats("NS", "M", "type", "current",
+                EPOCH_NOW.minusSeconds(10), EPOCH_NOW.plusSeconds(10), 60, "Count");
+        assertEquals(1, count.get("Datapoints").size());
+        assertEquals(10.0, count.get("Datapoints").get(0).get("Sum").asDouble());
+        assertEquals("Count", count.get("Datapoints").get(0).get("Unit").asText());
+
+        ObjectNode bytes = getStats("NS", "M", "type", "current",
+                EPOCH_NOW.minusSeconds(10), EPOCH_NOW.plusSeconds(10), 60, "Bytes");
+        assertEquals(1, bytes.get("Datapoints").size());
+        assertEquals(20.0, bytes.get("Datapoints").get(0).get("Sum").asDouble());
+        assertEquals("Bytes", bytes.get("Datapoints").get(0).get("Unit").asText());
+
+        ObjectNode noMatch = getStats("NS", "M", "type", "current",
+                EPOCH_NOW.minusSeconds(10), EPOCH_NOW.plusSeconds(10), 60, "Percent");
+        assertEquals(0, noMatch.get("Datapoints").size(),
+                "a unit no datum carries must filter every datapoint out");
+    }
+
+    @Test
+    void getMetricStatistics_jsonTreatsOmittedAndNullUnitAsNoFilter() {
+        putMetric("NS", "M", "type", "current", 10.0, EPOCH_NOW, "Count");
+        putMetric("NS", "M", "type", "current", 20.0, EPOCH_NOW, "Bytes");
+
+        ObjectNode omitted = getStats("NS", "M", "type", "current",
+                EPOCH_NOW.minusSeconds(10), EPOCH_NOW.plusSeconds(10), 60);
+        ObjectNode explicitNull = getStatsWithExplicitNullUnit("NS", "M", "type", "current",
+                EPOCH_NOW.minusSeconds(10), EPOCH_NOW.plusSeconds(10), 60);
+
+        assertTrue(omitted.get("Datapoints").size() > 0,
+                "an omitted Unit must not filter every datapoint out");
+        assertEquals(omitted.get("Datapoints"), explicitNull.get("Datapoints"),
+                "an explicit JSON null Unit must mean no filter, exactly like an omitted Unit");
+    }
+
+    @Test
+    void getMetricData_jsonTreatsExplicitNullUnitAsNoFilter() {
+        putMetric("NS", "M", "type", "current", 10.0, EPOCH_NOW, "Count");
+        putMetric("NS", "M", "type", "current", 20.0, EPOCH_NOW, "Bytes");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StartTime", sdkTimestamp(EPOCH_NOW.minusSeconds(10)));
+        req.put("EndTime", sdkTimestamp(EPOCH_NOW.plusSeconds(10)));
+        ObjectNode query = req.putArray("MetricDataQueries").addObject();
+        query.put("Id", "m0");
+        ObjectNode metricStat = query.putObject("MetricStat");
+        ObjectNode metric = metricStat.putObject("Metric");
+        metric.put("Namespace", "NS");
+        metric.put("MetricName", "M");
+        metric.putArray("Dimensions").addObject()
+                .put("Name", "type").put("Value", "current");
+        metricStat.put("Period", 60);
+        metricStat.put("Stat", "Sum");
+        metricStat.putNull("Unit");
+
+        Response resp = handler.handle("GetMetricData", req, REGION);
+        assertEquals(200, resp.getStatus());
+        ObjectNode body = (ObjectNode) resp.getEntity();
+        assertTrue(body.get("MetricDataResults").get(0).get("Values").size() > 0,
+                "an explicit JSON null Unit must not filter every datapoint out");
     }
 }

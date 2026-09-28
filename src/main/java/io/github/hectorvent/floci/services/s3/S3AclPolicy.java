@@ -23,6 +23,8 @@ record S3AclPolicy(List<S3AclPolicy.Grant> grants) {
 
     private static final Logger LOG = Logger.getLogger(S3AclPolicy.class);
     static final String ALL_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AllUsers";
+    static final String AUTHENTICATED_USERS_GROUP_URI =
+            "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
 
     static S3AclPolicy parse(String acl) throws AclParseException {
         try {
@@ -118,6 +120,15 @@ record S3AclPolicy(List<S3AclPolicy.Grant> grants) {
             return grantee.isAllUsersGroup() && permission.allowsWrite();
         }
 
+        /**
+         * Block Public Access calls an ACL public when it grants any permission to the AllUsers
+         * or AuthenticatedUsers predefined groups, which is broader than the read and write
+         * grants anonymous authorization consults.
+         */
+        boolean grantsToPublicGroup() {
+            return grantee.isPublicGroup();
+        }
+
         boolean allowsCanonicalUserRead(String canonicalUserId) {
             return grantee.isCanonicalUser(canonicalUserId) && permission.allowsRead();
         }
@@ -126,6 +137,10 @@ record S3AclPolicy(List<S3AclPolicy.Grant> grants) {
     record Grantee(String uri, String id) {
         boolean isAllUsersGroup() {
             return ALL_USERS_GROUP_URI.equals(uri);
+        }
+
+        boolean isPublicGroup() {
+            return isAllUsersGroup() || AUTHENTICATED_USERS_GROUP_URI.equals(uri);
         }
 
         boolean isCanonicalUser(String canonicalUserId) {

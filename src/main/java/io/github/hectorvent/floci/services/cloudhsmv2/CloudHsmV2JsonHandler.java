@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Certificates;
@@ -467,8 +468,8 @@ public class CloudHsmV2JsonHandler {
     private ObjectNode backupNode(Backup backup, String region) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("BackupId", backup.getBackupId());
-        String arnRegion = region != null ? region : "us-east-1";
-        node.put("BackupArn", "arn:aws:cloudhsm:" + arnRegion + ":000000000000:backup/" + backup.getBackupId());
+        String arnRegion = region != null ? region : "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+        node.put("BackupArn", AwsArnUtils.Arn.of("cloudhsm", arnRegion, "000000000000", "backup/" + backup.getBackupId()).toString());
         node.put("BackupState", backup.getBackupState());
         node.put("ClusterId", backup.getClusterId());
         if (backup.getHsmType() != null) {

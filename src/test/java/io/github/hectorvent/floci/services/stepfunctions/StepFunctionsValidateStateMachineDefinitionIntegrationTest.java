@@ -426,6 +426,108 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
     }
 
     @Test
+    void jsonataMapRejectsNestedNumberPathFields() {
+        String def = """
+                {"QueryLanguage":"JSONata","StartAt":"M","States":{"M":{"Type":"Map",
+                  "ItemBatcher":{"MaxItemsPerBatchPath":"$.batch"},
+                  "ToleratedFailurePercentagePath":"$.failure",
+                  "ItemReader":{"ReaderConfig":{"MaxItemsPath":"$.max"}},
+                  "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                  "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(3))
+                .body("diagnostics[0].message", containsString("MaxItemsPerBatchPath"))
+                .body("diagnostics[0].location", equalTo("/States/M"))
+                .body("diagnostics[1].message", containsString("ToleratedFailurePercentagePath"))
+                .body("diagnostics[1].location", equalTo("/States/M"))
+                .body("diagnostics[2].message", containsString("MaxItemsPath"))
+                .body("diagnostics[2].location", equalTo("/States/M"));
+    }
+
+    @Test
+    void mapNumberPathFieldsMustBeMutuallyExclusiveAndReferencePaths() {
+        String def = mapDefinition("", "\"ItemBatcher\":{\"MaxItemsPerBatch\":2,"
+                + "\"MaxItemsPerBatchPath\":\"$.batch\"},"
+                + "\"ToleratedFailureCountPath\":\"$.counts[*]\",");
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(2))
+                .body("diagnostics[0].message", containsString("MaxItemsPerBatch"))
+                .body("diagnostics[0].location", equalTo("/States/M/ItemBatcher/MaxItemsPerBatch"))
+                .body("diagnostics[1].message", equalTo("Value is not a Reference Path"))
+                .body("diagnostics[1].location", equalTo("/States/M/ToleratedFailureCountPath"));
+    }
+
+    /**
+     * ASL accepts a {@code string_sampler} wherever it accepts a Reference Path, and a Context
+     * Object path is one of its spellings, so every Map numeric path field takes {@code $$.} as
+     * readily as {@code $.}.
+     */
+    @Test
+    void mapNumberPathFieldsAcceptContextObjectPaths() {
+        String def = mapDefinition("", "\"MaxConcurrencyPath\":\"$$.Execution.Input.limit\","
+                + "\"ItemBatcher\":{\"MaxItemsPerBatchPath\":\"$$.Execution.Input.batch\","
+                + "\"MaxInputBytesPerBatchPath\":\"$$.Execution.Input.bytes\"},"
+                + "\"ToleratedFailureCountPath\":\"$$.Execution.Input.count\","
+                + "\"ToleratedFailurePercentagePath\":\"$$.Execution.Input.percentage\","
+                + "\"ItemReader\":{\"ReaderConfig\":{\"MaxItemsPath\":\"$$.Execution.Input.max\"}},");
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void mapNumberLiteralsEnforcePercentageAndReaderMaximums() {
+        String def = mapDefinition("", "\"ItemBatcher\":{\"MaxInputBytesPerBatch\":262145},"
+                + "\"ToleratedFailurePercentage\":100.1,"
+                + "\"ItemReader\":{\"ReaderConfig\":{\"MaxItems\":100000001}},");
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(3))
+                .body("diagnostics[0].message", equalTo("Maximum value is 262144"))
+                .body("diagnostics[0].location", equalTo("/States/M/ItemBatcher/MaxInputBytesPerBatch"))
+                .body("diagnostics[1].message", equalTo("Maximum value is 100"))
+                .body("diagnostics[1].location", equalTo("/States/M/ToleratedFailurePercentage"))
+                .body("diagnostics[2].message", equalTo("Maximum value is 100000000"))
+                .body("diagnostics[2].location", equalTo("/States/M/ItemReader/ReaderConfig/MaxItems"));
+    }
+
+    @Test
+    void mapInputBytesAcceptsDocumentedMaximumAndReferencePath() {
+        String maximum = mapDefinition("", "\"ItemBatcher\":{\"MaxInputBytesPerBatch\":262144},");
+        validateDefinition(maximum)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+
+        String path = mapDefinition("", "\"ItemBatcher\":{\"MaxInputBytesPerBatchPath\":\"$.bytes\"},");
+        validateDefinition(path)
+                .then().statusCode(200)
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0));
+    }
+
+    @Test
+    void createStateMachineRejectsMapNumberPathInJsonata() {
+        String def = mapDefinition("\"QueryLanguage\":\"JSONata\",",
+                "\"ToleratedFailureCountPath\":\"$.count\",");
+
+        createStateMachine("map-number-validation-3733", def)
+                .then().statusCode(400)
+                .body("__type", containsString("InvalidDefinition"));
+    }
+
+    @Test
     void unsupportedItemReaderResource_returnsFailWithSchemaError() {
         given().contentType(CT).header("X-Amz-Target", TARGET)
                 .body("{\"definition\":\"" + MAP_WITH_UNSUPPORTED_ITEM_READER_RESOURCE + "\"}")

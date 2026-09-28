@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.detective;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -167,8 +168,7 @@ public class DetectiveService implements Resettable {
     }
 
     private static String graphArnForAccount(String accountId, String region) {
-        return "arn:aws:detective:" + region + ":" + accountId
-                + ":graph:00000000000000000000000000000001";
+        return AwsArnUtils.Arn.of("detective", region, accountId, "graph:00000000000000000000000000000001").toString();
     }
 
     private static void requireAccountId(String accountId) {

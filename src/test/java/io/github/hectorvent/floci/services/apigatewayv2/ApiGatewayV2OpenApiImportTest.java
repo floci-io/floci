@@ -658,4 +658,32 @@ class ApiGatewayV2OpenApiImportTest {
                 .then().statusCode(400);
         assertNotNull(findRoute(get("/v2/apis/" + apiId + "/routes"), "GET /j"));
     }
+
+    @Test
+    @Order(19)
+    void outOfRangeAuthorizerTtlLeavesThePreviousDefinitionIntact() throws Exception {
+        // The TTL range is checked while planning, before ReimportApi deletes anything.
+        String created = given().contentType(ContentType.JSON)
+                .body("{\"name\": \"ttlRangeTarget\", \"protocolType\": \"HTTP\"}")
+                .when().post("/v2/apis")
+                .then().statusCode(201).extract().asString();
+        String apiId = mapper.readTree(created).get("apiId").asText();
+
+        given().contentType(ContentType.JSON)
+                .body(envelope(SPEC_WITH_AUTHORIZER))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(201);
+
+        String outOfRangeTtl = SPEC_WITH_AUTHORIZER.replace(
+                "\"authorizerResultTtlInSeconds\": 300", "\"authorizerResultTtlInSeconds\": 3601");
+        given().contentType(ContentType.JSON)
+                .body(envelope(outOfRangeTtl))
+                .when().put("/v2/apis/" + apiId)
+                .then().statusCode(400);
+
+        assertEquals(2, get("/v2/apis/" + apiId + "/routes").get("items").size());
+        JsonNode authorizers = get("/v2/apis/" + apiId + "/authorizers").get("items");
+        assertEquals(1, authorizers.size());
+        assertEquals(300, authorizers.get(0).get("authorizerResultTtlInSeconds").asInt());
+    }
 }

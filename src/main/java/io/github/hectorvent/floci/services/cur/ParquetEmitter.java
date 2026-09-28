@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cur;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.S3DestinationValidation;
 import io.github.hectorvent.floci.core.common.UsageLine;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -111,9 +112,9 @@ public class ParquetEmitter {
         // unconstrained input would let a quote in S3Prefix terminate the SQL
         // literal and inject additional statements via setup_sql.
         validateBucketName(destBucket);
-        validatePathSegment(reportName, "reportName");
+        S3DestinationValidation.requireSafeKeySegment(reportName, "reportName");
         if (destPrefix != null && !destPrefix.isEmpty()) {
-            validatePathSegment(destPrefix, "destPrefix");
+            S3DestinationValidation.requireSafeKeySegment(destPrefix, "destPrefix");
         }
 
         String runId = UUID.randomUUID().toString();
@@ -141,8 +142,8 @@ public class ParquetEmitter {
             String resultKey = "cur-staging/" + reportName + "/" + runId + ".result.csv";
             String resultS3Path = "s3://" + stagingBucket + "/" + resultKey;
 
-            // Escape every interpolated path even though validatePathSegment
-            // already rejects quotes — defense in depth.
+            // Escape every interpolated path even though requireSafeKeySegment
+            // already rejects quotes: defense in depth.
             String setupSql = "COPY (SELECT * FROM read_json_auto('"
                     + escapeSqlLiteral(stagingS3Path)
                     + "', format='newline_delimited')) TO '"
@@ -264,22 +265,4 @@ public class ParquetEmitter {
         }
     }
 
-    /**
-     * Rejects path components that contain SQL-significant characters.
-     * Allowed: alphanumerics, hyphens, underscores, periods, and forward slashes
-     * (so callers can pass a prefix like {@code billing/2026}).
-     */
-    private static void validatePathSegment(String value, String field) {
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            boolean ok = (c >= 'A' && c <= 'Z')
-                    || (c >= 'a' && c <= 'z')
-                    || (c >= '0' && c <= '9')
-                    || c == '-' || c == '_' || c == '.' || c == '/';
-            if (!ok) {
-                throw new AwsException("ValidationException",
-                        field + " contains characters not permitted in an S3 key segment.", 400);
-            }
-        }
-    }
 }

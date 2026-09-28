@@ -3,11 +3,9 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import org.jboss.logging.Logger;
 
 /**
- * Rollback bookkeeping shared by every resource handler, on both sides of the ongoing
- * decomposition: the remaining {@code CloudFormationResourceProvisioner} switch arms and the
- * extracted {@link CfnResourceProvisioner} implementations. It lives here instead of in either
- * half so the ownership marker and the cleanup logging stay single-sourced while types migrate
- * out one service at a time.
+ * Rollback bookkeeping shared by every {@link CfnResourceProvisioner} and read by
+ * {@code CloudFormationService}. It lives here so the ownership marker and the cleanup logging
+ * stay single-sourced across the per-service provisioners.
  */
 public final class CfnRollback {
 
@@ -23,8 +21,7 @@ public final class CfnRollback {
      * Marks a resource whose prior physical entity is still intact after a failed update, so the
      * rollback must not try to restore it. Set by a provisioner that creates the replacement before
      * deleting the original; read by {@code CloudFormationService} when deciding what a rollback
-     * owes. Lives here rather than on {@code CloudFormationResourceProvisioner} so extracted
-     * provisioners in this package can set it.
+     * owes. Lives here so every provisioner in this package can set it.
      */
     public static final String UPDATE_ROLLBACK_RESTORED_ATTR = "__FlociUpdateRollbackRestored";
 
@@ -80,6 +77,14 @@ public final class CfnRollback {
      * {@code rollbackUpdate}.
      */
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
+
+    /**
+     * Holds the complete prior metric filter, identity, name mode and per-address mutation outcomes
+     * and ownership states.
+     * Written before either an in-place put or a delete-then-create replacement; retained across
+     * failed restoration attempts and spent only after rollback or commit succeeds.
+     */
+    public static final String METRIC_FILTER_UPDATE_SNAPSHOT_ATTR = "__FlociMetricFilterUpdateSnapshot";
 
     /**
      * Holds the pipe a rename displaced: the name it still lives under, the region that addresses

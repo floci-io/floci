@@ -59,7 +59,7 @@ class TranscribeServiceTest {
 
         assertEquals("s3://bucket/two.wav",
                 service.getTranscriptionJob("shared-job").media().mediaFileUri());
-        assertEquals(1, service.listTranscriptionJobs(null, null, null).summaries().size());
+        assertEquals(1, service.listTranscriptionJobs(null, null, null, null).summaries().size());
 
         account.set(DEFAULT_ACCOUNT);
         region.set(DEFAULT_REGION);
@@ -76,7 +76,7 @@ class TranscribeServiceTest {
         service.createVocabulary("shared-vocabulary", "de-DE");
 
         assertEquals("de-DE", service.getVocabulary("shared-vocabulary").languageCode());
-        assertEquals(1, service.listVocabularies(null, null, null).vocabularies().size());
+        assertEquals(1, service.listVocabularies(null, null, null, null).vocabularies().size());
 
         account.set(DEFAULT_ACCOUNT);
         region.set(DEFAULT_REGION);
@@ -88,13 +88,13 @@ class TranscribeServiceTest {
         vocabularyStore.put("legacy-vocabulary",
                 new VocabularyInfo("legacy-vocabulary", "en-US", "READY", 1L));
 
-        assertEquals(1, service.listVocabularies(null, null, null).vocabularies().size());
+        assertEquals(1, service.listVocabularies(null, null, null, null).vocabularies().size());
         assertEquals("en-US", service.getVocabulary("legacy-vocabulary").languageCode());
 
         account.set("111111111111");
         region.set("eu-west-1");
         assertThrows(AwsException.class, () -> service.getVocabulary("legacy-vocabulary"));
-        assertTrue(service.listVocabularies(null, null, null).vocabularies().isEmpty());
+        assertTrue(service.listVocabularies(null, null, null, null).vocabularies().isEmpty());
 
         account.set(DEFAULT_ACCOUNT);
         region.set("eu-west-1");
@@ -109,7 +109,7 @@ class TranscribeServiceTest {
         region.set("eu-west-1");
 
         assertEquals("en-US", service.getVocabulary("legacy-vocabulary").languageCode());
-        assertEquals(1, service.listVocabularies(null, null, null).vocabularies().size());
+        assertEquals(1, service.listVocabularies(null, null, null, null).vocabularies().size());
         assertTrue(vocabularyStore.getForAccount("111111111111", "legacy-vocabulary").isEmpty());
         assertTrue(vocabularyStore.getForAccount("111111111111", "eu-west-1/legacy-vocabulary").isPresent());
 

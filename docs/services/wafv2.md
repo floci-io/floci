@@ -56,6 +56,10 @@ WAF v2 resources are partitioned by `Scope`: `REGIONAL` (ALB, API Gateway, AppSy
 
 `CreateIPSet` and `UpdateIPSet` require every entry in `Addresses` to be in CIDR notation matching the set's `IPAddressVersion`: an IPv4 address with a `/1`-`/32` prefix, or an IPv6 address with a `/1`-`/128` prefix (a `/0` prefix is rejected, matching AWS). A bare address with no prefix, a prefix outside that range, or an address that does not match the declared `IPAddressVersion` is rejected with `WAFInvalidParameterException`.
 
+## Tags
+
+Every WAF v2 resource accepts at most 50 tags. `TagResource`, `CreateWebACL`, `CreateIPSet`, `CreateRegexPatternSet` and `CreateRuleGroup` reject a request that would leave the resource with more than 50 tags with `WAFLimitsExceededException`; overwriting an existing key does not count toward the limit. Tag keys must be 1-128 characters and values 0-256 characters, both limited to letters, numbers, spaces and `_ . : / = + - @`. An invalid key or value is rejected with `WAFInvalidParameterException` (`Field: TAGS`, or `TAG_KEYS` for `UntagResource`).
+
 ## Example
 
 ```bash

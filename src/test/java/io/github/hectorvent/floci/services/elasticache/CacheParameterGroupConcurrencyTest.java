@@ -8,13 +8,16 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -35,12 +38,12 @@ class CacheParameterGroupConcurrencyTest {
         // Without a lock held across the existence check and the write, both creates see no group
         // and both succeed, so a duplicate never reports one.
         String name = "concurrent-create-pg";
-        var pool = Executors.newFixedThreadPool(8);
-        var start = new CountDownLatch(1);
-        var created = new AtomicInteger();
-        var rejected = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger created = new AtomicInteger();
+        AtomicInteger rejected = new AtomicInteger();
         try {
-            List<Future<Object>> attempts = java.util.stream.IntStream.range(0, 8)
+            List<Future<Object>> attempts = IntStream.range(0, 8)
                     .mapToObj(i -> pool.submit(() -> {
                         start.await();
                         try {
@@ -73,11 +76,11 @@ class CacheParameterGroupConcurrencyTest {
         // The modify reads its record inside the lock, so a delete that got there first leaves it
         // with nothing to write back.
         String name = "modify-delete-race-pg";
-        var pool = Executors.newFixedThreadPool(2);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             for (int attempt = 0; attempt < 40; attempt++) {
                 service.createCacheParameterGroup(name, "redis7", "race", Map.of());
-                var start = new CountDownLatch(1);
+                CountDownLatch start = new CountDownLatch(1);
 
                 Future<?> modify = pool.submit(() -> {
                     start.await();
@@ -137,8 +140,8 @@ class CacheParameterGroupConcurrencyTest {
         // load.
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CacheParameterGroup group = new CacheParameterGroup("persisted-pg", "redis7", "persisted");
-        group.setParameters(new java.util.LinkedHashMap<>(Map.of("maxmemory-policy", "allkeys-lru")));
-        group.setTags(new java.util.LinkedHashMap<>(Map.of("env", "prod")));
+        group.setParameters(new LinkedHashMap<>(Map.of("maxmemory-policy", "allkeys-lru")));
+        group.setTags(new LinkedHashMap<>(Map.of("env", "prod")));
 
         Map<String, CacheParameterGroup> reloaded = mapper.readValue(
                 mapper.writeValueAsString(Map.of("persisted-pg", group)),

@@ -28,11 +28,10 @@ import java.util.Set;
 /**
  * CloudFormation provisioning for RDS: the two parameter-group types, {@code DBSubnetGroup},
  * {@code DBInstance}, {@code DBCluster}, {@code DBProxy} and {@code DBProxyTargetGroup}.
- * Extracted from {@code CloudFormationResourceProvisioner}.
+ * Extracted from the former CloudFormation monolith.
  *
  * <p>Every type here deletes by physical id alone, so the id-only
- * {@link #delete(String, String, String)} serves all seven and none of them appears in the
- * engine's {@code DELETE_NEEDS_STACK_RESOURCE} set. {@code DBCluster} is the one type that
+ * {@link #delete(String, String, String)} serves all seven. {@code DBCluster} is the one type that
  * replaces through {@link ReplacementCleanup}; see {@code provisionDbCluster}.
  *
  * <p>Unlike most extractions this one does not take {@code RdsService} out of the monolith.
@@ -222,6 +221,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         r.setPhysicalId(group.getDbSubnetGroupName());
         r.getAttributes().put("DBSubnetGroupName", group.getDbSubnetGroupName());
+        if (group.getDbSubnetGroupArn() != null) {
+            r.getAttributes().put("DBSubnetGroupArn", group.getDbSubnetGroupArn());
+        }
     }
 
     private void provisionDbParameterGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -254,6 +256,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         r.setPhysicalId(group.getDbParameterGroupName());
         r.getAttributes().put("DBParameterGroupName", group.getDbParameterGroupName());
+        if (group.getDbParameterGroupArn() != null) {
+            r.getAttributes().put("DBParameterGroupArn", group.getDbParameterGroupArn());
+        }
     }
 
     private void provisionDbClusterParameterGroup(StackResource r, JsonNode props,
@@ -303,10 +308,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
 
         // provision() is re-invoked on every UpdateStack for every resource, so a same-id instance
         // already on file must be reconciled rather than re-created (createDbInstance throws
-        // DBInstanceAlreadyExists). Only the properties RdsService.modifyDbInstance actually supports
-        // (password, IAM auth, subnet group) are reconciled here; other property changes (engine,
-        // instance class, allocated storage, ...) are a pre-existing gap in that method, not addressed
-        // by this fix.
+        // DBInstanceAlreadyExists). Only password, IAM auth and subnet group are reconciled here.
+        // modifyDbInstance also takes DBInstanceClass, AllocatedStorage and EngineVersion now, but
+        // threading them through an UpdateStack is a separate change: DBInstanceClass and
+        // AllocatedStorage are update-in-place on the AWS::RDS::DBInstance schema while Engine is
+        // create-only, so passing them needs the replacement handling the DB cluster arm has.
         DbInstance instance = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbInstance);
         if (instance != null) {
             instance = rdsService.modifyDbInstance(

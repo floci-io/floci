@@ -6,11 +6,14 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
 import io.github.hectorvent.floci.services.ecr.model.Image;
 import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageFailure;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
+import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -41,6 +44,11 @@ public class EcrJsonHandler {
     public Response handle(String action, JsonNode request, String region) {
         return switch (action) {
             case "CreateRepository" -> handleCreateRepository(request, region);
+            case "CreatePullThroughCacheRule" -> handleCreatePullThroughCacheRule(request, region);
+            case "DescribePullThroughCacheRules" -> handleDescribePullThroughCacheRules(request, region);
+            case "UpdatePullThroughCacheRule" -> handleUpdatePullThroughCacheRule(request, region);
+            case "ValidatePullThroughCacheRule" -> handleValidatePullThroughCacheRule(request, region);
+            case "DeletePullThroughCacheRule" -> handleDeletePullThroughCacheRule(request, region);
             case "DescribeRepositories" -> handleDescribeRepositories(request, region);
             case "BatchGetRepositoryScanningConfiguration" ->
                     handleBatchGetRepositoryScanningConfiguration(request, region);
@@ -83,6 +91,95 @@ public class EcrJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("repository", buildRepository(repo));
+        return Response.ok(response).build();
+    }
+
+    private Response handleCreatePullThroughCacheRule(JsonNode request, String region) {
+        PullThroughCacheRule rule = service.createPullThroughCacheRule(
+                request.path("ecrRepositoryPrefix").asText(null),
+                request.path("upstreamRegistryUrl").asText(null),
+                request.path("registryId").asText(null),
+                request.path("upstreamRegistry").asText(null),
+                request.path("credentialArn").asText(null),
+                request.path("customRoleArn").asText(null),
+                request.path("upstreamRepositoryPrefix").asText(null),
+                region);
+        return Response.ok(buildPullThroughCacheRule(rule, true, false)).build();
+    }
+
+    private Response handleDescribePullThroughCacheRules(JsonNode request, String region) {
+        JsonNode prefixesNode = request.path("ecrRepositoryPrefixes");
+        List<String> prefixes = prefixesNode.isMissingNode() || prefixesNode.isNull()
+                ? null
+                : parseStringList(prefixesNode);
+        PaginatedResult<PullThroughCacheRule> result = service.describePullThroughCacheRules(
+                request.path("registryId").asText(null),
+                prefixes,
+                parseMaxResults(request.path("maxResults")),
+                request.path("nextToken").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode rules = objectMapper.createArrayNode();
+        for (PullThroughCacheRule rule : result.items()) {
+            rules.add(buildPullThroughCacheRule(rule, true, true));
+        }
+        response.set("pullThroughCacheRules", rules);
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeletePullThroughCacheRule(JsonNode request, String region) {
+        PullThroughCacheRule rule = service.deletePullThroughCacheRule(
+                request.path("ecrRepositoryPrefix").asText(null),
+                request.path("registryId").asText(null),
+                region);
+        return Response.ok(buildPullThroughCacheRule(rule, false, false)).build();
+    }
+
+    private Response handleUpdatePullThroughCacheRule(JsonNode request, String region) {
+        PullThroughCacheRule rule = service.updatePullThroughCacheRule(
+                request.path("ecrRepositoryPrefix").asText(null),
+                request.path("registryId").asText(null),
+                request.path("credentialArn").asText(null),
+                request.path("customRoleArn").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ecrRepositoryPrefix", rule.getEcrRepositoryPrefix());
+        response.put("registryId", rule.getRegistryId());
+        response.put("updatedAt", rule.getUpdatedAt().getEpochSecond());
+        if (rule.getCredentialArn() != null) {
+            response.put("credentialArn", rule.getCredentialArn());
+        }
+        if (rule.getCustomRoleArn() != null) {
+            response.put("customRoleArn", rule.getCustomRoleArn());
+        }
+        if (rule.getUpstreamRepositoryPrefix() != null) {
+            response.put("upstreamRepositoryPrefix", rule.getUpstreamRepositoryPrefix());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleValidatePullThroughCacheRule(JsonNode request, String region) {
+        PullThroughCacheRule rule = service.validatePullThroughCacheRule(
+                request.path("ecrRepositoryPrefix").asText(null),
+                request.path("registryId").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ecrRepositoryPrefix", rule.getEcrRepositoryPrefix());
+        response.put("registryId", rule.getRegistryId());
+        response.put("upstreamRegistryUrl", rule.getUpstreamRegistryUrl());
+        if (rule.getCredentialArn() != null) {
+            response.put("credentialArn", rule.getCredentialArn());
+        }
+        if (rule.getCustomRoleArn() != null) {
+            response.put("customRoleArn", rule.getCustomRoleArn());
+        }
+        if (rule.getUpstreamRepositoryPrefix() != null) {
+            response.put("upstreamRepositoryPrefix", rule.getUpstreamRepositoryPrefix());
+        }
+        response.put("isValid", true);
         return Response.ok(response).build();
     }
 
@@ -381,6 +478,32 @@ public class EcrJsonHandler {
         return n;
     }
 
+    private ObjectNode buildPullThroughCacheRule(PullThroughCacheRule rule,
+                                                 boolean includeUpstreamRegistry,
+                                                 boolean includeUpdatedAt) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ecrRepositoryPrefix", rule.getEcrRepositoryPrefix());
+        response.put("upstreamRegistryUrl", rule.getUpstreamRegistryUrl());
+        response.put("createdAt", rule.getCreatedAt().getEpochSecond());
+        response.put("registryId", rule.getRegistryId());
+        if (rule.getCredentialArn() != null) {
+            response.put("credentialArn", rule.getCredentialArn());
+        }
+        if (rule.getCustomRoleArn() != null) {
+            response.put("customRoleArn", rule.getCustomRoleArn());
+        }
+        if (rule.getUpstreamRepositoryPrefix() != null) {
+            response.put("upstreamRepositoryPrefix", rule.getUpstreamRepositoryPrefix());
+        }
+        if (includeUpstreamRegistry && rule.getUpstreamRegistry() != null) {
+            response.put("upstreamRegistry", rule.getUpstreamRegistry());
+        }
+        if (includeUpdatedAt && rule.getUpdatedAt() != null) {
+            response.put("updatedAt", rule.getUpdatedAt().getEpochSecond());
+        }
+        return response;
+    }
+
     private ObjectNode buildImageDetail(ImageDetail d) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("registryId", d.getRegistryId());
@@ -462,6 +585,16 @@ public class EcrJsonHandler {
         List<String> out = new ArrayList<>();
         node.forEach(n -> out.add(n.asText()));
         return out;
+    }
+
+    private static Integer parseMaxResults(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
+            throw new AwsException("InvalidParameterException", "maxResults must be an integer.", 400);
+        }
+        return node.intValue();
     }
 
     private static Map<String, String> parseTags(JsonNode node) {

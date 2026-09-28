@@ -19,6 +19,11 @@ COPY --chmod=755 docker/localstack-parity.sh docker/healthcheck.sh /usr/local/bi
 ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}
 ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+# A binary built in the Quarkus builder container (make native) links zlib dynamically, since
+# that image has no zlib-static, and ubi9-micro ships no libz.so.1; the Makefile stages the
+# library next to the binary and this is what lets the loader find it. The workflows build
+# with a host Mandrel that links zlib statically, so their images carry no such file.
+ENV LD_LIBRARY_PATH=/app
 COPY --chmod=755 --chown=1001:root native/${TARGETARCH}/ /app/
 
 LABEL org.opencontainers.image.title="Floci" \

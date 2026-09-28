@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.codepipeline;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -10,9 +13,17 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -24,6 +35,25 @@ import static org.hamcrest.Matchers.nullValue;
 class CodePipelineIntegrationTest {
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String TARGET = "CodePipeline_20150709.";
+
+    @Inject
+    EmulatorConfig config;
+
+    /**
+     * Sleeps for {@code cycles} times the configured source poll interval. The assertions that
+     * follow these waits check that no execution, or no additional execution, was started, and they
+     * are only meaningful if the poller actually ran and declined, so the wait scales with the
+     * interval instead of hard-coding milliseconds that stop covering enough cycles when the
+     * interval changes.
+     *
+     * <p>This is wall clock, not a handshake with the scheduler. The poller runs on a fixed delay,
+     * so its period is the interval plus however long a pass takes, and fewer than {@code cycles}
+     * passes may complete within the sleep. Several cycles are requested to leave margin for that,
+     * not to guarantee a number of completed passes.
+     */
+    private void awaitSourcePollCycles(int cycles) throws InterruptedException {
+        Thread.sleep(config.services().codepipeline().sourcePollIntervalMs() * cycles);
+    }
 
     @BeforeAll
     static void configureRestAssured() {
@@ -167,7 +197,8 @@ class CodePipelineIntegrationTest {
     void pipelineLifecycleExecutesS3SourceAndDeployActions() throws Exception {
         createBucket("codepipeline-source");
         createBucket("codepipeline-destination");
-        putObject("codepipeline-source", "source.zip", "pipeline artifact");
+        String sourceETag = putObject(
+                "codepipeline-source", "source.zip", "pipeline artifact", "release candidate");
 
         String pipelineName = "s3-copy-pipeline";
         post("CreatePipeline", pipeline(pipelineName, """
@@ -238,7 +269,9 @@ class CodePipelineIntegrationTest {
                 .body("pipelineExecution.pipelineName", equalTo(pipelineName))
                 .body("pipelineExecution.status", equalTo("Succeeded"))
                 .body("pipelineExecution.artifactRevisions", hasSize(1))
-                .body("pipelineExecution.artifactRevisions[0].name", equalTo("SourceObject"));
+                .body("pipelineExecution.artifactRevisions[0].name", equalTo("SourceObject"))
+                .body("pipelineExecution.sourceRevisions", nullValue())
+                .body("pipelineExecution.sourceRevisionOverrides", nullValue());
 
         post("ListPipelineExecutions", """
                 {"pipelineName": "%s"}
@@ -247,7 +280,16 @@ class CodePipelineIntegrationTest {
                 .statusCode(200)
                 .body("pipelineExecutionSummaries", hasSize(1))
                 .body("pipelineExecutionSummaries[0].pipelineExecutionId", equalTo(executionId))
-                .body("pipelineExecutionSummaries[0].status", equalTo("Succeeded"));
+                .body("pipelineExecutionSummaries[0].status", equalTo("Succeeded"))
+                .body("pipelineExecutionSummaries[0].sourceRevisions", hasSize(1))
+                .body("pipelineExecutionSummaries[0].sourceRevisions[0].actionName", equalTo("SourceObject"))
+                .body("pipelineExecutionSummaries[0].sourceRevisions[0].revisionId",
+                        equalTo(unquote(sourceETag)))
+                .body("pipelineExecutionSummaries[0].sourceRevisions[0].revisionSummary",
+                        equalTo("release candidate"))
+                .body("pipelineExecutionSummaries[0].sourceRevisions[0].revisionUrl",
+                        equalTo("s3://codepipeline-source/source.zip"))
+                .body("pipelineExecutionSummaries[0].sourceRevisionOverrides", nullValue());
 
         post("ListPipelineExecutions", """
                 {
@@ -373,7 +415,7 @@ class CodePipelineIntegrationTest {
                 """))
                 .then().statusCode(200);
 
-        Thread.sleep(1200);
+        awaitSourcePollCycles(5);
         post("ListPipelineExecutions", """
                 {"pipelineName": "%s"}
                 """.formatted(pipelineName))
@@ -402,7 +444,7 @@ class CodePipelineIntegrationTest {
                 .statusCode(200)
                 .body(equalTo("changed artifact"));
 
-        Thread.sleep(1200);
+        awaitSourcePollCycles(5);
         post("ListPipelineExecutions", """
                 {"pipelineName": "%s"}
                 """.formatted(pipelineName))
@@ -459,7 +501,7 @@ class CodePipelineIntegrationTest {
                 """))
                 .then().statusCode(200);
 
-        Thread.sleep(700);
+        awaitSourcePollCycles(3);
         post("ListPipelineExecutions", """
                 {"pipelineName": "%s"}
                 """.formatted(pipelineName))
@@ -530,7 +572,7 @@ class CodePipelineIntegrationTest {
                 .then().statusCode(200);
 
         putObject("codepipeline-poll-disabled-source", "source.zip", "changed artifact");
-        Thread.sleep(1200);
+        awaitSourcePollCycles(5);
 
         post("ListPipelineExecutions", """
                 {"pipelineName": "%s"}
@@ -538,6 +580,881 @@ class CodePipelineIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("pipelineExecutionSummaries", hasSize(0));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void retryStageExecutionReusesExecutionAndRetainedArtifacts() throws Exception {
+        createBucket("retry-stage-source");
+        createBucket("retry-stage-success");
+        putObject("retry-stage-source", "source.zip", "retry artifact");
+
+        String pipelineName = "retry-stage-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "retry-stage-source",
+                            "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}],
+                        "runOrder": 1
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "SuccessfulDeploy",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "retry-stage-success",
+                            "ObjectKey": "successful.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}],
+                        "runOrder": 1
+                    }, {
+                        "name": "FailedDeploy",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "retry-stage-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}],
+                        "runOrder": 1
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200);
+
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+
+        waitForExecution(pipelineName, executionId, "Failed");
+
+        post("ListActionExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "filter": {"pipelineExecutionId": "%s"}
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("actionExecutionDetails", hasSize(3))
+                .body("actionExecutionDetails.findAll { it.actionName == 'SourceObject' }", hasSize(1))
+                .body("actionExecutionDetails.find { it.actionName == 'SuccessfulDeploy' }.status",
+                        equalTo("Succeeded"))
+                .body("actionExecutionDetails.find { it.actionName == 'FailedDeploy' }.status", equalTo("Failed"));
+
+        createBucket("retry-stage-destination");
+
+        retryStage(pipelineName, "Deploy", executionId, "FAILED_ACTIONS")
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionId", equalTo(executionId));
+
+        waitForExecution(pipelineName, executionId, "Succeeded");
+
+        post("GetPipelineExecution", """
+                {"pipelineName": "%s", "pipelineExecutionId": "%s"}
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecution.pipelineExecutionId", equalTo(executionId))
+                .body("pipelineExecution.artifactsReleased", nullValue())
+                .body("pipelineExecution.stageExecutionStatuses", nullValue());
+
+        given()
+                .get("/retry-stage-destination/deployed.zip")
+        .then()
+                .statusCode(200)
+                .body(equalTo("retry artifact"));
+
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries", hasSize(1))
+                .body("pipelineExecutionSummaries[0].pipelineExecutionId", equalTo(executionId))
+                .body("pipelineExecutionSummaries[0].status", equalTo("Succeeded"));
+
+        post("ListActionExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "filter": {"pipelineExecutionId": "%s"}
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("actionExecutionDetails", hasSize(4))
+                .body("actionExecutionDetails.findAll { it.actionName == 'SourceObject' }", hasSize(1))
+                .body("actionExecutionDetails.findAll { it.actionName == 'SuccessfulDeploy' }", hasSize(1))
+                .body("actionExecutionDetails.findAll { it.actionName == 'FailedDeploy' }", hasSize(2))
+                .body("actionExecutionDetails.find { it.actionName == 'FailedDeploy' }.status", equalTo("Succeeded"));
+
+        post("GetPipelineState", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("stageStates.find { it.stageName == 'Deploy' }.actionStates"
+                        + ".find { it.actionName == 'SuccessfulDeploy' }.latestExecution.status", equalTo("Succeeded"))
+                .body("stageStates.find { it.stageName == 'Deploy' }.actionStates"
+                        + ".find { it.actionName == 'FailedDeploy' }.latestExecution.status", equalTo("Succeeded"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void retryStageExecutionAllActionsRerunsSuccessfulActions() throws Exception {
+        createBucket("retry-all-source");
+        createBucket("retry-all-success");
+        putObject("retry-all-source", "source.zip", "retry all artifact");
+
+        String pipelineName = "retry-all-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source", "owner": "AWS", "provider": "S3", "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "retry-all-source", "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "SuccessfulDeploy",
+                        "actionTypeId": {
+                            "category": "Deploy", "owner": "AWS", "provider": "S3", "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "retry-all-success", "ObjectKey": "successful.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}],
+                        "runOrder": 1
+                    }, {
+                        "name": "FailedDeploy",
+                        "actionTypeId": {
+                            "category": "Deploy", "owner": "AWS", "provider": "S3", "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "retry-all-destination", "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}],
+                        "runOrder": 1
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then().statusCode(200).extract().path("pipelineExecutionId");
+        waitForExecution(pipelineName, executionId, "Failed");
+        createBucket("retry-all-destination");
+
+        retryStage(pipelineName, "Deploy", executionId, "ALL_ACTIONS")
+                .then().statusCode(200).body("pipelineExecutionId", equalTo(executionId));
+        waitForExecution(pipelineName, executionId, "Succeeded");
+
+        post("ListActionExecutions", """
+                {
+                    "pipelineName": "%s",
+                    "filter": {"pipelineExecutionId": "%s"}
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("actionExecutionDetails.findAll { it.actionName == 'SourceObject' }", hasSize(1))
+                .body("actionExecutionDetails.findAll { it.actionName == 'SuccessfulDeploy' }", hasSize(2))
+                .body("actionExecutionDetails.findAll { it.actionName == 'FailedDeploy' }", hasSize(2));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void retryStageExecutionValidatesRetryability() throws Exception {
+        String pipelineName = "retry-validation-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "missing-retry-source",
+                            "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "unused-retry-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then()
+                .statusCode(200);
+
+        String executionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+
+        waitForExecution(pipelineName, executionId, "Failed");
+
+        post("RetryStageExecution", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Source",
+                    "pipelineExecutionId": "%s",
+                    "retryMode": "INVALID"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"));
+
+        post("RetryStageExecution", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Missing",
+                    "pipelineExecutionId": "%s",
+                    "retryMode": "FAILED_ACTIONS"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("StageNotFoundException"));
+
+        post("UpdatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObjectV2",
+                        "actionTypeId": {
+                            "category": "Source", "owner": "AWS", "provider": "S3", "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "missing-retry-source", "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy", "owner": "AWS", "provider": "S3", "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "unused-retry-destination", "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        post("RetryStageExecution", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Source",
+                    "pipelineExecutionId": "%s",
+                    "retryMode": "FAILED_ACTIONS"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("StageNotRetryableException"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void retryStageExecutionAdmitsOneOfConcurrentRetries() throws Exception {
+        String pipelineName = "retry-concurrent-pipeline";
+        post("CreatePipeline", approvalPipeline(pipelineName, "PARALLEL")).then().statusCode(200);
+        String executionId = startExecution(pipelineName);
+        waitForApprovalToken(pipelineName);
+        stopExecutions(pipelineName, List.of(executionId));
+        waitForExecution(pipelineName, executionId, "Stopped");
+
+        int callersPerBurst = 8;
+        ExecutorService callers = Executors.newFixedThreadPool(callersPerBurst);
+        try {
+            await("one retry to be admitted once the stopped run has finished").atMost(Duration.ofSeconds(5))
+                    .pollDelay(Duration.ZERO).pollInterval(Duration.ofMillis(50))
+                    .until(() -> {
+                        List<Response> completed = retryConcurrently(callers, callersPerBurst,
+                                pipelineName, "Approve", executionId, "ALL_ACTIONS");
+                        long admitted = completed.stream().filter(r -> r.statusCode() == 200).count();
+                        assertTrue(admitted <= 1, "more than one concurrent retry was admitted");
+                        assertTrue(completed.stream().filter(r -> r.statusCode() != 200)
+                                .allMatch(r -> r.statusCode() == 400
+                                        && r.jsonPath().getString("__type").contains("ConflictException")));
+                        return admitted == 1;
+                    });
+        } finally {
+            callers.shutdownNow();
+            post("StopPipelineExecution", """
+                    {"pipelineName": "%s", "pipelineExecutionId": "%s", "abandon": true}
+                    """.formatted(pipelineName, executionId));
+        }
+    }
+
+    @Test
+    void retryStageExecutionRejectsStageCompletedBeforeInboundStop() throws Exception {
+        String pipelineName = "retry-inbound-stop-pipeline";
+        post("CreatePipeline", approvalPipeline(pipelineName, "PARALLEL")).then().statusCode(200);
+        post("DisableStageTransition", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Complete",
+                    "transitionType": "Inbound",
+                    "reason": "hold"
+                }
+                """.formatted(pipelineName)).then().statusCode(200);
+        String executionId = startExecution(pipelineName);
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Approve",
+                    "actionName": "ManualApproval",
+                    "token": "%s",
+                    "result": {"status": "Approved", "summary": "ok"}
+                }
+                """.formatted(pipelineName, waitForApprovalToken(pipelineName))).then().statusCode(200);
+        waitForStageStatus(pipelineName, "Approve", "Succeeded");
+        stopExecutions(pipelineName, List.of(executionId));
+        waitForExecution(pipelineName, executionId, "Stopped");
+
+        retryStage(pipelineName, "Approve", executionId, "ALL_ACTIONS")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("StageNotRetryableException"));
+    }
+
+    @Test
+    void retryStageExecutionCountsAgainstActiveExecutionLimit() throws Exception {
+        String pipelineName = "retry-limit-pipeline";
+        post("CreatePipeline", approvalPipeline(pipelineName, "PARALLEL")).then().statusCode(200);
+        String stoppedId = startExecution(pipelineName);
+        waitForApprovalToken(pipelineName);
+        stopExecutions(pipelineName, List.of(stoppedId));
+        waitForExecution(pipelineName, stoppedId, "Stopped");
+
+        List<String> executionIds = new ArrayList<>();
+        try {
+            while (executionIds.size() < 50) {
+                executionIds.add(startExecution(pipelineName));
+            }
+            waitForActiveExecutions(pipelineName, 50);
+
+            retryStage(pipelineName, "Approve", stoppedId, "ALL_ACTIONS")
+                    .then()
+                    .statusCode(400)
+                    .body("__type", containsString("ConcurrentPipelineExecutionsLimitExceededException"));
+        } finally {
+            stopExecutions(pipelineName, executionIds);
+        }
+    }
+
+    @Test
+    void retryStageExecutionReleasesArtifactsOfOutdatedExecution() throws Exception {
+        createBucket("retry-outdated-source");
+        putObject("retry-outdated-source", "source.zip", "outdated artifact");
+        String pipelineName = "retry-outdated-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {"category": "Source", "owner": "AWS", "provider": "S3", "version": "1"},
+                        "configuration": {"S3Bucket": "retry-outdated-source", "S3ObjectKey": "source.zip"},
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {"category": "Deploy", "owner": "AWS", "provider": "S3", "version": "1"},
+                        "configuration": {"BucketName": "retry-outdated-destination", "ObjectKey": "deployed.zip"},
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """)).then().statusCode(200);
+
+        String olderId = startExecution(pipelineName);
+        waitForExecution(pipelineName, olderId, "Failed");
+        String newerId = startExecution(pipelineName);
+        waitForExecution(pipelineName, newerId, "Failed");
+
+        retryStage(pipelineName, "Deploy", olderId, "FAILED_ACTIONS")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("NotLatestPipelineExecutionException"));
+
+        createBucket("retry-outdated-destination");
+        retryStage(pipelineName, "Deploy", newerId, "FAILED_ACTIONS").then().statusCode(200);
+        waitForExecution(pipelineName, newerId, "Succeeded");
+
+        retryStage(pipelineName, "Deploy", olderId, "FAILED_ACTIONS")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("StageNotRetryableException"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void retryStageExecutionRejectsRetryWhileSiblingActionStillRuns() throws Exception {
+        String pipelineName = "retry-sibling-running-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "ManualApproval",
+                        "actionTypeId": {"category": "Approval", "owner": "AWS", "provider": "Manual", "version": "1"},
+                        "runOrder": 1
+                    }, {
+                        "name": "UnsupportedDeploy",
+                        "actionTypeId": {"category": "Deploy", "owner": "AWS", "provider": "ECS", "version": "1"},
+                        "configuration": {"ClusterName": "none", "ServiceName": "none"},
+                        "runOrder": 1
+                    }]
+                },
+                {
+                    "name": "Release",
+                    "actions": [{
+                        "name": "ReleaseApproval",
+                        "actionTypeId": {"category": "Approval", "owner": "AWS", "provider": "Manual", "version": "1"}
+                    }]
+                }
+                """)).then().statusCode(200);
+
+        String executionId = startExecution(pipelineName);
+        waitForExecution(pipelineName, executionId, "Failed");
+        String approvalToken = waitForApprovalToken(pipelineName);
+
+        post("RetryStageExecution", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Deploy",
+                    "pipelineExecutionId": "%s",
+                    "retryMode": "FAILED_ACTIONS"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ConflictException"));
+
+        post("PutApprovalResult", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Deploy",
+                    "actionName": "ManualApproval",
+                    "token": "%s",
+                    "result": {"status": "Approved", "summary": "done"}
+                }
+                """.formatted(pipelineName, approvalToken)).then().statusCode(200);
+        post("ListActionExecutions", """
+                {"pipelineName": "%s", "filter": {"pipelineExecutionId": "%s"}}
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("actionExecutionDetails.findAll { it.actionName == 'ManualApproval' }", hasSize(1));
+    }
+
+    @Test
+    void retryStageExecutionRetriesCodeBuildStageFedByUnstoredArtifact() throws Exception {
+        createBucket("retry-codebuild-source");
+        putObject("retry-codebuild-source", "source.zip", "codebuild artifact");
+        String pipelineName = "retry-codebuild-chain-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {"category": "Source", "owner": "AWS", "provider": "S3", "version": "1"},
+                        "configuration": {"S3Bucket": "retry-codebuild-source", "S3ObjectKey": "source.zip"},
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Test",
+                    "actions": [{
+                        "name": "RunTests",
+                        "actionTypeId": {"category": "Test", "owner": "AWS", "provider": "CodeBuild", "version": "1"},
+                        "configuration": {"ProjectName": "retry-codebuild-missing-project"},
+                        "inputArtifacts": [{"name": "BuildOutput"}]
+                    }]
+                }
+                """)).then().statusCode(200);
+
+        String executionId = startExecution(pipelineName);
+        waitForExecution(pipelineName, executionId, "Failed");
+        post("ListActionExecutions", """
+                {"pipelineName": "%s", "filter": {"pipelineExecutionId": "%s"}}
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("actionExecutionDetails.find { it.actionName == 'RunTests' }"
+                        + ".output.executionResult.errorDetails.message", containsString("Project not found"));
+
+        retryStage(pipelineName, "Test", executionId, "FAILED_ACTIONS")
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionId", equalTo(executionId));
+        waitForExecution(pipelineName, executionId, "Failed");
+        waitForActionExecutionCount(pipelineName, executionId, "RunTests", 2);
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void startPipelineExecutionS3OverridesSelectEffectiveKeyAndVersion() throws Exception {
+        createBucket("codepipeline-source-override");
+        createBucket("codepipeline-override-destination");
+        given()
+                .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+                .put("/codepipeline-source-override?versioning")
+        .then()
+                .statusCode(200);
+
+        putObject("codepipeline-source-override", "source.zip", "default artifact");
+        String oldVersion = given()
+                .contentType("application/octet-stream")
+                .body("selected old version".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        .when()
+                .put("/codepipeline-source-override/alternate.zip")
+        .then()
+                .statusCode(200)
+                .header("x-amz-version-id", notNullValue())
+                .extract().header("x-amz-version-id");
+        putObject("codepipeline-source-override", "alternate.zip", "newer version");
+
+        String pipelineName = "source-revision-override-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "codepipeline-source-override",
+                            "S3ObjectKey": "source.zip",
+                            "AllowOverrideForS3ObjectKey": "true"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-override-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        String executionId = post("StartPipelineExecution", """
+                {
+                    "name": "%s",
+                    "sourceRevisions": [
+                        {
+                            "actionName": "SourceObject",
+                            "revisionType": "S3_OBJECT_KEY",
+                            "revisionValue": "alternate.zip"
+                        },
+                        {
+                            "actionName": "SourceObject",
+                            "revisionType": "S3_OBJECT_VERSION_ID",
+                            "revisionValue": "%s"
+                        }
+                    ]
+                }
+                """.formatted(pipelineName, oldVersion))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+
+        waitForExecution(pipelineName, executionId, "Succeeded");
+
+        given()
+                .get("/codepipeline-override-destination/deployed.zip")
+        .then()
+                .statusCode(200)
+                .body(equalTo("selected old version"));
+
+        post("ListPipelineExecutions", """
+                {"pipelineName": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionSummaries[0].pipelineExecutionId", equalTo(executionId))
+                .body("pipelineExecutionSummaries[0].sourceRevisions", hasSize(1))
+                .body("pipelineExecutionSummaries[0].sourceRevisions[0].actionName", equalTo("SourceObject"))
+                .body("pipelineExecutionSummaries[0].sourceRevisions[0].revisionId", equalTo(oldVersion))
+                .body("pipelineExecutionSummaries[0].sourceRevisions[0].revisionUrl",
+                        equalTo("s3://codepipeline-source-override/alternate.zip"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void rollbackStageRedeploysTargetExecutionSourceVersion() throws Exception {
+        createBucket("codepipeline-rollback-source");
+        createBucket("codepipeline-rollback-destination");
+        given()
+                .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+                .put("/codepipeline-rollback-source?versioning")
+        .then()
+                .statusCode(200);
+        putObject("codepipeline-rollback-source", "source.zip", "first release");
+
+        String pipelineName = "rollback-source-version-pipeline";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "codepipeline-rollback-source",
+                            "S3ObjectKey": "source.zip",
+                            "PollForSourceChanges": "false"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-rollback-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        String firstExecutionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+        waitForExecution(pipelineName, firstExecutionId, "Succeeded");
+
+        putObject("codepipeline-rollback-source", "source.zip", "second release");
+        String secondExecutionId = post("StartPipelineExecution", """
+                {"name": "%s"}
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+        waitForExecution(pipelineName, secondExecutionId, "Succeeded");
+
+        String rollbackExecutionId = post("RollbackStage", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Deploy",
+                    "targetPipelineExecutionId": "%s"
+                }
+                """.formatted(pipelineName, firstExecutionId))
+                .then()
+                .statusCode(200)
+                .extract().path("pipelineExecutionId");
+        waitForExecution(pipelineName, rollbackExecutionId, "Succeeded");
+
+        given()
+                .get("/codepipeline-rollback-destination/deployed.zip")
+        .then()
+                .statusCode(200)
+                .body(equalTo("first release"));
+
+        post("DeletePipeline", """
+                {"name": "%s"}
+                """.formatted(pipelineName)).then().statusCode(200);
+    }
+
+    @Test
+    void startPipelineExecutionRejectsS3KeyOverrideUnlessActionAllowsIt() {
+        String pipelineName = "source-revision-key-override-validation";
+        post("CreatePipeline", pipeline(pipelineName, """
+                {
+                    "name": "Source",
+                    "actions": [{
+                        "name": "SourceObject",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "S3Bucket": "codepipeline-source",
+                            "S3ObjectKey": "source.zip"
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                },
+                {
+                    "name": "Deploy",
+                    "actions": [{
+                        "name": "DeployObject",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1"
+                        },
+                        "configuration": {
+                            "BucketName": "codepipeline-destination",
+                            "ObjectKey": "deployed.zip"
+                        },
+                        "inputArtifacts": [{"name": "SourceOutput"}]
+                    }]
+                }
+                """))
+                .then().statusCode(200);
+
+        post("StartPipelineExecution", """
+                {
+                    "name": "%s",
+                    "sourceRevisions": [{
+                        "actionName": "SourceObject",
+                        "revisionType": "S3_OBJECT_KEY",
+                        "revisionValue": "alternate.zip"
+                    }]
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("AllowOverrideForS3ObjectKey"));
+
+        post("StartPipelineExecution", """
+                {
+                    "name": "%s",
+                    "sourceRevisions": [
+                        {
+                            "actionName": "SourceObject",
+                            "revisionType": "S3_OBJECT_VERSION_ID",
+                            "revisionValue": "v1"
+                        },
+                        {
+                            "actionName": "SourceObject",
+                            "revisionType": "S3_OBJECT_VERSION_ID",
+                            "revisionValue": "v2"
+                        }
+                    ]
+                }
+                """.formatted(pipelineName))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("Duplicate S3_OBJECT_VERSION_ID"));
 
         post("DeletePipeline", """
                 {"name": "%s"}
@@ -1690,6 +2607,27 @@ class CodePipelineIntegrationTest {
         throw new AssertionError("Approval action did not reach " + expectedStatus + ", last status: " + status);
     }
 
+    private void waitForStageStatus(String pipelineName, String stageName, String expected) {
+        await("stage " + stageName + " to reach " + expected).atMost(Duration.ofSeconds(5))
+                .pollDelay(Duration.ZERO).pollInterval(Duration.ofMillis(50))
+                .until(() -> post("GetPipelineState", """
+                        {"name": "%s"}
+                        """.formatted(pipelineName))
+                        .jsonPath().getString("stageStates.find { it.stageName == '%s' }.latestExecution.status"
+                                .formatted(stageName)), equalTo(expected));
+    }
+
+    private void waitForActionExecutionCount(String pipelineName, String executionId, String actionName,
+                                             int expected) {
+        await(actionName + " to run " + expected + " times").atMost(Duration.ofSeconds(5))
+                .pollDelay(Duration.ZERO).pollInterval(Duration.ofMillis(50))
+                .until(() -> post("ListActionExecutions", """
+                        {"pipelineName": "%s", "filter": {"pipelineExecutionId": "%s"}}
+                        """.formatted(pipelineName, executionId))
+                        .jsonPath().getList("actionExecutionDetails.findAll { it.actionName == '%s' }"
+                                .formatted(actionName)).size(), equalTo(expected));
+    }
+
     private String waitForApprovalToken(String pipelineName) throws Exception {
         return waitForApprovalToken(pipelineName, 0);
     }
@@ -1779,6 +2717,56 @@ class CodePipelineIntegrationTest {
         }
     }
 
+    // A retry sent while the previous run is still finishing is rejected with ConflictException,
+    // which AWS documents as "try again later".
+    private static Response retryStage(String pipelineName, String stageName, String executionId,
+                                       String retryMode) {
+        AtomicReference<Response> response = new AtomicReference<>();
+        await("the previous run of " + executionId + " to finish").atMost(Duration.ofSeconds(5))
+                .pollDelay(Duration.ZERO).pollInterval(Duration.ofMillis(50))
+                .until(() -> {
+                    response.set(post("RetryStageExecution",
+                            retryBody(pipelineName, stageName, executionId, retryMode)));
+                    return !isConflict(response.get());
+                });
+        return response.get();
+    }
+
+    private static List<Response> retryConcurrently(ExecutorService callers, int count, String pipelineName,
+                                                    String stageName, String executionId, String retryMode)
+            throws Exception {
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Response>> futures = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            futures.add(callers.submit(() -> {
+                start.await();
+                return post("RetryStageExecution", retryBody(pipelineName, stageName, executionId, retryMode));
+            }));
+        }
+        start.countDown();
+        List<Response> responses = new ArrayList<>();
+        for (Future<Response> future : futures) {
+            responses.add(future.get(10, TimeUnit.SECONDS));
+        }
+        return responses;
+    }
+
+    private static String retryBody(String pipelineName, String stageName, String executionId, String retryMode) {
+        return """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "%s",
+                    "pipelineExecutionId": "%s",
+                    "retryMode": "%s"
+                }
+                """.formatted(pipelineName, stageName, executionId, retryMode);
+    }
+
+    private static boolean isConflict(Response response) {
+        return response.statusCode() == 400
+                && String.valueOf(response.jsonPath().getString("__type")).contains("ConflictException");
+    }
+
     private static Response post(String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET + action)
@@ -1808,13 +2796,27 @@ class CodePipelineIntegrationTest {
         given().when().put("/" + bucket).then().statusCode(200);
     }
 
-    private static void putObject(String bucket, String key, String body) {
-        given()
+    private static String putObject(String bucket, String key, String body) {
+        return putObject(bucket, key, body, null);
+    }
+
+    private static String putObject(String bucket, String key, String body, String revisionSummary) {
+        RequestSpecification request = given()
                 .contentType("application/octet-stream")
-                .body(body.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                .body(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        if (revisionSummary != null) {
+            request.header("x-amz-meta-codepipeline-artifact-revision-summary", revisionSummary);
+        }
+        return request
         .when()
                 .put("/" + bucket + "/" + key)
         .then()
-                .statusCode(200);
+                .statusCode(200)
+                .header("ETag", notNullValue())
+                .extract().header("ETag");
+    }
+
+    private static String unquote(String value) {
+        return value == null ? null : value.replace("\"", "");
     }
 }

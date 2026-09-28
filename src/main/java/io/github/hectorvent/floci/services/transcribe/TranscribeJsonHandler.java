@@ -50,9 +50,10 @@ public class TranscribeJsonHandler {
                 yield Response.ok(Map.of("TranscriptionJob", job)).build();
             }
             case "ListTranscriptionJobs" -> {
-                var result = transcribeService.listTranscriptionJobs(
+                TranscribeService.ListTranscriptionJobsResult result = transcribeService.listTranscriptionJobs(
                         getStringField(request, "Status"),
                         getStringField(request, "JobNameContains"),
+                        getStringField(request, "NextToken"),
                         getIntField(request, "MaxResults"));
                 ObjectNode root = objectMapper.createObjectNode();
                 if (result.status() != null) {
@@ -82,9 +83,10 @@ public class TranscribeJsonHandler {
                 yield Response.ok(vocab).build();
             }
             case "ListVocabularies" -> {
-                var result = transcribeService.listVocabularies(
+                TranscribeService.ListVocabulariesResult result = transcribeService.listVocabularies(
                         getStringField(request, "StateEquals"),
                         getStringField(request, "NameContains"),
+                        getStringField(request, "NextToken"),
                         getIntField(request, "MaxResults"));
                 ObjectNode root = objectMapper.createObjectNode();
                 if (result.status() != null) {

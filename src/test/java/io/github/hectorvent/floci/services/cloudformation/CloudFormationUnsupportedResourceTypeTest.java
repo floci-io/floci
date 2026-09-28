@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -56,7 +57,7 @@ class CloudFormationUnsupportedResourceTypeTest {
                     + "MyThing-11a79dff is not removed here.";
 
     private final ObjectMapper mapper = new ObjectMapper();
-    private CloudFormationResourceProvisioner provisioner;
+    private CfnResourceDispatcher provisioner;
 
     @BeforeEach
     void setUp() {
@@ -114,8 +115,8 @@ class CloudFormationUnsupportedResourceTypeTest {
 
     @Test
     void deleteOfUnsupportedTypeDoesNotThrow() {
-        // The same arm catches a type no provisioner ever created and a type the create switch does
-        // provision and this switch does not remove, so the line says what it leaves behind rather
+        // The same path catches a type no provisioner ever created and one that was only stubbed,
+        // neither of which left anything behind, so the line says what it leaves behind rather
         // than claiming nothing was created.
         List<LogRecord> logged = new CopyOnWriteArrayList<>();
 
@@ -130,7 +131,7 @@ class CloudFormationUnsupportedResourceTypeTest {
                 "expected the skipped delete to be reported at warn, got: " + rendered(logged));
     }
 
-    private CloudFormationResourceProvisioner provisionerWithStubAllowed(boolean allowed) {
+    private CfnResourceDispatcher provisionerWithStubAllowed(boolean allowed) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.CloudFormationServiceConfig cloudformation =
@@ -150,7 +151,7 @@ class CloudFormationUnsupportedResourceTypeTest {
     private <T> T whileCapturingProvisionerLogs(List<LogRecord> collected,
                                                 java.util.function.Supplier<T> action) {
         java.util.logging.Logger logger =
-                java.util.logging.Logger.getLogger(CloudFormationResourceProvisioner.class.getName());
+                java.util.logging.Logger.getLogger(CfnResourceDispatcher.class.getName());
         Level original = logger.getLevel();
         Handler handler = new Handler() {
             @Override

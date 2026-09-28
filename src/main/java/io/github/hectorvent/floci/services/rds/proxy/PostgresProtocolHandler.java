@@ -88,6 +88,7 @@ public class PostgresProtocolHandler {
     public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
                                       String masterUsername, String masterPassword, String dbName,
                                       boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding,
                                       RdsProxyTlsCertificates tlsCertificates,
                                       PasswordValidator passwordValidator,
                                       int handshakeTimeoutMillis) throws IOException {
@@ -128,7 +129,7 @@ public class PostgresProtocolHandler {
 
         PasswordValidator.AuthResult authResult = PasswordValidator.AuthResult.PASSTHROUGH;
         if (isIam) {
-            if (!sigV4.validate(clientPassword, clientUsername)) {
+            if (!sigV4.validate(clientPassword, clientUsername, binding)) {
                 sendErrorResponse(clientOut, "FATAL", "28P01",
                         "password authentication failed for user \"" + clientUsername + "\"");
                 clientOut.flush();

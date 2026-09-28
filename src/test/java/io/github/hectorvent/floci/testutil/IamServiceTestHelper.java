@@ -5,14 +5,59 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
+import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 
 import java.lang.reflect.Constructor;
 import java.time.Instant;
+import java.util.Map;
 
 public final class IamServiceTestHelper {
 
     private IamServiceTestHelper() {
+    }
+
+    /**
+     * An IAM service holding one user whose only permissions are the given inline policy
+     * document, plus an access key that belongs to that user.
+     */
+    public static IamService iamServiceWithUserPolicy(String accessKeyId, String secretAccessKey,
+                                                      String userName, String inlinePolicyDocument) {
+        try {
+            Constructor<IamService> constructor = IamService.class.getDeclaredConstructor(
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    StorageBackend.class,
+                    RegionResolver.class
+            );
+            constructor.setAccessible(true);
+
+            InMemoryStorage<String, IamUser> users = new InMemoryStorage<>();
+            IamUser user = new IamUser("AIDA" + userName.toUpperCase(), userName, "/",
+                    "arn:aws:iam::123456789012:user/" + userName);
+            user.setInlinePolicies(Map.of("inline", inlinePolicyDocument));
+            users.put(userName, user);
+
+            InMemoryStorage<String, AccessKey> accessKeys = new InMemoryStorage<>();
+            accessKeys.put(accessKeyId, new AccessKey(accessKeyId, secretAccessKey, userName));
+
+            return constructor.newInstance(
+                    users,
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    accessKeys,
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new RegionResolver("us-east-1", "123456789012")
+            );
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to construct IamService test fixture", e);
+        }
     }
 
     public static IamService iamServiceWithAccessKey(String accessKeyId, String secretAccessKey) {

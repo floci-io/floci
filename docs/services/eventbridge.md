@@ -119,10 +119,18 @@ aws events put-targets \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
+## Step Functions Targets
+
+A matching rule can start an unqualified Step Functions state machine ARN. The target supports the
+full event as the default input, plus `Input`, `InputPath`, and `InputTransformer`. Floci resolves
+the state machine from the account and region in its ARN.
+
+State machine aliases and versions are not supported as EventBridge targets.
+
 ## Current Behavior
 
 - `PutEvents` reports success once the source bus accepts an event, so target delivery failures surface only as a `WARN` in the Floci logs.
 - A `Detail` forwarded to an event bus must be a JSON object, as in AWS; anything else is dropped, including an `InputPath` selecting a scalar such as `$.detail.orderId` or an envelope carrying `"detail": null`.
 - A bus ARN naming another account is forwarded under that account, so the target bus and its rules resolve there.
-- Onward delivery from that bus follows each target type: SQS resolves cross-account, while Lambda, SNS, Batch and Firehose resolve in the caller's account.
+- Onward delivery from that bus follows each target type: SQS and Step Functions resolve cross-account, while Lambda, SNS, Batch and Firehose resolve in the caller's account.
 - An event is forwarded between buses only once, matching AWS: a bus that received an event from another bus does not forward it on to a third. The second hop is dropped with only a `WARN` rather than reported to the caller.

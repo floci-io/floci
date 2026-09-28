@@ -2,9 +2,11 @@ name: Compatibility Tests
 
 on:
   pull_request:
+    # ready_for_review is not a default type: without it, marking a draft ready
+    # would not start the run the draft skipped.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'src/**'
-      - 'sidecars/cedar/**'
       - 'pom.xml'
       - 'docker/Dockerfile.native-package'
       - 'docker/Dockerfile.compat'
@@ -19,6 +21,7 @@ on:
       - '.github/ci/compat-opentofu-allowlist-tf-only.txt'
       - '.github/ci/compat-opentofu-allowlist-otf-only.txt'
       - '.github/workflows/compatibility.yml'
+      - '.github/workflows/pr-draft-gate.yml'
 
 permissions:
   contents: read
@@ -28,10 +31,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Drafts skip the suite to spare runners; it runs once the PR is ready for review.
+  draft-gate:
+    uses: ./.github/workflows/pr-draft-gate.yml
+
   docker-runner-regression:
     name: compat / Docker runner failure aggregation
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    needs: draft-gate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -42,6 +50,7 @@ jobs:
     name: compat / aws CLI endpoint resolution
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
+    needs: draft-gate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -120,12 +129,12 @@ jobs:
     name: compat / opentofu resource parity
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
+    needs: draft-gate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: |
             compatibility-tests
-            sidecars/cedar
             .github/ci
 
       - name: Compare compat-terraform and compat-opentofu resource lists
@@ -135,6 +144,7 @@ jobs:
     name: Build native floci image (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    needs: draft-gate
     # Both published architectures. The native image is the only place an
     # arch-specific resource can go missing (snappy-java's JNI library is
     # registered per platform), and one arch cannot prove the other.
@@ -181,7 +191,9 @@ jobs:
         # single call site of a very large method; inlined, the method outgrows the aarch64
         # conditional-branch range and the build dies with BranchTargetOutOfBoundsException.
         # The flag only exists on Mandrel, so it is passed here rather than in application.yml.
-        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-Ob,-H:-AOTSingleCallsiteInline"
+        # maven.test.skip rather than skipTests: skipTests only stops surefire, so the build still
+        # compiled all of src/test (about 25s per arch) for a native image that never uses it.
+        run: mvn clean package -Dnative -Dmaven.test.skip=true -B -Dquarkus.native.additional-build-args-append="-Ob,-H:-AOTSingleCallsiteInline"
 
       # Quarkus always writes GraalVM's build-output JSON next to the native source jar. Surfacing
       # it here gives every PR a size record for both architectures: code area, image heap, total
@@ -300,10 +312,6 @@ jobs:
       - name: Start floci
         run: |
           DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
-          EXTRA_ENV=""
-          if [ "${{ matrix.test }}" = "sdk-test-java" ]; then
-            EXTRA_ENV="-e FLOCI_SERVICES_VERIFIEDPERMISSIONS_CEDAR_URL=http://floci-cedar:8180"
-          fi
           docker run -d --name floci --network compat-net \
             -p 4566:4566 \
             -v /var/run/docker.sock:/var/run/docker.sock \
@@ -313,10 +321,10 @@ jobs:
             -e FLOCI_HOSTNAME=floci \
             -e FLOCI_SERVICES_IOT_MQTT_ENABLED=true \
             -e FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true \
-            $EXTRA_ENV \
             -e FLOCI_TLS_ENABLED=true \
             -e FLOCI_SERVICES_EC2_MOCK=true \
             -e FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST=floci \
+            -e FLOCI_SERVICES_RDS_ENDPOINT_HOST=floci \
             -e FLOCI_SERVICES_SSOOIDC_LOCAL_PRINCIPAL_ID=11111111-2222-3333-4444-555555555555 \
             floci:test-native
 
@@ -348,23 +356,7 @@ jobs:
         with:
           sparse-checkout: |
             compatibility-tests
-            sidecars/cedar
             .github/ci
-
-      - name: Build and start Cedar sidecar
-        if: matrix.test == 'sdk-test-java'
-        run: |
-          docker build -f sidecars/cedar/Dockerfile -t floci-cedar:test .
-          docker run -d --name floci-cedar --network compat-net -p 18180:8180 floci-cedar:test
-          for _ in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:18180/health >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::Cedar sidecar did not become healthy"
-          docker logs floci-cedar
-          exit 1
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 

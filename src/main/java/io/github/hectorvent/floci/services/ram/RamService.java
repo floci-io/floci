@@ -110,8 +110,7 @@ public class RamService {
     public ResourceShare createResourceShare(String name, List<String> principals,
                                              List<String> resourceArns, boolean allowExternalPrincipals,
                                              String region, String owningAccountId) {
-        String arn = "arn:aws:ram:" + region + ":" + owningAccountId
-                + ":resource-share/" + UUID.randomUUID();
+        String arn = AwsArnUtils.Arn.of("ram", region, owningAccountId, "resource-share/" + UUID.randomUUID()).toString();
         ResourceShare share = new ResourceShare(
                 arn, name, owningAccountId, principals, resourceArns, allowExternalPrincipals);
         ResourceShare stored = putForOwner(share);
@@ -276,8 +275,8 @@ public class RamService {
                     continue;
                 }
                 String region = extractRegion(share.getResourceShareArn());
-                String arn = "arn:aws:ram:" + region + ":" + share.getOwningAccountId()
-                        + ":resource-share-invitation/" + UUID.randomUUID();
+                String arn = AwsArnUtils.Arn.of("ram", region, share.getOwningAccountId(),
+                        "resource-share-invitation/" + UUID.randomUUID()).toString();
                 putInvitation(new ResourceShareInvitation(arn, share.getResourceShareArn(), share.getName(),
                         share.getOwningAccountId(), principal, Instant.now(), "PENDING"));
             }

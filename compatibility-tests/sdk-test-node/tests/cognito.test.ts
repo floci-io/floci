@@ -7,6 +7,7 @@ import {
   CognitoIdentityProviderClient,
   CreateUserPoolCommand,
   CreateUserPoolClientCommand,
+  ExplicitAuthFlowsType,
   AdminCreateUserCommand,
   AdminSetUserPasswordCommand,
   InitiateAuthCommand,
@@ -62,6 +63,7 @@ describe('Cognito', () => {
       new CreateUserPoolClientCommand({
         UserPoolId: poolId,
         ClientName: `test-client-${uniqueName()}`,
+        ExplicitAuthFlows: [ExplicitAuthFlowsType.ALLOW_USER_PASSWORD_AUTH],
       })
     );
     clientId = response.UserPoolClient!.ClientId!;

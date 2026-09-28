@@ -103,7 +103,7 @@ public class OpenSearchDomainManager {
         LOG.infov("Starting OpenSearch container for domain: {0} (version={1}, image={2})",
                 domain.getDomainName(), domain.getEngineVersion(), image);
 
-        lifecycleManager.removeIfExists(containerName);
+        ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, containerName);
 
         // A restart of an existing domain has just removed the old container, so its
         // reservation is stale; hand the port back before allocating a fresh one.
@@ -143,9 +143,8 @@ public class OpenSearchDomainManager {
         applyEngineEnv(specBuilder, domain.getEngineVersion());
 
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager, config,
-                    "opensearch", domain.getVolumeId(), domain.getDomainName(),
-                    "/usr/share/opensearch/data");
+            ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager,
+                    resolveVolumeName(domain), "/usr/share/opensearch/data");
         } else {
             // Legacy host-path mode: host-persistent-path is an absolute path
             Path dataPath = ContainerStorageHelper.hostResourcePath(config, "opensearch", domain.getDomainName());
@@ -207,15 +206,9 @@ public class OpenSearchDomainManager {
         if (domain.getContainerId() == null) {
             return;
         }
-        if (config.services().opensearch().keepRunningOnShutdown()) {
-            LOG.infov("Leaving OpenSearch container for domain {0} running", domain.getDomainName());
-            return;
-        }
         lifecycleManager.stopAndRemove(domain.getContainerId(), null);
         // The container no longer holds the binding, so the reservation must go with
         // it. Repeated create/delete would otherwise exhaust the configured range.
-        // The keep-running early return above deliberately keeps the reservation:
-        // the surviving container still owns the binding.
         if (domain.getHostPort() != null) {
             portAllocator.release(domain.getHostPort());
             domain.setHostPort(null);
@@ -224,8 +217,21 @@ public class OpenSearchDomainManager {
     }
 
     public void removeDomainStorage(Domain domain) {
-        ContainerStorageHelper.removeStorage(config, lifecycleManager,
-                "opensearch", domain.getVolumeId(), domain.getDomainName());
+        ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, resolveVolumeName(domain));
+    }
+
+    /**
+     * The domain's Docker volume name, backfilled once for records written before the field
+     * existed: those predate the {@code floci-aws-} migration, so their data is in the
+     * legacy-named volume and must keep resolving there. Never use the live helper here, which
+     * would strand that data under a freshly created volume.
+     */
+    private String resolveVolumeName(Domain domain) {
+        if (domain.getDockerVolumeName() == null || domain.getDockerVolumeName().isBlank()) {
+            domain.setDockerVolumeName(ContainerStorageHelper.legacyResourceName(
+                    config, "opensearch", domain.getVolumeId(), domain.getDomainName()));
+        }
+        return domain.getDockerVolumeName();
     }
 
     private String resolveImage(String engineVersion) {

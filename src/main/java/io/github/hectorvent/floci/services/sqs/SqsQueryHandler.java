@@ -1,9 +1,13 @@
 package io.github.hectorvent.floci.services.sqs;
 
-import io.github.hectorvent.floci.core.common.*;
+import io.github.hectorvent.floci.core.common.AwsErrorMessages;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.AwsQueryResponse;
+import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.sqs.model.Message;
-import io.github.hectorvent.floci.services.sqs.model.Queue;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
+import io.github.hectorvent.floci.services.sqs.model.Queue;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -13,8 +17,10 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Query-protocol handler for SQS actions.
@@ -95,7 +101,7 @@ public class SqsQueryHandler {
     }
 
     private static void writeSystemAttributesXml(XmlBuilder xml, Message msg,
-                                                 java.util.Set<String> requested, String senderId) {
+                                                 Set<String> requested, String senderId) {
         if (requested.isEmpty()) {
             return;
         }
@@ -168,7 +174,7 @@ public class SqsQueryHandler {
         String prefix = getParam(params, "QueueNamePrefix");
         List<Queue> queues = sqsService.listQueues(prefix, region);
 
-        var xml = new XmlBuilder();
+        XmlBuilder xml = new XmlBuilder();
         for (Queue q : queues) {
             xml.elem("QueueUrl", q.getQueueUrl());
         }
@@ -197,8 +203,8 @@ public class SqsQueryHandler {
 
         Map<String, String> attributes = sqsService.getQueueAttributes(queueUrl, attributeNames, region);
 
-        var xml = new XmlBuilder();
-        for (var entry : attributes.entrySet()) {
+        XmlBuilder xml = new XmlBuilder();
+        for (Map.Entry<String, String> entry : attributes.entrySet()) {
             xml.start("Attribute")
                .elem("Name", entry.getKey())
                .elem("Value", entry.getValue())
@@ -246,7 +252,7 @@ public class SqsQueryHandler {
         Message msg = sqsService.sendMessage(queueUrl, body, delaySeconds, messageGroupId,
                 messageDeduplicationId, messageAttributes, awsTraceHeader, region);
 
-        var xml = new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .elem("MessageId", msg.getMessageId())
                 .elem("MD5OfMessageBody", msg.getMd5OfBody());
         if (msg.getMd5OfMessageAttributes() != null) {
@@ -264,14 +270,14 @@ public class SqsQueryHandler {
         int visibilityTimeout = getIntParam(params, "VisibilityTimeout", -1);
         Integer waitTimeSeconds = getOptionalIntParam(params, "WaitTimeSeconds");
 
-        java.util.Set<String> requestedAttrs = new java.util.LinkedHashSet<>();
+        Set<String> requestedAttrs = new LinkedHashSet<>();
         requestedAttrs.addAll(collectIndexed(params, "AttributeName."));
         requestedAttrs.addAll(collectIndexed(params, "MessageSystemAttributeName."));
 
         List<Message> messages = sqsService.receiveMessage(queueUrl, maxMessages, visibilityTimeout, waitTimeSeconds, region);
         String senderId = sqsService.senderIdFor(queueUrl);
 
-        var xml = new XmlBuilder();
+        XmlBuilder xml = new XmlBuilder();
         for (Message msg : messages) {
             xml.start("Message")
                .elem("MessageId", msg.getMessageId())
@@ -283,7 +289,7 @@ public class SqsQueryHandler {
             xml.elem("Body", msg.getBody());
             writeSystemAttributesXml(xml, msg, requestedAttrs, senderId);
             if (msg.getMessageAttributes() != null && !msg.getMessageAttributes().isEmpty()) {
-                for (var entry : msg.getMessageAttributes().entrySet()) {
+                for (Map.Entry<String, MessageAttributeValue> entry : msg.getMessageAttributes().entrySet()) {
                     xml.start("MessageAttribute")
                        .elem("Name", entry.getKey())
                        .start("Value")
@@ -319,7 +325,7 @@ public class SqsQueryHandler {
 
     private Response handleDeleteMessageBatch(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
-        var xml = new XmlBuilder();
+        XmlBuilder xml = new XmlBuilder();
 
         for (int i = 1; ; i++) {
             String id = getParam(params, "DeleteMessageBatchRequestEntry." + i + ".Id");
@@ -343,7 +349,7 @@ public class SqsQueryHandler {
 
     private Response handleSendMessageBatch(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
-        var xml = new XmlBuilder();
+        XmlBuilder xml = new XmlBuilder();
 
         record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
                            Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
@@ -396,7 +402,7 @@ public class SqsQueryHandler {
         for (ParsedEntry parsed : parsedEntries) {
             String id = parsed.id();
             try {
-                var msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
+                Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
                         parsed.groupId(), parsed.dedupId(), parsed.attributes(),
                         parsed.awsTraceHeader(), region);
                 xml.start("SendMessageBatchResultEntry")
@@ -426,7 +432,7 @@ public class SqsQueryHandler {
     private Response handleListDeadLetterSourceQueues(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
         List<String> queues = sqsService.listDeadLetterSourceQueues(queueUrl, region);
-        var xml = new XmlBuilder();
+        XmlBuilder xml = new XmlBuilder();
         for (String q : queues) {
             xml.elem("QueueUrl", q);
         }
@@ -438,7 +444,7 @@ public class SqsQueryHandler {
         String destinationArn = getParam(params, "DestinationArn");
         int maxRate = getIntParam(params, "MaxNumberOfMessagesPerSecond", 0);
         String taskHandle = sqsService.startMessageMoveTask(sourceArn, destinationArn, maxRate, region);
-        var xml = new XmlBuilder().elem("TaskHandle", taskHandle);
+        XmlBuilder xml = new XmlBuilder().elem("TaskHandle", taskHandle);
         return Response.ok(AwsQueryResponse.envelope("StartMessageMoveTask", null, xml.build())).build();
     }
 
@@ -446,7 +452,7 @@ public class SqsQueryHandler {
         String sourceArn = getParam(params, "SourceArn");
         int maxResults = getIntParam(params, "MaxResults", 10);
         List<SqsService.MoveTask> tasks = sqsService.listMessageMoveTasks(sourceArn, region);
-        var xml = new XmlBuilder();
+        XmlBuilder xml = new XmlBuilder();
         int count = 0;
         for (SqsService.MoveTask t : tasks) {
             if (count++ >= maxResults) break;
@@ -472,7 +478,7 @@ public class SqsQueryHandler {
     private Response handleCancelMessageMoveTask(MultivaluedMap<String, String> params, String region) {
         String taskHandle = getParam(params, "TaskHandle");
         long moved = sqsService.cancelMessageMoveTask(taskHandle, region);
-        var xml = new XmlBuilder().elem("ApproximateNumberOfMessagesMoved", moved);
+        XmlBuilder xml = new XmlBuilder().elem("ApproximateNumberOfMessagesMoved", moved);
         return Response.ok(AwsQueryResponse.envelope("CancelMessageMoveTask", null, xml.build())).build();
     }
 
@@ -491,7 +497,7 @@ public class SqsQueryHandler {
 
     private Response handleChangeMessageVisibilityBatch(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
-        var entries = new ArrayList<SqsService.ChangeVisibilityBatchEntry>();
+        List<SqsService.ChangeVisibilityBatchEntry> entries = new ArrayList<>();
         for (int i = 1; ; i++) {
             String id = getParam(params, "ChangeMessageVisibilityBatchRequestEntry." + i + ".Id");
             if (id == null) break;
@@ -500,9 +506,9 @@ public class SqsQueryHandler {
             entries.add(new SqsService.ChangeVisibilityBatchEntry(id, receiptHandle, visibilityTimeout));
         }
 
-        var results = sqsService.changeMessageVisibilityBatch(queueUrl, entries, region);
-        var xml = new XmlBuilder();
-        for (var result : results) {
+        List<SqsService.BatchResultEntry> results = sqsService.changeMessageVisibilityBatch(queueUrl, entries, region);
+        XmlBuilder xml = new XmlBuilder();
+        for (SqsService.BatchResultEntry result : results) {
             if (result.success()) {
                 xml.start("ChangeMessageVisibilityBatchResultEntry")
                    .elem("Id", result.id())
@@ -548,8 +554,8 @@ public class SqsQueryHandler {
         String queueUrl = getParam(params, "QueueUrl");
         Map<String, String> tags = sqsService.listQueueTags(queueUrl, region);
 
-        var xml = new XmlBuilder();
-        for (var entry : tags.entrySet()) {
+        XmlBuilder xml = new XmlBuilder();
+        for (Map.Entry<String, String> entry : tags.entrySet()) {
             xml.start("Tag")
                .elem("Key", entry.getKey())
                .elem("Value", entry.getValue())

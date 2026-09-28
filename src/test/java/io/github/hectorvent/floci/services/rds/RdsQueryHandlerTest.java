@@ -4,10 +4,12 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
@@ -15,6 +17,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
@@ -119,7 +122,8 @@ class RdsQueryHandlerTest {
     @Test
     void modifyDbInstance_forwardsPubliclyAccessible() {
         when(service.modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), any(), isNull(), any(),
-                isNull(), any(DbInstanceSettings.class), eq(true))).thenReturn(makeInstance("mydb"));
+                isNull(), any(DbInstanceSettings.class), eq(true), any(DbInstanceScalingChanges.class)))
+                .thenReturn(makeInstance("mydb"));
         MultivaluedMap<String, String> p = params();
         p.putSingle("DBInstanceIdentifier", "mydb");
         p.putSingle("PubliclyAccessible", "true");
@@ -127,7 +131,7 @@ class RdsQueryHandlerTest {
         handler.handle("ModifyDBInstance", p);
 
         verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), any(), isNull(), any(),
-                isNull(), any(DbInstanceSettings.class), eq(true));
+                isNull(), any(DbInstanceSettings.class), eq(true), any(DbInstanceScalingChanges.class));
     }
 
     @Test
@@ -140,7 +144,8 @@ class RdsQueryHandlerTest {
 
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
-        verify(service, never()).modifyDbInstance(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(service, never()).modifyDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any());
     }
 
     @Test
@@ -335,7 +340,8 @@ class RdsQueryHandlerTest {
         when(service.listDbInstances(null, "us-west-2")).thenReturn(List.of());
         when(service.getDbInstance("mydb", "us-west-2")).thenReturn(instance);
         when(service.modifyDbInstance(
-                eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull(), any(DbInstanceSettings.class), isNull()))
+                eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull(),
+                any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class)))
                 .thenReturn(instance);
         when(service.rebootDbInstance("mydb", "us-west-2")).thenReturn(instance);
         when(service.listDbClusters(null, "us-west-2")).thenReturn(List.of());
@@ -361,7 +367,8 @@ class RdsQueryHandlerTest {
         verify(service).getDbInstance("mydb", "us-west-2");
         verify(service).deleteDbInstance("mydb", "us-west-2");
         verify(service).modifyDbInstance(
-                eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull(), any(DbInstanceSettings.class), isNull());
+                eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull(),
+                any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class));
         verify(service).rebootDbInstance("mydb", "us-west-2");
         verify(service).listDbClusters(null, "us-west-2");
         verify(service).getDbCluster("mycluster", "us-west-2");
@@ -610,8 +617,8 @@ class RdsQueryHandlerTest {
 
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("InvalidParameterValue"));
-        verify(service, never()).modifyDbInstance(
-                any(), any(), any(), any(), any(), any(), any());
+        verify(service, never()).modifyDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any());
     }
 
     @Test
@@ -1104,10 +1111,13 @@ class RdsQueryHandlerTest {
 
     @Test
     void describeDbSnapshots_returnsSnapshotListWith200() {
-        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = new io.github.hectorvent.floci.services.rds.model.DbSnapshot();
+        DbSnapshot snapshot = new DbSnapshot();
         snapshot.setDbSnapshotIdentifier("mysnap");
         snapshot.setDbInstanceIdentifier("mydb");
         snapshot.setEngine(io.github.hectorvent.floci.services.rds.model.DatabaseEngine.POSTGRES);
+        snapshot.setSnapshotType("manual");
+        snapshot.setSourceDbSnapshotIdentifier(
+                "arn:aws:rds:us-east-1:123456789012:snapshot:source");
         when(service.describeDbSnapshots(eq("mysnap"), eq("mydb"), isNull())).thenReturn(List.of(snapshot));
 
         MultivaluedMap<String, String> p = params();
@@ -1120,6 +1130,27 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<DescribeDBSnapshotsResult>"));
         assertTrue(body.contains("<DBSnapshotIdentifier>mysnap</DBSnapshotIdentifier>"));
         assertTrue(body.contains("<DBInstanceIdentifier>mydb</DBInstanceIdentifier>"));
+        assertTrue(body.contains("<SnapshotType>manual</SnapshotType>"));
+        assertTrue(body.contains("<SourceDBSnapshotIdentifier>arn:aws:rds:us-east-1:123456789012:snapshot:source</SourceDBSnapshotIdentifier>"));
+        assertTrue(body.contains("<Encrypted>false</Encrypted>"));
+    }
+
+    @Test
+    void describeDbSnapshotsReportsEncryptionWithoutExplicitKmsKey() {
+        DbSnapshot snapshot = new DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("encrypted-snapshot");
+        snapshot.setStorageEncrypted(true);
+        when(service.describeDbSnapshots(eq("encrypted-snapshot"), isNull(), isNull()))
+                .thenReturn(List.of(snapshot));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSnapshotIdentifier", "encrypted-snapshot");
+        Response response = handler.handle("DescribeDBSnapshots", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Encrypted>true</Encrypted>"), body);
+        assertFalse(body.contains("<KmsKeyId>"), body);
     }
 
     @Test
@@ -1166,6 +1197,8 @@ class RdsQueryHandlerTest {
         // answers it with GlobalClusterNotFoundFault rather than an empty list.
         MultivaluedMap<String, String> params = params();
         params.putSingle("GlobalClusterIdentifier", "no-such-gc");
+        when(service.describeGlobalCluster("no-such-gc")).thenThrow(
+                new AwsException("GlobalClusterNotFoundFault", "Global cluster 'no-such-gc' not found", 404));
 
         Response response = handler.handle("DescribeGlobalClusters", params);
 
@@ -1191,6 +1224,8 @@ class RdsQueryHandlerTest {
     void describeGlobalClusters_rejectsMaxRecordsOutsideTheAllowedRange() {
         // A live account rejects this before it looks the identifier up, so an empty model is no
         // reason to accept a value AWS refuses.
+        when(service.describeGlobalCluster("no-such-gc")).thenThrow(
+                new AwsException("GlobalClusterNotFoundFault", "Global cluster 'no-such-gc' not found", 404));
         for (String value : new String[]{"5", "101", "abc"}) {
             MultivaluedMap<String, String> params = params();
             params.putSingle("MaxRecords", value);
@@ -1227,6 +1262,8 @@ class RdsQueryHandlerTest {
         assertTrue(((String) response.getEntity()).contains("The request token is invalid."));
 
         params.putSingle("GlobalClusterIdentifier", "no-such-gc");
+        when(service.describeGlobalCluster("no-such-gc")).thenThrow(
+                new AwsException("GlobalClusterNotFoundFault", "Global cluster 'no-such-gc' not found", 404));
         Response withBoth = handler.handle("DescribeGlobalClusters", params);
         assertEquals(404, withBoth.getStatus());
         assertTrue(((String) withBoth.getEntity()).contains("GlobalClusterNotFoundFault"));
@@ -1827,6 +1864,168 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<Engine>postgres</Engine>"));
         assertTrue(body.contains("<Key>owner</Key>"));
         assertTrue(body.contains("<Value>platform</Value>"));
+    }
+
+    @Test
+    void deleteDbSnapshot_success() {
+        DbSnapshot snapshot = new DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("mysnap");
+        snapshot.setStatus("deleted");
+        when(service.deleteDbSnapshot(eq("mysnap"), isNull())).thenReturn(snapshot);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSnapshotIdentifier", "mysnap");
+        Response response = handler.handle("DeleteDBSnapshot", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DeleteDBSnapshotResult>"));
+        assertTrue(body.contains("<DBSnapshotIdentifier>mysnap</DBSnapshotIdentifier>"));
+        assertTrue(body.contains("<Status>deleted</Status>"));
+        verify(service).deleteDbSnapshot("mysnap", null);
+    }
+
+    @Test
+    void copyDbSnapshot_forwardsSourceTagsAndOverrides() {
+        DbSnapshot snapshot = new DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("copy");
+        snapshot.setSnapshotType("manual");
+        snapshot.setSourceDbSnapshotIdentifier(
+                "arn:aws:rds:us-east-1:123456789012:snapshot:source");
+        snapshot.setStorageEncrypted(true);
+        snapshot.setKmsKeyId("kms-key");
+        when(service.copyDbSnapshot(eq("source"), eq("copy"), eq(true),
+                eq(Map.of("owner", "platform")), eq("custom-options"), eq("kms-key"), isNull()))
+                .thenReturn(snapshot);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("SourceDBSnapshotIdentifier", "source");
+        p.add("TargetDBSnapshotIdentifier", "copy");
+        p.add("CopyTags", "true");
+        p.add("OptionGroupName", "custom-options");
+        p.add("KmsKeyId", "kms-key");
+        p.add("Tags.Tag.1.Key", "owner");
+        p.add("Tags.Tag.1.Value", "platform");
+        Response response = handler.handle("CopyDBSnapshot", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<CopyDBSnapshotResult>"));
+        assertTrue(body.contains("<SnapshotType>manual</SnapshotType>"));
+        assertTrue(body.contains("<SourceDBSnapshotIdentifier>arn:aws:rds:us-east-1:123456789012:snapshot:source</SourceDBSnapshotIdentifier>"));
+        assertTrue(body.contains("<Encrypted>true</Encrypted>"));
+        verify(service).copyDbSnapshot("source", "copy", true,
+                Map.of("owner", "platform"), "custom-options", "kms-key", null);
+    }
+
+    @Test
+    void modifyDbSnapshot_forwardsMutableFields() {
+        DbSnapshot snapshot = new DbSnapshot();
+        snapshot.setDbSnapshotIdentifier("mysnap");
+        snapshot.setEngineVersion("14");
+        snapshot.setOptionGroupName("new-options");
+        when(service.modifyDbSnapshot(eq("mysnap"), eq("14"), eq("new-options"), isNull()))
+                .thenReturn(snapshot);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSnapshotIdentifier", "mysnap");
+        p.add("EngineVersion", "14");
+        p.add("OptionGroupName", "new-options");
+        Response response = handler.handle("ModifyDBSnapshot", p);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<ModifyDBSnapshotResult>"));
+        assertTrue(body.contains("<EngineVersion>14</EngineVersion>"));
+        assertTrue(body.contains("<OptionGroupName>new-options</OptionGroupName>"));
+        verify(service).modifyDbSnapshot("mysnap", "14", "new-options", null);
+    }
+
+    @Test
+    void stopStartAndRebootActions_dispatchAndRenderTransitionalStatuses() {
+        DbInstance stopping = makeInstance("standalone");
+        stopping.setStatus(DbInstanceStatus.STOPPING);
+        when(service.stopDbInstance(eq("standalone"), eq("before-stop"), isNull())).thenReturn(stopping);
+        MultivaluedMap<String, String> stop = params();
+        stop.add("DBInstanceIdentifier", "standalone");
+        stop.add("DBSnapshotIdentifier", "before-stop");
+        String stopBody = (String) handler.handle("StopDBInstance", stop).getEntity();
+        assertTrue(stopBody.contains("<StopDBInstanceResult>"));
+        assertTrue(stopBody.contains("<DBInstanceStatus>stopping</DBInstanceStatus>"));
+
+        DbInstance starting = makeInstance("standalone");
+        starting.setStatus(DbInstanceStatus.STARTING);
+        when(service.startDbInstance(eq("standalone"), isNull())).thenReturn(starting);
+        MultivaluedMap<String, String> start = params();
+        start.add("DBInstanceIdentifier", "standalone");
+        String startBody = (String) handler.handle("StartDBInstance", start).getEntity();
+        assertTrue(startBody.contains("<StartDBInstanceResult>"));
+        assertTrue(startBody.contains("<DBInstanceStatus>starting</DBInstanceStatus>"));
+
+        DbCluster cluster = new DbCluster();
+        cluster.setDbClusterIdentifier("aurora");
+        cluster.setStatus(DbInstanceStatus.STOPPED);
+        when(service.stopDbCluster(eq("aurora"), isNull())).thenReturn(cluster);
+        MultivaluedMap<String, String> stopCluster = params();
+        stopCluster.add("DBClusterIdentifier", "aurora");
+        String clusterBody = (String) handler.handle("StopDBCluster", stopCluster).getEntity();
+        assertTrue(clusterBody.contains("<StopDBClusterResult>"));
+        assertTrue(clusterBody.contains("<Status>stopped</Status>"));
+
+        assertEquals(400, handler.handle("StopDBInstance", params()).getStatus());
+        assertEquals(400, handler.handle("StartDBInstance", params()).getStatus());
+        assertEquals(400, handler.handle("StartDBCluster", params()).getStatus());
+        assertEquals(400, handler.handle("RebootDBCluster", params()).getStatus());
+        verify(service, never()).startDbCluster(any(), any());
+    }
+
+    @Test
+    void clusterSnapshotActions_dispatchAndRenderTheClusterSnapshot() {
+        DbClusterSnapshot snapshot = new DbClusterSnapshot();
+        snapshot.setDbClusterSnapshotIdentifier("csnap");
+        snapshot.setDbClusterIdentifier("aurora");
+        snapshot.setEngineIdentifier("aurora-postgresql");
+        snapshot.setStatus("available");
+        snapshot.setPercentProgress(100);
+        snapshot.setDbClusterSnapshotArn("arn:aws:rds:us-east-1:000000000000:cluster-snapshot:csnap");
+        snapshot.setAvailabilityZones(List.of("us-east-1a"));
+        snapshot.setRestoreAccountIds(List.of("all"));
+        when(service.createDbClusterSnapshot(eq("csnap"), eq("aurora"), eq(Map.of()), isNull())).thenReturn(snapshot);
+        MultivaluedMap<String, String> create = params();
+        create.add("DBClusterSnapshotIdentifier", "csnap");
+        create.add("DBClusterIdentifier", "aurora");
+        Response created = handler.handle("CreateDBClusterSnapshot", create);
+        assertEquals(200, created.getStatus());
+        String body = (String) created.getEntity();
+        assertTrue(body.contains("<CreateDBClusterSnapshotResult>"));
+        assertTrue(body.contains("<DBClusterSnapshot>"));
+        assertTrue(body.contains("<AvailabilityZone>us-east-1a</AvailabilityZone>"));
+        assertTrue(body.contains("<SnapshotType>manual</SnapshotType>"));
+        assertTrue(body.contains("<PercentProgress>100</PercentProgress>"));
+        assertTrue(body.contains("<DBClusterSnapshotArn>arn:aws:rds:us-east-1:000000000000:cluster-snapshot:csnap</DBClusterSnapshotArn>"));
+
+        when(service.describeDbClusterSnapshots(isNull(), eq("aurora"), isNull(), isNull())).thenReturn(List.of(snapshot));
+        MultivaluedMap<String, String> describe = params();
+        describe.add("DBClusterIdentifier", "aurora");
+        String listBody = (String) handler.handle("DescribeDBClusterSnapshots", describe).getEntity();
+        assertTrue(listBody.contains("<DBClusterSnapshots><DBClusterSnapshot>"));
+
+        when(service.describeDbClusterSnapshotAttributes(eq("csnap"), isNull())).thenReturn(snapshot);
+        MultivaluedMap<String, String> attrs = params();
+        attrs.add("DBClusterSnapshotIdentifier", "csnap");
+        String attrBody = (String) handler.handle("DescribeDBClusterSnapshotAttributes", attrs).getEntity();
+        assertTrue(attrBody.contains("<DBClusterSnapshotAttributesResult>"));
+        assertTrue(attrBody.contains("<AttributeName>restore</AttributeName>"));
+        assertTrue(attrBody.contains("<AttributeValue>all</AttributeValue>"));
+
+        assertEquals(400, handler.handle("CreateDBClusterSnapshot", params()).getStatus());
+        assertEquals(400, handler.handle("DeleteDBClusterSnapshot", params()).getStatus());
+        MultivaluedMap<String, String> restore = params();
+        restore.add("DBClusterIdentifier", "restored");
+        restore.add("SnapshotIdentifier", "csnap");
+        Response missingEngine = handler.handle("RestoreDBClusterFromSnapshot", restore);
+        assertEquals(400, missingEngine.getStatus());
+        assertTrue(((String) missingEngine.getEntity()).contains("Engine is required."));
     }
 
     @Test
@@ -2655,7 +2854,8 @@ class RdsQueryHandlerTest {
     void modifyDbInstance_passesBackupSettingsToService() {
         DbInstance instance = makeInstance("mydb");
         when(service.modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
-                isNull(), isNull(), any(DbInstanceSettings.class), isNull())).thenReturn(instance);
+                isNull(), isNull(), any(DbInstanceSettings.class), isNull(),
+                any(DbInstanceScalingChanges.class))).thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "mydb");
@@ -2669,8 +2869,64 @@ class RdsQueryHandlerTest {
 
         ArgumentCaptor<DbInstanceSettings> captor = ArgumentCaptor.forClass(DbInstanceSettings.class);
         verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
-                isNull(), isNull(), captor.capture(), isNull());
+                isNull(), isNull(), captor.capture(), isNull(), any(DbInstanceScalingChanges.class));
         assertEquals(new DbInstanceSettings(null, null, 3, "01:00-01:30", null, true), captor.getValue());
+    }
+
+    @Test
+    void modifyDbInstance_passesScalingChangesToService() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
+                isNull(), isNull(), any(DbInstanceSettings.class), isNull(),
+                any(DbInstanceScalingChanges.class))).thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("DBInstanceClass", "db.t3.large");
+        p.add("AllocatedStorage", "100");
+        p.add("EngineVersion", "14.7");
+        p.add("AllowMajorVersionUpgrade", "true");
+        assertEquals(200, handler.handle("ModifyDBInstance", p).getStatus());
+
+        ArgumentCaptor<DbInstanceScalingChanges> captor =
+                ArgumentCaptor.forClass(DbInstanceScalingChanges.class);
+        verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
+                isNull(), isNull(), any(DbInstanceSettings.class), isNull(), captor.capture());
+        assertEquals(new DbInstanceScalingChanges("db.t3.large", 100, "14.7", true), captor.getValue());
+    }
+
+    @Test
+    void modifyDbInstance_leavesScalingChangesUnsetWhenTheRequestOmitsThem() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
+                isNull(), isNull(), any(DbInstanceSettings.class), isNull(),
+                any(DbInstanceScalingChanges.class))).thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("BackupRetentionPeriod", "3");
+        assertEquals(200, handler.handle("ModifyDBInstance", p).getStatus());
+
+        ArgumentCaptor<DbInstanceScalingChanges> captor =
+                ArgumentCaptor.forClass(DbInstanceScalingChanges.class);
+        verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
+                isNull(), isNull(), any(DbInstanceSettings.class), isNull(), captor.capture());
+        assertEquals(DbInstanceScalingChanges.unchanged(), captor.getValue());
+    }
+
+    @Test
+    void modifyDbInstance_rejectsMalformedAllocatedStorage() {
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("AllocatedStorage", "not-a-number");
+
+        Response response = handler.handle("ModifyDBInstance", p);
+        String body = (String) response.getEntity();
+
+        assertEquals(400, response.getStatus());
+        assertTrue(body.contains("<Code>InvalidParameterValue</Code>"), body);
+        verify(service, never()).modifyDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any());
     }
 
     @Test

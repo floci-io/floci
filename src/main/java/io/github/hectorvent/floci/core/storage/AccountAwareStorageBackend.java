@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -43,6 +44,13 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     private final Instance<RequestContext> requestContextInstance;
     private final String defaultAccountId;
 
+    // Accounts that own keys here, so findAnyAccountEntry does one get per account instead of a scan.
+    // Tracking starts on the first cross-account lookup, so other stores pay one volatile read per write.
+    // Accounts are never removed. A stale one only costs a missed get.
+    private final Set<String> ownerAccounts = ConcurrentHashMap.newKeySet();
+    private volatile boolean trackingOwners;
+    private volatile boolean ownersComplete;
+
     public AccountAwareStorageBackend(StorageBackend<String, V> delegate,
                                       Instance<RequestContext> requestContextInstance,
                                       String defaultAccountId) {
@@ -61,7 +69,17 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     @Override
     public void put(String key, V value) {
-        delegate.put(prefixed(key), value);
+        String account = prefix();
+        delegate.put(account + "/" + key, value);
+        trackOwner(account);
+    }
+
+    @Override
+    public void putAll(Map<String, V> entries) {
+        String prefix = prefix() + "/";
+        Map<String, V> prefixedEntries = new LinkedHashMap<>();
+        entries.forEach((key, value) -> prefixedEntries.put(prefix + key, value));
+        delegate.putAll(prefixedEntries);
     }
 
     @Override
@@ -84,6 +102,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
             result = delegate.get(key);
             if (result.isPresent()) {
                 delegate.put(prefixedKey, result.get());
+                trackOwner(prefix());
                 delegate.delete(key);
             }
             return result;
@@ -118,6 +137,9 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     @Override
     public void load() {
         delegate.load();
+        if (trackingOwners) {
+            addOwnersFromKeys();
+        }
     }
 
     @Override
@@ -130,6 +152,19 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     /** Scans all values across every account, without any account prefix filtering. */
     public List<V> scanAllAccounts() {
         return delegate.scan(k -> true);
+    }
+
+    /** Removes matching values using their actual stored keys, including unprefixed legacy keys. */
+    public int deleteAllAccountsMatching(Predicate<V> valueFilter) {
+        int removed = 0;
+        for (String rawKey : new ArrayList<>(delegate.keys())) {
+            if (delegate.get(rawKey).filter(valueFilter).isEmpty()) {
+                continue;
+            }
+            delegate.delete(rawKey);
+            removed++;
+        }
+        return removed;
     }
 
     /**
@@ -212,6 +247,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
             if (!destination.equals(rawKey)) {
                 if (delegate.get(destination).isEmpty()) {
                     delegate.put(destination, value.get());
+                    trackOwner(accountId);
                 } else {
                     LOG.warnv("Legacy storage migration skipped stale value at {0}; destination {1} already exists",
                             rawKey, destination);
@@ -289,6 +325,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
             return Optional.empty();
         }
         delegate.put(accountId + "/" + key, legacy.get());
+        trackOwner(accountId);
         delegate.delete(key);
         return legacy;
     }
@@ -356,6 +393,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
                 continue;
             }
             delegate.put(destinationKey, legacy.get());
+            trackOwner(accountId);
             delegate.delete(candidateKey);
             return legacy;
         }
@@ -364,6 +402,14 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     public void putForAccount(String accountId, String key, V value) {
         delegate.put(accountId + "/" + key, value);
+        trackOwner(accountId);
+    }
+
+    public void putAllForAccount(String accountId, Map<String, V> entries) {
+        String prefix = accountId + "/";
+        Map<String, V> prefixedEntries = new LinkedHashMap<>();
+        entries.forEach((key, value) -> prefixedEntries.put(prefix + key, value));
+        delegate.putAll(prefixedEntries);
     }
 
     public void deleteForAccount(String accountId, String key) {
@@ -411,31 +457,56 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
      * Like {@link #findAnyAccount}, but also reports the owning account so a cross-account
      * <em>mutation</em> can write the value back to its owner's partition (via
      * {@link #putForAccount}) instead of forking a phantom copy into the caller's partition.
-     * The caller's own hit is owned by the current account context; a scanned hit's owner is
-     * the account segment of its raw key (or {@code defaultAccountId} for pre-multi-account,
-     * un-prefixed data).
+     * The caller's own hit, including un-prefixed data that {@link #get} migrates, is owned by the
+     * current account context; any other hit is owned by the account whose partition holds it.
      */
     public Optional<OwnedEntry<V>> findAnyAccountEntry(String key) {
-        Optional<V> own = get(key);
-        if (own.isPresent()) {
-            return Optional.of(new OwnedEntry<>(prefix(), own.get()));
+        String callerAccount = prefix();
+        Optional<V> own = delegate.get(callerAccount + "/" + key);
+        // get locks the store on a miss, so call it only when there is legacy data to migrate
+        if (own.isEmpty() && delegate.get(key).isPresent()) {
+            own = get(key);
         }
-        String suffix = "/" + key;
-        for (String rawKey : delegate.keys()) {
-            if (rawKey.equals(key)) {
-                Optional<V> value = delegate.get(rawKey);
-                if (value.isPresent()) {
-                    return Optional.of(new OwnedEntry<>(defaultAccountId, value.get()));
-                }
-            } else if (rawKey.endsWith(suffix)) {
-                Optional<V> value = delegate.get(rawKey);
-                if (value.isPresent()) {
-                    String account = rawKey.substring(0, rawKey.length() - suffix.length());
-                    return Optional.of(new OwnedEntry<>(account, value.get()));
-                }
+        if (own.isPresent()) {
+            return Optional.of(new OwnedEntry<>(callerAccount, own.get()));
+        }
+        if (!ownersComplete) {
+            startTrackingOwners();
+        }
+        for (String account : ownerAccounts) {
+            Optional<V> value = delegate.get(account + "/" + key);
+            if (value.isPresent()) {
+                return Optional.of(new OwnedEntry<>(account, value.get()));
             }
         }
         return Optional.empty();
+    }
+
+    private void trackOwner(String accountId) {
+        if (trackingOwners && !ownerAccounts.contains(accountId)) {
+            ownerAccounts.add(accountId);
+        }
+    }
+
+    private void startTrackingOwners() {
+        synchronized (ownerAccounts) {
+            if (ownersComplete) {
+                return;
+            }
+            // A write that reads the flag as unset stored its key before the flag was set, so the scan sees it
+            trackingOwners = true;
+            addOwnersFromKeys();
+            ownersComplete = true;
+        }
+    }
+
+    private void addOwnersFromKeys() {
+        for (String rawKey : delegate.keys()) {
+            int slash = rawKey.indexOf('/');
+            if (slash > 0) {
+                ownerAccounts.add(rawKey.substring(0, slash));
+            }
+        }
     }
 
     // ---

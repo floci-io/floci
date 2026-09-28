@@ -441,14 +441,30 @@ class S3IntegrationTest {
             .statusCode(204);
     }
 
+    /**
+     * A regional endpoint requires a LocationConstraint naming its region (moto's
+     * {@code aws_verified} matrix); only the us-east-1 endpoint accepts an empty body. The
+     * signing region alone never places a bucket.
+     */
     @Test
     @Order(21)
-    void createBucketUsesSigningRegionWhenBodyEmpty() {
+    void createBucketWithoutConstraintOnARegionalEndpointIsRejected() {
         String bucket = "signed-region-bucket";
+        String regionalAuth =
+                "AWS4-HMAC-SHA256 Credential=test/20260325/eu-west-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=test";
 
         given()
-            .header("Authorization",
-                    "AWS4-HMAC-SHA256 Credential=test/20260325/eu-west-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=test")
+            .header("Authorization", regionalAuth)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>IllegalLocationConstraintException</Code>"));
+
+        given()
+            .header("Authorization", regionalAuth)
+            .contentType("application/xml")
+            .body("<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>")
         .when()
             .put("/" + bucket)
         .then()
@@ -457,10 +473,10 @@ class S3IntegrationTest {
 
         given()
         .when()
-            .head("/" + bucket)
+            .get("/" + bucket + "?location")
         .then()
             .statusCode(200)
-            .header("x-amz-bucket-region", equalTo("eu-west-1"));
+            .body(containsString(">eu-west-1</LocationConstraint>"));
 
         given()
         .when()
@@ -489,6 +505,64 @@ class S3IntegrationTest {
     }
 
     @Test
+    void createBucketRejectsUnknownLocationConstraintWithoutCreatingBucket() {
+        for (String invalidRegion : List.of("polygondwanaland-west-1", "us-fake-9")) {
+            String bucket = "unknown-region-" + invalidRegion;
+            String createBucketConfiguration = """
+                    <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <LocationConstraint>%s</LocationConstraint>
+                    </CreateBucketConfiguration>
+                    """.formatted(invalidRegion);
+
+            given()
+                .contentType("application/xml")
+                .body(createBucketConfiguration)
+            .when()
+                .put("/" + bucket)
+            .then()
+                .statusCode(400)
+                .body(containsString("InvalidLocationConstraint"));
+
+            given()
+            .when()
+                .head("/" + bucket)
+            .then()
+                .statusCode(404);
+        }
+    }
+
+    @Test
+    void createBucketAcceptsKnownRegionOutsideAdvertisedRegionList() {
+        String bucket = "ap-south-two-bucket";
+        String createBucketConfiguration = """
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <LocationConstraint>ap-south-2</LocationConstraint>
+                </CreateBucketConfiguration>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(createBucketConfiguration)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .head("/" + bucket)
+        .then()
+            .statusCode(200)
+            .header("x-amz-bucket-region", equalTo("ap-south-2"));
+
+        given()
+        .when()
+            .delete("/" + bucket)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
     void createBucketRejectsOverlyLongBucketName() {
         String longBucketName = "30388849b0eaef3dfba3aa83849d28987be6fb7920bdbf3233bdc8e966f73870.json";
         given()
@@ -509,6 +583,117 @@ class S3IntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("MalformedXML"));
+    }
+
+    @Test
+    @Order(208)
+    void createBucketRejectsMalformedCreateBucketConfigurationAndCreatesNoBucket() {
+        String bucket = "malformed-config-bucket";
+        given()
+            .contentType("application/xml")
+            .body("<CreateBucketConfiguration><LocationConstraint>eu-central-1</LocationConstraint>")
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+
+        assertBucketDoesNotExist(bucket);
+    }
+
+    @Test
+    @Order(209)
+    void createBucketRejectsUnknownCreateBucketConfigurationFieldAndCreatesNoBucket() {
+        String bucket = "unknown-config-field-bucket";
+        given()
+            .contentType("application/xml")
+            .body("""
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <Foo>bar</Foo>
+                </CreateBucketConfiguration>
+                """)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+
+        assertBucketDoesNotExist(bucket);
+    }
+
+    @Test
+    @Order(210)
+    void createBucketRejectsWrongCreateBucketConfigurationRootAndCreatesNoBucket() {
+        String bucket = "wrong-config-root-bucket";
+        given()
+            .contentType("application/xml")
+            .body("""
+                <CreateBucketConfigurationFoo xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <LocationConstraint>eu-central-1</LocationConstraint>
+                </CreateBucketConfigurationFoo>
+                """)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+
+        assertBucketDoesNotExist(bucket);
+    }
+
+    @Test
+    @Order(211)
+    void createBucketRejectsInvalidLocationConstraintAndCreatesNoBucket() {
+        String bucket = "invalid-constraint-bucket";
+        given()
+            .contentType("application/xml")
+            .body("""
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <LocationConstraint>not-a-region</LocationConstraint>
+                </CreateBucketConfiguration>
+                """)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidLocationConstraint"));
+
+        assertBucketDoesNotExist(bucket);
+    }
+
+    @Test
+    @Order(212)
+    void createBucketAcceptsDirectoryBucketConfiguration() {
+        String bucket = "directory-config-bucket";
+        given()
+            .contentType("application/xml")
+            .body("""
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <Location>us-west-2</Location>
+                    <Bucket>
+                        <Type>Directory</Type>
+                    </Bucket>
+                </CreateBucketConfiguration>
+                """)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucket)
+        .then()
+            .statusCode(200);
+    }
+
+    private static void assertBucketDoesNotExist(String bucket) {
+        given()
+        .when()
+            .get("/" + bucket)
+        .then()
+            .statusCode(404)
+            .body(containsString("NoSuchBucket"));
     }
 
     @Test
