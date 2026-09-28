@@ -1079,13 +1079,14 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(queryFilter), false);
         ExpressionEvaluator.validateSyntax(keyConditionExpr, "KeyConditionExpression");
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
+        // DynamoDB reports filter errors before projection errors, and projection before key-condition.
+        requireDefinedTokens(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSemantics(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
         // Must run before DynamoDbAccessPathValidator below: an unresolved #name there falls
         // through to "Query condition missed key schema element" instead of the real cause.
         requireDefinedTokens(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
-        requireDefinedTokens(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateSemantics(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
-        ExpressionEvaluator.validateSemantics(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
 
         if (select != null && !VALID_SELECT.contains(select)) {
             throw new AwsException("ValidationException",
@@ -1247,9 +1248,10 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         DynamoDbNumberUtils.requireStorable(exprAttrValues, false);
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
-        ProjectionEvaluator.validateExpression(projectionExpressionScan, exprAttrNames);
+        // DynamoDB reports filter errors before projection errors.
         requireDefinedTokens(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateSemantics(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+        ProjectionEvaluator.validateExpression(projectionExpressionScan, exprAttrNames);
 
         // Reject ExpressionAttributeNames/Values entries not referenced by any expression (AWS parity, #2893)
         checkUnusedEan(exprAttrNames, extractHashTokens(filterExpr, projectionExpressionScan));

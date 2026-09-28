@@ -4741,6 +4741,72 @@ given()
         deleteTable(tableName);
     }
 
+    // A filter's semantic error is reported before an undefined #name in the projection.
+    @Test
+    void filterSemanticErrorWinsOverUndefinedProjectionName() {
+        String tableName = "FilterVsProjectionTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeyConditionExpression": "pk = :pk",
+                    "FilterExpression": "contains(a, a)",
+                    "ProjectionExpression": "#p",
+                    "ExpressionAttributeValues": {":pk": {"S": "a"}}
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid FilterExpression: The first operand must be distinct "
+                    + "from the remaining operands for this operator or function; operator: contains, "
+                    + "first operand: [a]"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "contains(a, a)",
+                    "ProjectionExpression": "#p"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Invalid FilterExpression: The first operand must be distinct "
+                    + "from the remaining operands for this operator or function; operator: contains, "
+                    + "first operand: [a]"));
+
+        deleteTable(tableName);
+    }
+
     // An undefined #name/:value in ConditionExpression must reject, not false-fail the condition.
     @Test
     void undefinedTokensInConditionExpressionAreRejected() {
