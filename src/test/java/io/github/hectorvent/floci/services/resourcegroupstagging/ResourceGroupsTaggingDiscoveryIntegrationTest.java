@@ -663,6 +663,15 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
                 """.formatted(wildcardArn)), wildcardArn);
         logGroupTagsAreOnlyTheMarker(name, marker);
 
+        String missingArn = ARN_PREFIX.formatted("logs") + "log-group:/probe/missing-" + marker + ":*";
+        wildcardArnIsRejected(tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"missing": "%s"}}
+                """.formatted(missingArn, marker)), missingArn);
+        getResources("""
+                {"TagFilters": [%s]}
+                """.formatted(tagFilter("missing", marker)))
+            .body("ResourceTagMappingList", empty());
+
         logs("DeleteLogGroup", """
                 {"logGroupName": "%s"}
                 """.formatted(name)).then().statusCode(200);

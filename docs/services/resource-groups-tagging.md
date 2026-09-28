@@ -58,7 +58,9 @@ and CloudWatch Logs `ListTagsForResource` show a tag set through
 `TagResources`, and nothing is written to the tagging store. When the owning
 service rejects the tags, for example a reserved `floci:` key on an API key or
 a log group ARN with the trailing `:*`, the ARN appears in `FailedResourcesMap`
-with that service's error and no tags are stored for it. Every other ARN, including
+with that service's error and no tags are stored for it. A log group ARN with
+the trailing `:*` is rejected this way whether or not the group exists, as in
+AWS. Every other ARN, including
 one the owning service does not list such as an API Gateway deployment ARN,
 goes to the tagging store and the owning service is not called.
 `UntagResources` routes the same way, and also removes the keys from the

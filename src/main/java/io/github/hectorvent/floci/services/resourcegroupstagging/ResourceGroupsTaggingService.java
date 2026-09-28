@@ -227,7 +227,8 @@ public class ResourceGroupsTaggingService implements Resettable {
                     }
                 }
             }
-            if (listed.contains(withoutWildcard(arn))) {
+            // A wildcard ARN always reaches its handler, which rejects it as AWS does, listed or not.
+            if (arn.endsWith(WILDCARD_SUFFIX) || listed.contains(arn)) {
                 owners.put(arn, handler);
             }
         }
