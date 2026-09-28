@@ -107,9 +107,8 @@ public class ApiGatewayCustomDomainFilter implements ContainerRequestFilter {
         LOG.debugv("Custom domain routing: {0}{1} -> {2}", host, path, newUri.getPath());
         // AWS_IAM dispatch rebuilds the caller's canonical request, which covers the path they
         // signed: the custom-domain path, not the /execute-api/... form this rewrite produces.
-        if (apiGatewayService.hasRestApi(restApiId)) {
-            routeContext.routeToRestApi();
-        }
+        // This is a REST API base-path mapping (restApiId), not a v2 API mapping.
+        routeContext.routeToRestApi();
         routeContext.recordSignedRequestPath(path);
         requestContext.setRequestUri(newUri);
     }

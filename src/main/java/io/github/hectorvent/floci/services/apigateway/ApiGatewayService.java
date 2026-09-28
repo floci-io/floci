@@ -332,9 +332,6 @@ public class ApiGatewayService {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API id specified", 404));
     }
 
-    public boolean hasRestApi(String apiId) {
-        return apiStore.keys().stream().anyMatch(key -> key.endsWith("::" + apiId));
-    }
 
     public String resolveRestApiRegion(String preferredRegion, String apiId) {
         if (apiStore.get(apiKey(preferredRegion, apiId)).isPresent()) {

@@ -190,38 +190,6 @@ class ApiGatewayRestExecuteApiHostIntegrationTest {
                 .then().statusCode(410);
     }
 
-    @Test
-    void websocketConnectionManagementThroughCustomDomain() {
-        String apiId = given()
-                .contentType(ContentType.JSON)
-                .body("{\"name\":\"websocket-domain\",\"protocolType\":\"WEBSOCKET\","
-                        + "\"routeSelectionExpression\":\"$request.body.action\"}")
-                .when().post("/v2/apis")
-                .then().statusCode(201)
-                .extract().path("apiId");
-        given()
-                .contentType(ContentType.JSON)
-                .body("{\"stageName\":\"test\"}")
-                .when().post("/v2/apis/" + apiId + "/stages")
-                .then().statusCode(201);
-        given()
-                .contentType(ContentType.JSON)
-                .body("{\"domainName\":\"websocket.example.com\","
-                        + "\"certificateArn\":\"arn:aws:acm:us-east-1:000000000000:certificate/demo\"}")
-                .when().post("/domainnames")
-                .then().statusCode(201);
-        given()
-                .contentType(ContentType.JSON)
-                .body("{\"basePath\":\"(none)\",\"restApiId\":\"" + apiId + "\",\"stage\":\"test\"}")
-                .when().post("/domainnames/websocket.example.com/basepathmappings")
-                .then().statusCode(201);
-
-        given()
-                .header("Host", "websocket.example.com.regional.local")
-                .when().get("/@connections/missing")
-                .then().statusCode(410);
-    }
-
     private static String resourceId(String apiId, String path) throws Exception {
         String resources = given()
                 .when().get("/restapis/" + apiId + "/resources")
