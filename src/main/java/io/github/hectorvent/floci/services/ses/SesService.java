@@ -373,7 +373,7 @@ public class SesService {
         }
         List<String> effectiveDestinations = hasExplicitDestinations
                 ? destinations
-                : allRecipients(headers.to(), headers.cc(), headers.bcc());
+                : SendEmailRequest.recipients(headers.to(), headers.cc(), headers.bcc());
         if (effectiveDestinations.isEmpty()) {
             throw new AwsException("InvalidParameterValue",
                     "At least one destination address is required.", 400);
@@ -445,20 +445,6 @@ public class SesService {
                 suppressedReasons, rejected, rejected ? requestTags(request.emailTags()) : effectiveTags,
                 List.of(), region);
         return messageId;
-    }
-
-    private static List<String> allRecipients(List<String> to, List<String> cc, List<String> bcc) {
-        List<String> all = new ArrayList<>();
-        if (to != null) {
-            all.addAll(to);
-        }
-        if (cc != null) {
-            all.addAll(cc);
-        }
-        if (bcc != null) {
-            all.addAll(bcc);
-        }
-        return all;
     }
 
     private void publishSendEvents(String configurationSetName, String messageId, String source,

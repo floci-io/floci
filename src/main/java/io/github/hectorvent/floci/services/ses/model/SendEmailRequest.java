@@ -33,15 +33,19 @@ public record SendEmailRequest(
     }
 
     public List<String> recipients() {
+        return recipients(toAddresses, ccAddresses, bccAddresses);
+    }
+
+    public static List<String> recipients(List<String> to, List<String> cc, List<String> bcc) {
         List<String> all = new ArrayList<>();
-        if (toAddresses != null) {
-            all.addAll(toAddresses);
+        if (to != null) {
+            all.addAll(to);
         }
-        if (ccAddresses != null) {
-            all.addAll(ccAddresses);
+        if (cc != null) {
+            all.addAll(cc);
         }
-        if (bccAddresses != null) {
-            all.addAll(bccAddresses);
+        if (bcc != null) {
+            all.addAll(bcc);
         }
         return all;
     }
