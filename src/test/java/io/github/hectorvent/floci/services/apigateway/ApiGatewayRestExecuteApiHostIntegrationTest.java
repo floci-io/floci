@@ -129,6 +129,13 @@ class ApiGatewayRestExecuteApiHostIntegrationTest {
                 .then().statusCode(201);
 
         given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"rest-id-collision\",\"tags\":{\"floci:override-id\":\"" + apiId + "\"}}")
+                .when().post("/restapis")
+                .then().statusCode(201)
+                .body("id", equalTo(apiId));
+
+        given()
                 .when().get("/execute-api/" + apiId + "/test/@connections/missing")
                 .then().statusCode(410);
 
