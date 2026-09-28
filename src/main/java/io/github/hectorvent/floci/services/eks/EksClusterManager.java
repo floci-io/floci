@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -22,6 +23,8 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
+import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
+import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataProxy;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -85,6 +88,7 @@ public class EksClusterManager
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
+    static final String DEFAULT_NODE_INSTANCE_TYPE = "m5.large";
 
     private static final String WEBHOOK_CONFIG_DIR = "/etc";
     private static final String WEBHOOK_CONFIG_FILE = "token-webhook.yaml";
@@ -140,6 +144,7 @@ public class EksClusterManager
     private final EksOidcService oidcService;
     private final FlociCertificateAuthority certificateAuthority;
     private final ContainerLogStreamer logStreamer;
+    private final Ec2InstanceTypeCatalog instanceTypeCatalog = new Ec2InstanceTypeCatalog();
     private final Map<String, ClusterNodeRecord> clusterNodeInstances = new ConcurrentHashMap<>();
     private final Map<String, Closeable> clusterLogHandles = new ConcurrentHashMap<>();
     private final List<Consumer<Instance>> nodeRegistrationListeners = new CopyOnWriteArrayList<>();
@@ -413,6 +418,24 @@ public class EksClusterManager
 
         List<String> serverArgs = buildServerArgs(config.services().eks().disableCni(), serviceCidr, clusterCidr);
 
+        EksNodeCapacity.Limits nodeLimits = null;
+        try {
+            Info host = lifecycleManager.getDockerClient().infoCmd().exec();
+            CatalogInstanceType type = instanceTypeCatalog.find(nodeInstanceType(cluster)).orElseThrow();
+            nodeLimits = EksNodeCapacity.calculate(type, host.getMemTotal(), host.getNCPU(),
+                    config.services().eks().maxMemoryMib(), config.services().eks().maxVcpus());
+            if (nodeLimits == null) {
+                LOG.warnv("EKS cluster {0} cannot fit node type {1} and its kubelet reservations"
+                        + " within the Docker host or configured cap; starting without resource limits",
+                        cluster.getName(), type.instanceType);
+            } else {
+                nodeLimits.addKubeletArgs(serverArgs);
+            }
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0} resource limits unavailable ({1}); starting without limits",
+                    cluster.getName(), e.getMessage());
+        }
+
         try {
             String providerId = deriveClusterNodeProviderId(cluster);
             serverArgs.add("--kubelet-arg=provider-id=" + providerId);
@@ -446,6 +469,11 @@ public class EksClusterManager
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
+
+        if (nodeLimits != null) {
+            specBuilder.withMemoryBytes(nodeLimits.memoryBytes());
+            specBuilder.withCpuUnits(nodeLimits.vcpus() * 1024);
+        }
 
         if (config.services().eks().embeddedDns()) {
             specBuilder.withEmbeddedDns();
@@ -707,6 +735,33 @@ public class EksClusterManager
         lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
         ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, clusterResourceName(cluster));
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
+    }
+
+    String selectNodeInstanceType(String requestedType) {
+        if (instanceTypeCatalog.find(requestedType).isPresent()) {
+            return requestedType;
+        }
+        LOG.warnv("EKS node instance type {0} is absent from the EC2 catalog; using {1}",
+                requestedType, DEFAULT_NODE_INSTANCE_TYPE);
+        return DEFAULT_NODE_INSTANCE_TYPE;
+    }
+
+    static String nodeInstanceType(Cluster cluster) {
+        return cluster != null && cluster.getNodeInstanceType() != null
+                ? cluster.getNodeInstanceType() : DEFAULT_NODE_INSTANCE_TYPE;
+    }
+
+    /** Recreate the shared node with its named data volume intact when its first node group arrives. */
+    void restartForNodeCapacity(Cluster cluster) {
+        if (cluster.getContainerId() == null) {
+            return;
+        }
+        unregisterMetadataEndpoint(cluster);
+        Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
+        lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
+        portAllocator.release(cluster.getHostPort());
+        cluster.setContainerId(null);
+        startCluster(cluster);
     }
 
     /**
@@ -2071,7 +2126,7 @@ public class EksClusterManager
 
         inst.setInstanceId(instanceId);
         inst.setImageId("ami-eks-k3s");
-        inst.setInstanceType("m5.large");
+        inst.setInstanceType(nodeInstanceType(cluster));
         inst.setPlacement(new Placement(az));
         inst.setRegion(safeRegion);
         inst.setState(InstanceState.running());

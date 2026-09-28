@@ -369,6 +369,39 @@ A restored cluster reports `CREATING` until its API server answers again, then r
 back (for example Docker is unavailable), the cluster is marked `FAILED` instead of appearing
 `ACTIVE` while unreachable.
 
+#### Cluster node capacity
+
+Floci runs one k3s container per cluster. Before a node group exists, its node uses the
+`m5.large` entry in the EC2 instance type catalog. Creating the first node group selects the
+group's first `instanceTypes` entry. If that changes the type, Floci recreates the container and
+keeps its named k3s data volume. Later
+node groups share this node and cannot change its type. An unknown type falls back to `m5.large`
+with a warning. The synthesized EC2 instance reports the selected type.
+
+The container receives a hard CPU quota equal to the selected type's vCPUs and a memory limit
+equal to its catalog memory plus 10% headroom (at least 128 MiB). Both are capped by Docker's host
+capacity. Memory is capped at 80% of the Docker host's memory so other processes can continue to
+run. `floci.services.eks.max-memory-mib` and `floci.services.eks.max-vcpus` provide optional lower
+ceilings; zero means no extra ceiling. Their environment variables are `FLOCI_SERVICES_EKS_MAX_MEMORY_MIB`
+and `FLOCI_SERVICES_EKS_MAX_VCPUS`.
+
+The same calculation sets kubelet's `kube-reserved`, `system-reserved`, and `eviction-hard` flags.
+The EKS AMI reserves `255 + 11 * maxPods` MiB and a tiered CPU fraction for kubelet and the
+container runtime. Floci derives `maxPods` from the catalog's primary network card and IPv4
+addresses per interface. Its `system-reserved` memory holds the container headroom, and its CPU
+reservation excludes the Docker host CPUs outside the container quota. Its absolute
+`memory.available` threshold includes the difference between Docker host memory and the container
+limit, plus a 100 MiB eviction buffer. This is necessary because kubelet in the nested container
+can report host memory while the kernel enforces the smaller cgroup limit.
+The EKS node filesystem eviction defaults remain at 10% available space and 5% free inodes.
+
+If Docker cannot report host capacity, or the host or configured ceiling is too small to leave
+256 MiB for pods after reservations, Floci warns and launches the cluster without resource limits
+or these kubelet arguments. This preserves startup on small hosts. A larger Docker memory allowance
+or a smaller node type enables the bounded behavior.
+
+The reservation formulas follow the [EKS AMI nodeadm source](https://github.com/awslabs/amazon-eks-ami/blob/main/nodeadm/internal/kubelet/config.go) and [AWS's node memory calculation](https://docs.aws.amazon.com/batch/latest/userguide/memory-cpu-batch-eks.html).
+
 #### Cluster node provider ID and topology labels
 
 In real mode, cluster nodes carry a Kubernetes `spec.providerID` matching the AWS format:
@@ -394,6 +427,8 @@ The derived availability zone and instance ID match the synthetic EC2 node insta
 |---|---|---|
 | `FLOCI_SERVICES_EKS_ENABLED` | `true` | Enable the EKS service |
 | `FLOCI_SERVICES_EKS_MOCK` | `false` | Metadata-only mode (no Docker) |
+| `FLOCI_SERVICES_EKS_MAX_MEMORY_MIB` | `0` | Optional k3s container memory ceiling in MiB |
+| `FLOCI_SERVICES_EKS_MAX_VCPUS` | `0` | Optional k3s container vCPU ceiling |
 | `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` | k3s Docker image fallback |
 | `FLOCI_SERVICES_EKS_IMAGE_TEMPLATE` | *(unset)* | Format string for custom k3s images (e.g. `myregistry.io/k3s:v%s`), taking cluster version |
 | `FLOCI_SERVICES_EKS_API_SERVER_BASE_PORT` | `6500` | First port in the k3s API server range |
@@ -521,7 +556,7 @@ services:
 ```
 
 ## Instance Metadata Service (IMDS)
-The cluster container is registered as a synthesized EC2 instance node (type `m5.large`, image `ami-eks-k3s`) regardless of whether IMDS is enabled, making it visible to the EC2 service (`DescribeInstances`, `DescribeInstanceStatus`, volume attachments, tagging).
+The cluster container is registered as a synthesized EC2 instance node (image `ami-eks-k3s`) regardless of whether IMDS is enabled, making it visible to the EC2 service (`DescribeInstances`, `DescribeInstanceStatus`, volume attachments, tagging). Its instance type is the same type used for the container limits.
 
 When IMDS is enabled (`FLOCI_SERVICES_EKS_IMDS=true`), each k3s cluster container exposes the AWS Instance Metadata Service on the link-local address `169.254.169.254:80`. Inside the container, Floci adds `169.254.169.254/32` to the loopback interface (`lo`) and runs a lightweight `socat` TCP relay forwarding metadata requests to Floci's IMDS server.
 

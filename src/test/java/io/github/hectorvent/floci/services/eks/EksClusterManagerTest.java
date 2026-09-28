@@ -38,7 +38,9 @@ import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.NetworkSettings;
+import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import org.junit.jupiter.api.BeforeEach;
@@ -1772,6 +1774,56 @@ class EksClusterManagerTest {
                     Mockito.mock(ContainerDetector.class), portAllocator,
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver, null, Mockito.mock(EksOidcService.class));
+        }
+
+        @Test
+        void nodeGroupTypeControlsContainerAndSynthesizedInstance() {
+            DockerClient dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
+            Info host = Mockito.mock(Info.class);
+            when(host.getMemTotal()).thenReturn(16L * 1024 * 1024 * 1024);
+            when(host.getNCPU()).thenReturn(8);
+            when(dockerClient.infoCmd().exec()).thenReturn(host);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("capacity-cluster");
+            cluster.setNodeInstanceType(manager.selectNodeInstanceType("t3.medium"));
+            manager.startCluster(cluster);
+
+            Ec2InstanceTypeCatalog catalog = new Ec2InstanceTypeCatalog();
+            EksNodeCapacity.Limits limits = EksNodeCapacity.calculate(
+                    catalog.find("t3.medium").orElseThrow(), host.getMemTotal(), host.getNCPU(), 0, 0);
+            verify(builder).withMemoryBytes(limits.memoryBytes());
+            verify(builder).withCpuUnits(limits.vcpus() * 1024);
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> expectedArgs = new ArrayList<>();
+            limits.addKubeletArgs(expectedArgs);
+            assertTrue(cmdCaptor.getValue().containsAll(expectedArgs));
+            assertEquals("t3.medium", manager.synthesizeClusterNodeInstance(
+                    cluster, "172.17.0.2", "us-east-1", "000000000000").getInstanceType());
+        }
+
+        @Test
+        void hostTooSmallLeavesClusterUnboundedAndStarting() {
+            DockerClient dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
+            Info host = Mockito.mock(Info.class);
+            when(host.getMemTotal()).thenReturn(1024L * 1024 * 1024);
+            when(host.getNCPU()).thenReturn(2);
+            when(dockerClient.infoCmd().exec()).thenReturn(host);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("small-host");
+            assertDoesNotThrow(() -> manager.startCluster(cluster));
+            verify(builder, never()).withMemoryBytes(Mockito.anyLong());
+            verify(builder, never()).withCpuUnits(Mockito.anyInt());
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            assertFalse(cmdCaptor.getValue().stream().anyMatch(arg -> arg.contains("reserved=")
+                    || arg.contains("eviction-hard=")));
         }
 
         @Test

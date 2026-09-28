@@ -96,6 +96,11 @@ public class Cluster {
     @JsonIgnore
     private String dockerName;
 
+    /** Instance type selected for the single shared node container. Internal persisted metadata. */
+    @JsonProperty("nodeInstanceType")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String nodeInstanceType;
+
     private AccessConfig accessConfig;
 
     public AccessConfig getAccessConfig() { return accessConfig; }
@@ -145,6 +150,9 @@ public class Cluster {
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }
 
+    public String getNodeInstanceType() { return nodeInstanceType; }
+    public void setNodeInstanceType(String nodeInstanceType) { this.nodeInstanceType = nodeInstanceType; }
+
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
 
@@ -193,6 +201,7 @@ public class Cluster {
         c.podCidr = this.podCidr;
         c.explicitVersion = this.explicitVersion;
         c.dockerName = this.dockerName;
+        c.nodeInstanceType = this.nodeInstanceType;
         c.accessConfig = this.accessConfig;
         return c;
     }

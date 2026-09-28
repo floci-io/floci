@@ -331,6 +331,8 @@ floci:
     eks:
       enabled: true
       mock: true
+      max-memory-mib: 0
+      max-vcpus: 0
       ecr-registry-mirror: true
       imds: false
       irsa-signing-key: true

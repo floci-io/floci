@@ -3071,6 +3071,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
+        /** Optional ceiling for the single k3s node container, in MiB. Zero uses its instance type. */
+        @WithDefault("0")
+        int maxMemoryMib();
+
+        /** Optional vCPU ceiling for the single k3s node container. Zero uses its instance type. */
+        @WithDefault("0")
+        int maxVcpus();
+
         @WithDefault("k3s")
         String provider();
 

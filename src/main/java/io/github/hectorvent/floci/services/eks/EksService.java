@@ -48,6 +48,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -204,6 +205,12 @@ public class EksService implements TagHandler, ResourceProvider {
                 LOG.infov("Restoring k3s container for persisted EKS cluster {0}", cluster.getName());
                 cluster.setStatus(ClusterStatus.CREATING);
                 cluster.setPodCidr(EksClusterManager.DEFAULT_POD_CIDR);
+                if (cluster.getNodeInstanceType() == null) {
+                    firstNodeGroup(cluster.getName(), entry.accountId()).ifPresent(group ->
+                            cluster.setNodeInstanceType(clusterManager.selectNodeInstanceType(
+                                    group.getInstanceTypes() == null || group.getInstanceTypes().isEmpty()
+                                            ? null : group.getInstanceTypes().getFirst())));
+                }
                 clusterManager.restoreCluster(cluster);
             } catch (Exception e) {
                 if (!clusterManager.isDockerReachable()) {
@@ -231,6 +238,21 @@ public class EksService implements TagHandler, ResourceProvider {
                         cluster.getAccountId() != null ? cluster.getAccountId() : regionResolver.getAccountId(),
                         cluster.getName(), cluster))
                 .toList();
+    }
+
+    private Optional<Nodegroup> firstNodeGroup(String clusterName, String accountId) {
+        String prefix = clusterName + "/";
+        List<Nodegroup> groups;
+        if (nodeGroupStorage instanceof AccountAwareStorageBackend<Nodegroup> aware) {
+            groups = aware.scanAllAccountEntries(key -> key.startsWith(prefix)).stream()
+                    .filter(entry -> accountId.equals(entry.accountId()))
+                    .map(AccountAwareStorageBackend.AccountEntry::value).toList();
+        } else {
+            groups = nodeGroupStorage.scan(key -> key.startsWith(prefix));
+        }
+        return groups.stream().min(Comparator.comparing(Nodegroup::getCreatedAt,
+                        Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(Nodegroup::getNodegroupName));
     }
 
     /**
@@ -712,6 +734,33 @@ public class EksService implements TagHandler, ResourceProvider {
         nodeGroup.setWarmPoolConfig(request.getWarmPoolConfig());
         nodeGroup.setLabels(request.getLabels() != null ? new HashMap<>(request.getLabels()) : null);
         nodeGroup.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
+
+        boolean firstGroup = firstNodeGroup(clusterName, accountId).isEmpty();
+        if (firstGroup && !config.services().eks().mock() && clusterManager != null) {
+            String requestedType = nodeGroup.getInstanceTypes().isEmpty()
+                    ? null : nodeGroup.getInstanceTypes().getFirst();
+            String selectedType = clusterManager.selectNodeInstanceType(requestedType);
+            String previousType = EksClusterManager.nodeInstanceType(cluster);
+            cluster.setNodeInstanceType(selectedType);
+            if (cluster.getContainerId() != null && !selectedType.equals(previousType)) {
+                cluster.setStatus(ClusterStatus.CREATING);
+                clusterManager.restartForNodeCapacity(cluster);
+            }
+            storage.put(clusterName, cluster);
+        } else if (!firstGroup && !config.services().eks().mock() && clusterManager != null) {
+            if (cluster.getNodeInstanceType() == null) {
+                firstNodeGroup(clusterName, accountId).ifPresent(group ->
+                        cluster.setNodeInstanceType(clusterManager.selectNodeInstanceType(
+                                group.getInstanceTypes() == null || group.getInstanceTypes().isEmpty()
+                                        ? null : group.getInstanceTypes().getFirst())));
+                storage.put(clusterName, cluster);
+            }
+            if (!nodeGroup.getInstanceTypes().isEmpty()
+                    && !nodeGroup.getInstanceTypes().contains(cluster.getNodeInstanceType())) {
+                LOG.warnv("EKS cluster {0} has one shared node; nodegroup {1} cannot change its capacity from {2}",
+                        clusterName, nodegroupName, cluster.getNodeInstanceType());
+            }
+        }
 
         if (launchTemplateData != null && launchTemplateData.getUserData() != null
                 && !launchTemplateData.getUserData().isBlank()) {

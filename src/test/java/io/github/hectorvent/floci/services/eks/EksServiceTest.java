@@ -902,6 +902,26 @@ class EksServiceTest {
     }
 
     @Test
+    void firstNodeGroupSelectsAndRestartsTheSharedNodeOnce() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        when(clusterManager.tryStartCluster(any())).thenReturn(true);
+        when(clusterManager.selectNodeInstanceType("t3.medium")).thenReturn("t3.medium");
+        EksService service = newService(clusterManager, false);
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName("capacity-cluster");
+        request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        Cluster cluster = service.createCluster(request);
+        cluster.setContainerId("existing-container");
+
+        service.createNodeGroup("capacity-cluster", nodeGroupRequest("first"));
+        assertEquals("t3.medium", cluster.getNodeInstanceType());
+        verify(clusterManager).restartForNodeCapacity(cluster);
+
+        service.createNodeGroup("capacity-cluster", nodeGroupRequest("second"));
+        verify(clusterManager).restartForNodeCapacity(cluster);
+    }
+
+    @Test
     void nodeGroupLifecycleDescribeListDelete() {
         createTestCluster("my-eks-cluster");
         eksService.createNodeGroup("my-eks-cluster", nodeGroupRequest("nodegroup-a"));
