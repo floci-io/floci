@@ -32,7 +32,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.TreeSet;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -1570,11 +1569,11 @@ public class IamQueryHandler {
         String accountId = accountResolver.resolve(authorization);
         String arn = requireParam(params, "Arn");
         AccessAdvisorTarget target = resolveAccessAdvisorTarget(accountId, arn);
-        IamPolicyEvaluator.GrantedServices granted =
-                policyEvaluator.servicesGrantedBy(target.policyDocuments());
+        // Already sorted and expanded, including the wildcard and NotAction grants that name no
+        // namespace of their own.
+        List<String> granted = policyEvaluator.servicesGrantedBy(target.policyDocuments());
         ServiceLastAccessedJob job = serviceLastAccessedService.generate(accountId, arn,
-                params.getFirst("Granularity"), new TreeSet<>(granted.namespaces()).stream().toList(),
-                target.entities());
+                params.getFirst("Granularity"), granted, target.entities());
         return Response.ok(AwsQueryResponse.envelope("GenerateServiceLastAccessedDetails", AwsNamespaces.IAM,
                 new XmlBuilder().elem("JobId", job.getJobId()).build())).build();
     }

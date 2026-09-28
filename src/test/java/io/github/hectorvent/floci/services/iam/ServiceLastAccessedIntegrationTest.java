@@ -172,6 +172,103 @@ class ServiceLastAccessedIntegrationTest {
             .body(not(containsString("<ServiceNamespace>dynamodb</ServiceNamespace>")));
     }
 
+    /**
+     * A policy granting {@code "Action": "*"} reaches every service, and AWS lists them all. The
+     * grant names no namespace, so this only works with a catalog to expand it against (#4487).
+     */
+    @Test
+    void getServiceLastAccessedDetailsExpandsAWildcardActionToEveryService() {
+        String tag = suffix();
+        String userName = "laa-star-" + tag;
+        String arn = createUser(userName);
+        iam("PutUserPolicy").formParam("UserName", userName)
+            .formParam("PolicyName", "laa-star-policy-" + tag)
+            .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"Action\":\"*\",\"Resource\":\"*\"}]}")
+        .when().post("/").then().statusCode(200);
+
+        // MaxItems is raised so one page can show the whole expansion.
+        String body = iam("GetServiceLastAccessedDetails").formParam("JobId", generateJobFor(arn))
+            .formParam("MaxItems", "1000")
+            .when().post("/").then()
+                .statusCode(200)
+                // Services the policy never names, reachable only through the wildcard.
+                .body(containsString("<ServiceNamespace>s3</ServiceNamespace>"))
+                .body(containsString("<ServiceNamespace>dynamodb</ServiceNamespace>"))
+                .body(containsString("<ServiceNamespace>cloudwatch</ServiceNamespace>"))
+                .extract().asString();
+
+        int reported = body.split("<ServiceNamespace>", -1).length - 1;
+        assertTrue(reported > 300, "expected a wildcard grant to reach every service, got " + reported);
+        // CloudWatch's credential scope must not leak in as though it were an IAM namespace.
+        assertTrue(!body.contains("<ServiceNamespace>monitoring</ServiceNamespace>"),
+                "monitoring is a credential scope, not an IAM namespace, in: " + body);
+    }
+
+    /** A globbed prefix names a set of namespaces, so it expands to the ones it matches. */
+    @Test
+    void getServiceLastAccessedDetailsExpandsAGlobbedServicePrefix() {
+        String tag = suffix();
+        String userName = "laa-glob-" + tag;
+        String arn = createUser(userName);
+        iam("PutUserPolicy").formParam("UserName", userName)
+            .formParam("PolicyName", "laa-glob-policy-" + tag)
+            .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"Action\":\"dynamodb*:*\",\"Resource\":\"*\"}]}")
+        .when().post("/").then().statusCode(200);
+
+        iam("GetServiceLastAccessedDetails").formParam("JobId", generateJobFor(arn))
+            .formParam("MaxItems", "1000")
+        .when().post("/").then()
+            .statusCode(200)
+            .body(containsString("<ServiceNamespace>dynamodb</ServiceNamespace>"))
+            // The glob covers the dynamodb family only, not every service.
+            .body(not(containsString("<ServiceNamespace>s3</ServiceNamespace>")));
+    }
+
+    /** {@code Allow} with {@code NotAction} reaches every service the list does not carve out. */
+    @Test
+    void getServiceLastAccessedDetailsExpandsNotActionToEverythingNotCarvedOut() {
+        String tag = suffix();
+        String userName = "laa-notaction-expand-" + tag;
+        String arn = createUser(userName);
+        iam("PutUserPolicy").formParam("UserName", userName)
+            .formParam("PolicyName", "laa-notaction-expand-policy-" + tag)
+            .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"NotAction\":\"iam:*\",\"Resource\":\"*\"}]}")
+        .when().post("/").then().statusCode(200);
+
+        // The whole expansion has to be in view for the carve-out to be the reason iam is absent.
+        iam("GetServiceLastAccessedDetails").formParam("JobId", generateJobFor(arn))
+            .formParam("MaxItems", "1000")
+        .when().post("/").then()
+            .statusCode(200)
+            .body(containsString("<ServiceNamespace>s3</ServiceNamespace>"))
+            // iam is carved out entirely, so it is the one service not reachable.
+            .body(not(containsString("<ServiceNamespace>iam</ServiceNamespace>")));
+    }
+
+    /**
+     * A namespace the policy names outright is reported whether or not the vendored catalog knows
+     * it, so a catalog behind an AWS launch still reports an explicitly named service.
+     */
+    @Test
+    void getServiceLastAccessedDetailsKeepsALiterallyNamedNamespaceUnknownToTheCatalog() {
+        String tag = suffix();
+        String userName = "laa-unknown-ns-" + tag;
+        String arn = createUser(userName);
+        iam("PutUserPolicy").formParam("UserName", userName)
+            .formParam("PolicyName", "laa-unknown-ns-policy-" + tag)
+            .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"Action\":\"somefutureservice:DoThing\",\"Resource\":\"*\"}]}")
+        .when().post("/").then().statusCode(200);
+
+        iam("GetServiceLastAccessedDetails").formParam("JobId", generateJobFor(arn))
+        .when().post("/").then()
+            .statusCode(200)
+            .body(containsString("<ServiceNamespace>somefutureservice</ServiceNamespace>"));
+    }
+
     /** A managed-policy ARN reports on that policy's own document, not on any identity. */
     @Test
     void getServiceLastAccessedDetailsForAPolicyArnUsesThatPolicysDocument() {

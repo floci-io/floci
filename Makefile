@@ -42,7 +42,8 @@ PREFIX ?= $(HOME)/.local
 .DEFAULT_GOAL := help
 .PHONY: help dev build test native native-host run-native native-install native-image native-up native-down native-logs clean-sidecars clean-volumes compat docker-tests \
         docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test \
-        aws-data-sync aws-data-check aws-data-test
+        aws-data-sync aws-data-check aws-data-test \
+        iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test
 
 help: ## List the targets below
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -184,3 +185,30 @@ aws-data-check: ## CI gate: the vendored partition data must match a fresh gener
 
 aws-data-test: ## Run the partition-data generator's unit tests
 	$(PYTHON) -m pytest tools/aws -q
+
+iam-namespaces-sync: ## Regenerate src/main/resources/aws/iam-service-namespaces.json from AWS (commit the result)
+	$(PYTHON) tools/aws/regen_service_namespaces.py
+
+iam-namespaces-check: ## CI gate (offline): the vendored IAM namespace list must be well-formed
+	@$(PYTHON) tools/aws/regen_service_namespaces.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-service-namespaces.json is malformed."; \
+		echo "       Run 'make iam-namespaces-sync' and commit the result."; \
+		exit 1; \
+	}
+
+iam-namespaces-verify: ## CI gate (online): every vendored IAM namespace must still exist upstream
+	@$(PYTHON) tools/aws/regen_service_namespaces.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not reach AWS's service reference index, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: the vendored IAM namespace list names a service AWS does not publish."; \
+		echo "       Run 'make iam-namespaces-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+iam-namespaces-test: ## Run the IAM namespace generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_service_namespaces.py -q
