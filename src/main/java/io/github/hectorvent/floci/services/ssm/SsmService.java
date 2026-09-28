@@ -239,6 +239,20 @@ public class SsmService implements ResourceProvider {
     }
 
     /**
+     * The resource IAM checks a reference read on: the secret's ARN, or for a secret that does not
+     * exist, the ARN a GetSecretValue by that name is checked on, so a missing secret is refused too.
+     */
+    String secretReferenceArn(String name, String region) {
+        String secretId = name.substring(SECRET_REFERENCE_PREFIX.length()).split(":", 2)[0];
+        try {
+            return secretsManager.describeSecret(secretId, region).getArn();
+        } catch (AwsException expected) {
+            // No such secret: check the name instead, so the caller is refused either way.
+            return regionResolver.buildArn("secretsmanager", region, "secret:" + secretId);
+        }
+    }
+
+    /**
      * AWS answers {@code /aws/reference/secretsmanager/<secret-id>[:<version-id-or-label>]} with the
      * secret's value. The order of the checks and the error texts are what AWS sends, including the
      * missing slash and the "null" it prints for a name without a selector.

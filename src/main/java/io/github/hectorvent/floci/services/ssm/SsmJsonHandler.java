@@ -5,7 +5,6 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ssm.model.Command;
 import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
 import io.github.hectorvent.floci.services.ssm.model.InstanceInformation;
@@ -43,16 +42,14 @@ public class SsmJsonHandler {
     private final SsmCommandService commandService;
     private final ObjectMapper objectMapper;
     private final IamEnforcementFilter iamEnforcementFilter;
-    private final RegionResolver regionResolver;
 
     @Inject
     public SsmJsonHandler(SsmService ssmService, SsmCommandService commandService, ObjectMapper objectMapper,
-                          IamEnforcementFilter iamEnforcementFilter, RegionResolver regionResolver) {
+                          IamEnforcementFilter iamEnforcementFilter) {
         this.ssmService = ssmService;
         this.commandService = commandService;
         this.objectMapper = objectMapper;
         this.iamEnforcementFilter = iamEnforcementFilter;
-        this.regionResolver = regionResolver;
     }
 
     public Response handle(String action, JsonNode request, String region, String authorization) {
@@ -167,7 +164,7 @@ public class SsmJsonHandler {
     /**
      * AWS reads a reference with the caller's own {@code secretsmanager:GetSecretValue}, checked
      * before the secret is looked up, and reports a refusal as a failed dependency call that fails
-     * the whole request. The resource is the one a direct GetSecretValue by that name is checked on.
+     * the whole request.
      */
     private void authorizeSecretReads(List<String> names, boolean withDecryption, String region,
                                       String authorization) {
@@ -176,10 +173,9 @@ public class SsmJsonHandler {
         }
         for (String name : names) {
             if (name.startsWith(SsmService.SECRET_REFERENCE_PREFIX)) {
-                String secretId = name.substring(SsmService.SECRET_REFERENCE_PREFIX.length()).split(":", 2)[0];
                 try {
                     iamEnforcementFilter.authorizeAdditionalResource(authorization, "secretsmanager:GetSecretValue",
-                            regionResolver.buildArn("secretsmanager", region, "secret:" + secretId));
+                            ssmService.secretReferenceArn(name, region));
                 } catch (AwsException denied) {
                     throw new AwsException("ValidationException",
                             "An error occurred while calling one AWS dependency service.", 400);

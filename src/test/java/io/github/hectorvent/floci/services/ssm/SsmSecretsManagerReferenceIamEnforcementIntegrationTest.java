@@ -68,14 +68,17 @@ class SsmSecretsManagerReferenceIamEnforcementIntegrationTest {
     }
 
     @Test
-    void aCallerAllowedGetSecretValueReadsTheReference() {
+    void aCallerAllowedGetSecretValueOnTheSecretArnReadsTheReference() {
         String secret = createSecret("ref-allowed");
+        String arn = json(ACCOUNT_ID, "secretsmanager", "secretsmanager.DescribeSecret",
+                "{\"SecretId\": \"" + secret + "\"}")
+            .statusCode(200)
+            .extract().path("ARN");
         String caller = createUserWithPolicy("ssm-and-secret", """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":["ssm:GetParameter","ssm:GetParameters"],"Resource":"*"},
-                  {"Effect":"Allow","Action":"secretsmanager:GetSecretValue",
-                   "Resource":"arn:aws:secretsmanager:%s:%s:secret:%s*"}
-                ]}""".formatted(REGION, ACCOUNT_ID, secret));
+                  {"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"%s"}
+                ]}""".formatted(arn));
 
         ssm(caller, "GetParameter", "{\"Name\": \"" + PREFIX + secret + "\", \"WithDecryption\": true}")
             .statusCode(200)
