@@ -144,6 +144,40 @@ class ApiGatewayOpenApiAwsVariablesIntegrationTest {
                 .path("responseTemplates").path("application/json").asText());
     }
 
+    @Test
+    void importRestApiResolvesAuthorizerArns() throws Exception {
+        ObjectNode definition = (ObjectNode) JSON.readTree(spec("AuthorizerVariables", URI, CREDENTIALS, "{}"));
+        ObjectNode schemes = definition.putObject("components").putObject("securitySchemes");
+        ObjectNode cognito = schemes.putObject("CognitoAuth");
+        cognito.put("type", "apiKey").put("name", "Authorization").put("in", "header");
+        cognito.put("x-amazon-apigateway-authtype", "cognito_user_pools");
+        cognito.putObject("x-amazon-apigateway-authorizer").put("type", "cognito_user_pools")
+                .putArray("providerARNs").add("arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/us-east-1_TEST");
+        ObjectNode lambda = schemes.putObject("LambdaAuth");
+        lambda.put("type", "apiKey").put("name", "Authorization").put("in", "header");
+        lambda.put("x-amazon-apigateway-authtype", "custom");
+        lambda.putObject("x-amazon-apigateway-authorizer").put("type", "token")
+                .put("authorizerUri", "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:auth/invocations");
+
+        String apiId = given().contentType(ContentType.JSON).queryParam("mode", "import")
+                .body(definition.toString()).when().post("/restapis").then().statusCode(201).extract().path("id");
+        JsonNode items = JSON.readTree(given().when().get("/restapis/" + apiId + "/authorizers")
+                .then().statusCode(200).extract().asString()).path("item");
+        assertEquals("arn:aws:cognito-idp:us-east-1:000000000000:userpool/us-east-1_TEST",
+                findByName(items, "CognitoAuth").path("providerARNs").path(0).asText());
+        assertEquals("arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:auth/invocations",
+                findByName(items, "LambdaAuth").path("authorizerUri").asText());
+    }
+
+    private static JsonNode findByName(JsonNode items, String name) {
+        for (JsonNode item : items) {
+            if (name.equals(item.path("name").asText())) {
+                return item;
+            }
+        }
+        throw new AssertionError("Authorizer was not found: " + name);
+    }
+
     private static String startResourceId(String apiId, String authorization) throws Exception {
         String resources = authorization == null
                 ? given().when().get("/restapis/" + apiId + "/resources")
