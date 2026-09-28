@@ -373,10 +373,10 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 
 Floci runs one k3s container per cluster. Before a node group exists, its node uses the
 `m5.large` entry in the EC2 instance type catalog. Creating the first node group selects the
-group's first `instanceTypes` entry. If that changes the type, Floci recreates the container and
-keeps its named k3s data volume. Later
-node groups share this node and cannot change its type. An unknown type falls back to `m5.large`
-with a warning. The synthesized EC2 instance reports the selected type.
+group's first `instanceTypes` entry. If that changes the type, Floci recreates the container,
+keeps its named k3s data volume, and reuses its published API port so existing kubeconfigs stay
+valid. Later node groups share this node and cannot change its type. An unknown type falls back to
+`m5.large` with a warning. The synthesized EC2 instance reports the selected type.
 First-group selection is serialized per cluster. If the replacement fails, Floci recreates the
 previous node, marks that node group `CREATE_FAILED`, and keeps its data volume. If recovery also
 fails, the cluster becomes `FAILED` instead of waiting indefinitely for readiness.

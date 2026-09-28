@@ -608,7 +608,7 @@ public class EksClusterManager
             return;
         }
         if (capacityChanged) {
-            replaceRestoredCluster(cluster);
+            replaceClusterContainer(cluster, null);
         }
     }
 
@@ -652,7 +652,7 @@ public class EksClusterManager
     }
 
     /** Keep the old container stopped but recoverable until its replacement has started. */
-    private void replaceRestoredCluster(Cluster cluster) {
+    private boolean replaceClusterContainer(Cluster cluster, String previousType) {
         String oldId = cluster.getContainerId();
         int oldPort = cluster.getHostPort();
         String containerName = cluster.getDockerName();
@@ -663,7 +663,8 @@ public class EksClusterManager
         } catch (RuntimeException cleanup) {
             LOG.warnv("Could not clear prior EKS capacity backup for cluster {0}: {1}; keeping current node",
                     cluster.getName(), cleanup.getMessage());
-            return;
+            restorePreviousNodeType(cluster, previousType);
+            return false;
         }
         boolean renamed = false;
         try {
@@ -678,8 +679,9 @@ public class EksClusterManager
         } catch (RuntimeException replacement) {
             LOG.warnv("Could not replace EKS cluster {0} for node capacity: {1}; restoring surviving node",
                     cluster.getName(), replacement.getMessage());
+            restorePreviousNodeType(cluster, previousType);
             if (!renamed) {
-                return;
+                return false;
             }
             try {
                 lifecycleManager.removeIfExistsStrict(containerName);
@@ -691,7 +693,7 @@ public class EksClusterManager
                 throw new IllegalStateException("Could not restore EKS cluster " + cluster.getName()
                         + " after node capacity replacement failed", rollback);
             }
-            return;
+            return false;
         }
         try {
             lifecycleManager.removeIfExistsStrict(backupName);
@@ -699,6 +701,13 @@ public class EksClusterManager
             LOG.warnv("EKS cluster {0} replacement is running, but its stopped capacity backup"
                     + " could not be removed: {1}; cluster deletion will retry",
                     cluster.getName(), cleanup.getMessage());
+        }
+        return true;
+    }
+
+    private static void restorePreviousNodeType(Cluster cluster, String previousType) {
+        if (previousType != null) {
+            cluster.setNodeInstanceType(previousType);
         }
     }
 
@@ -880,32 +889,7 @@ public class EksClusterManager
         if (cluster.getContainerId() == null) {
             return true;
         }
-        int oldPort = cluster.getHostPort();
-        try {
-            unregisterMetadataEndpoint(cluster);
-            Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
-            lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
-            portAllocator.release(oldPort);
-            cluster.setContainerId(null);
-            startCluster(cluster);
-            return true;
-        } catch (RuntimeException e) {
-            LOG.warnv("Could not apply new node capacity to EKS cluster {0}: {1}; restoring prior type {2}",
-                    cluster.getName(), e.getMessage(), previousType);
-            cluster.setNodeInstanceType(previousType);
-            try {
-                lifecycleManager.removeIfExists(cluster.getDockerName());
-                portAllocator.release(oldPort);
-                portAllocator.release(cluster.getHostPort());
-                cluster.setContainerId(null);
-                startCluster(cluster);
-                return false;
-            } catch (RuntimeException rollback) {
-                cluster.setContainerId(null);
-                throw new IllegalStateException("Could not restore EKS cluster " + cluster.getName()
-                        + " after node capacity change failed", rollback);
-            }
-        }
+        return replaceClusterContainer(cluster, previousType);
     }
 
     /**

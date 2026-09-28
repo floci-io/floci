@@ -209,9 +209,7 @@ public class EksService implements TagHandler, ResourceProvider {
                 cluster.setPodCidr(EksClusterManager.DEFAULT_POD_CIDR);
                 if (cluster.getNodeInstanceType() == null) {
                     firstNodeGroup(cluster.getName(), entry.accountId()).ifPresent(group ->
-                            cluster.setNodeInstanceType(clusterManager.selectNodeInstanceType(
-                                    group.getInstanceTypes() == null || group.getInstanceTypes().isEmpty()
-                                            ? null : group.getInstanceTypes().getFirst())));
+                            cluster.setNodeInstanceType(selectedNodeInstanceType(group)));
                 }
                 clusterManager.restoreCluster(cluster);
             } catch (Exception e) {
@@ -765,9 +763,7 @@ public class EksService implements TagHandler, ResourceProvider {
                     && !config.services().eks().mock() && clusterManager != null) {
                 if (currentCluster.getNodeInstanceType() == null) {
                     firstNodeGroup(clusterName, accountId).ifPresent(group ->
-                            currentCluster.setNodeInstanceType(clusterManager.selectNodeInstanceType(
-                                    group.getInstanceTypes() == null || group.getInstanceTypes().isEmpty()
-                                            ? null : group.getInstanceTypes().getFirst())));
+                            currentCluster.setNodeInstanceType(selectedNodeInstanceType(group)));
                     storage.put(clusterName, currentCluster);
                 }
                 if (!nodeGroup.getInstanceTypes().isEmpty()
@@ -839,12 +835,7 @@ public class EksService implements TagHandler, ResourceProvider {
 
     private void applyFirstNodeGroupCapacity(String clusterName, String nodegroupName,
                                               Cluster currentCluster, Nodegroup nodeGroup) {
-        String requestedType = nodeGroup.getInstanceTypes().isEmpty()
-                ? null : nodeGroup.getInstanceTypes().getFirst();
-        String selectedType = clusterManager.selectNodeInstanceType(requestedType);
-        if (selectedType == null) {
-            selectedType = EksClusterManager.DEFAULT_NODE_INSTANCE_TYPE;
-        }
+        String selectedType = selectedNodeInstanceType(nodeGroup);
         String previousType = EksClusterManager.nodeInstanceType(currentCluster);
         currentCluster.setNodeInstanceType(selectedType);
         if (currentCluster.getContainerId() != null && !selectedType.equals(previousType)) {
@@ -865,6 +856,13 @@ public class EksService implements TagHandler, ResourceProvider {
             }
         }
         storage.put(clusterName, currentCluster);
+    }
+
+    private String selectedNodeInstanceType(Nodegroup group) {
+        String requestedType = group.getInstanceTypes() == null || group.getInstanceTypes().isEmpty()
+                ? null : group.getInstanceTypes().getFirst();
+        String selectedType = clusterManager.selectNodeInstanceType(requestedType);
+        return selectedType != null ? selectedType : EksClusterManager.DEFAULT_NODE_INSTANCE_TYPE;
     }
 
     private LaunchTemplateData validateLaunchTemplate(String region, Object launchTemplateObj) {

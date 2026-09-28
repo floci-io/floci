@@ -492,6 +492,53 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void firstNodeGroupReplacementKeepsTheClusterEndpoint() {
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenReturn(new ContainerInfo("cid-new", Map.of()));
+            Cluster cluster = cluster();
+            cluster.setDockerName("floci-eks-demo");
+            cluster.setContainerId("cid-old");
+            cluster.setHostPort(6441);
+            cluster.setNodeInstanceType("t3.medium");
+
+            assertTrue(manager.restartForNodeCapacity(cluster, "m5.large"));
+
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals(6441, cluster.getHostPort());
+            assertEquals("https://localhost:6441", cluster.getEndpoint());
+            verify(portAllocator, never()).allocate(6440, 6499);
+            verify(portAllocator, never()).release(6441);
+            verify(dockerClient).stopContainerCmd("cid-old");
+            verify(lifecycleManager, Mockito.times(2))
+                    .removeIfExistsStrict("floci-eks-demo-capacity-backup");
+        }
+
+        @Test
+        void failedFirstNodeGroupReplacementRestoresPreviousContainerAndType() {
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenThrow(new IllegalStateException("replacement failed"));
+            when(lifecycleManager.adopt("cid-old", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6441)));
+            Cluster cluster = cluster();
+            cluster.setDockerName("floci-eks-demo");
+            cluster.setContainerId("cid-old");
+            cluster.setHostPort(6441);
+            cluster.setNodeInstanceType("t3.medium");
+
+            assertFalse(manager.restartForNodeCapacity(cluster, "m5.large"));
+
+            assertEquals("m5.large", cluster.getNodeInstanceType());
+            assertEquals("cid-old", cluster.getContainerId());
+            assertEquals(6441, cluster.getHostPort());
+            assertEquals("https://localhost:6441", cluster.getEndpoint());
+            verify(portAllocator, never()).allocate(6440, 6499);
+            verify(portAllocator, never()).release(6441);
+            verify(lifecycleManager, never()).removeVolume(anyString());
+        }
+
+        @Test
         void backupCleanupFailureKeepsTheNewNodeRunning() {
             when(lifecycleManager.findByName("floci-eks-demo"))
                     .thenReturn(Optional.of(containerFromJson("{\"Id\":\"cid-old\"}")));
@@ -1919,25 +1966,6 @@ class EksClusterManagerTest {
             verify(builder).withCmd(cmdCaptor.capture());
             assertFalse(cmdCaptor.getValue().stream().anyMatch(arg -> arg.contains("reserved=")
                     || arg.contains("eviction-hard=")));
-        }
-
-        @Test
-        void failedNodeCapacityChangeRestoresThePreviousContainer() {
-            when(lifecycleManager.startCreated(any(), any()))
-                    .thenThrow(new IllegalStateException("replacement failed"))
-                    .thenReturn(new ContainerInfo("container-id", Map.of()));
-            Cluster cluster = new Cluster();
-            cluster.setName("capacity-cluster");
-            cluster.setContainerId("old-container");
-            cluster.setHostPort(6500);
-            cluster.setNodeInstanceType("t3.medium");
-
-            assertFalse(manager.restartForNodeCapacity(cluster, "m5.large"));
-
-            assertEquals("m5.large", cluster.getNodeInstanceType());
-            assertEquals("container-id", cluster.getContainerId());
-            verify(lifecycleManager).stopAndRemove("old-container", null);
-            verify(lifecycleManager, never()).removeVolume(anyString());
         }
 
         @Test
