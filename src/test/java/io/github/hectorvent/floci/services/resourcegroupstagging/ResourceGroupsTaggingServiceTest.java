@@ -21,6 +21,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ResourceGroupsTaggingServiceTest {
@@ -32,6 +33,7 @@ class ResourceGroupsTaggingServiceTest {
     private static final String INSTANCE_ARN = "arn:aws:ec2:us-east-1:000000000000:instance/i-1";
     private static final String API_KEY_ARN = "arn:aws:apigateway:us-east-1::/apikeys/k1";
     private static final String IOT_ARN = "arn:aws:iot:us-east-1:000000000000:thing/t1";
+    private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/r";
 
     @Test
     void parsedTypeCutsAtSlashOrColonAfterLeadingSlash() {
@@ -64,18 +66,18 @@ class ResourceGroupsTaggingServiceTest {
         assertEquals(List.of(functionArn), arns(filterByType(service, "lambda:function")));
         assertEquals(List.of(logGroupArn), arns(filterByType(service, "logs:log-group")));
         assertEquals(List.of(API_KEY_ARN), arns(filterByType(service, "apigateway:apikeys")));
-        assertEquals(List.of(API_KEY_ARN), arns(filterByType(service, "apigateway:/apikeys")));
+        assertTrue(filterByType(service, "apigateway:/apikeys").isEmpty());
     }
 
     @Test
-    void restApisFilterDoesNotMatchStages() {
+    void restApisFilterMatchesRestApisAndTheirStages() {
         String apiArn = "arn:aws:apigateway:us-east-1::/restapis/a";
         String stageArn = apiArn + "/stages/s";
         ResourceGroupsTaggingService service = service(List.of(provider(
                 resource(apiArn, "apigateway:restapis", Map.of("k", "v")),
                 resource(stageArn, "apigateway:restapis/stages", Map.of("k", "v")))), List.of());
 
-        assertEquals(List.of(apiArn), arns(filterByType(service, "apigateway:restapis")));
+        assertEquals(List.of(apiArn, stageArn), arns(filterByType(service, "apigateway:restapis")));
         assertEquals(List.of(stageArn), arns(filterByType(service, "apigateway:restapis/stages")));
     }
 
@@ -127,14 +129,12 @@ class ResourceGroupsTaggingServiceTest {
     void otherRegionAndOtherAccountAreHidden() {
         String otherRegion = "arn:aws:sqs:us-west-2:000000000000:q-west";
         String otherAccount = "arn:aws:sqs:us-east-1:111111111111:q-foreign";
-        String global = "arn:aws:iam::000000000000:user/u1";
         ResourceGroupsTaggingService service = service(List.of(provider(
                 resource(otherRegion, "sqs:queue", Map.of("k", "v")),
                 resource(otherAccount, "sqs:queue", Map.of("k", "v")),
-                resource(global, "iam:user", Map.of("k", "v")),
                 resource(QUEUE_ARN, "sqs:queue", Map.of("k", "v")))), List.of());
 
-        assertEquals(List.of(global, QUEUE_ARN), arns(allResources(service)));
+        assertEquals(List.of(QUEUE_ARN), arns(allResources(service)));
     }
 
     @Test
@@ -162,13 +162,24 @@ class ResourceGroupsTaggingServiceTest {
     }
 
     @Test
-    void globalProviderResourceIsVisibleInEveryRegion() {
-        String roleArn = "arn:aws:iam::000000000000:role/r";
-        ResourceGroupsTaggingService service = service(List.of(provider(new ExplorerResource(
-                roleArn, "iam:role", "iam", "global", ACCOUNT, Instant.EPOCH, Map.of("k", "v")))), List.of());
+    void globalProviderResourceIsNotListedInAnyRegion() {
+        ResourceGroupsTaggingService service = service(List.of(provider(globalRole(Map.of("k", "v")),
+                resource("arn:aws:iam::000000000000:user/u1", "iam:user", Map.of("k", "v")))), List.of());
 
-        assertEquals(List.of(roleArn), arns(resourcesIn(service, REGION)));
-        assertEquals(List.of(roleArn), arns(resourcesIn(service, "eu-west-1")));
+        assertTrue(resourcesIn(service, REGION).isEmpty());
+        assertTrue(resourcesIn(service, "eu-west-1").isEmpty());
+        assertTrue(service.getTagKeys(null, 0, REGION).items().isEmpty());
+    }
+
+    @Test
+    void storeEntryForGlobalProviderResourceKeepsTheStoreRules() {
+        ResourceGroupsTaggingService service = service(List.of(provider(globalRole(Map.of("k", "v")))), List.of());
+        service.tagResources(List.of(ROLE_ARN), Map.of("team", "a"), REGION);
+
+        List<ResourceTagMapping> items = allResources(service);
+
+        assertEquals(List.of(ROLE_ARN), arns(items));
+        assertEquals(Map.of("team", "a"), items.getFirst().getTags());
     }
 
     @Test
@@ -310,29 +321,78 @@ class ResourceGroupsTaggingServiceTest {
 
     @Test
     void ownerInAnotherRegionIsNotForwarded() {
-        String westApiKeyArn = "arn:aws:apigateway:us-west-2::/apikeys/k-west";
-        RecordingTagHandler handler = new RecordingTagHandler("apigateway", false);
-        ResourceGroupsTaggingService service = service(List.of(
-                provider(resource(westApiKeyArn, "apigateway:apikeys", Map.of()))), List.of(handler));
+        String bucketArn = "arn:aws:s3:::b";
+        RecordingTagHandler handler = new RecordingTagHandler("s3", false);
+        ResourceGroupsTaggingService service = service(List.of(provider(new ExplorerResource(
+                bucketArn, "s3:bucket", "s3", "us-west-2", ACCOUNT, Instant.EPOCH, Map.of()))), List.of(handler));
 
-        service.applyTags(List.of(westApiKeyArn), Map.of("a", "1", "b", "2"), REGION);
-        service.removeTags(List.of(westApiKeyArn), List.of("a"), REGION);
+        service.applyTags(List.of(bucketArn), Map.of("a", "1", "b", "2"), REGION);
+        service.removeTags(List.of(bucketArn), List.of("a"), REGION);
 
         assertTrue(handler.tagged.isEmpty());
         assertTrue(handler.untagged.isEmpty());
-        assertEquals(Map.of("b", "2"), service.getTagsForResource(REGION, westApiKeyArn));
+        assertEquals(Map.of("b", "2"), service.getTagsForResource(REGION, bucketArn));
     }
 
     @Test
     void applyTagsPassesRequestRegionWhenArnHasNone() {
-        String userArn = "arn:aws:iam::000000000000:user/u1";
-        RecordingTagHandler handler = new RecordingTagHandler("iam", false);
-        ResourceGroupsTaggingService service = service(List.of(
-                provider(resource(userArn, "iam:user", Map.of()))), List.of(handler));
+        String bucketArn = "arn:aws:s3:::b";
+        RecordingTagHandler handler = new RecordingTagHandler("s3", false);
+        ResourceGroupsTaggingService service = service(List.of(provider(new ExplorerResource(
+                bucketArn, "s3:bucket", "s3", "eu-west-1", ACCOUNT, Instant.EPOCH, Map.of()))), List.of(handler));
 
-        service.applyTags(List.of(userArn), Map.of("k", "v"), "eu-west-1");
+        service.applyTags(List.of(bucketArn), Map.of("k", "v"), "eu-west-1");
 
         assertEquals(List.of("eu-west-1"), handler.regions);
+    }
+
+    @Test
+    void globalProviderResourceIsNotRoutedToItsOwner() {
+        RecordingTagHandler handler = new RecordingTagHandler("iam", false);
+        ResourceGroupsTaggingService service = service(List.of(provider(globalRole(Map.of()))), List.of(handler));
+
+        service.applyTags(List.of(ROLE_ARN), Map.of("k", "v"), REGION);
+
+        assertTrue(handler.tagged.isEmpty());
+        assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, ROLE_ARN));
+    }
+
+    @Test
+    void applyTagsRejectsArnFromAnotherRegionAndWritesNothing() {
+        String westQueueArn = "arn:aws:sqs:us-west-2:000000000000:q-west";
+        RecordingTagHandler handler = new RecordingTagHandler("apigateway", false);
+        ResourceGroupsTaggingService service = service(List.of(
+                provider(resource(API_KEY_ARN, "apigateway:apikeys", Map.of()))), List.of(handler));
+
+        AwsException e = assertThrows(AwsException.class, () -> service.applyTags(
+                List.of(API_KEY_ARN, QUEUE_ARN, westQueueArn), Map.of("k", "v"), REGION));
+
+        assertEquals("InvalidParameterException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+        assertEquals("Region in the ARN " + westQueueArn
+                + " does not match with the region in which TagResources API is invoked", e.getMessage());
+        assertTrue(handler.tagged.isEmpty());
+        assertTrue(service.getTagsForResource(REGION, QUEUE_ARN).isEmpty());
+        assertTrue(service.getTagsForResource(REGION, westQueueArn).isEmpty());
+    }
+
+    @Test
+    void removeTagsRejectsArnFromAnotherRegionAndRemovesNothing() {
+        String westQueueArn = "arn:aws:sqs:us-west-2:000000000000:q-west";
+        RecordingTagHandler handler = new RecordingTagHandler("apigateway", false);
+        ResourceGroupsTaggingService service = service(List.of(
+                provider(resource(API_KEY_ARN, "apigateway:apikeys", Map.of()))), List.of(handler));
+        service.tagResources(List.of(QUEUE_ARN), Map.of("k", "v"), REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.removeTags(
+                List.of(API_KEY_ARN, QUEUE_ARN, westQueueArn), List.of("k"), REGION));
+
+        assertEquals("InvalidParameterException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+        assertEquals("Region in the ARN " + westQueueArn
+                + " does not match with the region in which UntagResources API is invoked", e.getMessage());
+        assertTrue(handler.untagged.isEmpty());
+        assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, QUEUE_ARN));
     }
 
     @Test
@@ -434,6 +494,11 @@ class ResourceGroupsTaggingServiceTest {
     private static ExplorerResource resource(String arn, String resourceType, Map<String, String> tags) {
         String[] parts = arn.split(":", 6);
         return new ExplorerResource(arn, resourceType, parts[2], parts[3], parts[4], Instant.EPOCH, tags);
+    }
+
+    // IamService reports its region-less ARNs with the region "global".
+    private static ExplorerResource globalRole(Map<String, String> tags) {
+        return new ExplorerResource(ROLE_ARN, "iam:role", "iam", "global", ACCOUNT, Instant.EPOCH, tags);
     }
 
     private static ResourceProvider provider(ExplorerResource... resources) {

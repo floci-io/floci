@@ -144,8 +144,11 @@ public class ResourceGroupsTaggingService implements Resettable {
      * they can never recurse through their own handler.
      *
      * @return the owning service's rejection per ARN, empty when every ARN was tagged
+     * @throws AwsException {@code InvalidParameterException} when an ARN names another region;
+     *                      nothing is tagged then
      */
     public Map<String, AwsException> applyTags(List<String> resourceArns, Map<String, String> tags, String region) {
+        rejectOtherRegion(resourceArns, region, "TagResources");
         Map<String, AwsException> failures = new LinkedHashMap<>();
         Map<String, TagHandler> owners = listedOwners(resourceArns, region);
         for (String arn : resourceArns) {
@@ -168,8 +171,11 @@ public class ResourceGroupsTaggingService implements Resettable {
      * leave the tagging store for every ARN whose owning service did not reject them.
      *
      * @return the owning service's rejection per ARN, empty when every ARN was untagged
+     * @throws AwsException {@code InvalidParameterException} when an ARN names another region;
+     *                      nothing is untagged then
      */
     public Map<String, AwsException> removeTags(List<String> resourceArns, List<String> tagKeys, String region) {
+        rejectOtherRegion(resourceArns, region, "UntagResources");
         Map<String, AwsException> failures = new LinkedHashMap<>();
         Map<String, TagHandler> owners = listedOwners(resourceArns, region);
         List<String> untagged = new ArrayList<>();
@@ -189,6 +195,16 @@ public class ResourceGroupsTaggingService implements Resettable {
         return failures;
     }
 
+    private static void rejectOtherRegion(List<String> resourceArns, String region, String operation) {
+        for (String arn : resourceArns) {
+            String arnRegion = AwsArnUtils.regionOrDefault(arn, "");
+            if (!arnRegion.isEmpty() && !arnRegion.equals(region)) {
+                throw new AwsException("InvalidParameterException", "Region in the ARN " + arn
+                        + " does not match with the region in which " + operation + " API is invoked", 400);
+            }
+        }
+    }
+
     // Providers are only read when some ARN has a handler, so a store-only request stays cheap.
     private Map<String, TagHandler> listedOwners(List<String> resourceArns, String region) {
         Map<String, TagHandler> owners = new HashMap<>();
@@ -203,7 +219,9 @@ public class ResourceGroupsTaggingService implements Resettable {
                 listed = new HashSet<>();
                 for (ExplorerResource resource : providerResources()) {
                     String listedArn = withoutWildcard(resource.arn());
-                    if (isVisible(listedArn, resource.region(), region, accountId)) {
+                    String resourceRegion = providerRegion(listedArn, resource.region());
+                    if (resourceRegion != null && resourceRegion.equals(region)
+                            && isVisible(listedArn, region, accountId)) {
                         listed.add(listedArn);
                     }
                 }
@@ -280,11 +298,8 @@ public class ResourceGroupsTaggingService implements Resettable {
             return false;
         }
         AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
-        // The owner's declared types decide; only an ARN known just to the store falls back to its parsed type.
-        Set<String> types = entry.declaredTypes().isEmpty()
-                ? Set.of(parsedType(arn.resource()))
-                : entry.declaredTypes();
-        // filter format is "service[:resourceType]" (e.g. "ec2:instance", "apigateway:/apikeys")
+        String resourceType = parsedType(arn.resource());
+        // filter format is "service[:resourceType]" (e.g. "ec2:instance", "apigateway:restapis/stages")
         for (String filter : resourceTypeFilters) {
             String[] filterParts = filter.split(":", 2);
             if (!filterParts[0].equalsIgnoreCase(arn.service())) {
@@ -293,8 +308,9 @@ public class ResourceGroupsTaggingService implements Resettable {
             if (filterParts.length == 1) {
                 return true;
             }
-            String filterType = stripLeadingSlash(filterParts[1]);
-            if (types.stream().anyMatch(filterType::equalsIgnoreCase)) {
+            String filterType = filterParts[1];
+            if (filterType.equalsIgnoreCase(resourceType)
+                    || entry.declaredTypes().stream().anyMatch(filterType::equalsIgnoreCase)) {
                 return true;
             }
         }
@@ -338,14 +354,18 @@ public class ResourceGroupsTaggingService implements Resettable {
         Map<String, ViewEntry> byArn = new TreeMap<>();
         for (ResourceTagMapping stored : store.values()) {
             String arn = stored.getResourceArn();
-            if (isVisible(arn, null, region, accountId)) {
+            if (isVisible(arn, region, accountId)) {
                 byArn.computeIfAbsent(arn, ViewEntry::of).mapping().getTags().putAll(stored.getTags());
             }
         }
         for (ExplorerResource resource : providerResources()) {
             String arn = withoutWildcard(resource.arn());
+            String resourceRegion = providerRegion(arn, resource.region());
+            if (resourceRegion == null) {
+                continue;
+            }
             // The owner's region decides, so a store copy of a region-less ARN must not surface elsewhere.
-            if (!isVisible(arn, resource.region(), region, accountId)) {
+            if (!resourceRegion.equals(region) || !isVisible(arn, region, accountId)) {
                 byArn.remove(arn);
                 continue;
             }
@@ -384,23 +404,22 @@ public class ResourceGroupsTaggingService implements Resettable {
     }
 
     // Region and account come from the ARN (arn:<partition>:svc:region:acct:resource), and a string
-    // that is not an ARN stays visible as it always has. An empty ARN region falls back to
-    // fallbackRegion (a provider resource's own region, null for store entries); a fallback that
-    // is null, empty or "global" means the resource is global.
-    private static boolean isVisible(String arn, String fallbackRegion, String region, String accountId) {
+    // that is not an ARN, or an ARN without a region, stays visible as it always has.
+    private static boolean isVisible(String arn, String region, String accountId) {
         String[] parts = arn.split(":", 6);
-        if (parts.length >= 4 && !regionMatches(parts[3], fallbackRegion, region)) {
+        if (parts.length >= 4 && !parts[3].isEmpty() && !parts[3].equals(region)) {
             return false;
         }
         return accountId == null || parts.length < 5 || parts[4].isEmpty() || parts[4].equals(accountId);
     }
 
-    private static boolean regionMatches(String arnRegion, String fallbackRegion, String region) {
-        if (!arnRegion.isEmpty()) {
-            return arnRegion.equals(region);
-        }
-        return fallbackRegion == null || fallbackRegion.isEmpty() || fallbackRegion.equals(GLOBAL_REGION)
-                || fallbackRegion.equals(region);
+    // A provider resource's region is its ARN's, else the owner's region for it. Null means it has none,
+    // like the IAM resources reported as "global": the tagging API never lists or routes those.
+    private static String providerRegion(String arn, String ownerRegion) {
+        String resourceRegion = AwsArnUtils.regionOrDefault(arn, ownerRegion);
+        return resourceRegion == null || resourceRegion.isEmpty() || resourceRegion.equals(GLOBAL_REGION)
+                ? null
+                : resourceRegion;
     }
 
     // ─── GetTagKeys ────────────────────────────────────────────────────────────

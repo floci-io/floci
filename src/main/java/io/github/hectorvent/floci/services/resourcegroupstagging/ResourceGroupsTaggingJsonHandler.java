@@ -126,13 +126,13 @@ public class ResourceGroupsTaggingJsonHandler {
 
     // ─── Helpers ───────────────────────────────────────────────────────────────
 
-    // FailureInfo.ErrorCode is an enum of InternalServiceException and InvalidParameterException only.
+    // AWS reports the owning service's own error, although the model's ErrorCode enum names only two codes.
     private ObjectNode failedResourcesMap(Map<String, AwsException> failures) {
         ObjectNode map = objectMapper.createObjectNode();
         failures.forEach((arn, e) -> {
             ObjectNode info = map.putObject(arn);
             info.put("StatusCode", e.getHttpStatus());
-            info.put("ErrorCode", e.getHttpStatus() >= 500 ? "InternalServiceException" : "InvalidParameterException");
+            info.put("ErrorCode", e.getErrorCode());
             info.put("ErrorMessage", e.getMessage());
         });
         return map;

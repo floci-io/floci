@@ -28,6 +28,7 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     private static final String JSON_1_1 = "application/x-amz-json-1.1";
     private static final String ARN_PREFIX = "arn:aws:%s:us-east-1:000000000000:";
     private static final String APIGATEWAY_ARN_PREFIX = "arn:aws:apigateway:us-east-1::";
+    private static final String IAM_AUTH = "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -195,7 +196,7 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
             .body("ResourceTagMappingList[0].Tags.size()", equalTo(3))
             .body("ResourceTagMappingList[0].Tags.find { it.Key == 'cid' }.Value", equalTo("c1"));
         getResources(rsidFilter("apigateway:/apikeys", marker))
-            .body("ResourceTagMappingList.ResourceARN", contains(arn));
+            .body("ResourceTagMappingList", empty());
 
         deleteApiKey(id);
         getResources(rsidFilter("apigateway:apikeys", marker))
@@ -256,7 +257,7 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
             .statusCode(200)
             .body("FailedResourcesMap", hasKey(arn))
             .body("FailedResourcesMap['%s'].StatusCode".formatted(arn), equalTo(400))
-            .body("FailedResourcesMap['%s'].ErrorCode".formatted(arn), equalTo("InvalidParameterException"))
+            .body("FailedResourcesMap['%s'].ErrorCode".formatted(arn), equalTo("BadRequestException"))
             .body("FailedResourcesMap['%s'].ErrorMessage".formatted(arn), containsString("floci:override-id"));
 
         getResources(rsidFilter("apigateway:apikeys", marker))
@@ -386,8 +387,8 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
 
     @Test
     void stageIsDiscoveredByType() {
-        String apiId = createRestApi(unique());
         String marker = unique();
+        String apiId = createRestApi(marker);
         String deploymentId = given()
             .contentType("application/json")
             .body("{}")
@@ -406,13 +407,61 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
         .then()
             .statusCode(201);
 
+        String restApiArn = APIGATEWAY_ARN_PREFIX + "/restapis/" + apiId;
         getResources(markerFilter("apigateway:restapis/stages", marker))
-            .body("ResourceTagMappingList.ResourceARN",
-                    contains(APIGATEWAY_ARN_PREFIX + "/restapis/" + apiId + "/stages/dev"));
+            .body("ResourceTagMappingList.ResourceARN", contains(restApiArn + "/stages/dev"));
         getResources(markerFilter("apigateway:restapis", marker))
-            .body("ResourceTagMappingList", empty());
+            .body("ResourceTagMappingList.ResourceARN", contains(restApiArn, restApiArn + "/stages/dev"));
 
         given().when().delete("/restapis/" + apiId).then().statusCode(202);
+    }
+
+    @Test
+    void taggedIamRoleIsNotListed() {
+        String role = "discovery-" + unique();
+        String marker = unique();
+        given()
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", role)
+            .formParam("AssumeRolePolicyDocument", """
+                {"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+                 "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]}""")
+            .formParam("Tags.member.1.Key", "fd")
+            .formParam("Tags.member.1.Value", marker)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        getResources("""
+                {"TagFilters": [%s]}
+                """.formatted(tagFilter("fd", marker)))
+            .body("ResourceTagMappingList", empty());
+
+        given()
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "DeleteRole")
+            .formParam("RoleName", role)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void tagResourcesRejectsArnFromAnotherRegion() {
+        String marker = unique();
+        String westArn = "arn:aws:sqs:eu-west-1:000000000000:discovery-" + marker;
+
+        tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"fd": "%s"}}
+                """.formatted(westArn, marker))
+            .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"))
+            .body("message", equalTo("Region in the ARN " + westArn
+                    + " does not match with the region in which TagResources API is invoked"));
     }
 
     @Test

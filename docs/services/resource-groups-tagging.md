@@ -22,11 +22,15 @@ well, and its tags are kept in the tagging store.
 | `GetTagValues` | Lists distinct values for a requested tag key in the current region |
 
 `TagResources` and `UntagResources` return an empty `FailedResourcesMap` on
-success. An ARN the owning service rejected is listed there with its
-`StatusCode`, `ErrorCode` and `ErrorMessage`, and the call still returns
-HTTP 200. `GetResources`, `GetTagKeys`, and `GetTagValues` support pagination
-tokens for multi-page responses; a token past the last result returns an empty
-page.
+success. An ARN the owning service rejected is listed there with that
+service's own `StatusCode`, `ErrorCode` and `ErrorMessage`, such as
+`400 BadRequestException` for a reserved `floci:` key on an API key, and the
+call still returns HTTP 200. An ARN that names a region other than the
+request's fails the whole call with HTTP 400 `InvalidParameterException`,
+`Region in the ARN <arn> does not match with the region in which TagResources
+API is invoked` (or `UntagResources`), and nothing is tagged or untagged.
+`GetResources`, `GetTagKeys`, and `GetTagValues` support pagination tokens for
+multi-page responses; a token past the last result returns an empty page.
 
 ## Resource discovery
 
@@ -79,23 +83,26 @@ Tag those resources through their own service to see the tags in both places.
 | `ResourceTypeFilters` | Matches `service` or `service:resourceType`, such as `lambda`, `lambda:function` or `ec2:instance` |
 | `ResourcesPerPage` + `PaginationToken` | Pages through matching resource mappings |
 
-The resource type in `service:resourceType`, with one leading `/` dropped,
-matches the type the owning service declares for the resource, such as
-`lambda:function`, `sqs:queue`, `apigateway:apikeys` (or `apigateway:/apikeys`)
-and `apigateway:restapis/stages`. So `apigateway:restapis` lists REST APIs but
-not their stages. For an ARN known only to the tagging store, the type is the
-ARN resource part with one leading `/` dropped, cut at the first `/` or `:`, so
-`logs:log-group` and `ec2:instance` match there too.
+The resource type in `service:resourceType` matches the ARN's type, which is
+the ARN resource part with one leading `/` dropped, cut at the first `/` or
+`:`, or the type the owning service declares for the resource. So
+`lambda:function`, `logs:log-group`, `ec2:instance`, `apigateway:apikeys` and
+`apigateway:restapis/stages` all match. SQS queue ARNs have no type segment, so
+`sqs:queue` matches through the type SQS declares for its queues. As in AWS,
+`apigateway:restapis` lists REST APIs together with their stages, and a filter
+type with a leading `/`, such as `apigateway:/apikeys`, matches nothing.
 
 A resource is visible in the region its ARN names. When the ARN has no region,
 such as an S3 bucket ARN, the owning service's region for the resource
 decides, also for tags the tagging store holds for that ARN, so an
 `eu-west-1` bucket tagged through `TagResources` is not listed from
-`us-east-1`. IAM users and roles, and region-less ARNs known only to the
-tagging store, are visible in every region. Every store is per account, so
-results are scoped to the calling account. An ARN with an empty account
-segment, such as an API Gateway ARN, only leaves the account out of the ARN;
-the resource is still listed for the account that owns it.
+`us-east-1`. A region-less ARN known only to the tagging store is visible in
+every region. As in AWS, a resource the owning service reports without a
+region, or in the region `global` as IAM does for users and roles, is never
+listed, and `TagResources` does not forward to its owning service. Every store
+is per account, so results are scoped to the calling account. An ARN with an
+empty account segment, such as an API Gateway ARN, only leaves the account out
+of the ARN; the resource is still listed for the account that owns it.
 
 ## Configuration
 
