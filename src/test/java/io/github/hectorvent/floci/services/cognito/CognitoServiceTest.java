@@ -2498,6 +2498,25 @@ class CognitoServiceTest {
         assertEquals("NotAuthorizedException", ex.getErrorCode());
     }
 
+    @Test
+    void passwordVerifierWithoutSessionReturnsNotAuthorized() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        AwsException userError = assertThrows(AwsException.class, () ->
+                service.respondToAuthChallenge(client.getClientId(), "PASSWORD_VERIFIER", null, Map.of()));
+        assertEquals("NotAuthorizedException", userError.getErrorCode());
+        assertEquals("Session not found", userError.getMessage());
+        assertEquals(400, userError.getHttpStatus());
+
+        AwsException adminError = assertThrows(AwsException.class, () ->
+                service.adminRespondToAuthChallenge(pool.getId(), client.getClientId(),
+                        "PASSWORD_VERIFIER", null, Map.of()));
+        assertEquals("NotAuthorizedException", adminError.getErrorCode());
+        assertEquals("Session not found", adminError.getMessage());
+        assertEquals(400, adminError.getHttpStatus());
+    }
+
     // =========================================================================
     // Auth challenge session expiry
     // =========================================================================
