@@ -50,7 +50,8 @@ class RedshiftStaleContainerIntegrationTest {
         try {
             dockerClient.pingCmd().exec();
             available = true;
-        } catch (RuntimeException e) {
+        } catch (RuntimeException ignored) {
+            // An unreachable daemon only means this test is skipped; the assumption message says so.
             available = false;
         }
         Assumptions.assumeTrue(available, "Docker daemon must be available for Redshift container tests");
@@ -61,22 +62,32 @@ class RedshiftStaleContainerIntegrationTest {
         String containerName = ContainerStorageHelper.dockerName(
                 config, "redshift-" + config.defaultAccountId() + "-" + CLUSTER_ID);
         String image = imageCacheService.ensureImageExists(config.services().redshift().imageVersion());
+        // An interrupted earlier run may have left its fixture under the same name
+        lifecycleManager.removeIfExists(containerName);
         String staleId = dockerClient.createContainerCmd(image)
                 .withName(containerName)
                 .exec()
                 .getId();
+        Response created = null;
         try {
-            query("Action", "CreateCluster", "ClusterIdentifier", CLUSTER_ID,
-                    "NodeType", "dc2.large", "MasterUsername", "admin", "MasterUserPassword", "Password123")
-                    .then().statusCode(200);
+            created = query("Action", "CreateCluster", "ClusterIdentifier", CLUSTER_ID,
+                    "NodeType", "dc2.large", "MasterUsername", "admin", "MasterUserPassword", "Password123");
+            created.then().statusCode(200);
 
             Optional<Container> running = lifecycleManager.findByName(containerName);
             assertTrue(running.isPresent());
             assertNotEquals(staleId, running.get().getId());
         } finally {
-            query("Action", "DeleteCluster", "ClusterIdentifier", CLUSTER_ID,
-                    "SkipFinalClusterSnapshot", "true");
-            lifecycleManager.removeIfExists(containerName);
+            try {
+                // Only a created cluster can be deleted; asserting a 404 here would hide the original failure
+                if (created != null && created.statusCode() == 200) {
+                    query("Action", "DeleteCluster", "ClusterIdentifier", CLUSTER_ID,
+                            "SkipFinalClusterSnapshot", "true")
+                            .then().statusCode(200);
+                }
+            } finally {
+                lifecycleManager.removeIfExists(containerName);
+            }
         }
     }
 
