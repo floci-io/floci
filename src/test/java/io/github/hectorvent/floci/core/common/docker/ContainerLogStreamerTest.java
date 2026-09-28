@@ -83,34 +83,28 @@ class ContainerLogStreamerTest {
                 eq("555555555555"), eq("/aws/lambda/example"), eq("stream"), anyList(), eq("us-east-1"));
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    void attachedStreamAlwaysReachesCloudWatchAndConsoleIsOptional(boolean logToConsole) {
+    @Test
+    void attachedStreamStillReachesCloudWatchAndConsole() {
         DockerClient dockerClient = mock(DockerClient.class);
         LogContainerCmd command = mock(LogContainerCmd.class, RETURNS_SELF);
         when(dockerClient.logContainerCmd("container-1")).thenReturn(command);
         CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
         ContainerLogStreamer streamer = new ContainerLogStreamer(dockerClient, cloudWatchLogsService);
 
-        if (logToConsole) {
-            streamer.attachForAccount("555555555555", "container-1", "/aws/eks/cluster/cluster",
-                    "stream", "us-east-1", "eks:cluster");
-        } else {
-            streamer.attachForAccount("555555555555", "container-1", "/aws/eks/cluster/cluster",
-                    "stream", "us-east-1", "eks:cluster", false);
-        }
+        streamer.attachForAccount("555555555555", "container-1", "/aws/eks/cluster/cluster",
+                "stream", "us-east-1", "eks:cluster");
         ArgumentCaptor<ContainerLogStreamer.LogReassemblyCallback> callback =
                 ArgumentCaptor.forClass(ContainerLogStreamer.LogReassemblyCallback.class);
         verify(command).exec(callback.capture());
 
         List<LogRecord> records = captureConsoleLogs(() ->
-                callback.getValue().onNext(new Frame(StreamType.STDOUT, utf8("audit event\n"))));
+                callback.getValue().onNext(new Frame(StreamType.STDOUT, utf8("container output\n"))));
 
-        assertEquals(logToConsole ? 1 : 0, records.size());
+        assertEquals(1, records.size());
         verify(cloudWatchLogsService).putLogEventsForAccount(
                 eq("555555555555"), eq("/aws/eks/cluster/cluster"), eq("stream"),
                 argThat(events ->
-                        events.size() == 1 && "audit event".equals(events.getFirst().get("message"))),
+                        events.size() == 1 && "container output".equals(events.getFirst().get("message"))),
                 eq("us-east-1"));
     }
 

@@ -85,18 +85,7 @@ public class ContainerLogStreamer {
     public Closeable attachForAccount(
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix) {
-        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null, true);
-    }
-
-    /**
-     * Attaches a stream that always forwards to CloudWatch Logs.
-     *
-     * @param logToConsole whether to also write each line to the Floci console at INFO level
-     */
-    public Closeable attachForAccount(
-            String accountId, String containerId, String logGroup, String logStream,
-            String region, String logPrefix, boolean logToConsole) {
-        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null, logToConsole);
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null);
     }
 
     /**
@@ -105,28 +94,21 @@ public class ContainerLogStreamer {
     public Closeable attachFromNowForAccount(
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix) {
-        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, Instant.now(), true);
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, Instant.now());
     }
 
     /** {@code since} of null follows the container's complete log history. */
     Closeable attachForAccount(
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix, Instant since) {
-        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, since, true);
-    }
-
-    private Closeable attachForAccount(
-            String accountId, String containerId, String logGroup, String logStream,
-            String region, String logPrefix, Instant since, boolean logToConsole) {
         ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
 
-        // Trim trailing whitespace and drop blank lines before forwarding each reassembled line.
+        // Trim trailing whitespace and drop blank lines, then fan each reassembled line out to the
+        // console logger and CloudWatch Logs.
         Consumer<String> emitter = line -> {
             String trimmed = line.stripTrailing();
             if (!trimmed.isEmpty()) {
-                if (logToConsole) {
-                    LOG.infov("[{0}] {1}", logPrefix, trimmed);
-                }
+                LOG.infov("[{0}] {1}", logPrefix, trimmed);
                 forwardToCloudWatchLogs(accountId, logGroup, logStream, region, trimmed);
             }
         };
@@ -188,7 +170,7 @@ public class ContainerLogStreamer {
     }
 
     /**
-     * Shared frame handling for both the container log stream and exec streams.
+     * Handles frames from Docker exec streams.
      *
      * @param accountId account that owns the destination log stream, or {@code null} for the
      *                  default account
