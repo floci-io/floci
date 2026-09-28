@@ -380,6 +380,10 @@ public class EksClusterManager
      * {@link #isReady(Cluster)} returns true and {@link #finalizeCluster(Cluster)} is called.
      */
     public void startCluster(Cluster cluster) {
+        startCluster(cluster, null);
+    }
+
+    private void startCluster(Cluster cluster, Integer retainedPort) {
         String image = resolveClusterImage(cluster);
         if (cluster.getDockerName() == null) {
             cluster.setDockerName(accountQualifiedName(cluster));
@@ -390,7 +394,7 @@ public class EksClusterManager
                 cluster.getName(), image);
 
         // Allocate host port for the k3s API server
-        int hostPort = portAllocator.allocate(
+        int hostPort = retainedPort != null ? retainedPort : portAllocator.allocate(
                 config.services().eks().apiServerBasePort(),
                 config.services().eks().apiServerMaxPort());
 
@@ -597,31 +601,36 @@ public class EksClusterManager
 
         String desiredCapacity = capacityLabel(cluster, resolveNodeCapacity(cluster));
         Map<String, String> existingLabels = existing.get().getLabels();
-        if (existingLabels == null || !desiredCapacity.equals(existingLabels.get(NODE_CAPACITY_LABEL))) {
-            LOG.infov("Recreating EKS cluster {0} to apply current node capacity limits", cluster.getName());
+        boolean capacityChanged = existingLabels == null
+                || !desiredCapacity.equals(existingLabels.get(NODE_CAPACITY_LABEL));
+        if (!adoptSurvivingCluster(cluster, existing.get().getId())) {
             startCluster(cluster);
             return;
         }
+        if (capacityChanged) {
+            replaceRestoredCluster(cluster);
+        }
+    }
 
+    private boolean adoptSurvivingCluster(Cluster cluster, String containerId) {
         if (config.services().eks().irsaSigningKey() && oidcService != null) {
-            reinjectSigningKeys(existing.get().getId(), cluster);
+            reinjectSigningKeys(containerId, cluster);
         }
 
         ContainerInfo info;
         try {
-            info = lifecycleManager.adopt(existing.get().getId(), List.of(K3S_API_SERVER_PORT));
+            info = lifecycleManager.adopt(containerId, List.of(K3S_API_SERVER_PORT));
         } catch (Exception e) {
             LOG.warnv("Could not adopt surviving k3s container {0} for EKS cluster {1} ({2}); recreating it",
-                    containerName, cluster.getName(), e.getMessage());
-            startCluster(cluster);
-            return;
+                    cluster.getDockerName(), cluster.getName(), e.getMessage());
+            return false;
         }
 
         var publishedPort = info.publishedHostPort(K3S_API_SERVER_PORT);
         if (publishedPort.isEmpty()) {
-            LOG.warnv("Surviving k3s container {0} publishes no API server port; recreating it", containerName);
-            startCluster(cluster);
-            return;
+            LOG.warnv("Surviving k3s container {0} publishes no API server port; recreating it",
+                    cluster.getDockerName());
+            return false;
         }
 
         int hostPort = publishedPort.getAsInt();
@@ -629,7 +638,7 @@ public class EksClusterManager
         portAllocator.markReserved(hostPort);
         cluster.setContainerId(info.containerId());
         cluster.setHostPort(hostPort);
-        applyEndpoints(cluster, containerName, hostPort, info);
+        applyEndpoints(cluster, cluster.getDockerName(), hostPort, info);
         registerClusterNodeInstance(cluster, info.containerId());
         configureLinkLocalMetadataEndpoint(cluster, info.containerId());
         configurePodIdentityRelay(cluster, info.containerId());
@@ -639,6 +648,44 @@ public class EksClusterManager
 
         LOG.infov("Adopted surviving k3s container {0} for EKS cluster {1} on port {2} (internal: {3})",
                 info.containerId(), cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
+        return true;
+    }
+
+    /** Keep the old container stopped but recoverable until its replacement has started. */
+    private void replaceRestoredCluster(Cluster cluster) {
+        String oldId = cluster.getContainerId();
+        int oldPort = cluster.getHostPort();
+        String containerName = cluster.getDockerName();
+        String backupName = containerName + "-capacity-backup-" + UUID.randomUUID();
+        DockerClient docker = lifecycleManager.getDockerClient();
+        boolean renamed = false;
+        try {
+            docker.renameContainerCmd(oldId).withName(backupName).exec();
+            renamed = true;
+            docker.stopContainerCmd(oldId).exec();
+            unregisterMetadataEndpoint(cluster);
+            closeQuietly(clusterLogHandles.remove(clusterResourceName(cluster)));
+            cluster.setContainerId(null);
+            startCluster(cluster, oldPort);
+            lifecycleManager.removeIfExists(backupName);
+            LOG.infov("Replaced EKS cluster {0} to apply current node capacity limits", cluster.getName());
+        } catch (RuntimeException replacement) {
+            LOG.warnv("Could not replace EKS cluster {0} for node capacity: {1}; restoring surviving node",
+                    cluster.getName(), replacement.getMessage());
+            if (!renamed) {
+                return;
+            }
+            try {
+                lifecycleManager.removeIfExistsStrict(containerName);
+                docker.renameContainerCmd(oldId).withName(containerName).exec();
+                if (!adoptSurvivingCluster(cluster, oldId)) {
+                    throw new IllegalStateException("Could not adopt previous EKS container " + oldId);
+                }
+            } catch (RuntimeException rollback) {
+                throw new IllegalStateException("Could not restore EKS cluster " + cluster.getName()
+                        + " after node capacity replacement failed", rollback);
+            }
+        }
     }
 
     /**

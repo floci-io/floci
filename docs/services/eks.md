@@ -410,8 +410,9 @@ amount.
 
 The reservation formulas follow the [EKS AMI nodeadm source](https://github.com/awslabs/amazon-eks-ami/blob/main/nodeadm/internal/kubelet/config.go) and [AWS's node memory calculation](https://docs.aws.amazon.com/batch/latest/userguide/memory-cpu-batch-eks.html).
 On restore, a surviving container whose capacity label differs from the current calculation is
-recreated against the retained data volume. This also upgrades containers started before resource
-limits were available.
+recreated against the retained data volume, reusing its published API port. Floci keeps the old
+container until the replacement starts and restarts it if replacement fails. This also upgrades
+containers started before resource limits were available.
 
 #### Cluster node provider ID and topology labels
 

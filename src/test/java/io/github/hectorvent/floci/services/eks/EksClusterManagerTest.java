@@ -365,6 +365,7 @@ class EksClusterManagerTest {
         private EmulatorConfig.StorageConfig storage;
         private ContainerLifecycleManager lifecycleManager;
         private PortAllocator portAllocator;
+        private DockerClient dockerClient;
         private EksClusterManager manager;
 
         @BeforeEach
@@ -391,6 +392,8 @@ class EksClusterManagerTest {
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
             when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
             portAllocator = Mockito.mock(PortAllocator.class);
+            dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
             manager = new EksClusterManager(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), portAllocator,
@@ -455,6 +458,8 @@ class EksClusterManagerTest {
         void recreatesAnOldSurvivorWithoutCapacityLimits() {
             when(lifecycleManager.findByName("floci-eks-demo"))
                     .thenReturn(Optional.of(containerFromJson("{\"Id\":\"cid-old\"}")));
+            when(lifecycleManager.adopt("cid-old", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
             stubFreshStart("cid-new", 6440);
 
             Cluster cluster = cluster();
@@ -462,7 +467,28 @@ class EksClusterManagerTest {
 
             assertEquals("cid-new", cluster.getContainerId());
             verify(lifecycleManager).create(any());
-            verify(lifecycleManager, never()).adopt(anyString(), any());
+            verify(portAllocator, never()).allocate(6440, 6499);
+            verify(dockerClient).stopContainerCmd("cid-old");
+        }
+
+        @Test
+        void restoresOldSurvivorWhenCapacityReplacementFails() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(containerFromJson("{\"Id\":\"cid-old\"}")));
+            when(lifecycleManager.adopt("cid-old", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenThrow(new RuntimeException("replacement failed"));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-old", cluster.getContainerId());
+            assertEquals(6440, cluster.getHostPort());
+            verify(lifecycleManager).removeIfExistsStrict("floci-eks-demo");
+            verify(dockerClient).stopContainerCmd("cid-old");
+            verify(portAllocator, never()).allocate(6440, 6499);
         }
 
         @Test
