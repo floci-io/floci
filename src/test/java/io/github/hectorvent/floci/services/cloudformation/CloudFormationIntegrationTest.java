@@ -1122,7 +1122,7 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", stackName)
             .formParam("TemplateBody", template.formatted(functionName, """
                 ,
-                    "Tags": [{"Key": "team", "Value": "a"}, {"Key": "env", "Value": "dev"}]"""))
+                    "Tags": [{"Key": "a", "Value": "1"}, {"Key": "b", "Value": "2"}]"""))
         .when()
             .post("/")
         .then()
@@ -1134,14 +1134,14 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body("Tags.size()", equalTo(2))
-            .body("Tags.team", equalTo("a"))
-            .body("Tags.env", equalTo("dev"));
+            .body("Tags.a", equalTo("1"))
+            .body("Tags.b", equalTo("2"));
 
         given()
             .header("X-Amz-Target", "ResourceGroupsTaggingAPI_20170126.GetResources")
             .contentType(TAGGING_CONTENT_TYPE)
             .body("""
-                {"ResourceTypeFilters": ["lambda:function"], "TagFilters": [{"Key": "team", "Values": ["a"]}]}
+                {"ResourceTypeFilters": ["lambda:function"], "TagFilters": [{"Key": "a", "Values": ["1"]}]}
                 """)
         .when()
             .post("/")
@@ -1150,12 +1150,22 @@ class CloudFormationIntegrationTest {
             .body("ResourceTagMappingList.ResourceARN", hasItem(functionArn));
 
         given()
+            .contentType("application/json")
+            .body("""
+                {"Tags": {"oob": "x"}}
+                """)
+        .when()
+            .post("/2017-03-31/tags/" + functionArn)
+        .then()
+            .statusCode(204);
+
+        given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
             .formParam("TemplateBody", template.formatted(functionName, """
                 ,
-                    "Tags": [{"Key": "team", "Value": "b"}]"""))
+                    "Tags": [{"Key": "a", "Value": "1"}, {"Key": "c", "Value": "3"}]"""))
         .when()
             .post("/")
         .then()
@@ -1166,25 +1176,10 @@ class CloudFormationIntegrationTest {
             .get("/2017-03-31/tags/" + functionArn)
         .then()
             .statusCode(200)
-            .body("Tags.size()", equalTo(1))
-            .body("Tags.team", equalTo("b"));
-
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "UpdateStack")
-            .formParam("StackName", stackName)
-            .formParam("TemplateBody", template.formatted(functionName, ""))
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
-
-        given()
-        .when()
-            .get("/2017-03-31/tags/" + functionArn)
-        .then()
-            .statusCode(200)
-            .body("Tags.size()", equalTo(0));
+            .body("Tags.size()", equalTo(3))
+            .body("Tags.a", equalTo("1"))
+            .body("Tags.c", equalTo("3"))
+            .body("Tags.oob", equalTo("x"));
     }
 
     @Test

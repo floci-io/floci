@@ -30,12 +30,14 @@ import static org.mockito.Mockito.when;
 
 /**
  * The Lambda function CFN provisioner in isolation, for the {@code Tags} property: the create
- * request carries the template's tags and an in-place update drives them to the template's set.
+ * request carries the template's tags, and an in-place update applies the template's set and removes
+ * only the keys the previous template had, keeping tags added outside the template.
  */
 class LambdaCfnProvisionerTest {
 
     private static final String REGION = "us-east-1";
     private static final String FUNCTION_ARN = "arn:aws:lambda:us-east-1:000000000000:function:";
+    private static final String TEMPLATE_TAG_KEYS_ATTR = "FlociLambdaTemplateTagKeys";
 
     private final LambdaService lambda = mock(LambdaService.class);
     private final LambdaCfnProvisioner provisioner = new LambdaCfnProvisioner(
@@ -57,6 +59,12 @@ class LambdaCfnProvisionerTest {
         ProvisionContext create = ctx();
         return new ProvisionContext(create.engine(), create.region(), create.accountId(),
                 create.stackName(), priorPhysicalId);
+    }
+
+    private StackResource function(String physicalId, String templateTagKeys) {
+        StackResource r = function(physicalId);
+        r.getAttributes().put(TEMPLATE_TAG_KEYS_ATTR, templateTagKeys);
+        return r;
     }
 
     private StackResource function(String physicalId) {
@@ -102,10 +110,12 @@ class LambdaCfnProvisionerTest {
     @Test
     void functionTagsFromTheTemplateReachCreateFunction() {
         when(lambda.createFunction(eq(REGION), anyMap())).thenReturn(lambdaFunction("my-fn"));
+        StackResource r = function(null);
 
-        provisioner.provision(function(null), props("my-fn", "team", "a", "env", "dev"), ctx());
+        provisioner.provision(r, props("my-fn", "team", "a", "env", "dev"), ctx());
 
         assertEquals(Map.of("team", "a", "env", "dev"), capturedCreateRequest().get("Tags"));
+        assertEquals("env,team", r.getAttributes().get(TEMPLATE_TAG_KEYS_ATTR));
         verify(lambda, never()).tagResource(anyString(), anyMap());
         verify(lambda, never()).untagResource(anyString(), any());
     }
@@ -124,24 +134,38 @@ class LambdaCfnProvisionerTest {
 
     @Test
     void inPlaceUpdateUntagsOnlyTheKeyTheTemplateDropped() {
-        stubInPlaceUpdate("my-fn", Map.of("team", "a", "env", "dev"));
+        stubInPlaceUpdate("my-fn", Map.of("team", "a", "env", "dev", "oob", "x"));
+        StackResource r = function("my-fn", "env,team");
 
-        provisioner.provision(function("my-fn"), props("my-fn", "team", "b"), updateCtx("my-fn"));
+        provisioner.provision(r, props("my-fn", "team", "b"), updateCtx("my-fn"));
 
         verify(lambda).untagResource(FUNCTION_ARN + "my-fn", List.of("env"));
         verify(lambda).tagResource(FUNCTION_ARN + "my-fn", Map.of("team", "b"));
         verify(lambda, never()).createFunction(anyString(), anyMap());
+        assertEquals("team", r.getAttributes().get(TEMPLATE_TAG_KEYS_ATTR));
     }
 
     @Test
-    void inPlaceUpdateWithTheTagsPropertyGoneUntagsTheFunctionCompletely() {
-        stubInPlaceUpdate("my-fn", Map.of("team", "a", "env", "dev"));
+    void inPlaceUpdateWithTheTagsPropertyGoneUntagsOnlyTheTemplateKeys() {
+        stubInPlaceUpdate("my-fn", Map.of("team", "a", "env", "dev", "oob", "x"));
+        StackResource r = function("my-fn", "env,team");
 
-        provisioner.provision(function("my-fn"), props("my-fn"), updateCtx("my-fn"));
+        provisioner.provision(r, props("my-fn"), updateCtx("my-fn"));
 
         verify(lambda).untagResource(eq(FUNCTION_ARN + "my-fn"),
                 argThat(keys -> keys.size() == 2 && keys.containsAll(List.of("team", "env"))));
         verify(lambda, never()).tagResource(anyString(), anyMap());
+        assertEquals("", r.getAttributes().get(TEMPLATE_TAG_KEYS_ATTR));
+    }
+
+    @Test
+    void inPlaceUpdateWithoutRecordedTemplateKeysUntagsNothing() {
+        stubInPlaceUpdate("my-fn", Map.of("legacy", "x"));
+
+        provisioner.provision(function("my-fn"), props("my-fn", "team", "b"), updateCtx("my-fn"));
+
+        verify(lambda, never()).untagResource(anyString(), any());
+        verify(lambda).tagResource(FUNCTION_ARN + "my-fn", Map.of("team", "b"));
     }
 
     @SuppressWarnings("unchecked")

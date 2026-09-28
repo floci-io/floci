@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -32,6 +33,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -53,6 +55,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     private static final String HOT_RELOAD_BUCKET = "hot-reload";
     private static final String LAMBDA_NAME_MODE_ATTR = "FlociLambdaFunctionNameMode";
     private static final String LAMBDA_PACKAGE_TYPE_ATTR = "FlociLambdaPackageType";
+    private static final String LAMBDA_TEMPLATE_TAG_KEYS_ATTR = "FlociLambdaTemplateTagKeys";
     private static final String NAME_MODE_EXPLICIT = "explicit";
     private static final String NAME_MODE_GENERATED = "generated";
 
@@ -120,7 +123,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
         } else {
             func = updateLambdaFunction(region, existing, desired, r);
-            reconcileTags(func.getFunctionArn(), desired.tags());
+            reconcileTags(func.getFunctionArn(), r.getAttributes().get(LAMBDA_TEMPLATE_TAG_KEYS_ATTR),
+                    desired.tags());
         }
 
         applyLambdaReservedConcurrency(region, func, desired);
@@ -131,6 +135,9 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put(LAMBDA_NAME_MODE_ATTR,
                 desired.explicitFunctionName() ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
         r.getAttributes().put(LAMBDA_PACKAGE_TYPE_ATTR, desired.packageType());
+        // Tag keys cannot contain a comma, so the sorted keys join losslessly.
+        r.getAttributes().put(LAMBDA_TEMPLATE_TAG_KEYS_ATTR,
+                String.join(",", new TreeSet<>(desired.tags().keySet())));
     }
 
     private LambdaDesiredState buildLambdaDesiredState(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -387,14 +394,19 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Drives an in-place updated function's tags to the template's set, as {@code SqsCfnProvisioner}
-     * does: a key the template drops is untagged, and a template with no {@code Tags} leaves the
-     * function untagged. A created function already carries them in the create request.
+     * Applies the template's tags to an in-place updated function and untags only the keys the
+     * previous template set and this one drops, so a tag added outside the template stays, as in
+     * AWS. A function provisioned before the keys were recorded has none to drop. A created
+     * function already carries its tags in the create request.
      */
-    private void reconcileTags(String functionArn, Map<String, String> desired) {
-        List<String> stale = ProvisionContext.staleTagKeys(lambdaService.listTags(functionArn), desired);
-        if (!stale.isEmpty()) {
-            lambdaService.untagResource(functionArn, stale);
+    private void reconcileTags(String functionArn, String previousTemplateKeys, Map<String, String> desired) {
+        List<String> dropped = previousTemplateKeys == null || previousTemplateKeys.isEmpty()
+                ? List.of()
+                : Arrays.stream(previousTemplateKeys.split(","))
+                        .filter(key -> !desired.containsKey(key))
+                        .toList();
+        if (!dropped.isEmpty()) {
+            lambdaService.untagResource(functionArn, dropped);
         }
         if (!desired.isEmpty()) {
             lambdaService.tagResource(functionArn, desired);
