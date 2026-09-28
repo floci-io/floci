@@ -407,6 +407,61 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     @Test
+    void taggingApiWritesReachTheUsagePlan() {
+        String marker = unique();
+        String planId = given()
+            .contentType("application/json")
+            .body("""
+                {"name": "discovery-%s", "tags": {"fd": "%s"}}
+                """.formatted(marker, marker))
+        .when()
+            .post("/usageplans")
+        .then()
+            .statusCode(201)
+            .extract().path("id");
+        String arn = APIGATEWAY_ARN_PREFIX + "/usageplans/" + planId;
+
+        tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"added": "yes"}}
+                """.formatted(arn))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", anEmptyMap());
+
+        given()
+        .when()
+            .get("/usageplans/" + planId)
+        .then()
+            .statusCode(200)
+            .body("tags.fd", equalTo(marker))
+            .body("tags.added", equalTo("yes"));
+        given()
+            .pathParam("arn", arn)
+        .when()
+            .get("/tags/{arn}")
+        .then()
+            .statusCode(200)
+            .body("tags.fd", equalTo(marker))
+            .body("tags.added", equalTo("yes"));
+
+        tagging("UntagResources", """
+                {"ResourceARNList": ["%s"], "TagKeys": ["added"]}
+                """.formatted(arn))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", anEmptyMap());
+        given()
+        .when()
+            .get("/usageplans/" + planId)
+        .then()
+            .statusCode(200)
+            .body("tags.fd", equalTo(marker))
+            .body("tags", not(hasKey("added")));
+
+        given().when().delete("/usageplans/" + planId).then().statusCode(202);
+    }
+
+    @Test
     void domainNameIsDiscoveredByType() {
         String marker = unique();
         String domainName = "discovery-" + marker + ".example.com";

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -107,6 +108,7 @@ public class ApiGatewayService implements ResourceProvider {
     private final Object domainNameLock = new Object();
     private final TlsCertificateManager certificateManager;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
 
     // Constants
     private static final String EPC_KEY = "endpointConfiguration";
@@ -115,9 +117,10 @@ public class ApiGatewayService implements ResourceProvider {
 
     @Inject
     public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
-                             TlsCertificateManager certificateManager) {
+                             TlsCertificateManager certificateManager, RegionResolver regionResolver) {
         this.certificateManager = certificateManager;
         this.config = config;
+        this.regionResolver = regionResolver;
         this.apiStore = storageFactory.create("apigateway", "apigateway-apis.json",
                 new TypeReference<>() {
                 });
@@ -1360,6 +1363,18 @@ public class ApiGatewayService implements ResourceProvider {
         plan.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
         usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
         return plan;
+    }
+
+    public void tagUsagePlan(String region, String usagePlanId, Map<String, String> tags) {
+        Map<String, String> merged = new HashMap<>(getUsagePlan(region, usagePlanId).getTags());
+        merged.putAll(tags);
+        replaceUsagePlanTags(region, usagePlanId, merged);
+    }
+
+    public void untagUsagePlan(String region, String usagePlanId, List<String> tagKeys) {
+        Map<String, String> remaining = new HashMap<>(getUsagePlan(region, usagePlanId).getTags());
+        tagKeys.forEach(remaining::remove);
+        replaceUsagePlanTags(region, usagePlanId, remaining);
     }
 
     // ──────────────────────────── Usage Plan Keys ────────────────────────────
@@ -2656,7 +2671,7 @@ public class ApiGatewayService implements ResourceProvider {
 
     @Override
     public List<ExplorerResource> getResources() {
-        String account = config.defaultAccountId();
+        String account = regionResolver.getAccountId();
         List<ExplorerResource> resources = new ArrayList<>();
         for (String key : apiStore.keys()) {
             apiStore.get(key).ifPresent(api -> resources.add(explorerResource(key, account,
