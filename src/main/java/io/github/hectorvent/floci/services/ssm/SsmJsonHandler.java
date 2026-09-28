@@ -129,7 +129,7 @@ public class SsmJsonHandler {
 
     private Response handleGetParameter(JsonNode request, String region) {
         String name = request.path("Name").asText();
-        Parameter param = ssmService.getParameter(name, region);
+        Parameter param = ssmService.getParameter(name, request.path("WithDecryption").asBoolean(false), region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Parameter", parameterToNode(param));
@@ -140,7 +140,7 @@ public class SsmJsonHandler {
         List<String> names = new ArrayList<>();
         request.path("Names").forEach(n -> names.add(n.asText()));
 
-        List<Parameter> params = ssmService.getParameters(names, region);
+        List<Parameter> params = ssmService.getParameters(names, request.path("WithDecryption").asBoolean(false), region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
@@ -149,7 +149,7 @@ public class SsmJsonHandler {
         }
         response.set("Parameters", parametersArray);
         response.set("InvalidParameters", invalidParameterNames(names,
-                params.stream().map(Parameter::getName).toList()));
+                params.stream().map(p -> p.getName() + (p.getSelector() == null ? "" : p.getSelector())).toList()));
         return Response.ok(response).build();
     }
 
@@ -981,12 +981,19 @@ public class SsmJsonHandler {
     private ObjectNode parameterToNode(Parameter p) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Name", p.getName());
-        node.put("Value", p.getValue());
+        if (p.getValue() != null) {
+            node.put("Value", p.getValue());
+        }
         node.put("Type", p.getType());
         node.put("Version", p.getVersion());
         node.put("LastModifiedDate", p.getLastModifiedDate().toEpochMilli() / 1000.0);
         node.put("ARN", p.getArn());
-        node.put("DataType", p.getDataType());
+        if (p.getDataType() != null) {
+            node.put("DataType", p.getDataType());
+        }
+        if (p.getSelector() != null) {
+            node.put("Selector", p.getSelector());
+        }
         return node;
     }
 

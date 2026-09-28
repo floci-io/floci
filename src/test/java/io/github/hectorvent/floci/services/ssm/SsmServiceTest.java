@@ -137,7 +137,7 @@ class SsmServiceTest {
         ssmService.putParameter("/b", "2", "String", null, false, region);
         ssmService.putParameter("/c", "3", "String", null, false, region);
 
-        List<Parameter> params = ssmService.getParameters(List.of("/a", "/c", "/missing"), region);
+        List<Parameter> params = ssmService.getParameters(List.of("/a", "/c", "/missing"), false, region);
         assertEquals(2, params.size());
     }
 
