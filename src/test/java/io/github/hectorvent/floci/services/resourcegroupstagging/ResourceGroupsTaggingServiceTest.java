@@ -444,7 +444,7 @@ class ResourceGroupsTaggingServiceTest {
     }
 
     @Test
-    void removeTagsFailureIsReportedAndStoreKeptForThatArn() {
+    void removeTagsFailureIsReportedAndStoreStillUntagged() {
         RecordingTagHandler handler = new RecordingTagHandler("apigateway", true);
         ResourceGroupsTaggingService service = service(List.of(
                 provider(resource(API_KEY_ARN, "apigateway:apikeys", Map.of()))), List.of(handler));
@@ -453,8 +453,21 @@ class ResourceGroupsTaggingServiceTest {
         Map<String, AwsException> failures = service.removeTags(List.of(API_KEY_ARN, QUEUE_ARN), List.of("a"), REGION);
 
         assertEquals(List.of(API_KEY_ARN), List.copyOf(failures.keySet()));
-        assertEquals(Map.of("a", "1", "b", "2"), service.getTagsForResource(REGION, API_KEY_ARN));
+        assertEquals(Map.of("b", "2"), service.getTagsForResource(REGION, API_KEY_ARN));
         assertEquals(Map.of("b", "2"), service.getTagsForResource(REGION, QUEUE_ARN));
+    }
+
+    @Test
+    void removeTagsClearsStoredWildcardLogGroupArnTheHandlerRejects() {
+        String wildcardArn = "arn:aws:logs:us-east-1:000000000000:log-group:/a:*";
+        RecordingTagHandler handler = new RecordingTagHandler("logs", true);
+        ResourceGroupsTaggingService service = service(List.of(), List.of(handler));
+        service.tagResources(List.of(wildcardArn), Map.of("a", "1", "b", "2"), REGION);
+
+        Map<String, AwsException> failures = service.removeTags(List.of(wildcardArn), List.of("a"), REGION);
+
+        assertEquals(List.of(wildcardArn), List.copyOf(failures.keySet()));
+        assertEquals(Map.of("b", "2"), service.getTagsForResource(REGION, wildcardArn));
     }
 
     @Test

@@ -64,7 +64,8 @@ AWS. Every other ARN, including
 one the owning service does not list such as an API Gateway deployment ARN,
 goes to the tagging store and the owning service is not called.
 `UntagResources` routes the same way, and also removes the keys from the
-tagging store for every ARN the owning service did not reject.
+tagging store for every ARN, including one the owning service rejects, so a
+copy stored earlier can always be cleared.
 
 ## Filtering
 
