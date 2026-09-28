@@ -50,27 +50,19 @@ the owning service's value wins. CloudWatch Logs log group ARNs are returned
 without the trailing `:*`.
 
 `TagResources` forwards the tags to the owning service only when that service
-registers a tag handler, such as API Gateway or MSK, and currently lists the
-exact ARN as one of its resources visible to the request's region and account,
-by the same rule reads use. The tags then live only in the owning
-service, so `GetApiKey` shows a tag set through `TagResources`, and nothing is
-written to the tagging store. When the owning service rejects the tags, for
-example a reserved `floci:` key on an API key, the ARN appears in
-`FailedResourcesMap` and no tags are stored for it. Every other ARN, including
+registers a tag handler, such as API Gateway, MSK, SQS, Lambda or CloudWatch
+Logs, and currently lists the exact ARN as one of its resources visible to the
+request's region and account, by the same rule reads use. The tags then live
+only in the owning service, so `GetApiKey`, `ListQueueTags`, Lambda `ListTags`
+and CloudWatch Logs `ListTagsForResource` show a tag set through
+`TagResources`, and nothing is written to the tagging store. When the owning
+service rejects the tags, for example a reserved `floci:` key on an API key or
+a log group ARN with the trailing `:*`, the ARN appears in `FailedResourcesMap`
+with that service's error and no tags are stored for it. Every other ARN, including
 one the owning service does not list such as an API Gateway deployment ARN,
 goes to the tagging store and the owning service is not called.
 `UntagResources` routes the same way, and also removes the keys from the
 tagging store for every ARN the owning service did not reject.
-
-### Known limitations
-
-No shared tag handler is registered for SQS, Lambda or CloudWatch Logs, so the
-tagging API cannot forward to them, although Lambda serves its own REST
-`/tags/{arn}` API. Tags set on their resources through `TagResources` stay in
-the tagging store. They appear in `GetResources`, `GetTagKeys` and
-`GetTagValues`, but not in `ListQueueTags`, Lambda `ListTags`, or CloudWatch
-Logs `ListTagsForResource`.
-Tag those resources through their own service to see the tags in both places.
 
 ## Filtering
 

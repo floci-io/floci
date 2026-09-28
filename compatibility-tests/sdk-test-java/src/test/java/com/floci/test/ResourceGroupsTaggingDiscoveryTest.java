@@ -26,6 +26,7 @@ import software.amazon.awssdk.services.resourcegroupstaggingapi.model.TagFilter;
 import software.amazon.awssdk.services.resourcegroupstaggingapi.model.TagResourcesResponse;
 import software.amazon.awssdk.services.resourcegroupstaggingapi.model.UntagResourcesResponse;
 import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
 
 import java.util.ArrayList;
@@ -116,6 +117,40 @@ class ResourceGroupsTaggingDiscoveryTest {
         } finally {
             sqs.deleteQueue(request -> request.queueUrl(primaryUrl));
             sqs.deleteQueue(request -> request.queueUrl(secondaryUrl));
+        }
+    }
+
+    @Test
+    @DisplayName("Tags written on an SQS queue through the tagging API are the queue's own tags")
+    void taggingApiWritesReachSqsQueueTags() {
+        String queueName = TestFixtures.uniqueName("tag-discovery-write");
+        String queueUrl = sqs.createQueue(request -> request
+                .queueName(queueName)
+                .tags(Map.of("Env", "dev"))).queueUrl();
+
+        try {
+            String arn = sqs.getQueueAttributes(request -> request
+                    .queueUrl(queueUrl)
+                    .attributeNames(QueueAttributeName.QUEUE_ARN))
+                    .attributes().get(QueueAttributeName.QUEUE_ARN);
+
+            TagResourcesResponse tagged = tagging.tagResources(request -> request
+                    .resourceARNList(arn)
+                    .tags(Map.of("Owner", "compat")));
+
+            assertThat(tagged.failedResourcesMap()).isEmpty();
+            assertThat(sqs.listQueueTags(request -> request.queueUrl(queueUrl)).tags())
+                    .containsOnly(Map.entry("Env", "dev"), Map.entry("Owner", "compat"));
+
+            UntagResourcesResponse untagged = tagging.untagResources(request -> request
+                    .resourceARNList(arn)
+                    .tagKeys("Owner"));
+
+            assertThat(untagged.failedResourcesMap()).isEmpty();
+            assertThat(sqs.listQueueTags(request -> request.queueUrl(queueUrl)).tags())
+                    .containsOnly(Map.entry("Env", "dev"));
+        } finally {
+            sqs.deleteQueue(request -> request.queueUrl(queueUrl));
         }
     }
 

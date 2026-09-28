@@ -505,6 +505,153 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     @Test
+    void taggingApiWritesReachTheSqsQueue() {
+        String name = "discovery-" + unique();
+        String marker = unique();
+        String value = unique();
+        String arn = ARN_PREFIX.formatted("sqs") + name;
+        String queueUrl = sqs("CreateQueue", """
+                {"QueueName": "%s", "tags": {"fd": "%s"}}
+                """.formatted(name, marker))
+            .then()
+            .statusCode(200)
+            .extract().path("QueueUrl");
+
+        tagAddedThroughTaggingApi(arn, value);
+        sqsQueueTags(queueUrl)
+            .body("Tags.fd", equalTo(marker))
+            .body("Tags.added", equalTo(value));
+        addedTagIsListedOnce(arn, value);
+
+        untagAddedThroughTaggingApi(arn);
+        sqsQueueTags(queueUrl)
+            .body("Tags.fd", equalTo(marker))
+            .body("Tags", not(hasKey("added")));
+        addedTagIsNotListed(arn);
+
+        sqs("DeleteQueue", """
+                {"QueueUrl": "%s"}
+                """.formatted(queueUrl)).then().statusCode(200);
+    }
+
+    @Test
+    void taggingApiWritesReachTheLambdaFunction() {
+        String name = "discovery-" + unique();
+        String marker = unique();
+        String value = unique();
+        String arn = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler",
+                    "Tags": {"fd": "%s"}
+                }
+                """.formatted(name, marker))
+        .when()
+            .post("/2015-03-31/functions")
+        .then()
+            .statusCode(201)
+            .extract().path("FunctionArn");
+
+        tagAddedThroughTaggingApi(arn, value);
+        lambdaTags(arn)
+            .body("Tags.fd", equalTo(marker))
+            .body("Tags.added", equalTo(value));
+        addedTagIsListedOnce(arn, value);
+
+        untagAddedThroughTaggingApi(arn);
+        lambdaTags(arn)
+            .body("Tags.fd", equalTo(marker))
+            .body("Tags", not(hasKey("added")));
+        addedTagIsNotListed(arn);
+
+        given().when().delete("/2015-03-31/functions/" + name).then().statusCode(204);
+    }
+
+    @Test
+    void taggingApiWritesReachTheLogGroup() {
+        String name = "/probe/" + unique();
+        String marker = unique();
+        String value = unique();
+        String arn = ARN_PREFIX.formatted("logs") + "log-group:" + name;
+        logs("CreateLogGroup", """
+                {"logGroupName": "%s", "tags": {"fd": "%s"}}
+                """.formatted(name, marker)).then().statusCode(200);
+
+        tagAddedThroughTaggingApi(arn, value);
+        logs("ListTagsLogGroup", """
+                {"logGroupName": "%s"}
+                """.formatted(name))
+            .then()
+            .statusCode(200)
+            .body("tags.fd", equalTo(marker))
+            .body("tags.added", equalTo(value));
+        logGroupTagsByArn(arn)
+            .body("tags.fd", equalTo(marker))
+            .body("tags.added", equalTo(value));
+        addedTagIsListedOnce(arn, value);
+
+        untagAddedThroughTaggingApi(arn);
+        logGroupTagsByArn(arn)
+            .body("tags.fd", equalTo(marker))
+            .body("tags", not(hasKey("added")));
+        addedTagIsNotListed(arn);
+
+        logs("DeleteLogGroup", """
+                {"logGroupName": "%s"}
+                """.formatted(name)).then().statusCode(200);
+    }
+
+    @Test
+    void taggingApiRejectsWildcardLogGroupArn() {
+        String name = "/probe/" + unique();
+        String marker = unique();
+        String wildcardArn = ARN_PREFIX.formatted("logs") + "log-group:" + name + ":*";
+        logs("CreateLogGroup", """
+                {"logGroupName": "%s", "tags": {"fd": "%s"}}
+                """.formatted(name, marker)).then().statusCode(200);
+
+        wildcardArnIsRejected(tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"added": "yes"}}
+                """.formatted(wildcardArn)), wildcardArn);
+        logGroupTagsAreOnlyTheMarker(name, marker);
+
+        wildcardArnIsRejected(tagging("UntagResources", """
+                {"ResourceARNList": ["%s"], "TagKeys": ["fd"]}
+                """.formatted(wildcardArn)), wildcardArn);
+        logGroupTagsAreOnlyTheMarker(name, marker);
+
+        logs("DeleteLogGroup", """
+                {"logGroupName": "%s"}
+                """.formatted(name)).then().statusCode(200);
+    }
+
+    @Test
+    void sqsQueueIsNotServedOnTheSharedTagsPaths() {
+        String name = "discovery-" + unique();
+        String arn = ARN_PREFIX.formatted("sqs") + name;
+        String unhandledArn = ARN_PREFIX.formatted("sns") + name;
+        String queueUrl = sqs("CreateQueue", """
+                {"QueueName": "%s", "tags": {"fd": "%s"}}
+                """.formatted(name, unique()))
+            .then()
+            .statusCode(200)
+            .extract().path("QueueUrl");
+
+        for (String path : List.of("/tags/{arn}", "/v1/tags/{arn}")) {
+            tagsPathRejectsArn(path, unhandledArn);
+            tagsPathRejectsArn(path, arn);
+        }
+
+        sqs("DeleteQueue", """
+                {"QueueUrl": "%s"}
+                """.formatted(queueUrl)).then().statusCode(200);
+    }
+
+    @Test
     void usagePlanIsDiscoveredByType() {
         String marker = unique();
         String planId = given()
@@ -654,6 +801,96 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
 
     private static void deleteApiKey(String id) {
         given().when().delete("/apikeys/" + id).then().statusCode(202);
+    }
+
+    private static void tagAddedThroughTaggingApi(String arn, String value) {
+        tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"added": "%s"}}
+                """.formatted(arn, value))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", anEmptyMap());
+    }
+
+    private static void untagAddedThroughTaggingApi(String arn) {
+        tagging("UntagResources", """
+                {"ResourceARNList": ["%s"], "TagKeys": ["added"]}
+                """.formatted(arn))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", anEmptyMap());
+    }
+
+    private static void addedTagIsListedOnce(String arn, String value) {
+        getResources(arnFilter(arn))
+            .body("ResourceTagMappingList.ResourceARN", contains(arn))
+            .body("ResourceTagMappingList[0].Tags.findAll { it.Key == 'added' }.Value", contains(value));
+    }
+
+    private static void addedTagIsNotListed(String arn) {
+        getResources(arnFilter(arn))
+            .body("ResourceTagMappingList.ResourceARN", contains(arn))
+            .body("ResourceTagMappingList[0].Tags.Key", not(hasItem("added")));
+    }
+
+    private static String arnFilter(String arn) {
+        return """
+                {"ResourceARNList": ["%s"]}
+                """.formatted(arn);
+    }
+
+    private static ValidatableResponse sqsQueueTags(String queueUrl) {
+        return sqs("ListQueueTags", """
+                {"QueueUrl": "%s"}
+                """.formatted(queueUrl))
+            .then()
+            .statusCode(200);
+    }
+
+    private static ValidatableResponse lambdaTags(String arn) {
+        return given()
+        .when()
+            .get("/2017-03-31/tags/" + arn)
+        .then()
+            .statusCode(200);
+    }
+
+    private static ValidatableResponse logGroupTagsByArn(String arn) {
+        return logs("ListTagsForResource", """
+                {"resourceArn": "%s"}
+                """.formatted(arn))
+            .then()
+            .statusCode(200);
+    }
+
+    private static void wildcardArnIsRejected(Response response, String wildcardArn) {
+        response.then()
+            .statusCode(200)
+            .body("FailedResourcesMap.size()", equalTo(1))
+            .body("FailedResourcesMap['%s'].StatusCode".formatted(wildcardArn), equalTo(400))
+            .body("FailedResourcesMap['%s'].ErrorCode".formatted(wildcardArn), equalTo("ValidationException"))
+            .body("FailedResourcesMap['%s'].ErrorMessage".formatted(wildcardArn), equalTo("Invalid resourceArn"));
+    }
+
+    private static void logGroupTagsAreOnlyTheMarker(String name, String marker) {
+        logs("ListTagsLogGroup", """
+                {"logGroupName": "%s"}
+                """.formatted(name))
+            .then()
+            .statusCode(200)
+            .body("tags.size()", equalTo(1))
+            .body("tags.fd", equalTo(marker));
+    }
+
+    private static void tagsPathRejectsArn(String path, String arn) {
+        given()
+            .pathParam("arn", arn)
+        .when()
+            .get(path)
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Invalid resource ARN: " + arn));
     }
 
     private static String createRestApi(String marker) {
