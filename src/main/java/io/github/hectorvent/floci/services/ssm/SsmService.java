@@ -37,7 +37,7 @@ public class SsmService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
     private static final String PUBLIC_PARAMETER_PREFIX = "/aws/service/";
-    private static final String SECRET_REFERENCE_PREFIX = "/aws/reference/secretsmanager/";
+    static final String SECRET_REFERENCE_PREFIX = "/aws/reference/secretsmanager/";
     // Label is a ParameterStringFilter key too, but only GetParametersByPath accepts it.
     private static final Set<String> DESCRIBE_PARAMETERS_FILTER_KEYS =
             Set.of("Name", "Type", "KeyId", "Path", "Tier", "DataType");

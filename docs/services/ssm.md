@@ -120,6 +120,8 @@ The answer is a `SecureString` with the secret's value and ARN and `Version` 0. 
 `:<version-id>` or `:<staging-label>` suffix, such as `:AWSPREVIOUS`, selects a version and is
 echoed as `Selector`. As on AWS, `WithDecryption` must be true, and a missing secret is
 `ParameterNotFound`; `GetParameters` lists a reference it cannot answer in `InvalidParameters`.
+With IAM enforcement on, the caller also needs `secretsmanager:GetSecretValue` on the secret,
+and a refusal fails the whole call with a `ValidationException`, as it does on AWS.
 
 ```bash
 aws ssm get-parameter --name /aws/reference/secretsmanager/my-app/api-key --with-decryption
