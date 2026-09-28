@@ -82,6 +82,12 @@ warnings; malformed definitions and fatal import errors remain errors in either 
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
 
+`TagResource`, `UntagResource` and `GetTags` also accept API key ARNs,
+`arn:aws:apigateway:<region>::/apikeys/<id>`. Tagged REST APIs, stages, API keys, usage plans and
+custom domain names are discoverable through the [Resource Groups Tagging API](resource-groups-tagging.md),
+whose `TagResources` and `UntagResources` write REST API, stage, API key and custom domain name tags
+through to API Gateway.
+
 ### API Key Behaviour Notes
 
 #### `CreateApiKey` and `ImportApiKeys` share one route
