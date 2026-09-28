@@ -64,6 +64,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -1027,6 +1030,60 @@ class EksClusterManagerTest {
             manager.registerClusterNodeInstance(cluster, "container-no-vpc");
 
             assertTrue(manager.vpcForClient("172.17.0.2").isEmpty());
+        }
+
+        @Test
+        void aClusterWhoseAddressesCannotBeDeterminedClaimsNoneAndSaysWhy() {
+            // Inspection failing leaves resolver rules quietly not applying rather than failing
+            // anything, so the warning is the only way a reader finds out. See #4538 review.
+            when(dockerClient.inspectContainerCmd(anyString()))
+                    .thenThrow(new RuntimeException("docker is unreachable"));
+            Cluster cluster = new Cluster();
+            cluster.setName("unreachable-cluster");
+            ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+            vpcConfig.setVpcId("vpc-12345678");
+            cluster.setResourcesVpcConfig(vpcConfig);
+
+            List<LogRecord> logs = captureClusterManagerLogs(
+                    () -> manager.registerClusterNodeInstance(cluster, "container-unreachable"));
+
+            assertTrue(manager.vpcForClient("172.17.0.2").isEmpty());
+            // Compared by severity, not identity: JBoss LogManager has its own Level constants, so
+            // its WARN is not the same object as java.util.logging's WARNING.
+            assertTrue(logs.stream().anyMatch(
+                            record -> record.getLevel().intValue() >= Level.WARNING.intValue()
+                                    && String.valueOf(record.getMessage()).contains("Resolver rules will not apply")),
+                    "the cluster must say why its rules stopped applying, got: "
+                            + logs.stream().map(LogRecord::getMessage).toList());
+        }
+
+        private static List<LogRecord> captureClusterManagerLogs(Runnable action) {
+            java.util.logging.Logger julLogger =
+                    java.util.logging.Logger.getLogger(EksClusterManager.class.getName());
+            julLogger.setLevel(Level.ALL);
+            List<LogRecord> records = new ArrayList<>();
+            Handler handler = new Handler() {
+                @Override
+                public void publish(LogRecord record) {
+                    records.add(record);
+                }
+
+                @Override
+                public void flush() {
+                }
+
+                @Override
+                public void close() {
+                }
+            };
+            handler.setLevel(Level.ALL);
+            julLogger.addHandler(handler);
+            try {
+                action.run();
+            } finally {
+                julLogger.removeHandler(handler);
+            }
+            return records;
         }
 
         @Test

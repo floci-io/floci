@@ -257,7 +257,7 @@ class EmbeddedDnsServerTest {
                     clientAddress -> Optional.of(partial));
 
             assertEquals(EmbeddedDnsServer.QueryPlan.UPSTREAM,
-                    dns.planQuery("db.corp.internal", CLIENT, MY_IP), partial.toString());
+                    dns.planQuery("db.corp.internal", CLIENT, MY_IP, 1), partial.toString());
         }
     }
 
