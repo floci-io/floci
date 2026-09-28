@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -33,7 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class EcsContainerManagerFirelensDockerIntegrationTest {
 
-    private static final String IMAGE = "public.ecr.aws/docker/library/busybox:latest";
+    private static final String IMAGE = TestImages.BUSYBOX;
     /** A real FireLens router image: Floci writes the generated config to its own
      * {@code /fluent-bit/etc}, which no minimal image carries. */
     private static final String ROUTER_IMAGE = "public.ecr.aws/aws-observability/aws-for-fluent-bit:3";

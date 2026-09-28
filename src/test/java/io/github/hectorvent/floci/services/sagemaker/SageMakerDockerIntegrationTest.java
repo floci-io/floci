@@ -6,6 +6,7 @@ import com.github.dockerjava.api.model.Event;
 import com.github.dockerjava.api.model.EventType;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
@@ -59,7 +60,7 @@ class SageMakerDockerIntegrationTest {
                 {
                   "TrainingJobName":"%s",
                   "AlgorithmSpecification":{
-                    "TrainingImage":"public.ecr.aws/docker/library/busybox:stable",
+                    "TrainingImage":"%s",
                     "ContainerEntrypoint":["/bin/sh","-c"],
                     "ContainerArguments":["mkdir -p /opt/ml/model && cp /opt/ml/input/data/train/data.txt /opt/ml/model/model.txt"]
                   },
@@ -68,7 +69,7 @@ class SageMakerDockerIntegrationTest {
                   "ResourceConfig":{"InstanceType":"ml.m5.large","InstanceCount":1,"VolumeSizeInGB":1},
                   "StoppingCondition":{"MaxRuntimeInSeconds":60}
                 }
-                """.formatted(job, bucket, bucket)).then().statusCode(200).body("TrainingJobArn", notNullValue());
+                """.formatted(job, TestImages.BUSYBOX, bucket, bucket)).then().statusCode(200).body("TrainingJobArn", notNullValue());
 
         waitForTraining(job, "Completed");
         String artifact = post("SageMaker.DescribeTrainingJob", "{\"TrainingJobName\":\"%s\"}".formatted(job))
@@ -111,7 +112,7 @@ class SageMakerDockerIntegrationTest {
                 {
                   "TrainingJobName":"%s",
                   "AlgorithmSpecification":{
-                    "TrainingImage":"public.ecr.aws/docker/library/busybox:stable",
+                    "TrainingImage":"%s",
                     "ContainerEntrypoint":["/bin/sh","-c"],
                     "ContainerArguments":["trap 'exit 143' TERM; mkfifo /tmp/hold; cat /tmp/hold & wait"]
                   },
@@ -119,7 +120,7 @@ class SageMakerDockerIntegrationTest {
                   "ResourceConfig":{"InstanceType":"ml.m5.large","InstanceCount":1,"VolumeSizeInGB":1},
                   "StoppingCondition":{"MaxRuntimeInSeconds":300}
                 }
-                """.formatted(job, bucket)).then().statusCode(200);
+                """.formatted(job, TestImages.BUSYBOX, bucket)).then().statusCode(200);
         // Wait for the container to actually be running, blocked on an empty pipe, so the stop
         // races a real running container rather than one still being staged.
         awaitContainerRunning("floci-aws-sagemaker-training-" + job);

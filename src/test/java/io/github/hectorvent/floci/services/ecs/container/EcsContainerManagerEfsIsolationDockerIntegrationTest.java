@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -33,7 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @QuarkusTest
 class EcsContainerManagerEfsIsolationDockerIntegrationTest {
 
-    private static final String IMAGE = "public.ecr.aws/docker/library/busybox:latest";
+    private static final String IMAGE = TestImages.BUSYBOX;
 
     @Inject
     EcsContainerManager containerManager;

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.services.batch.model.BatchJob;
 import io.github.hectorvent.floci.services.batch.model.BatchRunResult;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
@@ -19,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @QuarkusTest
 class BatchDockerRunnerDockerIntegrationTest {
 
-    private static final String IMAGE = "public.ecr.aws/docker/library/busybox:latest";
+    private static final String IMAGE = TestImages.BUSYBOX;
 
     @Inject
     BatchDockerRunner runner;

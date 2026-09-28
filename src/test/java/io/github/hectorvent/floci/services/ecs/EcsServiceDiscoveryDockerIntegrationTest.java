@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.UpdateServiceRequest;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -43,7 +44,7 @@ class EcsServiceDiscoveryDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
     private static final String SUBNET = "subnet-default-us-east-1-a";
-    private static final String BUSYBOX_IMAGE = "public.ecr.aws/docker/library/busybox:latest";
+    private static final String BUSYBOX_IMAGE = TestImages.BUSYBOX;
     private static final String CONTAINER_NAME = "app";
     private static final String CLOUD_MAP_SERVICE_NAME = "cache";
     private static final String ECS_SERVICE_NAME = "cache-svc";
