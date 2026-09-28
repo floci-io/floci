@@ -2943,6 +2943,45 @@ public class CognitoService implements ResourceProvider {
         return authFlowHandler.adminRespondToAuthChallenge(userPoolId, clientId, challengeName, session, responses, clientMetadata);
     }
 
+    public Map<String, Object> associateSoftwareToken(String accessToken, String session) {
+        return authFlowHandler.associateSoftwareToken(accessToken, session);
+    }
+
+    public Map<String, Object> verifySoftwareToken(String accessToken, String session, String userCode) {
+        return authFlowHandler.verifySoftwareToken(accessToken, session, userCode);
+    }
+
+    void beginSoftwareTokenMfa(String poolId, String username, String secret) {
+        synchronized (userLock(poolId, username)) {
+            CognitoUser user = adminGetUser(poolId, username);
+            user.setPendingSoftwareTokenMfaSecret(secret);
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(poolId, user.getUsername()), user);
+        }
+    }
+
+    boolean activateSoftwareTokenMfa(String poolId, String username, String expectedSecret,
+                                     String code, Instant now) {
+        synchronized (userLock(poolId, username)) {
+            CognitoUser user = adminGetUser(poolId, username);
+            String pending = user.getPendingSoftwareTokenMfaSecret();
+            if (pending == null) {
+                throw new AwsException("InvalidParameterException", "No software token is awaiting verification", 400);
+            }
+            if (expectedSecret != null && !expectedSecret.equals(pending)) {
+                throw new AwsException("NotAuthorizedException", "Software token association has changed", 400);
+            }
+            if (!CognitoTotp.validCode(pending, code, now)) {
+                return false;
+            }
+            user.setSoftwareTokenMfaSecret(pending);
+            user.setPendingSoftwareTokenMfaSecret(null);
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(poolId, user.getUsername()), user);
+            return true;
+        }
+    }
+
     public void changePassword(String accessToken, String previousPassword, String proposedPassword) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
         String username = token.username();
@@ -4534,7 +4573,7 @@ public class CognitoService implements ResourceProvider {
      * {@link #verifyAccessToken}, which already confirms the token is a valid, unexpired access
      * token; this only adds the scope check on top.
      */
-    private void requireScope(String accessToken, String requiredScope) {
+    void requireScope(String accessToken, String requiredScope) {
         Set<String> scopes = extractScopesFromToken(accessToken);
         if (scopes != null && !scopes.contains(requiredScope)) {
             throw new AwsException("NotAuthorizedException", "Access Token does not have the required scope", 400);

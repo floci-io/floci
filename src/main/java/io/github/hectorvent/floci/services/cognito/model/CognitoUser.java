@@ -26,6 +26,8 @@ public class CognitoUser {
     private String srpSalt;
     private String srpVerifier;
     private EmailMfaSettings emailMfaSettings;
+    private String softwareTokenMfaSecret;
+    private String pendingSoftwareTokenMfaSecret;
     private String federatedProviderName;
     private String federatedSubject;
 
@@ -91,6 +93,12 @@ public class CognitoUser {
     public void setEmailMfaSettings(EmailMfaSettings emailMfaSettings) {
         this.emailMfaSettings = emailMfaSettings;
     }
+
+    public String getSoftwareTokenMfaSecret() { return softwareTokenMfaSecret; }
+    public void setSoftwareTokenMfaSecret(String secret) { this.softwareTokenMfaSecret = secret; }
+
+    public String getPendingSoftwareTokenMfaSecret() { return pendingSoftwareTokenMfaSecret; }
+    public void setPendingSoftwareTokenMfaSecret(String secret) { this.pendingSoftwareTokenMfaSecret = secret; }
 
     public String getFederatedProviderName() {
         return federatedProviderName;

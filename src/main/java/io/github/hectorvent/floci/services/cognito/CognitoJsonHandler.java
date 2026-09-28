@@ -95,6 +95,8 @@ public class CognitoJsonHandler {
             case "AdminInitiateAuth" -> handleAdminInitiateAuth(request);
             case "RespondToAuthChallenge" -> handleRespondToAuthChallenge(request);
             case "AdminRespondToAuthChallenge" -> handleAdminRespondToAuthChallenge(request);
+            case "AssociateSoftwareToken" -> handleAssociateSoftwareToken(request);
+            case "VerifySoftwareToken" -> handleVerifySoftwareToken(request);
             case "SignUp" -> handleSignUp(request);
             case "ConfirmSignUp" -> handleConfirmSignUp(request);
             case "ResendConfirmationCode" -> handleResendConfirmationCode(request);
@@ -913,6 +915,19 @@ public class CognitoJsonHandler {
                 responses,
                 clientMetadata
         );
+        return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
+    private Response handleAssociateSoftwareToken(JsonNode request) {
+        Map<String, Object> result = service.associateSoftwareToken(
+                request.path("AccessToken").asText(null), request.path("Session").asText(null));
+        return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
+    private Response handleVerifySoftwareToken(JsonNode request) {
+        Map<String, Object> result = service.verifySoftwareToken(
+                request.path("AccessToken").asText(null), request.path("Session").asText(null),
+                request.path("UserCode").asText(null));
         return Response.ok(objectMapper.valueToTree(result)).build();
     }
 
