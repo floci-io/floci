@@ -48,7 +48,6 @@ import java.util.function.Supplier;
 public class NativeDynamoDbJsonHandler {
 
     private static final String SSE_TYPE_KMS = "KMS";
-    private static final Set<String> VALID_BILLING_MODES = Set.of("PROVISIONED", "PAY_PER_REQUEST");
 
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
@@ -138,7 +137,7 @@ public class NativeDynamoDbJsonHandler {
         String tableNameRaw = (request.has("TableName") && !request.path("TableName").isNull())
                 ? request.path("TableName").asText() : null;
         String tableName = DynamoDbTableNames.requireShortName(tableNameRaw);
-        validateBillingMode(request, memberPrefix);
+        DynamoDbService.validateBillingMode(request, memberPrefix);
 
         List<KeySchemaElement> keySchema = new ArrayList<>();
         request.path("KeySchema").forEach(ks ->
@@ -246,16 +245,6 @@ public class NativeDynamoDbJsonHandler {
 
         return tableService.createTable(new CreateTableRequest(tableName, keySchema, attrDefs,
                 throughput, gsis, lsis, vectorIndexes, tags, parseTableSettings(request)), initialStatus, region);
-    }
-
-    private static void validateBillingMode(JsonNode request, String memberPrefix) {
-        JsonNode billingMode = request.path("BillingMode");
-        if (billingMode.isTextual() && !VALID_BILLING_MODES.contains(billingMode.asText())) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + billingMode.asText() + "' at '" + memberPrefix
-                    + "billingMode' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]", 400);
-        }
     }
 
     /**
@@ -1632,7 +1621,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleUpdateTable(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
-        validateBillingMode(request, "");
+        DynamoDbService.validateBillingMode(request, "");
         JsonNode replicaUpdates = request.path("ReplicaUpdates");
         List<String> addRegions = new ArrayList<>();
         List<String> removeRegions = new ArrayList<>();
