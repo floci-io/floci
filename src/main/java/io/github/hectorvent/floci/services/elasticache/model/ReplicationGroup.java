@@ -6,6 +6,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -21,7 +22,9 @@ public class ReplicationGroup {
     private Instant createdAt;
     private int proxyPort;
     private String authToken; // stored plain-text for PASSWORD auth validation in the proxy
+    /** Users associated directly by user id, which Floci accepted before it modelled user groups. */
     private Set<String> associatedUserIds = new HashSet<>();
+    private Set<String> userGroupIds = new LinkedHashSet<>();
     private String arn;
     private String region;
     private boolean atRestEncryptionEnabled;
@@ -88,6 +91,11 @@ public class ReplicationGroup {
     public Set<String> getAssociatedUserIds() { return associatedUserIds; }
     public void setAssociatedUserIds(Set<String> associatedUserIds) {
         this.associatedUserIds = associatedUserIds != null ? associatedUserIds : new HashSet<>();
+    }
+
+    public Set<String> getUserGroupIds() { return userGroupIds; }
+    public void setUserGroupIds(Set<String> userGroupIds) {
+        this.userGroupIds = userGroupIds != null ? userGroupIds : new LinkedHashSet<>();
     }
 
     public String getContainerId() { return containerId; }

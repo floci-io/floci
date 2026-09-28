@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.elasticache.model.CacheParameterGroup
 import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
 import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
+import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUserGroup;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
@@ -70,6 +71,10 @@ public class ElastiCacheQueryHandler {
             case "DescribeUsers"              -> handleDescribeUsers(params);
             case "ModifyUser"                 -> handleModifyUser(params);
             case "DeleteUser"                 -> handleDeleteUser(params);
+            case "CreateUserGroup"            -> handleCreateUserGroup(params, region);
+            case "DescribeUserGroups"         -> handleDescribeUserGroups(params);
+            case "ModifyUserGroup"            -> handleModifyUserGroup(params);
+            case "DeleteUserGroup"            -> handleDeleteUserGroup(params);
             case "CreateCacheCluster"         -> handleCreateCacheCluster(params, region);
             case "DescribeCacheClusters"      -> handleDescribeCacheClusters(params);
             case "DeleteCacheCluster"         -> handleDeleteCacheCluster(params);
@@ -131,7 +136,8 @@ public class ElastiCacheQueryHandler {
                             boolParam(params, "MultiAZEnabled"),
                             intParam(params, "Port"),
                             replicationGroupSettings(params),
-                            parseTags(params)));
+                            parseTags(params),
+                            extractMemberList(params, "UserGroupIds.member.")));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
@@ -220,15 +226,15 @@ public class ElastiCacheQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue",
                     "ReplicationGroupId is required.", AwsNamespaces.EC, 400);
         }
-        List<String> userIdsToAdd = extractMemberList(params, "UserGroupIdsToAdd.member.");
-        List<String> userIdsToRemove = extractMemberList(params, "UserGroupIdsToRemove.member.");
+        List<String> userGroupIdsToAdd = extractMemberList(params, "UserGroupIdsToAdd.member.");
+        List<String> userGroupIdsToRemove = extractMemberList(params, "UserGroupIdsToRemove.member.");
         try {
             // AtRestEncryptionEnabled and KmsKeyId are fixed at create and not in the modify shape
             ReplicationGroupSettings settings = new ReplicationGroupSettings(null, null,
                     optionalInt(params.getFirst("SnapshotRetentionLimit")), params.getFirst("SnapshotWindow"));
             ReplicationGroup group = service.modifyReplicationGroup(groupId,
-                    userIdsToAdd.isEmpty() ? null : userIdsToAdd,
-                    userIdsToRemove.isEmpty() ? null : userIdsToRemove, settings);
+                    userGroupIdsToAdd.isEmpty() ? null : userGroupIdsToAdd,
+                    userGroupIdsToRemove.isEmpty() ? null : userGroupIdsToRemove, settings);
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("ModifyReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
@@ -314,6 +320,80 @@ public class ElastiCacheQueryHandler {
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }
+    }
+
+    // ── User groups ───────────────────────────────────────────────────────────
+
+    private Response handleCreateUserGroup(MultivaluedMap<String, String> params, String region) {
+        try {
+            ElastiCacheUserGroup userGroup = service.createUserGroup(params.getFirst("UserGroupId"),
+                    params.getFirst("Engine"), extractMemberList(params, "UserIds.member."), region);
+            return Response.ok(AwsQueryResponse.envelope("CreateUserGroup", AwsNamespaces.EC,
+                    userGroupXml(userGroup))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDescribeUserGroups(MultivaluedMap<String, String> params) {
+        try {
+            Collection<ElastiCacheUserGroup> userGroups = service.listUserGroups(params.getFirst("UserGroupId"));
+            XmlBuilder xml = new XmlBuilder().start("UserGroups");
+            for (ElastiCacheUserGroup userGroup : userGroups) {
+                xml.start("member").raw(userGroupXml(userGroup)).end("member");
+            }
+            xml.end("UserGroups");
+            return Response.ok(AwsQueryResponse.envelope("DescribeUserGroups", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleModifyUserGroup(MultivaluedMap<String, String> params) {
+        try {
+            ElastiCacheUserGroup userGroup = service.modifyUserGroup(params.getFirst("UserGroupId"),
+                    extractMemberList(params, "UserIdsToAdd.member."),
+                    extractMemberList(params, "UserIdsToRemove.member."),
+                    params.getFirst("Engine"));
+            return Response.ok(AwsQueryResponse.envelope("ModifyUserGroup", AwsNamespaces.EC,
+                    userGroupXml(userGroup))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDeleteUserGroup(MultivaluedMap<String, String> params) {
+        try {
+            ElastiCacheUserGroup userGroup = service.deleteUserGroup(params.getFirst("UserGroupId"));
+            return Response.ok(AwsQueryResponse.envelope("DeleteUserGroup", AwsNamespaces.EC,
+                    userGroupXml(userGroup))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private String userGroupXml(ElastiCacheUserGroup g) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("UserGroupId", g.getUserGroupId())
+                .elem("Status", g.getStatus())
+                .elem("Engine", g.getEngine());
+        xml.start("UserIds");
+        for (String userId : g.getUserIds()) {
+            xml.elem("member", userId);
+        }
+        xml.end("UserIds");
+        // MinimumEngineVersion: the only value AWS documents, as on users.
+        xml.elem("MinimumEngineVersion", "6.0");
+        xml.start("ReplicationGroups");
+        for (String replicationGroupId : service.replicationGroupIdsUsing(g.getUserGroupId())) {
+            xml.elem("member", replicationGroupId);
+        }
+        xml.end("ReplicationGroups");
+        xml.start("ServerlessCaches").end("ServerlessCaches");
+        String region = g.getRegion() != null ? g.getRegion() : regionResolver.getDefaultRegion();
+        xml.elem("ARN", AwsArnUtils.Arn.of("elasticache", region,
+                regionResolver.getAccountId(), "usergroup:" + g.getUserGroupId()).toString());
+        return xml.build();
     }
 
     // ── Cache Clusters (Memcached, and single-node Redis/Valkey) ──────────────
@@ -950,6 +1030,9 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         if (g.getArn() != null) {
             xml.elem("ARN", g.getArn());
         }
+        if (!g.getUserGroupIds().isEmpty()) {
+            xml.raw(memberListXml("UserGroupIds", g.getUserGroupIds()));
+        }
         xml.start("MemberClusters");
         for (ElastiCacheService.MemberCacheCluster member : members) {
             xml.elem("ClusterId", member.cacheClusterId());
@@ -1044,9 +1127,17 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                 .elem("Engine", u.getEngine())
                 // MinimumEngineVersion: the only value AWS documents; no valkey-specific one is published.
                 .elem("MinimumEngineVersion", "6.0")
-                .start("UserGroupIds").end("UserGroupIds")
+                .raw(memberListXml("UserGroupIds", service.userGroupIdsContaining(u.getUserId())))
                 .elem("ARN", AwsArnUtils.Arn.of("elasticache", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "user:" + u.getUserId()).toString())
                 .build();
+    }
+
+    private static String memberListXml(String name, Collection<String> values) {
+        XmlBuilder xml = new XmlBuilder().start(name);
+        for (String value : values) {
+            xml.elem("member", value);
+        }
+        return xml.end(name).build();
     }
 
     private static List<String> extractMemberList(MultivaluedMap<String, String> params, String prefix) {

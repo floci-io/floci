@@ -39,7 +39,8 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     @Override
     protected boolean authenticate(String username, String password) {
         return switch (authMode) {
-            case IAM -> sigV4Validator.validate(password, groupId, username);
+            case IAM -> sigV4Validator.validate(password, groupId, username)
+                    && passwordValidator.permitsIamUser(username);
             case PASSWORD -> passwordValidator.validatePassword(username, password);
             case NO_AUTH -> true; // unreachable: authRequired() is false for NO_AUTH
         };
@@ -62,10 +63,18 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     }
 
     /**
-     * Callback interface for password validation, provided by ElastiCacheService.
+     * Callback interface for credential checks, provided by ElastiCacheService.
      */
     @FunctionalInterface
     public interface PasswordValidator {
         boolean validatePassword(String username, String password);
+
+        /**
+         * Whether a user whose IAM token already validated may connect. Every user may unless
+         * the cache restricts access to the users of its user groups.
+         */
+        default boolean permitsIamUser(String username) {
+            return true;
+        }
     }
 }
