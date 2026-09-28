@@ -136,6 +136,7 @@ public class SsmJsonHandler {
         boolean withDecryption = request.path("WithDecryption").asBoolean(false);
         authorizeSecretReads(List.of(name), withDecryption, region, authorization);
         Parameter param = ssmService.getParameter(name, withDecryption, region);
+        authorizeSecretValues(List.of(param), authorization);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Parameter", parameterToNode(param));
@@ -149,6 +150,7 @@ public class SsmJsonHandler {
         authorizeSecretReads(names, withDecryption, region, authorization);
 
         List<Parameter> params = ssmService.getParameters(names, withDecryption, region);
+        authorizeSecretValues(params, authorization);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
@@ -173,14 +175,26 @@ public class SsmJsonHandler {
         }
         for (String name : names) {
             if (name.startsWith(SsmService.SECRET_REFERENCE_PREFIX)) {
-                try {
-                    iamEnforcementFilter.authorizeAdditionalResource(authorization, "secretsmanager:GetSecretValue",
-                            ssmService.secretReferenceArn(name, region));
-                } catch (AwsException denied) {
-                    throw new AwsException("ValidationException",
-                            "An error occurred while calling one AWS dependency service.", 400);
-                }
+                authorizeSecretRead(authorization, ssmService.secretReferenceArn(name, region));
             }
+        }
+    }
+
+    /** The value is read by name, so a secret replaced since the check is checked on its own ARN. */
+    private void authorizeSecretValues(List<Parameter> params, String authorization) {
+        for (Parameter param : params) {
+            if (param.getName().startsWith(SsmService.SECRET_REFERENCE_PREFIX)) {
+                authorizeSecretRead(authorization, param.getArn());
+            }
+        }
+    }
+
+    private void authorizeSecretRead(String authorization, String secretArn) {
+        try {
+            iamEnforcementFilter.authorizeAdditionalResource(authorization, "secretsmanager:GetSecretValue", secretArn);
+        } catch (AwsException denied) {
+            throw new AwsException("ValidationException",
+                    "An error occurred while calling one AWS dependency service.", 400);
         }
     }
 
