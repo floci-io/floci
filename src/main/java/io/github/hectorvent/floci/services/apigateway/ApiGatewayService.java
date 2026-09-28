@@ -38,6 +38,7 @@ import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigateway.model.VpcLink;
 import io.swagger.v3.core.util.Json;
+import io.swagger.parser.OpenAPIParser;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
@@ -2850,7 +2851,7 @@ public class ApiGatewayService {
     private record ParsedOpenApi(OpenAPI openAPI, List<String> warnings) {}
 
     private ParsedOpenApi parseOpenApiSpec(String region, String specBody, boolean failOnWarnings) {
-        SwaggerParseResult result = new io.swagger.parser.OpenAPIParser()
+        SwaggerParseResult result = new OpenAPIParser()
                 .readContents(resolveOpenApiAwsVariables(region, specBody), null, null);
         if (result.getOpenAPI() == null) {
             String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
