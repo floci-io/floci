@@ -173,6 +173,12 @@ A verified caller reaches the integration as `requestContext.identity.{accessKey
 user, userArn}` on a REST proxy event, and as `requestContext.authorizer.iam` on an HTTP API 2.0
 event.
 
+As on AWS, a REST (v1) `AWS_PROXY` or `HTTP_PROXY` integration never receives the caller's
+`Authorization` header when the method is `AWS_IAM`, and on any method the header is dropped if it
+carries a SigV4 signature. `X-Amz-Date`, `X-Amz-Security-Token` and every other header still pass
+through, and a `Bearer` token on a method without `AWS_IAM` reaches the integration unchanged.
+HTTP API (v2) integrations receive `Authorization` as the caller sent it.
+
 Sign with any access key the emulator has issued (`CreateAccessKey`, or the temporary credentials
 from `AssumeRole`), or with the well-known local-dev `test`/`test` pair that Floci accepts across
 S3, RDS, and ElastiCache. No other unregistered key is accepted: an unknown key cannot sign for

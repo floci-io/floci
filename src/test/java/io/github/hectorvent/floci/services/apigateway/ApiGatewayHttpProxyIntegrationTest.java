@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.testutil.ExecuteApiRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -13,6 +15,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -23,6 +26,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -49,6 +53,7 @@ class ApiGatewayHttpProxyIntegrationTest {
     private static final AtomicReference<String> lastBody = new AtomicReference<>();
     private static final AtomicReference<String> lastForwardedHeader = new AtomicReference<>();
     private static final AtomicReference<String> lastAuthorization = new AtomicReference<>();
+    private static final AtomicReference<String> lastAmzDate = new AtomicReference<>();
     private static final AtomicReference<String> lastHost = new AtomicReference<>();
     private static final AtomicReference<List<String>> lastTraceHeaders = new AtomicReference<>();
 
@@ -78,6 +83,7 @@ class ApiGatewayHttpProxyIntegrationTest {
         lastBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
         lastForwardedHeader.set(exchange.getRequestHeaders().getFirst("X-Forwarded-Tenant"));
         lastAuthorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+        lastAmzDate.set(exchange.getRequestHeaders().getFirst("X-Amz-Date"));
         lastHost.set(exchange.getRequestHeaders().getFirst("Host"));
         List<String> trace = exchange.getRequestHeaders().get("X-Trace");
         lastTraceHeaders.set(trace == null ? null : List.copyOf(trace));
@@ -105,6 +111,7 @@ class ApiGatewayHttpProxyIntegrationTest {
         lastBody.set(null);
         lastForwardedHeader.set(null);
         lastAuthorization.set(null);
+        lastAmzDate.set(null);
         lastHost.set(null);
         lastTraceHeaders.set(null);
     }
@@ -114,6 +121,11 @@ class ApiGatewayHttpProxyIntegrationTest {
      * HTTP_PROXY integration pointing at {@code targetUri}, deployed to stage {@code test}.
      */
     private String createProxyApi(String name, String targetUri, String requestParametersJson) {
+        return createProxyApi(name, targetUri, requestParametersJson, "NONE");
+    }
+
+    private String createProxyApi(String name, String targetUri, String requestParametersJson,
+                                  String authorizationType) {
         String apiId = given()
                 .contentType(ContentType.JSON)
                 .body("{\"name\":\"" + name + "\"}")
@@ -132,7 +144,7 @@ class ApiGatewayHttpProxyIntegrationTest {
                 .then().statusCode(201).extract().path("id");
 
         given().contentType(ContentType.JSON)
-                .body("{\"authorizationType\":\"NONE\"}")
+                .body("{\"authorizationType\":\"" + authorizationType + "\"}")
                 .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/ANY")
                 .then().statusCode(201);
 
@@ -315,6 +327,44 @@ class ApiGatewayHttpProxyIntegrationTest {
                 .then().statusCode(200);
 
         assertEquals("Bearer caller-supplied-token", lastAuthorization.get());
+    }
+
+    @Test
+    void dropsAuthorizationHeaderOnAwsIamRoute() throws Exception {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-iam-auth-api", backendUri(), null, "AWS_IAM");
+        String path = "/execute-api/" + apiId + "/test/orders";
+        Map<String, String> signed = ExecuteApiRequestSigner.signedHeaders(
+                "GET", path, Map.of(), "localhost:" + RestAssured.port, null,
+                "test", "test", "us-east-1", Instant.now());
+
+        // AWS drops Authorization on its way to the integration when the method is AWS_IAM; the
+        // rest of the signed request, X-Amz-Date included, still reaches the backend.
+        given().headers(signed)
+                .when().get(path)
+                .then().statusCode(200);
+
+        assertEquals("/orders", lastPath.get());
+        assertNull(lastAuthorization.get());
+        assertEquals(signed.get("X-Amz-Date"), lastAmzDate.get());
+    }
+
+    @Test
+    void dropsSigV4AuthorizationHeaderOnNoneAuthRoute() {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-sigv4-none-api", backendUri(), null);
+
+        // No signature is verified on a NONE route, but AWS still drops an Authorization header
+        // that carries one.
+        given()
+                .header("Authorization", "AWS4-HMAC-SHA256 "
+                        + "Credential=test/20260928/us-east-1/execute-api/aws4_request, "
+                        + "SignedHeaders=host;x-amz-date, Signature=abc123")
+                .when().get("/execute-api/" + apiId + "/test/orders")
+                .then().statusCode(200);
+
+        assertEquals("/orders", lastPath.get());
+        assertNull(lastAuthorization.get());
     }
 
     @Test
