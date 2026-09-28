@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
@@ -118,6 +119,19 @@ class LambdaCfnProvisionerTest {
         assertEquals("env,team", r.getAttributes().get(TEMPLATE_TAG_KEYS_ATTR));
         verify(lambda, never()).tagResource(anyString(), anyMap());
         verify(lambda, never()).untagResource(anyString(), any());
+    }
+
+    @Test
+    void adoptedFunctionIsTaggedWithTheTemplateTags() {
+        when(lambda.createFunction(eq(REGION), anyMap())).thenThrow(
+                new AwsException("ResourceConflictException", "Function already exist: my-fn", 409));
+        when(lambda.getFunction(REGION, "my-fn")).thenReturn(lambdaFunction("my-fn"));
+        StackResource r = function(null);
+
+        provisioner.provision(r, props("my-fn", "team", "a", "env", "dev"), ctx());
+
+        verify(lambda).tagResource(FUNCTION_ARN + "my-fn", Map.of("team", "a", "env", "dev"));
+        assertEquals("env,team", r.getAttributes().get(TEMPLATE_TAG_KEYS_ATTR));
     }
 
     @Test
