@@ -168,6 +168,30 @@ public class ApiGatewayExecuteController {
 
     private static final String CONNECTIONS_PREFIX = "@connections/";
 
+    private boolean isWebSocketConnectionRequest(String apiId, String proxy, HttpHeaders headers) {
+        if (proxy == null || !proxy.startsWith(CONNECTIONS_PREFIX)) {
+            return false;
+        }
+        if (routeContext.httpApiRegion() == null) {
+            String region = regionResolver.resolveRegion(headers);
+            if (regionResolver.resolveRegionFromAuthOrNull(headers.getHeaderString("Authorization")) == null) {
+                region = apiGatewayService.resolveRestApiRegion(region, apiId);
+            }
+            try {
+                apiGatewayService.getRestApi(region, apiId);
+                return false;
+            } catch (AwsException ignored) {
+                // No REST API owns this direct path; check for a WebSocket API below.
+            }
+        }
+        Optional<ApiGatewayV2Service.ApiOwner> owner = apiGatewayV2Service.findApiOwner(apiId);
+        if (owner.isEmpty()) {
+            return false;
+        }
+        applyApiOwnerContext(owner.get());
+        return "WEBSOCKET".equals(apiGatewayV2Service.getApi(owner.get().region(), apiId).getProtocolType());
+    }
+
     private String decodeConnectionId(String rawConnectionId) {
         return URLDecoder.decode(rawConnectionId, StandardCharsets.UTF_8);
     }
@@ -230,7 +254,7 @@ public class ApiGatewayExecuteController {
                               @PathParam("apiId") String apiId,
                               @PathParam("stageName") String stageName,
                               @PathParam("proxy") String proxy) {
-        if (proxy != null && proxy.startsWith(CONNECTIONS_PREFIX)) {
+        if (isWebSocketConnectionRequest(apiId, proxy, headers)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handleGetConnectionInfo(connectionId);
         }
@@ -245,7 +269,7 @@ public class ApiGatewayExecuteController {
                                @PathParam("stageName") String stageName,
                                @PathParam("proxy") String proxy,
                                byte[] body) {
-        if (proxy != null && proxy.startsWith(CONNECTIONS_PREFIX)) {
+        if (isWebSocketConnectionRequest(apiId, proxy, headers)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handlePostToConnection(connectionId, body);
         }
@@ -270,7 +294,7 @@ public class ApiGatewayExecuteController {
                                  @PathParam("apiId") String apiId,
                                  @PathParam("stageName") String stageName,
                                  @PathParam("proxy") String proxy) {
-        if (proxy != null && proxy.startsWith(CONNECTIONS_PREFIX)) {
+        if (isWebSocketConnectionRequest(apiId, proxy, headers)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handleDeleteConnection(connectionId);
         }
