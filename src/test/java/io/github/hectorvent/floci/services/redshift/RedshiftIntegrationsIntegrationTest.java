@@ -7,9 +7,12 @@ import io.restassured.config.HttpClientConfig;
 import io.restassured.config.RestAssuredConfig;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.awaitility.Awaitility;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -39,10 +42,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * integrations returns an empty list rather than an error.
  */
 @QuarkusTest
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class RedshiftIntegrationsIntegrationTest {
 
-    private static String source;
-    private static String otherSource;
+    @Inject
+    RedshiftService service;
+
+    private String source;
+    private String otherSource;
     private static final String TARGET = "arn:aws:redshift:us-east-1:000000000000:cluster:zero-etl-cluster";
 
     /**
@@ -80,6 +87,13 @@ class RedshiftIntegrationsIntegrationTest {
         otherSource = newOtherSource;
     }
 
+    @AfterAll
+    void deleteZeroEtlCluster() {
+        if (source != null) {
+            service.deleteCluster("zero-etl-cluster");
+        }
+    }
+
     private static String createDynamoTable(String tableName) {
         Response response = given()
                 .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
@@ -105,7 +119,7 @@ class RedshiftIntegrationsIntegrationTest {
         return response.then().statusCode(200).extract().path("TableDescription.LatestStreamArn");
     }
 
-    private static String createIntegration(String name) {
+    private String createIntegration(String name) {
         return query("Action", "CreateIntegration", "IntegrationName", name,
                 "SourceArn", source, "TargetArn", TARGET)
                 .then().statusCode(200)
