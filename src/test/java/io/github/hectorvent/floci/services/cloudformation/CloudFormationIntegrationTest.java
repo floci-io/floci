@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
@@ -1180,6 +1181,107 @@ class CloudFormationIntegrationTest {
             .body("Tags.a", equalTo("1"))
             .body("Tags.c", equalTo("3"))
             .body("Tags.oob", equalTo("x"));
+    }
+
+    @Test
+    void updateStack_ssmParameterTagsFollowTheTemplate() {
+        String stackName = "cfn-ssm-tags-stack";
+        String parameterName = "/cfn/ssm-tags-param";
+
+        createSsmParameterStackWithOutOfTemplateTag(stackName, parameterName);
+        updateSsmParameterStack(stackName, parameterName, """
+            ,
+                    "Tags": {"a": "changed"}""");
+
+        ssmParameterTags(parameterName)
+            .body("TagList.size()", equalTo(2))
+            .body("TagList.find { it.Key == 'a' }.Value", equalTo("changed"))
+            .body("TagList.find { it.Key == 'ext' }.Value", equalTo("x"));
+    }
+
+    @Test
+    void updateStack_ssmParameterTagsPropertyRemovedKeepsOutOfTemplateTags() {
+        String stackName = "cfn-ssm-tags-removed-stack";
+        String parameterName = "/cfn/ssm-tags-removed-param";
+
+        createSsmParameterStackWithOutOfTemplateTag(stackName, parameterName);
+        updateSsmParameterStack(stackName, parameterName, "");
+
+        ssmParameterTags(parameterName)
+            .body("TagList.size()", equalTo(1))
+            .body("TagList.find { it.Key == 'ext' }.Value", equalTo("x"));
+    }
+
+    private static String ssmParameterTemplate(String parameterName, String tagsProperty) {
+        return """
+            {
+              "Resources": {
+                "MyParameter": {
+                  "Type": "AWS::SSM::Parameter",
+                  "Properties": {
+                    "Name": "%s",
+                    "Type": "String",
+                    "Value": "v"%s
+                  }
+                }
+              }
+            }
+            """.formatted(parameterName, tagsProperty);
+    }
+
+    private static void createSsmParameterStackWithOutOfTemplateTag(String stackName, String parameterName) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", ssmParameterTemplate(parameterName, """
+                ,
+                    "Tags": {"a": "1", "b": "2"}"""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        ssmParameterTags(parameterName)
+            .body("TagList.size()", equalTo(2))
+            .body("TagList.find { it.Key == 'a' }.Value", equalTo("1"))
+            .body("TagList.find { it.Key == 'b' }.Value", equalTo("2"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.AddTagsToResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {"ResourceType": "Parameter", "ResourceId": "%s", "Tags": [{"Key": "ext", "Value": "x"}]}
+                """.formatted(parameterName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private static void updateSsmParameterStack(String stackName, String parameterName, String tagsProperty) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", ssmParameterTemplate(parameterName, tagsProperty))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private static ValidatableResponse ssmParameterTags(String parameterName) {
+        return given()
+            .header("X-Amz-Target", "AmazonSSM.ListTagsForResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {"ResourceType": "Parameter", "ResourceId": "%s"}
+                """.formatted(parameterName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test

@@ -310,6 +310,9 @@ before provisioning:
 
 The `AWS::SSM::Parameter` **resource** type exposes `Value`, `Type`, `Name`, and `Arn` attributes through
 `Ref` / `Fn::GetAtt` so downstream resources can consume a parameter the same stack creates.
+`Tags` are applied when the parameter is created. On `UpdateStack` the template's tags are applied and
+only the keys the previous template set and the new one drops are removed, so a tag added outside the
+template is kept, as in AWS.
 
 ## AWS::Include (`Fn::Transform`)
 
