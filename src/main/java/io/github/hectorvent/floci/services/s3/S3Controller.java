@@ -3807,7 +3807,7 @@ public class S3Controller {
     }
 
     /**
-     * Extracts the object key from the raw Vert.x request URI, preserving leading slashes
+     * Extracts the object key from the raw Vert.x request path, preserving leading slashes
      * that JAX-RS path normalization would otherwise strip.
      */
     private String extractObjectKey(UriInfo uriInfo, String bucket) {
@@ -3816,9 +3816,7 @@ public class S3Controller {
 
     private String extractObjectKey(UriInfo uriInfo, String bucket, String fallbackKey) {
         validateRawUri();
-        String rawUri = currentVertxRequest.getCurrent().request().uri();
-        int qIdx = rawUri.indexOf('?');
-        String rawPath = qIdx >= 0 ? rawUri.substring(0, qIdx) : rawUri;
+        String rawPath = currentVertxRequest.getCurrent().request().path();
         String bucketPrefix = "/" + bucket + "/";
         String rawKey;
         if (isVirtualHostedRawPath(uriInfo, bucket, rawPath)) {
@@ -3883,9 +3881,7 @@ public class S3Controller {
     }
 
     private void validateRawUri() {
-        String rawUri = currentVertxRequest.getCurrent().request().uri();
-        int queryIndex = rawUri.indexOf('?');
-        String rawPath = queryIndex >= 0 ? rawUri.substring(0, queryIndex) : rawUri;
+        String rawPath = currentVertxRequest.getCurrent().request().path();
         String decodedPath;
         try {
             decodedPath = URLDecoder.decode(rawPath.replace("+", "%2B"), StandardCharsets.UTF_8);

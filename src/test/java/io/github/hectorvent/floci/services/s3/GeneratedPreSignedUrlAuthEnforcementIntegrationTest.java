@@ -11,6 +11,8 @@ import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.net.InetSocketAddress;
+import java.net.ProxySelector;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.net.http.HttpClient;
@@ -222,6 +224,38 @@ class GeneratedPreSignedUrlAuthEnforcementIntegrationTest {
         HttpResponse<String> altered = client.send(HttpRequest.newBuilder(alteredUri).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(403, altered.statusCode(), altered.body());
+    }
+
+    @Test
+    void proxiedGeneratedUrlUsesTheSignedPathWhenHostMatchesBucket() throws Exception {
+        String bucket = "generated-presign-proxy-" + UUID.randomUUID().toString().substring(0, 8);
+        given().filter(OWNER).when().put("/" + bucket).then().statusCode(200);
+        given().filter(OWNER).body("signed object").when().put("/" + bucket + "/object.txt")
+                .then().statusCode(200);
+        given().filter(OWNER).body("other object").when().put("/" + bucket + "/" + bucket + "/object.txt")
+                .then().statusCode(200);
+
+        HttpClient proxyClient = HttpClient.newBuilder()
+                .proxy(ProxySelector.of(new InetSocketAddress("localhost", RestAssured.port)))
+                .build();
+        String baseUrl = "http://" + bucket;
+        URI getUri = URI.create(presignGenerator.generatePresignedUrl(
+                baseUrl, bucket, "object.txt", "GET", 60));
+        HttpResponse<String> get = proxyClient.send(HttpRequest.newBuilder(getUri).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, get.statusCode(), get.body());
+        assertEquals("signed object", get.body());
+
+        URI putUri = URI.create(presignGenerator.generatePresignedUrl(
+                baseUrl, bucket, "object.txt", "PUT", 60));
+        HttpResponse<String> put = proxyClient.send(HttpRequest.newBuilder(putUri)
+                        .PUT(HttpRequest.BodyPublishers.ofString("updated object")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, put.statusCode(), put.body());
+        given().filter(OWNER).when().get("/" + bucket + "/object.txt")
+                .then().statusCode(200).body(equalTo("updated object"));
+        given().filter(OWNER).when().get("/" + bucket + "/" + bucket + "/object.txt")
+                .then().statusCode(200).body(equalTo("other object"));
     }
 
     private static String queryParam(URI uri, String name) {
