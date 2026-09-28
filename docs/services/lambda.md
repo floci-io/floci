@@ -1042,3 +1042,19 @@ of `{}` or with an empty `Filters` array clears any existing filters.
 ## Supported Runtimes
 
 Any runtime that has an official AWS Lambda container image works with Floci (e.g. `nodejs22.x`, `python3.13`, `java21`, `go1.x`, `provided.al2023`).
+
+By default, Floci builds each runtime image reference from `floci.services.lambda.ecr-base-uri`
+and the runtime tag. To pin one runtime to a full image reference, set
+`floci.services.lambda.runtime-images` in the Floci configuration:
+
+```yaml
+floci:
+  services:
+    lambda:
+      runtime-images:
+        "python3.12": "public.ecr.aws/lambda/python:3.12@sha256:<digest>"
+```
+
+Replace `<digest>` with the image's full SHA-256 digest. The override applies to
+zip-based functions using that runtime; other runtimes retain their default images.
+Custom image URI passthrough and image-package functions are unaffected.
