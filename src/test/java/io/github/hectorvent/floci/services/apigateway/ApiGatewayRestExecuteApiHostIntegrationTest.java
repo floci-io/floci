@@ -145,6 +145,51 @@ class ApiGatewayRestExecuteApiHostIntegrationTest {
                 .then().statusCode(410);
     }
 
+    @Test
+    void restCustomDomainWinsOverWebSocketIdCollision() {
+        String apiId = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec())
+                .when().post("/restapis")
+                .then().statusCode(201)
+                .extract().path("id");
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"stageName\":\"test\"}")
+                .when().post("/restapis/" + apiId + "/deployments")
+                .then().statusCode(201);
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"websocket-id-collision\",\"protocolType\":\"WEBSOCKET\","
+                        + "\"routeSelectionExpression\":\"$request.body.action\","
+                        + "\"tags\":{\"floci:override-id\":\"" + apiId + "\"}}")
+                .when().post("/v2/apis")
+                .then().statusCode(201)
+                .body("apiId", equalTo(apiId));
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"domainName\":\"collision.example.com\","
+                        + "\"certificateArn\":\"arn:aws:acm:us-east-1:000000000000:certificate/demo\"}")
+                .when().post("/domainnames")
+                .then().statusCode(201);
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"basePath\":\"(none)\",\"restApiId\":\"" + apiId + "\",\"stage\":\"test\"}")
+                .when().post("/domainnames/collision.example.com/basepathmappings")
+                .then().statusCode(201);
+
+        given()
+                .header("Host", "collision.example.com.regional.local")
+                .when().get("/@connections/demo")
+                .then().statusCode(200)
+                .body("route", equalTo("rest-connection"));
+
+        given()
+                .when().get("/execute-api/" + apiId + "/test/@connections/missing")
+                .then().statusCode(410);
+    }
+
     private static String resourceId(String apiId, String path) throws Exception {
         String resources = given()
                 .when().get("/restapis/" + apiId + "/resources")

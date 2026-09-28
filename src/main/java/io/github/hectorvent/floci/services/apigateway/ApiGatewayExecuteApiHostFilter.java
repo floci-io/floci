@@ -208,6 +208,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
                 .replacePath("/execute-api/" + apiId + path)
                 .buildFromEncoded();
         LOG.debugv("REST execute-api host routing: {0} -> {1}", originalPath, newUri.getRawPath());
+        routeContext.routeToRestApi();
         routeContext.recordSignedRequestPath(originalPath);
         requestContext.setRequestUri(newUri);
     }

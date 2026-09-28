@@ -169,7 +169,7 @@ public class ApiGatewayExecuteController {
     private static final String CONNECTIONS_PREFIX = "@connections/";
 
     private boolean isWebSocketConnectionRequest(String apiId, String proxy) {
-        if (proxy == null || !proxy.startsWith(CONNECTIONS_PREFIX)) {
+        if (proxy == null || !proxy.startsWith(CONNECTIONS_PREFIX) || routeContext.isRestApiRoute()) {
             return false;
         }
         Optional<ApiGatewayV2Service.ApiOwner> owner = apiGatewayV2Service.findApiOwner(apiId);
