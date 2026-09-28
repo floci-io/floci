@@ -2690,7 +2690,7 @@ public class ApiGatewayService {
     }
 
     public RestApi importRestApi(String region, String specBody, boolean failOnWarnings) {
-        ParsedOpenApi parsed = parseOpenApiSpec(resolveOpenApiAwsVariables(region, specBody), failOnWarnings);
+        ParsedOpenApi parsed = parseOpenApiSpec(specBody, failOnWarnings);
         OpenAPI openAPI = parsed.openAPI();
 
         String name = openAPI.getInfo() != null ? openAPI.getInfo().getTitle() : "Imported API";
@@ -2742,8 +2742,11 @@ public class ApiGatewayService {
         }
     }
 
-    private String resolveOpenApiAwsVariables(String region, String specBody) {
-        return specBody
+    private String resolveOpenApiAwsVariables(String region, String value) {
+        if (value == null) {
+            return null;
+        }
+        return value
                 .replace("${AWS::Region}", region)
                 .replace("${AWS::AccountId}", regionResolver.getAccountId())
                 .replace("${AWS::Partition}", regionResolver.partitionForRegion(region));
@@ -3457,12 +3460,14 @@ public class ApiGatewayService {
         Map<String, Object> integrationRequest = new HashMap<>();
         integrationRequest.put("type", integrationExt.get("type"));
         integrationRequest.put("httpMethod", integrationExt.get("httpMethod"));
-        integrationRequest.put("uri", integrationExt.get("uri"));
+        integrationRequest.put("uri", resolveOpenApiAwsVariables(region, (String) integrationExt.get("uri")));
         integrationRequest.put("passthroughBehavior", integrationExt.get("passthroughBehavior"));
         for (String field : List.of("contentHandling", "timeoutInMillis", "connectionType",
                 "connectionId", "credentials", "cacheNamespace", "cacheKeyParameters", "tlsConfig")) {
             if (integrationExt.get(field) != null) {
-                integrationRequest.put(field, integrationExt.get(field));
+                integrationRequest.put(field, "credentials".equals(field)
+                        ? resolveOpenApiAwsVariables(region, (String) integrationExt.get(field))
+                        : integrationExt.get(field));
             }
         }
 

@@ -108,6 +108,42 @@ class ApiGatewayOpenApiAwsVariablesIntegrationTest {
                 imported.path("credentials").asText());
     }
 
+    @Test
+    void importRestApiPreservesLiteralMappingTemplates() throws Exception {
+        String requestTemplate = "{\"literal\":\"${AWS::Region}\"}";
+        String responseTemplate = "{\"literal\":\"${AWS::AccountId}\"}";
+        ObjectNode definition = (ObjectNode) JSON.readTree(spec("LiteralTemplates", URI, CREDENTIALS,
+                requestTemplate));
+        ObjectNode integration = (ObjectNode) definition.path("paths").path("/start").path("post")
+                .path("x-amazon-apigateway-integration");
+        ((ObjectNode) integration.path("responses").path("default"))
+                .putObject("responseTemplates").put("application/json", responseTemplate);
+
+        String apiId = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(definition.toString())
+                .when().post("/restapis")
+                .then().statusCode(201)
+                .extract().path("id");
+        String resourceId = startResourceId(apiId, null);
+
+        String importedIntegration = given()
+                .when().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST/integration")
+                .then().statusCode(200)
+                .extract().asString();
+        assertEquals(requestTemplate, JSON.readTree(importedIntegration)
+                .path("requestTemplates").path("application/json").asText());
+
+        String importedResponse = given()
+                .when().get("/restapis/" + apiId + "/resources/" + resourceId
+                        + "/methods/POST/integration/responses/200")
+                .then().statusCode(200)
+                .extract().asString();
+        assertEquals(responseTemplate, JSON.readTree(importedResponse)
+                .path("responseTemplates").path("application/json").asText());
+    }
+
     private static String startResourceId(String apiId, String authorization) throws Exception {
         String resources = authorization == null
                 ? given().when().get("/restapis/" + apiId + "/resources")

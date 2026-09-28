@@ -71,9 +71,9 @@ For a same-name Cognito authorizer, merge also keeps its existing pool ARNs when
 definition provides no new `providerARNs`; an explicit list replaces them, including `[]`.
 
 REST OpenAPI imports resolve `${AWS::Region}`, `${AWS::AccountId}`, and `${AWS::Partition}`
-in the definition before creating resources and integrations. Values come from the request
-region and account, so integration URIs and role ARNs can use the same definition across
-regions and partitions. This applies to both `ImportRestApi` and `PutRestApi`.
+in integration URIs and credentials. Values come from the request region and account,
+so the same definition can be imported across regions and partitions. Mapping templates
+retain their literal contents. This applies to both `ImportRestApi` and `PutRestApi`.
 
 ### Supported Operations
 
