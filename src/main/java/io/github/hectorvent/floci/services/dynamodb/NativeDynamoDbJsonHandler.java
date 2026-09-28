@@ -1728,8 +1728,7 @@ public class NativeDynamoDbJsonHandler {
                             "Cannot delete and update the same index: " + indexName, 400);
                 }
                 if (currentTable.findGsi(indexName).isEmpty()) {
-                    throw new AwsException("ValidationException",
-                            "The table does not have the specified index: " + indexName, 400);
+                    throw DynamoDbService.missingGsi(indexName, currentTable.getTableName());
                 }
             }
         }
