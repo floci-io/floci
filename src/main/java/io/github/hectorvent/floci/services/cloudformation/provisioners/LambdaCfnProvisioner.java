@@ -120,6 +120,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
         } else {
             func = updateLambdaFunction(region, existing, desired, r);
+            reconcileTags(func.getFunctionArn(), desired.tags());
         }
 
         applyLambdaReservedConcurrency(region, func, desired);
@@ -236,6 +237,10 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         putResolvedMapIfPresent(configRequest, props, "ImageConfig", "ImageConfig", engine);
 
         createRequest.putAll(configRequest);
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        if (!tags.isEmpty()) {
+            createRequest.put("Tags", tags);
+        }
         Integer reservedConcurrentExecutions = null;
         String reserved = ctx.resolveOptional(props, "ReservedConcurrentExecutions");
         if (reserved != null) {
@@ -248,7 +253,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         }
 
         return new LambdaDesiredState(functionName, hasExplicitName, packageType,
-                createRequest, code, configRequest, props != null && props.has("ReservedConcurrentExecutions"),
+                createRequest, code, configRequest, tags, props != null && props.has("ReservedConcurrentExecutions"),
                 reservedConcurrentExecutions);
     }
 
@@ -379,6 +384,21 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             current = lambdaService.updateFunctionCode(region, current.getFunctionName(), desired.code().request());
         }
         return current;
+    }
+
+    /**
+     * Drives an in-place updated function's tags to the template's set, as {@code SqsCfnProvisioner}
+     * does: a key the template drops is untagged, and a template with no {@code Tags} leaves the
+     * function untagged. A created function already carries them in the create request.
+     */
+    private void reconcileTags(String functionArn, Map<String, String> desired) {
+        List<String> stale = ProvisionContext.staleTagKeys(lambdaService.listTags(functionArn), desired);
+        if (!stale.isEmpty()) {
+            lambdaService.untagResource(functionArn, stale);
+        }
+        if (!desired.isEmpty()) {
+            lambdaService.tagResource(functionArn, desired);
+        }
     }
 
     private void deleteReplacedLambda(String region, String functionName) {
@@ -886,6 +906,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                                       Map<String, Object> createRequest,
                                       LambdaCodeSpec code,
                                       Map<String, Object> configRequest,
+                                      Map<String, String> tags,
                                       boolean reservedConcurrentExecutionsPresent,
                                       Integer reservedConcurrentExecutions) {}
 

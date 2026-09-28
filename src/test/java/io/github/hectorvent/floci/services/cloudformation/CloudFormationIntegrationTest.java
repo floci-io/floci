@@ -49,6 +49,7 @@ class CloudFormationIntegrationTest {
     private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String SM_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String COGNITO_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String TAGGING_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Inject
@@ -1092,6 +1093,98 @@ class CloudFormationIntegrationTest {
             .body("Configuration.FunctionName", equalTo(functionName))
             .body("Configuration.Timeout", equalTo(9))
             .body("Configuration.Environment.Variables.STAGE", equalTo("green"));
+    }
+
+    @Test
+    void updateStack_lambdaFunctionTagsFollowTheTemplate() {
+        String stackName = "cfn-lambda-tags-stack";
+        String functionName = "cfn-lambda-tags-func";
+        String functionArn = "arn:aws:lambda:us-east-1:000000000000:function:" + functionName;
+        String template = """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role"%s
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(functionName, """
+                ,
+                    "Tags": [{"Key": "team", "Value": "a"}, {"Key": "env", "Value": "dev"}]"""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/2017-03-31/tags/" + functionArn)
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(2))
+            .body("Tags.team", equalTo("a"))
+            .body("Tags.env", equalTo("dev"));
+
+        given()
+            .header("X-Amz-Target", "ResourceGroupsTaggingAPI_20170126.GetResources")
+            .contentType(TAGGING_CONTENT_TYPE)
+            .body("""
+                {"ResourceTypeFilters": ["lambda:function"], "TagFilters": [{"Key": "team", "Values": ["a"]}]}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResourceTagMappingList.ResourceARN", hasItem(functionArn));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(functionName, """
+                ,
+                    "Tags": [{"Key": "team", "Value": "b"}]"""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/2017-03-31/tags/" + functionArn)
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(1))
+            .body("Tags.team", equalTo("b"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(functionName, ""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/2017-03-31/tags/" + functionArn)
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(0));
     }
 
     @Test
