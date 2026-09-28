@@ -10,7 +10,9 @@ import io.github.hectorvent.floci.services.resourcegroupstagging.model.ResourceT
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.ConcurrentModificationException;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -124,6 +126,26 @@ class ResourceGroupsTaggingServiceTest {
     }
 
     @Test
+    void providerResourceWithoutArnRegionUsesItsOwnRegion() {
+        String bucketArn = "arn:aws:s3:::b";
+        ResourceGroupsTaggingService service = service(List.of(provider(new ExplorerResource(
+                bucketArn, "s3:bucket", "s3", "eu-west-1", ACCOUNT, Instant.EPOCH, Map.of("k", "v")))), List.of());
+
+        assertTrue(resourcesIn(service, REGION).isEmpty());
+        assertEquals(List.of(bucketArn), arns(resourcesIn(service, "eu-west-1")));
+    }
+
+    @Test
+    void globalProviderResourceIsVisibleInEveryRegion() {
+        String roleArn = "arn:aws:iam::000000000000:role/r";
+        ResourceGroupsTaggingService service = service(List.of(provider(new ExplorerResource(
+                roleArn, "iam:role", "iam", "global", ACCOUNT, Instant.EPOCH, Map.of("k", "v")))), List.of());
+
+        assertEquals(List.of(roleArn), arns(resourcesIn(service, REGION)));
+        assertEquals(List.of(roleArn), arns(resourcesIn(service, "eu-west-1")));
+    }
+
+    @Test
     void failingProviderIsSkipped() {
         ResourceProvider failing = new ResourceProvider() {
             @Override
@@ -137,6 +159,21 @@ class ResourceGroupsTaggingServiceTest {
             }
         };
         ResourceGroupsTaggingService service = service(List.of(failing,
+                provider(resource(QUEUE_ARN, "sqs:queue", Map.of("k", "v")))), List.of());
+
+        assertEquals(List.of(QUEUE_ARN), arns(allResources(service)));
+    }
+
+    @Test
+    void providerWhoseTagsFailToCopyIsSkipped() {
+        Map<String, String> liveTags = new AbstractMap<>() {
+            @Override
+            public Set<Entry<String, String>> entrySet() {
+                throw new ConcurrentModificationException();
+            }
+        };
+        ResourceGroupsTaggingService service = service(List.of(
+                provider(resource(INSTANCE_ARN, "ec2:instance", liveTags)),
                 provider(resource(QUEUE_ARN, "sqs:queue", Map.of("k", "v")))), List.of());
 
         assertEquals(List.of(QUEUE_ARN), arns(allResources(service)));
@@ -169,6 +206,30 @@ class ResourceGroupsTaggingServiceTest {
         assertEquals(List.of(INSTANCE_ARN), arns(first.items()));
         assertEquals(List.of(QUEUE_ARN), arns(second.items()));
         assertNull(second.nextPaginationToken());
+    }
+
+    @Test
+    void staleTokenPastTheEndReturnsAnEmptyPage() {
+        ResourceGroupsTaggingService service = service(List.of(), List.of());
+        service.tagResources(List.of(INSTANCE_ARN), Map.of("a", "v1"), REGION);
+        service.tagResources(List.of(QUEUE_ARN), Map.of("a", "v2", "b", "x"), REGION);
+        String resourcesToken = service.getResources(
+                List.of(), List.of(), List.of(), null, 1, REGION).nextPaginationToken();
+        String keysToken = service.getTagKeys(null, 1, REGION).nextPaginationToken();
+        String valuesToken = service.getTagValues("a", null, 1, REGION).nextPaginationToken();
+
+        service.deleteResources(List.of(INSTANCE_ARN, QUEUE_ARN), REGION);
+        ResourceGroupsTaggingService.PageResult resources = service.getResources(
+                List.of(), List.of(), List.of(), resourcesToken, 1, REGION);
+        ResourceGroupsTaggingService.PageResult keys = service.getTagKeys(keysToken, 1, REGION);
+        ResourceGroupsTaggingService.PageResult values = service.getTagValues("a", valuesToken, 1, REGION);
+
+        assertTrue(resources.items().isEmpty());
+        assertNull(resources.nextPaginationToken());
+        assertTrue(keys.items().isEmpty());
+        assertNull(keys.nextPaginationToken());
+        assertTrue(values.items().isEmpty());
+        assertNull(values.nextPaginationToken());
     }
 
     @Test
@@ -264,7 +325,11 @@ class ResourceGroupsTaggingServiceTest {
     }
 
     private static List<ResourceTagMapping> allResources(ResourceGroupsTaggingService service) {
-        return service.getResources(List.of(), List.of(), List.of(), null, 0, REGION).items();
+        return resourcesIn(service, REGION);
+    }
+
+    private static List<ResourceTagMapping> resourcesIn(ResourceGroupsTaggingService service, String region) {
+        return service.getResources(List.of(), List.of(), List.of(), null, 0, region).items();
     }
 
     private static List<ResourceTagMapping> filterByType(ResourceGroupsTaggingService service, String typeFilter) {

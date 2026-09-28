@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +39,7 @@ public class ResourceGroupsTaggingService implements Resettable {
     private static final Logger LOG = Logger.getLogger(ResourceGroupsTaggingService.class);
     private static final Pattern TYPE_DELIMITER = Pattern.compile("[/:]");
     private static final String WILDCARD_SUFFIX = ":*";
+    private static final String GLOBAL_REGION = "global";
 
     private final StorageFactory storageFactory;
     private final Iterable<ResourceProvider> providers;
@@ -228,7 +230,7 @@ public class ResourceGroupsTaggingService implements Resettable {
                 .map(ViewEntry::mapping)
                 .collect(Collectors.toList());
 
-        int offset = decodePaginationToken(paginationToken);
+        int offset = Math.min(decodePaginationToken(paginationToken), all.size());
         int pageSize = (resourcesPerPage > 0) ? resourcesPerPage : 100;
         int end = Math.min(offset + pageSize, all.size());
         List<ResourceTagMapping> page = all.subList(offset, end);
@@ -312,7 +314,7 @@ public class ResourceGroupsTaggingService implements Resettable {
         Map<String, ViewEntry> byArn = new TreeMap<>();
         for (ResourceTagMapping stored : store.values()) {
             String arn = stored.getResourceArn();
-            if (isVisible(arn, region, accountId)) {
+            if (isVisible(arn, null, region, accountId)) {
                 byArn.computeIfAbsent(arn, ViewEntry::of).mapping().getTags().putAll(stored.getTags());
             }
         }
@@ -322,7 +324,7 @@ public class ResourceGroupsTaggingService implements Resettable {
                     : resource.arn();
             ViewEntry entry = byArn.get(arn);
             if (entry == null) {
-                if (resource.tags().isEmpty() || !isVisible(arn, region, accountId)) {
+                if (resource.tags().isEmpty() || !isVisible(arn, resource.region(), region, accountId)) {
                     continue;
                 }
                 entry = ViewEntry.of(arn);
@@ -334,11 +336,18 @@ public class ResourceGroupsTaggingService implements Resettable {
         return new ArrayList<>(byArn.values());
     }
 
+    // Tags are copied inside the try so a live tag map that changes mid-copy skips only its provider.
     private List<ExplorerResource> providerResources() {
         List<ExplorerResource> resources = new ArrayList<>();
         for (ResourceProvider provider : providers) {
             try {
-                resources.addAll(provider.getResources());
+                List<ExplorerResource> copies = new ArrayList<>();
+                for (ExplorerResource resource : provider.getResources()) {
+                    copies.add(new ExplorerResource(resource.arn(), resource.resourceType(), resource.service(),
+                            resource.region(), resource.owningAccountId(), resource.lastReportedAt(),
+                            new HashMap<>(resource.tags())));
+                }
+                resources.addAll(copies);
             } catch (RuntimeException e) {
                 LOG.warnv(e, "ResourceProvider {0} failed to supply resources; excluding it from tag discovery",
                         provider.getClass().getSimpleName());
@@ -347,14 +356,24 @@ public class ResourceGroupsTaggingService implements Resettable {
         return resources;
     }
 
-    // Region and account come from the ARN (arn:<partition>:svc:region:acct:resource); an empty
-    // segment means global, and a string that is not an ARN stays visible as it always has.
-    private static boolean isVisible(String arn, String region, String accountId) {
+    // Region and account come from the ARN (arn:<partition>:svc:region:acct:resource), and a string
+    // that is not an ARN stays visible as it always has. An empty ARN region falls back to
+    // fallbackRegion (a provider resource's own region, null for store entries); a fallback that
+    // is null, empty or "global" means the resource is global.
+    private static boolean isVisible(String arn, String fallbackRegion, String region, String accountId) {
         String[] parts = arn.split(":", 6);
-        if (parts.length >= 4 && !parts[3].isEmpty() && !parts[3].equals(region)) {
+        if (parts.length >= 4 && !regionMatches(parts[3], fallbackRegion, region)) {
             return false;
         }
         return accountId == null || parts.length < 5 || parts[4].isEmpty() || parts[4].equals(accountId);
+    }
+
+    private static boolean regionMatches(String arnRegion, String fallbackRegion, String region) {
+        if (!arnRegion.isEmpty()) {
+            return arnRegion.equals(region);
+        }
+        return fallbackRegion == null || fallbackRegion.isEmpty() || fallbackRegion.equals(GLOBAL_REGION)
+                || fallbackRegion.equals(region);
     }
 
     // ─── GetTagKeys ────────────────────────────────────────────────────────────
@@ -366,7 +385,7 @@ public class ResourceGroupsTaggingService implements Resettable {
                 .sorted()
                 .collect(Collectors.toList());
 
-        int offset = decodePaginationToken(paginationToken);
+        int offset = Math.min(decodePaginationToken(paginationToken), keys.size());
         int pageSize = (maxResults > 0) ? maxResults : 100;
         int end = Math.min(offset + pageSize, keys.size());
         // Return as ResourceTagMapping with just the key in the ARN field (repurposed for keys)
@@ -387,7 +406,7 @@ public class ResourceGroupsTaggingService implements Resettable {
                 .sorted()
                 .collect(Collectors.toList());
 
-        int offset = decodePaginationToken(paginationToken);
+        int offset = Math.min(decodePaginationToken(paginationToken), values.size());
         int pageSize = (maxResults > 0) ? maxResults : 100;
         int end = Math.min(offset + pageSize, values.size());
         List<ResourceTagMapping> page = values.subList(offset, end).stream()
