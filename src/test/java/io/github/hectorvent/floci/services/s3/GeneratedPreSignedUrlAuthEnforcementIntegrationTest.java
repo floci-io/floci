@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
-import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.testing.S3IamEnforcementProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
@@ -19,8 +19,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.util.UUID;
 import java.util.Map;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
