@@ -15,9 +15,18 @@ import java.util.Map;
 public class AppSyncDataSourceInvokers {
 
     private final Map<DataSourceType, AppSyncDataSourceInvoker> byType = new EnumMap<>(DataSourceType.class);
+    private final AppSyncDataSourceAuthorizer authorizer;
 
     @Inject
-    public AppSyncDataSourceInvokers(Instance<AppSyncDataSourceInvoker> invokers) {
+    public AppSyncDataSourceInvokers(Instance<AppSyncDataSourceInvoker> invokers,
+                                    AppSyncDataSourceAuthorizer authorizer) {
+        this((Iterable<AppSyncDataSourceInvoker>) invokers, authorizer);
+    }
+
+    /** Test constructor: an explicit set, bypassing CDI. */
+    public AppSyncDataSourceInvokers(Iterable<AppSyncDataSourceInvoker> invokers,
+                                    AppSyncDataSourceAuthorizer authorizer) {
+        this.authorizer = authorizer;
         invokers.forEach(invoker -> {
             AppSyncDataSourceInvoker existing = byType.put(invoker.type(), invoker);
             if (existing != null) {
@@ -26,11 +35,6 @@ public class AppSyncDataSourceInvokers {
                         + invoker.getClass().getSimpleName());
             }
         });
-    }
-
-    /** Test constructor: an explicit set, bypassing CDI. */
-    public AppSyncDataSourceInvokers(Iterable<AppSyncDataSourceInvoker> invokers) {
-        invokers.forEach(invoker -> byType.put(invoker.type(), invoker));
     }
 
     /**
@@ -48,6 +52,7 @@ public class AppSyncDataSourceInvokers {
                     "Floci cannot invoke AppSync data sources of type " + type
                             + " (data source " + dataSource.getName() + ")", 500);
         }
+        authorizer.authorize(dataSource, request, region);
         return invoker.invoke(dataSource, request, region);
     }
 

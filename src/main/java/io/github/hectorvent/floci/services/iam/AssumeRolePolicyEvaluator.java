@@ -7,6 +7,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.Iterator;
+import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -104,6 +107,39 @@ public class AssumeRolePolicyEvaluator {
         return allow;
     }
 
+    /**
+     * Checks a service trust policy in the context of an AppSync API. AWS supports narrowing
+     * service trust with aws:SourceAccount and aws:SourceArn. Unknown condition keys or operators
+     * are rejected rather than silently turning a conditional Allow into an unconditional one.
+     */
+    public boolean allowsService(String trustPolicyDocument, String servicePrincipal,
+                                 String sourceArn, String sourceAccount) {
+        if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
+            return false;
+        }
+        JsonNode statements;
+        try {
+            statements = objectMapper.readTree(trustPolicyDocument).path("Statement");
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
+            return false;
+        }
+        boolean allow = false;
+        if (statements.isArray()) {
+            for (JsonNode statement : statements) {
+                switch (evaluateServiceStatement(statement, servicePrincipal, sourceArn, sourceAccount)) {
+                    case DENY -> { return false; }
+                    case ALLOW -> allow = true;
+                    case NO_MATCH -> { }
+                }
+            }
+        } else if (statements.isObject()) {
+            return evaluateServiceStatement(statements, servicePrincipal,
+                    sourceArn, sourceAccount) == Match.ALLOW;
+        }
+        return allow;
+    }
+
     private enum Match { ALLOW, DENY, NO_MATCH }
 
     private Match evaluateStatement(JsonNode stmt, String callerArn, String callerAccount) {
@@ -123,6 +159,74 @@ public class AssumeRolePolicyEvaluator {
         return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
     }
 
+    private Match evaluateServiceStatement(JsonNode stmt, String servicePrincipal,
+                                           String sourceArn, String sourceAccount) {
+        if (!actionApplies(stmt) || !matchesServicePrincipal(stmt.get("Principal"), servicePrincipal)) {
+            return Match.NO_MATCH;
+        }
+        Match condition = serviceCondition(stmt.get("Condition"), sourceArn, sourceAccount);
+        if (condition != Match.ALLOW) {
+            return condition;
+        }
+        return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
+    }
+
+    /** ALLOW means the condition matches, NO_MATCH means it does not, DENY means unsupported. */
+    private Match serviceCondition(JsonNode condition, String sourceArn, String sourceAccount) {
+        if (condition == null) {
+            return Match.ALLOW;
+        }
+        if (!condition.isObject() || condition.isEmpty()) {
+            return Match.DENY;
+        }
+        for (Iterator<Map.Entry<String, JsonNode>> operators = condition.fields();
+             operators.hasNext();) {
+            Map.Entry<String, JsonNode> operator = operators.next();
+            if (!"StringEquals".equals(operator.getKey()) && !"StringLike".equals(operator.getKey())
+                    && !"ArnEquals".equals(operator.getKey()) && !"ArnLike".equals(operator.getKey())) {
+                return Match.DENY;
+            }
+            if (!operator.getValue().isObject() || operator.getValue().isEmpty()) {
+                return Match.DENY;
+            }
+            for (Iterator<Map.Entry<String, JsonNode>> keys = operator.getValue().fields();
+                 keys.hasNext();) {
+                Map.Entry<String, JsonNode> key = keys.next();
+                String actual = switch (key.getKey().toLowerCase(Locale.ROOT)) {
+                    case "aws:sourcearn" -> sourceArn;
+                    case "aws:sourceaccount" -> sourceAccount;
+                    default -> null;
+                };
+                if (!"aws:sourcearn".equalsIgnoreCase(key.getKey())
+                        && !"aws:sourceaccount".equalsIgnoreCase(key.getKey())) {
+                    return Match.DENY;
+                }
+                if (actual == null || !matchesServiceConditionValue(operator.getKey(), key.getValue(), actual)) {
+                    return Match.NO_MATCH;
+                }
+            }
+        }
+        return Match.ALLOW;
+    }
+
+    private boolean matchesServiceConditionValue(String operator, JsonNode values, String actual) {
+        if (values.isArray()) {
+            for (JsonNode value : values) {
+                if (matchesServiceConditionValue(operator, value, actual)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (!values.isTextual()) {
+            return false;
+        }
+        if ("StringEquals".equals(operator)) {
+            return values.asText().equals(actual);
+        }
+        return IamPolicyEvaluator.globMatches(values.asText(), actual);
+    }
+
     private boolean matchesServicePrincipal(JsonNode principalNode, String servicePrincipal) {
         if (principalNode == null || servicePrincipal == null) {
             return false;
@@ -132,11 +236,11 @@ public class AssumeRolePolicyEvaluator {
             return false;
         }
         if (service.isTextual()) {
-            return IamPolicyEvaluator.globMatches(service.asText(), servicePrincipal);
+            return service.asText().equals(servicePrincipal);
         }
         if (service.isArray()) {
             for (JsonNode entry : service) {
-                if (entry.isTextual() && IamPolicyEvaluator.globMatches(entry.asText(), servicePrincipal)) {
+                if (entry.isTextual() && entry.asText().equals(servicePrincipal)) {
                     return true;
                 }
             }

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlEngine;
+import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceAuthorizer;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvoker;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvokers;
 import io.github.hectorvent.floci.services.appsync.graphql.js.AppSyncJsRuntime;
@@ -47,7 +48,8 @@ class AppSyncResolverExecutorTest {
     private final RecordingInvoker noneInvoker = new RecordingInvoker(DataSourceType.NONE);
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AppSyncResolverExecutor executor = new AppSyncResolverExecutor(appSync, jsRuntime,
-            new AppSyncDataSourceInvokers(List.of(invoker, noneInvoker)), vtlEngine(), objectMapper);
+            new AppSyncDataSourceInvokers(List.of(invoker, noneInvoker),
+                    mock(AppSyncDataSourceAuthorizer.class)), vtlEngine(), objectMapper);
 
     private static AppSyncVtlEngine vtlEngine() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
