@@ -162,6 +162,12 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
                 return;
             }
         } catch (AwsException e) {
+            // The v2 owner lookup is account-independent. When it found no owner, let the
+            // REST execute controller resolve the API after account context is established.
+            if (owner.isEmpty()) {
+                routeToRestApi(requestContext, originalUri, originalPath, apiId);
+                return;
+            }
             LOG.debugv(e, "Execute API host did not resolve to a routable API: apiId={0}, region={1}",
                     apiId, region);
             return;
@@ -191,6 +197,17 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         routeContext.routeToHttpApi(region);
         // AWS_IAM dispatch rebuilds the caller's canonical request, which covers the path they
         // signed: the virtual-host path, not the /execute-api/... form this rewrite produces.
+        routeContext.recordSignedRequestPath(originalPath);
+        requestContext.setRequestUri(newUri);
+    }
+
+    private void routeToRestApi(ContainerRequestContext requestContext, URI originalUri,
+                                String originalPath, String apiId) {
+        String path = originalPath == null || originalPath.isEmpty() ? "/" : originalPath;
+        URI newUri = UriBuilder.fromUri(originalUri)
+                .replacePath("/execute-api/" + apiId + path)
+                .buildFromEncoded();
+        LOG.debugv("REST execute-api host routing: {0} -> {1}", originalPath, newUri.getRawPath());
         routeContext.recordSignedRequestPath(originalPath);
         requestContext.setRequestUri(newUri);
     }

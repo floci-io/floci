@@ -86,6 +86,24 @@ class ApiGatewayExecuteApiHostFilterTest {
     }
 
     @Test
+    void routesRestHostWhenNoV2ApiOwnsTheIdentifier() {
+        FakeApiGatewayLookup lookup = new FakeApiGatewayLookup();
+        RecordingRequest request = new RecordingRequest(
+                "abc123.execute-api.localhost.floci.io",
+                URI.create("http://abc123.execute-api.localhost.floci.io/dev/deep/path?value=a%2Fb"));
+        ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
+
+        new ApiGatewayExecuteApiHostFilter(
+                lookup, new RegionResolver(REGION, "000000000000"), routeContext)
+                .filter(request.context());
+
+        assertEquals("/execute-api/abc123/dev/deep/path", request.routedUri().getRawPath());
+        assertEquals("value=a%2Fb", request.routedUri().getRawQuery());
+        assertNull(routeContext.httpApiRegion());
+        assertEquals("/dev/deep/path", routeContext.signedRequestPath());
+    }
+
+    @Test
     void resolvesUnsignedApiOutsideDefaultRegion() {
         FakeApiGatewayLookup lookup = new FakeApiGatewayLookup();
         lookup.addApi("us-west-2", API_ID, "HTTP");
