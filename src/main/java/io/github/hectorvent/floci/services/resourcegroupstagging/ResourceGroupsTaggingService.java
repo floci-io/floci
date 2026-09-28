@@ -137,16 +137,17 @@ public class ResourceGroupsTaggingService implements Resettable {
     // ─── Write-through for the tagging API ────────────────────────────────────
 
     /**
-     * TagResources from the tagging API. An ARN that a {@link ResourceProvider} currently lists
-     * goes to its owning service's {@link TagHandler} only, so the owner holds the one copy; any
-     * other ARN goes to the tagging store. {@link #tagResources} stays store-only for services
-     * that dual-write, so they can never recurse through their own handler.
+     * TagResources from the tagging API. An ARN that a {@link ResourceProvider} currently lists,
+     * visible to the request's region and account as on the read path, goes to its owning
+     * service's {@link TagHandler} only, so the owner holds the one copy; any other ARN goes to
+     * the tagging store. {@link #tagResources} stays store-only for services that dual-write, so
+     * they can never recurse through their own handler.
      *
      * @return the owning service's rejection per ARN, empty when every ARN was tagged
      */
     public Map<String, AwsException> applyTags(List<String> resourceArns, Map<String, String> tags, String region) {
         Map<String, AwsException> failures = new LinkedHashMap<>();
-        Map<String, TagHandler> owners = listedOwners(resourceArns);
+        Map<String, TagHandler> owners = listedOwners(resourceArns, region);
         for (String arn : resourceArns) {
             TagHandler owner = owners.get(arn);
             if (owner == null) {
@@ -154,7 +155,7 @@ public class ResourceGroupsTaggingService implements Resettable {
                 continue;
             }
             try {
-                owner.tagResource(AwsArnUtils.regionOrDefault(arn, region), arn, tags);
+                owner.tagResource(region, arn, tags);
             } catch (AwsException e) {
                 failures.put(arn, e);
             }
@@ -170,13 +171,13 @@ public class ResourceGroupsTaggingService implements Resettable {
      */
     public Map<String, AwsException> removeTags(List<String> resourceArns, List<String> tagKeys, String region) {
         Map<String, AwsException> failures = new LinkedHashMap<>();
-        Map<String, TagHandler> owners = listedOwners(resourceArns);
+        Map<String, TagHandler> owners = listedOwners(resourceArns, region);
         List<String> untagged = new ArrayList<>();
         for (String arn : resourceArns) {
             TagHandler owner = owners.get(arn);
             if (owner != null) {
                 try {
-                    owner.untagResource(AwsArnUtils.regionOrDefault(arn, region), arn, tagKeys);
+                    owner.untagResource(region, arn, tagKeys);
                 } catch (AwsException e) {
                     failures.put(arn, e);
                     continue;
@@ -189,7 +190,7 @@ public class ResourceGroupsTaggingService implements Resettable {
     }
 
     // Providers are only read when some ARN has a handler, so a store-only request stays cheap.
-    private Map<String, TagHandler> listedOwners(List<String> resourceArns) {
+    private Map<String, TagHandler> listedOwners(List<String> resourceArns, String region) {
         Map<String, TagHandler> owners = new HashMap<>();
         Set<String> listed = null;
         for (String arn : resourceArns) {
@@ -198,9 +199,13 @@ public class ResourceGroupsTaggingService implements Resettable {
                 continue;
             }
             if (listed == null) {
+                String accountId = regionResolver != null ? regionResolver.getAccountId() : null;
                 listed = new HashSet<>();
                 for (ExplorerResource resource : providerResources()) {
-                    listed.add(withoutWildcard(resource.arn()));
+                    String listedArn = withoutWildcard(resource.arn());
+                    if (isVisible(listedArn, resource.region(), region, accountId)) {
+                        listed.add(listedArn);
+                    }
                 }
             }
             if (listed.contains(withoutWildcard(arn))) {
@@ -275,7 +280,10 @@ public class ResourceGroupsTaggingService implements Resettable {
             return false;
         }
         AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
-        String resourceType = parsedType(arn.resource());
+        // The owner's declared types decide; only an ARN known just to the store falls back to its parsed type.
+        Set<String> types = entry.declaredTypes().isEmpty()
+                ? Set.of(parsedType(arn.resource()))
+                : entry.declaredTypes();
         // filter format is "service[:resourceType]" (e.g. "ec2:instance", "apigateway:/apikeys")
         for (String filter : resourceTypeFilters) {
             String[] filterParts = filter.split(":", 2);
@@ -286,8 +294,7 @@ public class ResourceGroupsTaggingService implements Resettable {
                 return true;
             }
             String filterType = stripLeadingSlash(filterParts[1]);
-            if (filterType.equalsIgnoreCase(resourceType)
-                    || entry.declaredTypes().stream().anyMatch(filterType::equalsIgnoreCase)) {
+            if (types.stream().anyMatch(filterType::equalsIgnoreCase)) {
                 return true;
             }
         }

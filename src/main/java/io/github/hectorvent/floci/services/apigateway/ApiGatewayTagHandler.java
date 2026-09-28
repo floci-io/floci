@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -49,11 +50,11 @@ public class ApiGatewayTagHandler implements TagHandler {
         if (domainName != null) {
             return service.getDomainNameTags(region, domainName);
         }
-        String apiKeyId = apiKeyIdFromArn(arn);
+        String apiKeyId = topLevelIdFromArn(arn, API_KEYS);
         if (apiKeyId != null) {
             return service.getApiKey(region, apiKeyId).getTags();
         }
-        String usagePlanId = usagePlanIdFromArn(arn);
+        String usagePlanId = topLevelIdFromArn(arn, USAGE_PLANS);
         if (usagePlanId != null) {
             return service.getUsagePlan(region, usagePlanId).getTags();
         }
@@ -66,8 +67,8 @@ public class ApiGatewayTagHandler implements TagHandler {
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
         String domainName = domainNameFromArn(arn);
-        String apiKeyId = apiKeyIdFromArn(arn);
-        String usagePlanId = usagePlanIdFromArn(arn);
+        String apiKeyId = topLevelIdFromArn(arn, API_KEYS);
+        String usagePlanId = topLevelIdFromArn(arn, USAGE_PLANS);
         String stageName = stageNameFromArn(arn);
         if (domainName != null) {
             service.tagDomainName(region, domainName, tags);
@@ -85,8 +86,8 @@ public class ApiGatewayTagHandler implements TagHandler {
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
         String domainName = domainNameFromArn(arn);
-        String apiKeyId = apiKeyIdFromArn(arn);
-        String usagePlanId = usagePlanIdFromArn(arn);
+        String apiKeyId = topLevelIdFromArn(arn, API_KEYS);
+        String usagePlanId = topLevelIdFromArn(arn, USAGE_PLANS);
         String stageName = stageNameFromArn(arn);
         if (domainName != null) {
             service.untagDomainName(region, domainName, tagKeys);
@@ -136,23 +137,20 @@ public class ApiGatewayTagHandler implements TagHandler {
         return domainName.isEmpty() || domainName.contains("/") ? null : domainName;
     }
 
-    /** The key a {@code /apikeys/<apiKeyId>} ARN names, or null for any other ARN. */
-    private static String apiKeyIdFromArn(String arn) {
-        int at = arn.indexOf(API_KEYS);
-        if (at < 0) {
+    /**
+     * The id an ARN whose resource part is exactly {@code <prefix><id>} names, such as
+     * {@code /apikeys/<apiKeyId>} or {@code /usageplans/<usagePlanId>}, or null for any other ARN,
+     * including one that nests the prefix under another resource.
+     */
+    private static String topLevelIdFromArn(String arn, String prefix) {
+        if (!AwsArnUtils.isArn(arn)) {
             return null;
         }
-        String apiKeyId = arn.substring(at + API_KEYS.length());
-        return apiKeyId.isEmpty() || apiKeyId.contains("/") ? null : apiKeyId;
-    }
-
-    /** The plan a {@code /usageplans/<usagePlanId>} ARN names, or null for any other ARN. */
-    private static String usagePlanIdFromArn(String arn) {
-        int at = arn.indexOf(USAGE_PLANS);
-        if (at < 0) {
+        String resource = AwsArnUtils.parse(arn).resource();
+        if (!resource.startsWith(prefix)) {
             return null;
         }
-        String usagePlanId = arn.substring(at + USAGE_PLANS.length());
-        return usagePlanId.isEmpty() || usagePlanId.contains("/") ? null : usagePlanId;
+        String id = resource.substring(prefix.length());
+        return id.isEmpty() || id.contains("/") ? null : id;
     }
 }

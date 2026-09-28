@@ -68,6 +68,18 @@ class ResourceGroupsTaggingServiceTest {
     }
 
     @Test
+    void restApisFilterDoesNotMatchStages() {
+        String apiArn = "arn:aws:apigateway:us-east-1::/restapis/a";
+        String stageArn = apiArn + "/stages/s";
+        ResourceGroupsTaggingService service = service(List.of(provider(
+                resource(apiArn, "apigateway:restapis", Map.of("k", "v")),
+                resource(stageArn, "apigateway:restapis/stages", Map.of("k", "v")))), List.of());
+
+        assertEquals(List.of(apiArn), arns(filterByType(service, "apigateway:restapis")));
+        assertEquals(List.of(stageArn), arns(filterByType(service, "apigateway:restapis/stages")));
+    }
+
+    @Test
     void providerResourceWithTagsIsListed() {
         ResourceGroupsTaggingService service = service(List.of(
                 provider(resource(QUEUE_ARN, "sqs:queue", Map.of("team", "a")))), List.of());
@@ -260,12 +272,12 @@ class ResourceGroupsTaggingServiceTest {
         ResourceGroupsTaggingService service = service(List.of(
                 provider(resource(API_KEY_ARN, "apigateway:apikeys", Map.of()))), List.of(handler));
 
-        Map<String, AwsException> failures = service.applyTags(List.of(API_KEY_ARN), Map.of("cid", "c2"), "eu-west-1");
+        Map<String, AwsException> failures = service.applyTags(List.of(API_KEY_ARN), Map.of("cid", "c2"), REGION);
 
         assertTrue(failures.isEmpty());
         assertEquals(Map.of("cid", "c2"), handler.tagged.get(API_KEY_ARN));
-        assertEquals(List.of("us-east-1"), handler.regions);
-        assertTrue(service.getTagsForResource("eu-west-1", API_KEY_ARN).isEmpty());
+        assertEquals(List.of(REGION), handler.regions);
+        assertTrue(service.getTagsForResource(REGION, API_KEY_ARN).isEmpty());
     }
 
     @Test
@@ -294,6 +306,21 @@ class ResourceGroupsTaggingServiceTest {
         assertTrue(failures.isEmpty());
         assertTrue(handler.tagged.isEmpty());
         assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, deploymentArn));
+    }
+
+    @Test
+    void ownerInAnotherRegionIsNotForwarded() {
+        String westApiKeyArn = "arn:aws:apigateway:us-west-2::/apikeys/k-west";
+        RecordingTagHandler handler = new RecordingTagHandler("apigateway", false);
+        ResourceGroupsTaggingService service = service(List.of(
+                provider(resource(westApiKeyArn, "apigateway:apikeys", Map.of()))), List.of(handler));
+
+        service.applyTags(List.of(westApiKeyArn), Map.of("a", "1", "b", "2"), REGION);
+        service.removeTags(List.of(westApiKeyArn), List.of("a"), REGION);
+
+        assertTrue(handler.tagged.isEmpty());
+        assertTrue(handler.untagged.isEmpty());
+        assertEquals(Map.of("b", "2"), service.getTagsForResource(REGION, westApiKeyArn));
     }
 
     @Test

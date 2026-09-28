@@ -343,6 +343,35 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     @Test
+    void apiKeySegmentNestedUnderRestApiArnDoesNotTagTheApiKey() {
+        String marker = unique();
+        String apiId = createRestApi(marker);
+        String keyId = createApiKey(marker);
+        String arn = APIGATEWAY_ARN_PREFIX + "/restapis/" + apiId + "/apikeys/" + keyId;
+
+        given()
+            .pathParam("arn", arn)
+            .contentType("application/json")
+            .body("""
+                {"tags": {"nested": "yes"}}
+                """)
+        .when()
+            .put("/tags/{arn}")
+        .then()
+            .statusCode(204);
+        given()
+        .when()
+            .get("/apikeys/" + keyId)
+        .then()
+            .statusCode(200)
+            .body("tags.rsid", equalTo(marker))
+            .body("tags", not(hasKey("nested")));
+
+        deleteApiKey(keyId);
+        given().when().delete("/restapis/" + apiId).then().statusCode(202);
+    }
+
+    @Test
     void restApiIsDiscoveredByType() {
         String marker = unique();
         String apiId = createRestApi(marker);
@@ -380,6 +409,8 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
         getResources(markerFilter("apigateway:restapis/stages", marker))
             .body("ResourceTagMappingList.ResourceARN",
                     contains(APIGATEWAY_ARN_PREFIX + "/restapis/" + apiId + "/stages/dev"));
+        getResources(markerFilter("apigateway:restapis", marker))
+            .body("ResourceTagMappingList", empty());
 
         given().when().delete("/restapis/" + apiId).then().statusCode(202);
     }

@@ -47,7 +47,8 @@ without the trailing `:*`.
 
 `TagResources` forwards the tags to the owning service only when that service
 registers a shared tag handler, such as API Gateway, and currently lists the
-exact ARN as one of its resources. The tags then live only in the owning
+exact ARN as one of its resources visible to the request's region and account,
+by the same rule reads use. The tags then live only in the owning
 service, so `GetApiKey` shows a tag set through `TagResources`, and nothing is
 written to the tagging store. When the owning service rejects the tags, for
 example a reserved `floci:` key on an API key, the ARN appears in
@@ -78,11 +79,13 @@ Tag those resources through their own service to see the tags in both places.
 | `ResourceTypeFilters` | Matches `service` or `service:resourceType`, such as `lambda`, `lambda:function` or `ec2:instance` |
 | `ResourcesPerPage` + `PaginationToken` | Pages through matching resource mappings |
 
-The resource type in `service:resourceType` is the ARN resource part with one
-leading `/` dropped, cut at the first `/` or `:`. So `lambda:function`,
-`logs:log-group`, `ec2:instance` and `apigateway:apikeys` (or
-`apigateway:/apikeys`) all match. SQS queue ARNs have no type segment, so
-`sqs:queue` matches through the type SQS declares for its queues.
+The resource type in `service:resourceType`, with one leading `/` dropped,
+matches the type the owning service declares for the resource, such as
+`lambda:function`, `sqs:queue`, `apigateway:apikeys` (or `apigateway:/apikeys`)
+and `apigateway:restapis/stages`. So `apigateway:restapis` lists REST APIs but
+not their stages. For an ARN known only to the tagging store, the type is the
+ARN resource part with one leading `/` dropped, cut at the first `/` or `:`, so
+`logs:log-group` and `ec2:instance` match there too.
 
 A resource is visible in the region its ARN names. When the ARN has no region,
 such as an S3 bucket ARN, the owning service's region for the resource
