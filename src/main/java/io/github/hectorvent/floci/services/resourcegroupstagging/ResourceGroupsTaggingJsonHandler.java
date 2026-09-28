@@ -70,7 +70,7 @@ public class ResourceGroupsTaggingJsonHandler {
         Map<String, String> tags = new LinkedHashMap<>();
         request.path("Tags").fields().forEachRemaining(e -> tags.put(e.getKey(), e.getValue().asText()));
 
-        service.tagResources(arns, tags, region);
+        service.applyTags(arns, tags, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         // FailedResourcesMap is empty on success
@@ -84,7 +84,7 @@ public class ResourceGroupsTaggingJsonHandler {
         List<String> arns = toStringList(request.path("ResourceARNList"));
         List<String> tagKeys = toStringList(request.path("TagKeys"));
 
-        service.untagResources(arns, tagKeys, region);
+        service.removeTags(arns, tagKeys, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("FailedResourcesMap", objectMapper.createObjectNode());
