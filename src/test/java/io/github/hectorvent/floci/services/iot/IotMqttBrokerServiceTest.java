@@ -675,6 +675,7 @@ class IotMqttBrokerServiceTest {
 
             assertThrows(IllegalStateException.class, broker::startIfEnabled);
             assertFalse(rulesRun(), "a failed restart leaves rules off");
+            awaitClosed(plainPort);
         }
 
         broker.startIfEnabled();
