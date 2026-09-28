@@ -1703,7 +1703,7 @@ public class AslExecutor {
             return result;
         }
 
-        // .sync or .sync:2 — poll until terminal, or until one of the two clocks runs out: the parent
+        // .sync or .sync:2 polls until terminal, or until one of the two clocks runs out: the parent
         // execution's TimeoutSeconds budget ends the parent as TIMED_OUT and leaves the child running;
         // the Task's own TimeoutSeconds fails the state with States.Timeout and aborts the child, the
         // way AWS does (measured: child ABORTED, no error, the cause below). A StopExecution on the

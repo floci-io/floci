@@ -231,7 +231,7 @@ One deviation. Every pause is capped at `floci.services.stepfunctions.max-wait-s
 
 ASL carries two `TimeoutSeconds` fields and Floci enforces both, in the two terminal shapes
 AWS uses. The state machine's own field bounds every state; a `Task`'s own field bounds one that
-waits — for a task token (an activity, or a `.waitForTaskToken` integration) or for a job to end
+waits: for a task token (an activity, or a `.waitForTaskToken` integration) or for a job to end
 (`ecs:runTask.sync`, `states:startExecution.sync` and `.sync:2`). A Lambda or other SDK task that
 returns directly is not bound by it.
 
