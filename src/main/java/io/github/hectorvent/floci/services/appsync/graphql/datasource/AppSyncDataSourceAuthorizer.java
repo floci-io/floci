@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.datasource;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -30,22 +31,26 @@ public class AppSyncDataSourceAuthorizer {
     private final IamPolicyEvaluator policyEvaluator;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final EmulatorConfig config;
 
     @Inject
     public AppSyncDataSourceAuthorizer(IamService iamService,
                                        AssumeRolePolicyEvaluator trustEvaluator,
                                        IamPolicyEvaluator policyEvaluator,
                                        RegionResolver regionResolver,
-                                       ObjectMapper objectMapper) {
+                                       ObjectMapper objectMapper,
+                                       EmulatorConfig config) {
         this.iamService = iamService;
         this.trustEvaluator = trustEvaluator;
         this.policyEvaluator = policyEvaluator;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.config = config;
     }
 
     public void authorize(DataSource dataSource, Object request, String region) {
-        if (dataSource.getType() == DataSourceType.NONE) {
+        if (dataSource.getType() == DataSourceType.NONE
+                || !config.services().iam().enforcementEnabled()) {
             return;
         }
         String roleArn = dataSource.getServiceRoleArn();
@@ -82,7 +87,10 @@ public class AppSyncDataSourceAuthorizer {
         String sourceAccount = sourceId.accountId();
         String roleName = roleId.resource().substring(roleId.resource().lastIndexOf('/') + 1);
         Optional<IamRole> role = iamService.findRole(roleId.accountId(), roleName);
-        if (role.isEmpty() || !roleArn.equals(role.get().getArn())) {
+        if (role.isEmpty()) {
+            return;
+        }
+        if (!roleArn.equals(role.get().getArn())) {
             throw denied(dataSource, "service role does not exist");
         }
         String servicePrincipal = "appsync." + AwsRegions.dnsSuffixFor(region);

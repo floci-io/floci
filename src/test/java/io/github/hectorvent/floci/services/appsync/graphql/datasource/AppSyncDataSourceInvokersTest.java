@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.appsync.graphql.datasource;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
@@ -23,6 +24,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class AppSyncDataSourceInvokersTest {
@@ -86,10 +88,16 @@ class AppSyncDataSourceInvokersTest {
                   "Principal":{"Service":"appsync.amazonaws.com"}}}
                 """);
         when(iam.findRole("000000000000", "Resolver")).thenReturn(Optional.of(role));
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.IamServiceConfig iamConfig = mock(EmulatorConfig.IamServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.iam()).thenReturn(iamConfig);
+        when(iamConfig.enforcementEnabled()).thenReturn(true);
         ObjectMapper mapper = new ObjectMapper();
         AppSyncDataSourceAuthorizer authorizer = new AppSyncDataSourceAuthorizer(iam,
                 new AssumeRolePolicyEvaluator(mapper), new IamPolicyEvaluator(mapper),
-                mock(RegionResolver.class), mapper);
+                mock(RegionResolver.class), mapper, config);
         AppSyncDataSourceInvoker invoker = mock(AppSyncDataSourceInvoker.class);
         when(invoker.type()).thenReturn(DataSourceType.AWS_LAMBDA);
         AppSyncDataSourceInvokers dispatch = new AppSyncDataSourceInvokers(List.of(invoker), authorizer);
@@ -118,5 +126,34 @@ class AppSyncDataSourceInvokersTest {
         when(invoker.invoke(source, request, "us-east-1")).thenReturn(Map.of("accepted", true));
         assertEquals(Map.of("accepted", true), dispatch.invoke(source, request, "us-east-1"));
         verify(invoker).invoke(source, request, "us-east-1");
+    }
+
+    @Test
+    void disabledEnforcementAllowsJsAndVtlDispatchWithoutLocalRole() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.IamServiceConfig iamConfig = mock(EmulatorConfig.IamServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.iam()).thenReturn(iamConfig);
+        when(iamConfig.enforcementEnabled()).thenReturn(false);
+        IamService iam = mock(IamService.class);
+        ObjectMapper mapper = new ObjectMapper();
+        AppSyncDataSourceAuthorizer authorizer = new AppSyncDataSourceAuthorizer(iam,
+                new AssumeRolePolicyEvaluator(mapper), new IamPolicyEvaluator(mapper),
+                mock(RegionResolver.class), mapper, config);
+        AppSyncDataSourceInvoker invoker = mock(AppSyncDataSourceInvoker.class);
+        when(invoker.type()).thenReturn(DataSourceType.AWS_LAMBDA);
+        AppSyncDataSourceInvokers dispatch = new AppSyncDataSourceInvokers(List.of(invoker), authorizer);
+        DataSource source = new DataSource();
+        source.setName("Products");
+        source.setType(DataSourceType.AWS_LAMBDA);
+        Map<String, Object> request = Map.of("version", "2018-05-29", "operation", "Invoke");
+
+        dispatch.invoke(source, request, "us-east-1");
+        dispatch.invokeVtl(source, request, "us-east-1");
+
+        verify(invoker).invoke(source, request, "us-east-1");
+        verify(invoker).invokeVtl(source, request, "us-east-1");
+        verifyNoInteractions(iam);
     }
 }

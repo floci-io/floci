@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.appsync.graphql.datasource;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -19,6 +21,8 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -35,9 +39,19 @@ class AppSyncDataSourceAuthorizerTest {
     private final IamService iam = mock(IamService.class);
     private final RegionResolver regionResolver = mock(RegionResolver.class);
     private final ObjectMapper mapper = new ObjectMapper();
+    private final EmulatorConfig config = mock(EmulatorConfig.class);
+    private final EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+    private final EmulatorConfig.IamServiceConfig iamConfig = mock(EmulatorConfig.IamServiceConfig.class);
     private final AppSyncDataSourceAuthorizer authorizer = new AppSyncDataSourceAuthorizer(
             iam, new AssumeRolePolicyEvaluator(mapper), new IamPolicyEvaluator(mapper),
-            regionResolver, mapper);
+            regionResolver, mapper, config);
+
+    @BeforeEach
+    void enableIamEnforcement() {
+        when(config.services()).thenReturn(services);
+        when(services.iam()).thenReturn(iamConfig);
+        when(iamConfig.enforcementEnabled()).thenReturn(true);
+    }
 
     private record DynamoDbRequest(String operation, String index) {}
 
@@ -86,6 +100,18 @@ class AppSyncDataSourceAuthorizerTest {
     }
 
     @Test
+    void disabledEnforcementPreservesUnmanagedDataSources() {
+        when(iamConfig.enforcementEnabled()).thenReturn(false);
+        for (DataSourceType type : List.of(DataSourceType.AMAZON_DYNAMODB,
+                DataSourceType.AWS_LAMBDA, DataSourceType.RELATIONAL_DATABASE)) {
+            DataSource source = dataSource(type);
+            source.setServiceRoleArn(null);
+            authorizer.authorize(source, Map.of(), "us-east-1");
+        }
+        verifyNoInteractions(iam);
+    }
+
+    @Test
     void missingRoleAndCrossAccountRoleDenyBeforeDispatch() {
         DataSource source = dataSource(DataSourceType.AMAZON_DYNAMODB);
         source.setServiceRoleArn(null);
@@ -96,14 +122,24 @@ class AppSyncDataSourceAuthorizerTest {
     }
 
     @Test
-    void missingOrUntrustedRoleDenies() {
+    void untrustedRoleDenies() {
         DataSource source = dataSource(DataSourceType.AWS_LAMBDA);
-        denied(authorizer, source, Map.of("operation", "Invoke"));
         role("""
                 {"Statement":{"Effect":"Allow","Action":"sts:AssumeRole",
                   "Principal":{"Service":"lambda.amazonaws.com"}}}
                 """, allow("lambda:InvokeFunction", "*"));
         denied(authorizer, source, Map.of("operation", "Invoke"));
+    }
+
+    @Test
+    void unknownRoleRemainsPermissiveWhenEnforcementIsEnabled() {
+        DataSource source = dataSource(DataSourceType.AWS_LAMBDA);
+        when(iam.findRole("000000000000", "Resolver")).thenReturn(Optional.empty());
+
+        authorizer.authorize(source, Map.of("operation", "Invoke"), "us-east-1");
+
+        verify(iam).findRole("000000000000", "Resolver");
+        verify(iam, never()).resolvePrincipalContext(ROLE_ARN);
     }
 
     @Test
