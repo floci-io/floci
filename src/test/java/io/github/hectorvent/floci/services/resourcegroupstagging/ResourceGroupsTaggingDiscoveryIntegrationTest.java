@@ -17,8 +17,8 @@ import static org.hamcrest.Matchers.*;
 
 /**
  * GetResources, GetTagKeys and GetTagValues see the tags a resource's own service holds, so a
- * queue, function or log group tagged through SQS, Lambda or CloudWatch Logs is discoverable
- * without ever being tagged through the Resource Groups Tagging API.
+ * queue, function, log group or API Gateway resource tagged through its own service is
+ * discoverable without ever being tagged through the Resource Groups Tagging API.
  */
 @QuarkusTest
 class ResourceGroupsTaggingDiscoveryIntegrationTest {
@@ -27,6 +27,7 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     private static final String JSON_1_0 = "application/x-amz-json-1.0";
     private static final String JSON_1_1 = "application/x-amz-json-1.1";
     private static final String ARN_PREFIX = "arn:aws:%s:us-east-1:000000000000:";
+    private static final String APIGATEWAY_ARN_PREFIX = "arn:aws:apigateway:us-east-1::";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -181,6 +182,229 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
         sqs("DeleteQueue", """
                 {"QueueUrl": "%s"}
                 """.formatted(queueUrl)).then().statusCode(200);
+    }
+
+    @Test
+    void apiKeyIsDiscoveredByTypeAndItsOwnTags() {
+        String marker = unique();
+        String id = createApiKey(marker);
+        String arn = APIGATEWAY_ARN_PREFIX + "/apikeys/" + id;
+
+        getResources(rsidFilter("apigateway:apikeys", marker))
+            .body("ResourceTagMappingList.ResourceARN", contains(arn))
+            .body("ResourceTagMappingList[0].Tags.size()", equalTo(3))
+            .body("ResourceTagMappingList[0].Tags.find { it.Key == 'cid' }.Value", equalTo("c1"));
+        getResources(rsidFilter("apigateway:/apikeys", marker))
+            .body("ResourceTagMappingList.ResourceARN", contains(arn));
+
+        deleteApiKey(id);
+        getResources(rsidFilter("apigateway:apikeys", marker))
+            .body("ResourceTagMappingList", empty());
+    }
+
+    @Test
+    void taggingApiWritesReachTheApiKey() {
+        String marker = unique();
+        String cid = "c2-" + marker;
+        String id = createApiKey(marker);
+        String arn = APIGATEWAY_ARN_PREFIX + "/apikeys/" + id;
+
+        tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"cid": "%s"}}
+                """.formatted(arn, cid))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", anEmptyMap());
+        tagging("UntagResources", """
+                {"ResourceARNList": ["%s"], "TagKeys": ["baah"]}
+                """.formatted(arn))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", anEmptyMap());
+
+        given()
+        .when()
+            .get("/apikeys/" + id)
+        .then()
+            .statusCode(200)
+            .body("tags.rsid", equalTo(marker))
+            .body("tags.cid", equalTo(cid))
+            .body("tags", not(hasKey("baah")));
+        getResources("""
+                {"ResourceTypeFilters": ["apigateway:apikeys"], "TagFilters": [%s]}
+                """.formatted(tagFilter("cid", cid)))
+            .body("ResourceTagMappingList.ResourceARN", contains(arn))
+            .body("ResourceTagMappingList[0].Tags.size()", equalTo(2));
+
+        deleteApiKey(id);
+        getResources("""
+                {"TagFilters": [%s]}
+                """.formatted(tagFilter("cid", cid)))
+            .body("ResourceTagMappingList", empty());
+    }
+
+    @Test
+    void restTagsPathReadsAndWritesApiKeyTags() {
+        String marker = unique();
+        String id = createApiKey(marker);
+        String arn = APIGATEWAY_ARN_PREFIX + "/apikeys/" + id;
+
+        given()
+            .pathParam("arn", arn)
+            .contentType("application/json")
+            .body("""
+                {"tags": {"added": "yes"}}
+                """)
+        .when()
+            .put("/tags/{arn}")
+        .then()
+            .statusCode(204);
+        given()
+            .pathParam("arn", arn)
+        .when()
+            .get("/tags/{arn}")
+        .then()
+            .statusCode(200)
+            .body("tags.rsid", equalTo(marker))
+            .body("tags.added", equalTo("yes"));
+        given()
+            .pathParam("arn", arn)
+            .queryParam("tagKeys", "added")
+        .when()
+            .delete("/tags/{arn}")
+        .then()
+            .statusCode(204);
+        given()
+        .when()
+            .get("/apikeys/" + id)
+        .then()
+            .statusCode(200)
+            .body("tags", not(hasKey("added")));
+
+        deleteApiKey(id);
+    }
+
+    @Test
+    void restApiIsDiscoveredByType() {
+        String marker = unique();
+        String apiId = createRestApi(marker);
+
+        getResources(markerFilter("apigateway:restapis", marker))
+            .body("ResourceTagMappingList.ResourceARN", contains(APIGATEWAY_ARN_PREFIX + "/restapis/" + apiId));
+
+        given().when().delete("/restapis/" + apiId).then().statusCode(202);
+        getResources(markerFilter("apigateway:restapis", marker))
+            .body("ResourceTagMappingList", empty());
+    }
+
+    @Test
+    void stageIsDiscoveredByType() {
+        String apiId = createRestApi(unique());
+        String marker = unique();
+        String deploymentId = given()
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/restapis/" + apiId + "/deployments")
+        .then()
+            .statusCode(201)
+            .extract().path("id");
+        given()
+            .contentType("application/json")
+            .body("""
+                {"stageName": "dev", "deploymentId": "%s", "tags": {"fd": "%s"}}
+                """.formatted(deploymentId, marker))
+        .when()
+            .post("/restapis/" + apiId + "/stages")
+        .then()
+            .statusCode(201);
+
+        getResources(markerFilter("apigateway:restapis/stages", marker))
+            .body("ResourceTagMappingList.ResourceARN",
+                    contains(APIGATEWAY_ARN_PREFIX + "/restapis/" + apiId + "/stages/dev"));
+
+        given().when().delete("/restapis/" + apiId).then().statusCode(202);
+    }
+
+    @Test
+    void usagePlanIsDiscoveredByType() {
+        String marker = unique();
+        String planId = given()
+            .contentType("application/json")
+            .body("""
+                {"name": "discovery-%s", "tags": {"fd": "%s"}}
+                """.formatted(marker, marker))
+        .when()
+            .post("/usageplans")
+        .then()
+            .statusCode(201)
+            .extract().path("id");
+
+        getResources(markerFilter("apigateway:usageplans", marker))
+            .body("ResourceTagMappingList.ResourceARN", contains(APIGATEWAY_ARN_PREFIX + "/usageplans/" + planId));
+
+        given().when().delete("/usageplans/" + planId).then().statusCode(202);
+        getResources(markerFilter("apigateway:usageplans", marker))
+            .body("ResourceTagMappingList", empty());
+    }
+
+    @Test
+    void domainNameIsDiscoveredByType() {
+        String marker = unique();
+        String domainName = "discovery-" + marker + ".example.com";
+        given()
+            .contentType("application/json")
+            .body("""
+                {"domainName": "%s", "regionalCertificateArn": "%s",
+                 "endpointConfiguration": {"types": ["REGIONAL"]}, "tags": {"fd": "%s"}}
+                """.formatted(domainName, ARN_PREFIX.formatted("acm") + "certificate/" + UUID.randomUUID(), marker))
+        .when()
+            .post("/domainnames")
+        .then()
+            .statusCode(201);
+
+        getResources(markerFilter("apigateway:domainnames", marker))
+            .body("ResourceTagMappingList.ResourceARN", contains(APIGATEWAY_ARN_PREFIX + "/domainnames/" + domainName));
+
+        given().when().delete("/domainnames/" + domainName).then().statusCode(202);
+        getResources(markerFilter("apigateway:domainnames", marker))
+            .body("ResourceTagMappingList", empty());
+    }
+
+    private static String createApiKey(String marker) {
+        return given()
+            .contentType("application/json")
+            .body("""
+                {"name": "discovery-%s", "tags": {"rsid": "%s", "cid": "c1", "baah": "x"}}
+                """.formatted(marker, marker))
+        .when()
+            .post("/apikeys")
+        .then()
+            .statusCode(201)
+            .extract().path("id");
+    }
+
+    private static void deleteApiKey(String id) {
+        given().when().delete("/apikeys/" + id).then().statusCode(202);
+    }
+
+    private static String createRestApi(String marker) {
+        return given()
+            .contentType("application/json")
+            .body("""
+                {"name": "discovery-%s", "tags": {"fd": "%s"}}
+                """.formatted(marker, marker))
+        .when()
+            .post("/restapis")
+        .then()
+            .statusCode(201)
+            .extract().path("id");
+    }
+
+    private static String rsidFilter(String resourceType, String marker) {
+        return """
+                {"ResourceTypeFilters": ["%s"], "TagFilters": [%s]}
+                """.formatted(resourceType, tagFilter("rsid", marker));
     }
 
     private static List<String> allTagKeys() {

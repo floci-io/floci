@@ -11,14 +11,16 @@ import java.util.Map;
 /**
  * {@link TagHandler} implementation for API Gateway.
  *
- * <p>ARN formats: {@code arn:aws:apigateway:<region>::/restapis/<apiId>} for a REST API and
- * {@code arn:aws:apigateway:<region>::/domainnames/<domainName>} for a custom domain. The
- * {@code apiId} or domain name is the canonical identifier the underlying {@link ApiGatewayService}
+ * <p>ARN formats: {@code arn:aws:apigateway:<region>::/restapis/<apiId>} for a REST API,
+ * {@code arn:aws:apigateway:<region>::/domainnames/<domainName>} for a custom domain and
+ * {@code arn:aws:apigateway:<region>::/apikeys/<apiKeyId>} for an API key. The {@code apiId},
+ * domain name or key id is the canonical identifier the underlying {@link ApiGatewayService}
  * uses for its tag store.
  */
 @ApplicationScoped
 public class ApiGatewayTagHandler implements TagHandler {
 
+    private static final String API_KEYS = "/apikeys/";
     private static final String DOMAIN_NAMES = "/domainnames/";
     private static final String STAGES = "/stages/";
 
@@ -45,6 +47,10 @@ public class ApiGatewayTagHandler implements TagHandler {
         if (domainName != null) {
             return service.getDomainNameTags(region, domainName);
         }
+        String apiKeyId = apiKeyIdFromArn(arn);
+        if (apiKeyId != null) {
+            return service.getApiKey(region, apiKeyId).getTags();
+        }
         String stageName = stageNameFromArn(arn);
         return stageName != null
                 ? service.getStageTags(region, apiIdFromArn(arn), stageName)
@@ -54,9 +60,12 @@ public class ApiGatewayTagHandler implements TagHandler {
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
         String domainName = domainNameFromArn(arn);
+        String apiKeyId = apiKeyIdFromArn(arn);
         String stageName = stageNameFromArn(arn);
         if (domainName != null) {
             service.tagDomainName(region, domainName, tags);
+        } else if (apiKeyId != null) {
+            service.tagApiKey(region, apiKeyId, tags);
         } else if (stageName != null) {
             service.tagStage(region, apiIdFromArn(arn), stageName, tags);
         } else {
@@ -67,9 +76,12 @@ public class ApiGatewayTagHandler implements TagHandler {
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
         String domainName = domainNameFromArn(arn);
+        String apiKeyId = apiKeyIdFromArn(arn);
         String stageName = stageNameFromArn(arn);
         if (domainName != null) {
             service.untagDomainName(region, domainName, tagKeys);
+        } else if (apiKeyId != null) {
+            service.untagApiKey(region, apiKeyId, tagKeys);
         } else if (stageName != null) {
             service.untagStage(region, apiIdFromArn(arn), stageName, tagKeys);
         } else {
@@ -110,5 +122,15 @@ public class ApiGatewayTagHandler implements TagHandler {
         }
         String domainName = arn.substring(at + DOMAIN_NAMES.length());
         return domainName.isEmpty() || domainName.contains("/") ? null : domainName;
+    }
+
+    /** The key a {@code /apikeys/<apiKeyId>} ARN names, or null for any other ARN. */
+    private static String apiKeyIdFromArn(String arn) {
+        int at = arn.indexOf(API_KEYS);
+        if (at < 0) {
+            return null;
+        }
+        String apiKeyId = arn.substring(at + API_KEYS.length());
+        return apiKeyId.isEmpty() || apiKeyId.contains("/") ? null : apiKeyId;
     }
 }

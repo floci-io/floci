@@ -6,8 +6,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.apigateway.model.Account;
@@ -45,6 +49,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
@@ -63,7 +68,7 @@ import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class ApiGatewayService {
+public class ApiGatewayService implements ResourceProvider {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -1225,6 +1230,18 @@ public class ApiGatewayService {
         key.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
         apiKeyStore.put(apiKeyGlobalKey(region, apiKeyId), key);
         return key;
+    }
+
+    public void tagApiKey(String region, String apiKeyId, Map<String, String> tags) {
+        Map<String, String> merged = new HashMap<>(getApiKey(region, apiKeyId).getTags());
+        merged.putAll(tags);
+        replaceApiKeyTags(region, apiKeyId, merged);
+    }
+
+    public void untagApiKey(String region, String apiKeyId, List<String> tagKeys) {
+        Map<String, String> remaining = new HashMap<>(getApiKey(region, apiKeyId).getTags());
+        tagKeys.forEach(remaining::remove);
+        replaceApiKeyTags(region, apiKeyId, remaining);
     }
 
     // ──────────────────────────── Usage Plans ────────────────────────────
@@ -2633,6 +2650,61 @@ public class ApiGatewayService {
                 domainStore.put(domainKey(region, domainName), domain);
             }
         }
+    }
+
+    // ──────────────────────────── Resource Explorer 2 ────────────────────────────
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        String account = config.defaultAccountId();
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (String key : apiStore.keys()) {
+            apiStore.get(key).ifPresent(api -> resources.add(explorerResource(key, account,
+                    "/restapis/" + api.getId(), "apigateway:restapis", api.getCreatedDate(), api.getTags())));
+        }
+        for (String key : stageStore.keys()) {
+            String[] parts = key.split("::", 3);
+            if (parts.length == 3) {
+                stageStore.get(key).ifPresent(stage -> resources.add(explorerResource(key, account,
+                        "/restapis/" + parts[1] + "/stages/" + stage.getStageName(), "apigateway:restapis/stages",
+                        stage.getCreatedDate(), stage.getTags())));
+            }
+        }
+        for (String key : apiKeyStore.keys()) {
+            apiKeyStore.get(key).ifPresent(apiKey -> resources.add(explorerResource(key, account,
+                    "/apikeys/" + apiKey.getId(), "apigateway:apikeys", apiKey.getCreatedDate(), apiKey.getTags())));
+        }
+        for (String key : usagePlanStore.keys()) {
+            usagePlanStore.get(key).ifPresent(plan -> resources.add(explorerResource(key, account,
+                    "/usageplans/" + plan.getId(), "apigateway:usageplans", 0, plan.getTags())));
+        }
+        for (String key : domainStore.keys()) {
+            domainStore.get(key).ifPresent(domain -> resources.add(explorerResource(key, account,
+                    "/domainnames/" + domain.getDomainName(), "apigateway:domainnames", 0, domain.getTags())));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType("apigateway:restapis", "apigateway", true),
+                new SupportedResourceType("apigateway:restapis/stages", "apigateway", true),
+                new SupportedResourceType("apigateway:apikeys", "apigateway", true),
+                new SupportedResourceType("apigateway:usageplans", "apigateway", true),
+                new SupportedResourceType("apigateway:domainnames", "apigateway", true));
+    }
+
+    /** API Gateway ARNs carry no account: {@code arn:<partition>:apigateway:<region>::<path>}. */
+    private static ExplorerResource explorerResource(String storeKey, String account, String path,
+                                                     String resourceType, long createdEpochSeconds,
+                                                     Map<String, String> tags) {
+        String region = storeKey.substring(0, storeKey.indexOf("::"));
+        return new ExplorerResource(
+                AwsArnUtils.Arn.of("apigateway", region, "", path).toString(),
+                resourceType, "apigateway", region, account,
+                createdEpochSeconds > 0 ? Instant.ofEpochSecond(createdEpochSeconds) : Instant.now(),
+                tags != null ? tags : Map.of());
     }
 
     // ──────────────────────────── OpenAPI Import ────────────────────────────
