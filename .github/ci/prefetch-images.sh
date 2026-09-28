@@ -5,7 +5,9 @@
 # shards do not each pull all images (registry rate-limit exposure).
 # ECR Public counts anonymous transfer per runner IP, so an image is keyed on the classes that
 # start it whenever its package is spread over every shard (Lambda, ECS), and a key that names a
-# class is checked against src/test/java so a rename cannot silently turn the prefetch off.
+# class is checked against src/test/java so a rename cannot silently turn the prefetch off. The
+# Docker library images the tests start come from Docker Hub, which GitHub-hosted runners pull
+# without a limit; TestImages says why they are not taken through the ECR Public mirror.
 # Each pull writes one line to $PREFETCH_LOG (prefetch-images.log next to shard.txt by default):
 # "prefetched <image>" or "prefetch failed <image>: <last line of docker's output>", timestamped,
 # so a test that pulled the image itself can be told apart from a prefetch that failed or was
@@ -26,8 +28,14 @@ pull_and_log() {
         echo "$(date -u +%H:%M:%S) prefetch failed $1: $(printf '%s\n' "$output" | tail -n 1)" >> "$PREFETCH_LOG"
     fi
 }
-# Docker Hub and other registries: each pull in its own background job, as before.
-pull() { pull_and_log "$1" & }
+# Docker Hub and other registries: each pull in its own background job, as before. An image two
+# entries name (busybox:stable is both the EFS init image and the tests' shell) is pulled once.
+REQUESTED=""
+pull() {
+    case " $REQUESTED " in *" $1 "*) return 0;; esac
+    REQUESTED="$REQUESTED $1"
+    pull_and_log "$1" &
+}
 # ECR Public counts unauthenticated pulls per second as well as bytes, so its images are queued
 # and pulled one after another, a second apart, in a single background job instead of all at once.
 ECR_PUBLIC_IMAGES=""
@@ -41,24 +49,29 @@ starts() {
     done
     grep -qE "$(IFS='|'; echo "$*")" "$SHARD_FILE"
 }
+# The image a test constant pins, or empty (and a log line) when the constant cannot be read.
+test_image() {
+    image="$(grep -oE "$1 *= *\"[^\"]+\"" src/test/java/io/github/hectorvent/floci/testing/TestImages.java | grep -oE '"[^"]+"' | tr -d '"')"
+    [ -n "$image" ] || echo "$(date -u +%H:%M:%S) prefetch skipped: TestImages.$1 not readable" >> "$PREFETCH_LOG"
+    echo "$image"
+}
 
-# ECR Public images, in queue order: the small ones first, because core/common/docker sorts near
-# the top of every shard and its tests start right after compile, then the runtimes by size.
 # Every Docker-backed test that needs a shell uses the one busybox TestImages pins, so one pull
 # serves all of them. It is also the base of the image
 # EcsContainerManagerVolumesFromDockerIntegrationTest builds, and a build resolves its base against
-# the registry rather than through ImageCacheService. That pull has hit "toomanyrequests" and
-# failed the shard (PRs 4075, 4142, 4164, then main on 2026-09-27), so it is prefetched for the
-# cache hit rather than for the second it saves. ContainerPlatformDockerIntegrationTest is not
-# listed: it pulls the other architecture, which a prefetch of the host image cannot serve.
-BUSYBOX_IMAGE="$(grep -oE 'BUSYBOX = "[^"]+"' src/test/java/io/github/hectorvent/floci/testing/TestImages.java | grep -oE '"[^"]+"' | tr -d '"')"
+# the registry rather than through ImageCacheService, so it is prefetched for the cache hit rather
+# than for the second it saves. ContainerPlatformDockerIntegrationTest is not listed: it pulls the
+# other architecture, which a prefetch of the host image cannot serve.
+BUSYBOX_IMAGE="$(test_image BUSYBOX)"
 starts ContainerHostNetworkDockerIntegrationTest EcsServiceDiscoveryDockerIntegrationTest \
        EcsContainerManagerEfsIsolationDockerIntegrationTest EcsContainerManagerFirelensDockerIntegrationTest \
        EcsContainerManagerStatsDockerIntegrationTest EcsContainerManagerVolumesFromDockerIntegrationTest \
        EcsExecChannelDockerIntegrationTest BatchDockerRunnerDockerIntegrationTest SageMakerDockerIntegrationTest \
-    && [ -n "$BUSYBOX_IMAGE" ] && ecr "$BUSYBOX_IMAGE"
-starts SageMakerDockerIntegrationTest && ecr public.ecr.aws/docker/library/python:3-alpine
-starts ContainerCaBundleDockerIntegrationTest EcsCredentialsProxyDockerIntegrationTest && ecr public.ecr.aws/docker/library/python:3.12-alpine
+    && [ -n "$BUSYBOX_IMAGE" ] && pull "$BUSYBOX_IMAGE"
+PYTHON_ALPINE_IMAGE="$(test_image PYTHON_ALPINE)"
+starts ContainerCaBundleDockerIntegrationTest EcsCredentialsProxyDockerIntegrationTest SageMakerDockerIntegrationTest \
+    && [ -n "$PYTHON_ALPINE_IMAGE" ] && pull "$PYTHON_ALPINE_IMAGE"
+# ECR Public images, in queue order: the Lambda runtimes by size, then the Firelens router.
 # Lambda runtimes, measured from a full four-shard run by pairing each ImageCacheService
 # "Pulling image" / "Image already present locally" line with the class that logged it.
 # nodejs:20 is the runtime the API Gateway, ELBv2 and Lambda integration tests resolve and every
