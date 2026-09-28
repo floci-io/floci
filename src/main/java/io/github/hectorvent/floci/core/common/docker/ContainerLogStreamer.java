@@ -88,7 +88,11 @@ public class ContainerLogStreamer {
         return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null, true);
     }
 
-    /** Attaches a stream with optional console output while always forwarding to CloudWatch Logs. */
+    /**
+     * Attaches a stream that always forwards to CloudWatch Logs.
+     *
+     * @param logToConsole whether to also write each line to the Floci console at INFO level
+     */
     public Closeable attachForAccount(
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix, boolean logToConsole) {
@@ -172,7 +176,11 @@ public class ContainerLogStreamer {
         return execLogCallbackForAccount(accountId, logGroup, logStream, region, logPrefix, true);
     }
 
-    /** Returns an exec callback with optional console output and CloudWatch Logs delivery. */
+    /**
+     * Returns an exec callback that always forwards to CloudWatch Logs.
+     *
+     * @param logToConsole whether to also write each frame to the Floci console at INFO level
+     */
     public ResultCallback.Adapter<Frame> execLogCallbackForAccount(
             String accountId, String logGroup, String logStream, String region, String logPrefix,
             boolean logToConsole) {
