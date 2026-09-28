@@ -49,7 +49,7 @@ class Route53ResolverDnsForwardingRulesTest {
         String vpcId = uniqueVpcId();
         associate(forwardRule("corp.internal", target("10.1.0.53", null), target("10.1.0.54", 5353)), vpcId);
 
-        List<DnsForwardingRule> rules = forwardingRules.rulesFor(ACCOUNT, vpcId);
+        List<DnsForwardingRule> rules = forwardingRules.rulesFor(ACCOUNT, REGION, vpcId);
 
         assertEquals(1, rules.size());
         assertEquals("corp.internal", rules.getFirst().domainName());
@@ -62,7 +62,7 @@ class Route53ResolverDnsForwardingRulesTest {
         createRule(forwardRule("unassociated.internal", target("10.1.0.53", null)));
         associate(forwardRule("elsewhere.internal", target("10.1.0.53", null)), uniqueVpcId());
 
-        assertTrue(forwardingRules.rulesFor(ACCOUNT, uniqueVpcId()).isEmpty());
+        assertTrue(forwardingRules.rulesFor(ACCOUNT, REGION, uniqueVpcId()).isEmpty());
     }
 
     @Test
@@ -72,19 +72,37 @@ class Route53ResolverDnsForwardingRulesTest {
         // otherwise any account could redirect another account's cluster DNS by naming its VPC.
         String vpcId = uniqueVpcId();
         associate(forwardRule("corp.internal", target("10.1.0.53", null)), vpcId);
-        assertEquals(1, forwardingRules.rulesFor(ACCOUNT, vpcId).size());
+        assertEquals(1, forwardingRules.rulesFor(ACCOUNT, REGION, vpcId).size());
 
-        assertTrue(forwardingRules.rulesFor("999999999999", vpcId).isEmpty());
-        assertTrue(resolverService.resolverRuleAssociationsForAccount("999999999999").isEmpty());
+        assertTrue(forwardingRules.rulesFor("999999999999", REGION, vpcId).isEmpty());
+        assertTrue(resolverService.resolverRuleIdsAssociatedWith("999999999999", vpcId).isEmpty());
     }
 
     @Test
-    void noAccountOrVpcMeansNoRules() {
+    void noAccountRegionOrVpcMeansNoRules() {
         String vpcId = uniqueVpcId();
         associate(forwardRule("corp.internal", target("10.1.0.53", null)), vpcId);
 
-        assertTrue(forwardingRules.rulesFor(null, vpcId).isEmpty());
-        assertTrue(forwardingRules.rulesFor(ACCOUNT, "  ").isEmpty());
+        assertTrue(forwardingRules.rulesFor(null, REGION, vpcId).isEmpty());
+        assertTrue(forwardingRules.rulesFor(ACCOUNT, "  ", vpcId).isEmpty());
+        assertTrue(forwardingRules.rulesFor(ACCOUNT, REGION, "  ").isEmpty());
+    }
+
+    @Test
+    void aRuleFromAnotherRegionDoesNotSteerThisRegionsQueries() {
+        // Route 53 Resolver is regional: "objects that you create in one AWS Region are available
+        // only in that Region". The stores carry no region in their keys, so the rule's region comes
+        // from the ARN this service minted for it.
+        String vpcId = uniqueVpcId();
+        String ruleId = createRuleIn(forwardRule("corp.internal", target("10.1.0.53", null)), "eu-west-1");
+        ObjectNode association = objectMapper.createObjectNode();
+        association.put("ResolverRuleId", ruleId);
+        association.put("VPCId", vpcId);
+        resolverService.associateResolverRule(association);
+
+        assertEquals(List.of(ruleId), resolverService.resolverRuleIdsAssociatedWith(ACCOUNT, vpcId));
+        assertTrue(forwardingRules.rulesFor(ACCOUNT, REGION, vpcId).isEmpty());
+        assertEquals(1, forwardingRules.rulesFor(ACCOUNT, "eu-west-1", vpcId).size());
     }
 
     @Test
@@ -93,7 +111,7 @@ class Route53ResolverDnsForwardingRulesTest {
         associate(forwardRule("corp.internal", target("10.1.0.53", null)), vpcId);
         associate(systemRule("acme.corp.internal"), vpcId);
 
-        List<DnsForwardingRule> rules = forwardingRules.rulesFor(ACCOUNT, vpcId);
+        List<DnsForwardingRule> rules = forwardingRules.rulesFor(ACCOUNT, REGION, vpcId);
 
         assertEquals(List.of("acme.corp.internal", "corp.internal"),
                 rules.stream().map(DnsForwardingRule::domainName).toList());
@@ -107,7 +125,7 @@ class Route53ResolverDnsForwardingRulesTest {
         associate(ruleRequest("RECURSIVE", "recursive.internal"), vpcId);
         associate(ruleRequest("DELEGATE", "delegate.internal"), vpcId);
 
-        List<DnsForwardingRule> rules = forwardingRules.rulesFor(ACCOUNT, vpcId);
+        List<DnsForwardingRule> rules = forwardingRules.rulesFor(ACCOUNT, REGION, vpcId);
 
         assertEquals(List.of("recursive.internal"),
                 rules.stream().map(DnsForwardingRule::domainName).toList());
@@ -123,7 +141,7 @@ class Route53ResolverDnsForwardingRulesTest {
         request.putArray("TargetIps").add(ipv6Target);
         associate(request, vpcId);
 
-        assertTrue(forwardingRules.rulesFor(ACCOUNT, vpcId).isEmpty());
+        assertTrue(forwardingRules.rulesFor(ACCOUNT, REGION, vpcId).isEmpty());
     }
 
     private void associate(ObjectNode ruleRequest, String vpcId) {
@@ -134,7 +152,11 @@ class Route53ResolverDnsForwardingRulesTest {
     }
 
     private String createRule(ObjectNode ruleRequest) {
-        String ruleId = resolverService.createResolverRule(ruleRequest, REGION, ACCOUNT).get("Id").asText();
+        return createRuleIn(ruleRequest, REGION);
+    }
+
+    private String createRuleIn(ObjectNode ruleRequest, String region) {
+        String ruleId = resolverService.createResolverRule(ruleRequest, region, ACCOUNT).get("Id").asText();
         createdRuleIds.add(ruleId);
         return ruleId;
     }

@@ -1010,7 +1010,7 @@ class EksClusterManagerTest {
 
             manager.registerClusterNodeInstance(cluster, "container-dns");
 
-            assertEquals(Optional.of(new ClientVpc("000000000000", "vpc-12345678")),
+            assertEquals(Optional.of(new ClientVpc("000000000000", "us-east-1", "vpc-12345678")),
                     manager.vpcForClient("172.17.0.2"));
             assertTrue(manager.vpcForClient("172.17.0.99").isEmpty());
             assertTrue(manager.vpcForClient(null).isEmpty());

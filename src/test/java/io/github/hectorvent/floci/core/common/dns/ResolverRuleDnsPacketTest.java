@@ -32,6 +32,7 @@ class ResolverRuleDnsPacketTest {
 
     private static final String CLIENT = "127.0.0.1";
     private static final String ACCOUNT = "000000000000";
+    private static final String REGION = "us-east-1";
     private static final String VPC_ID = "vpc-0dns0000";
 
     @Inject
@@ -77,10 +78,10 @@ class ResolverRuleDnsPacketTest {
         DnsRecordSource records = name -> "api.sapphire.internal".equals(name)
                 ? Optional.of(DnsAnswer.records(List.of("172.31.0.6"), 60)) : Optional.empty();
         return new EmbeddedDnsServer(List.of(), List.of(records),
-                List.of((accountId, vpcId) ->
-                        ACCOUNT.equals(accountId) && VPC_ID.equals(vpcId) ? List.of(rule) : List.of()),
+                List.of((accountId, region, vpcId) -> ACCOUNT.equals(accountId)
+                        && REGION.equals(region) && VPC_ID.equals(vpcId) ? List.of(rule) : List.of()),
                 List.of(clientAddress ->
-                        Optional.of(new DnsClientVpcSource.ClientVpc(ACCOUNT, VPC_ID))));
+                        Optional.of(new DnsClientVpcSource.ClientVpc(ACCOUNT, REGION, VPC_ID))));
     }
 
     /** Answers the first datagram with {@code payload}, on a daemon thread. */

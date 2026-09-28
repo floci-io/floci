@@ -292,7 +292,8 @@ public class EmbeddedDnsServer {
         DnsForwardingRule best = null;
         for (DnsForwardingRuleSource source : forwardingRuleSources) {
             try {
-                for (DnsForwardingRule rule : source.rulesFor(origin.accountId(), origin.vpcId())) {
+                for (DnsForwardingRule rule :
+                        source.rulesFor(origin.accountId(), origin.region(), origin.vpcId())) {
                     if (rule == null || !rule.matches(name)) {
                         continue;
                     }
@@ -328,8 +329,12 @@ public class EmbeddedDnsServer {
     }
 
     private static boolean isUsableOrigin(DnsClientVpcSource.ClientVpc clientVpc) {
-        return clientVpc.accountId() != null && !clientVpc.accountId().isBlank()
-                && clientVpc.vpcId() != null && !clientVpc.vpcId().isBlank();
+        return isPresent(clientVpc.accountId()) && isPresent(clientVpc.region())
+                && isPresent(clientVpc.vpcId());
+    }
+
+    private static boolean isPresent(String value) {
+        return value != null && !value.isBlank();
     }
 
     /**

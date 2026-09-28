@@ -98,15 +98,18 @@ server, which is how cluster containers resolve (see
 on label boundaries, and `.` matches everything. Where several rules match, the one with the most
 labels in its domain name wins.
 
-**Association** is honoured, since a rule does nothing in AWS until it is associated with a VPC.
-Floci reads the querying account and VPC from the query's source address: a cluster container's
-address maps to the account that owns the cluster and its `resourcesVpcConfig.vpcId`. Only that
-account's associations are consulted. `AssociateResolverRule` stores whatever `VPCId` the caller
-names without proving ownership of it, so scoping the lookup to the querying account's own
-partition is what stops one account redirecting another account's cluster DNS by naming its VPC.
-An address no service claims, or a cluster with no resolvable VPC id, belongs to no VPC, so no rule
-applies and resolution is unchanged; Floci logs a warning when it cannot determine a running
-cluster's container addresses, because rules then silently do not reach it.
+**Association, account and region** all have to line up. A rule does nothing in AWS until it is
+associated with a VPC, and Route 53 Resolver is regional, so a rule created in one region governs
+nothing in another. Floci reads all three from the query's source address: a cluster container's
+address maps to the account that owns the cluster, the cluster's region, and its
+`resourcesVpcConfig.vpcId`. Only that account's associations are consulted, and only rules from the
+querying region among them. `AssociateResolverRule` stores whatever `VPCId` the caller names without
+proving ownership of it, so scoping the lookup to the querying account's own partition is what stops
+one account redirecting another account's cluster DNS by naming its VPC. The stores carry no region
+in their keys, so a rule's region is read back from the ARN Floci minted for it. An address no
+service claims, or a cluster with no resolvable VPC id, belongs to no VPC, so no rule applies and
+resolution is unchanged; Floci logs a warning when it cannot determine a running cluster's container
+addresses, because rules then silently do not reach it.
 
 **Precedence over private hosted zones** matches AWS: when a private hosted zone and a resolver rule
 both match a name, the rule wins and the query is forwarded instead of answered from the zone's
@@ -136,13 +139,14 @@ cluster DNS does, governed by `floci.services.eks.embedded-dns`.
   modelled.
 - **`CreateResolverRule`/`UpdateResolverRule` do not validate `ResolverEndpointId`
   against an existing endpoint.** Any non-blank string is accepted.
-- **No VPC-scoping or region-scoping is enforced for custom resources.** The four
+- **No region-scoping is enforced on the API surface.** The four
   stores go through `StorageFactory`, so every key is prefixed with the calling
   credential's account id and custom resources *are* isolated per account: one account
   cannot read, update or delete another's endpoints, rules, associations or domain
   lists. Neither region nor VPC is part of the key, though, so a custom resource created
   in one region is visible from every other, and `VPCId` on an association does not filter
-  any API response. It does decide which rules steer DNS resolution, as above. The AWS-managed
+  any API response. Both do decide which rules steer DNS resolution, as above: that path reads the
+  region back from the rule's ARN and the account from the store partition. The AWS-managed
   domain lists are the deliberate exception: they
   are derived per region from the name list rather than stored, so they are region-scoped
   and visible to every caller, as they are in AWS.

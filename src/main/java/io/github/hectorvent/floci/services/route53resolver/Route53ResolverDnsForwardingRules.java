@@ -10,22 +10,20 @@ import jakarta.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.SequencedSet;
 
 /**
  * Turns the resolver rules {@link Route53ResolverService} stores into the forwarding rules the
  * embedded DNS server applies. Discovered via CDI as a {@link DnsForwardingRuleSource}, so the DNS
  * server never imports this service, and the rules are read from its stores rather than copied.
  *
- * <p>Only rules the querying account has associated with the querying VPC are returned, because
- * that is the only way a rule does anything in AWS: an unassociated rule is inert, and an
- * association naming a VPC of some other account is not that account's business.
- * {@code FORWARD} rules carry their target resolvers; {@code SYSTEM} and {@code RECURSIVE} rules
- * carry none and so hand the query back to Floci's own resolution, which is what both mean in AWS.
- * {@code DELEGATE} is stored but not applied.
+ * <p>Only rules the querying account has associated with the querying VPC, in the querying region,
+ * are returned. An unassociated rule is inert in AWS, an association naming a VPC of some other
+ * account is not that account's business, and Route 53 Resolver is regional, so a rule governs
+ * nothing outside the region it was created in. {@code FORWARD} rules carry their target resolvers;
+ * {@code SYSTEM} and {@code RECURSIVE} rules carry none and so hand the query back to Floci's own
+ * resolution, which is what both mean in AWS. {@code DELEGATE} is stored but not applied.
  */
 @ApplicationScoped
 public class Route53ResolverDnsForwardingRules implements DnsForwardingRuleSource {
@@ -40,18 +38,13 @@ public class Route53ResolverDnsForwardingRules implements DnsForwardingRuleSourc
     }
 
     @Override
-    public List<DnsForwardingRule> rulesFor(String accountId, String vpcId) {
-        if (accountId == null || accountId.isBlank() || vpcId == null || vpcId.isBlank()
-                || !config.services().route53resolver().enabled()) {
-            return List.of();
-        }
-        SequencedSet<String> associatedRuleIds = associatedRuleIds(accountId, vpcId);
-        if (associatedRuleIds.isEmpty()) {
+    public List<DnsForwardingRule> rulesFor(String accountId, String region, String vpcId) {
+        if (!config.services().route53resolver().enabled()) {
             return List.of();
         }
         List<DnsForwardingRule> rules = new ArrayList<>();
-        for (String ruleId : associatedRuleIds) {
-            resolverService.resolverRuleForAccount(accountId, ruleId)
+        for (String ruleId : resolverService.resolverRuleIdsAssociatedWith(accountId, vpcId)) {
+            resolverService.resolverRuleIn(accountId, region, ruleId)
                     .flatMap(Route53ResolverDnsForwardingRules::forwardingRuleFor)
                     .ifPresent(rules::add);
         }
@@ -60,22 +53,6 @@ public class Route53ResolverDnsForwardingRules implements DnsForwardingRuleSourc
         rules.sort(Comparator.comparingInt(DnsForwardingRule::specificity).reversed()
                 .thenComparing(DnsForwardingRule::domainName));
         return List.copyOf(rules);
-    }
-
-    /**
-     * The ids this account has associated with this VPC. The associations are scanned because they
-     * are keyed by association id rather than by VPC, but the rules themselves are then fetched by
-     * id, so a query reads only the rules it could actually match instead of the whole rule store.
-     */
-    private SequencedSet<String> associatedRuleIds(String accountId, String vpcId) {
-        SequencedSet<String> ruleIds = new LinkedHashSet<>();
-        for (ObjectNode association : resolverService.resolverRuleAssociationsForAccount(accountId)) {
-            String ruleId = text(association, "ResolverRuleId");
-            if (ruleId != null && vpcId.equals(text(association, "VPCId"))) {
-                ruleIds.add(ruleId);
-            }
-        }
-        return ruleIds;
     }
 
     private static Optional<DnsForwardingRule> forwardingRuleFor(ObjectNode rule) {

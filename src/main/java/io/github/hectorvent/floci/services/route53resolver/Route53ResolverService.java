@@ -18,8 +18,12 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -90,16 +94,16 @@ public class Route53ResolverService {
     @Inject
     public Route53ResolverService(StorageFactory storageFactory, ObjectMapper objectMapper) {
         this.domainListStore = storageFactory.create("route53resolver", "route53resolver-domain-lists.json",
-                new TypeReference<java.util.Map<String, ObjectNode>>() {});
+                new TypeReference<Map<String, ObjectNode>>() {});
         this.endpointStore = storageFactory.create("route53resolver", "route53resolver-endpoints.json",
-                new TypeReference<java.util.Map<String, ObjectNode>>() {});
+                new TypeReference<Map<String, ObjectNode>>() {});
         this.ruleStore = storageFactory.create("route53resolver", "route53resolver-rules.json",
-                new TypeReference<java.util.Map<String, ObjectNode>>() {});
+                new TypeReference<Map<String, ObjectNode>>() {});
         this.ruleAssociationStore = storageFactory.create("route53resolver",
-                "route53resolver-rule-associations.json", new TypeReference<java.util.Map<String, ObjectNode>>() {});
+                "route53resolver-rule-associations.json", new TypeReference<Map<String, ObjectNode>>() {});
         this.endpointIpRequestStore = storageFactory.create("route53resolver",
                 "route53resolver-endpoint-ip-requests.json",
-                new TypeReference<java.util.Map<String, ObjectNode>>() {});
+                new TypeReference<Map<String, ObjectNode>>() {});
         this.objectMapper = objectMapper;
     }
 
@@ -341,9 +345,9 @@ public class Route53ResolverService {
     }
 
     /**
-     * One account's rule/VPC associations. The DNS server reads them off the packet path, where
-     * there is no caller, so the account comes from the resource the query originated on rather
-     * than from a request context.
+     * The ids of the rules {@code accountId} has associated with {@code vpcId}. The DNS server reads
+     * these off the packet path, where there is no caller, so the account comes from the resource the
+     * query originated on rather than from a request context.
      *
      * <p>Scoped to that one account deliberately. A {@code VPCId} is not proof of ownership:
      * {@code AssociateResolverRule} stores whatever VPC id the caller names, so an association made
@@ -351,37 +355,62 @@ public class Route53ResolverService {
      * lookup to the querying account's partition is the boundary, and it costs nothing because
      * {@code AssociateResolverRule} can only reference a rule that exists in the caller's own
      * partition, so an association and its rule always share an account.
+     *
+     * <p>Returns ids rather than the association nodes so the DNS path does not copy a record per
+     * association on every query when all it needs is which rules to look at.
      */
-    public List<ObjectNode> resolverRuleAssociationsForAccount(String accountId) {
-        if (accountId == null || accountId.isBlank()) {
+    public List<String> resolverRuleIdsAssociatedWith(String accountId, String vpcId) {
+        if (accountId == null || accountId.isBlank() || vpcId == null || vpcId.isBlank()) {
             return List.of();
         }
+        List<String> ruleIds = new ArrayList<>();
+        for (ObjectNode association : associationsForAccount(accountId)) {
+            String ruleId = text(association, "ResolverRuleId");
+            if (ruleId != null && !ruleIds.contains(ruleId) && vpcId.equals(text(association, "VPCId"))) {
+                ruleIds.add(ruleId);
+            }
+        }
+        return List.copyOf(ruleIds);
+    }
+
+    private List<ObjectNode> associationsForAccount(String accountId) {
         if (ruleAssociationStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
             @SuppressWarnings("unchecked")
             AccountAwareStorageBackend<ObjectNode> accountAware =
                     (AccountAwareStorageBackend<ObjectNode>) rawAccountAware;
-            return accountAware.scanForAccount(accountId, key -> true).stream()
-                    .map(ObjectNode::deepCopy).toList();
+            return accountAware.scanForAccount(accountId, key -> true);
         }
-        return ruleAssociationStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+        return ruleAssociationStore.scan(key -> true);
     }
 
     /**
-     * One of an account's resolver rules by id, fetched rather than scanned for so the DNS path
-     * reads only the rules an association actually named. See
-     * {@link #resolverRuleAssociationsForAccount}.
+     * One of an account's resolver rules by id, but only if it belongs to {@code region}. Fetched
+     * rather than scanned for, so the DNS path reads only the rules an association actually named.
+     *
+     * <p>Route 53 Resolver is regional: a rule created in one region governs nothing in another. The
+     * stores carry no region in their keys, so the rule's own region comes from the ARN this service
+     * minted for it, the same place {@link #replayOf} reads it from. A stored rule with no parseable
+     * ARN has no region to claim and is treated as belonging to the region asking, which no create
+     * path can produce and which cannot leak another region's rule.
      */
-    public Optional<ObjectNode> resolverRuleForAccount(String accountId, String ruleId) {
-        if (accountId == null || accountId.isBlank() || ruleId == null || ruleId.isBlank()) {
+    public Optional<ObjectNode> resolverRuleIn(String accountId, String region, String ruleId) {
+        if (accountId == null || accountId.isBlank() || region == null || region.isBlank()
+                || ruleId == null || ruleId.isBlank()) {
             return Optional.empty();
         }
+        return storedRule(accountId, ruleId)
+                .filter(rule -> region.equals(AwsArnUtils.regionOrDefault(text(rule, "Arn"), region)))
+                .map(ObjectNode::deepCopy);
+    }
+
+    private Optional<ObjectNode> storedRule(String accountId, String ruleId) {
         if (ruleStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
             @SuppressWarnings("unchecked")
             AccountAwareStorageBackend<ObjectNode> accountAware =
                     (AccountAwareStorageBackend<ObjectNode>) rawAccountAware;
-            return accountAware.getForAccount(accountId, ruleId).map(ObjectNode::deepCopy);
+            return accountAware.getForAccount(accountId, ruleId);
         }
-        return ruleStore.get(ruleId).map(ObjectNode::deepCopy);
+        return ruleStore.get(ruleId);
     }
 
     /**
@@ -524,9 +553,9 @@ public class Route53ResolverService {
      * key must not depend on it.</p>
      */
     private ArrayNode normalizedIpRequests(JsonNode ipAddresses) {
-        List<JsonNode> entries = new java.util.ArrayList<>();
+        List<JsonNode> entries = new ArrayList<>();
         ipAddresses.forEach(entries::add);
-        entries.sort(java.util.Comparator.comparing(Route53ResolverService::canonicalKey));
+        entries.sort(Comparator.comparing(Route53ResolverService::canonicalKey));
         ArrayNode normalized = objectMapper.createArrayNode();
         entries.forEach(normalized::add);
         return normalized;
@@ -535,9 +564,9 @@ public class Route53ResolverService {
     /** A node's contents as a string that does not depend on the order its members were written in. */
     private static String canonicalKey(JsonNode node) {
         if (node.isObject()) {
-            List<String> names = new java.util.ArrayList<>();
+            List<String> names = new ArrayList<>();
             node.fieldNames().forEachRemaining(names::add);
-            java.util.Collections.sort(names);
+            Collections.sort(names);
             StringBuilder key = new StringBuilder("{");
             for (String name : names) {
                 key.append(name).append('=').append(canonicalKey(node.get(name))).append(';');

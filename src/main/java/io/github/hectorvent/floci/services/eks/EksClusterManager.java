@@ -183,8 +183,8 @@ public class EksClusterManager
     private final Map<String, ClusterNodeVpc> clusterNodeVpcs = new ConcurrentHashMap<>();
 
     /**
-     * A DNS query from a cluster container originates in the account and VPC the cluster was created
-     * with, which is what a Route 53 Resolver rule has to be associated with for the query to follow
+     * A DNS query from a cluster container originates in the account, region and VPC the cluster was
+     * created with, which is what a Route 53 Resolver rule has to belong to for the query to follow
      * it. A cluster with no resolvable VPC id claims no address: its queries resolve as they do
      * without any rule rather than picking up another cluster's.
      */
@@ -197,7 +197,8 @@ public class EksClusterManager
                 .map(ClusterNodeVpc::clientVpc);
     }
 
-    private void registerClusterNodeVpc(Cluster cluster, String accountId, Set<String> addresses) {
+    private void registerClusterNodeVpc(Cluster cluster, String accountId, String region,
+                                        Set<String> addresses) {
         String clusterKey = clusterResourceName(cluster);
         forgetClusterNodeVpcs(clusterKey);
         String vpcId = cluster.getResourcesVpcConfig() != null
@@ -220,7 +221,7 @@ public class EksClusterManager
                     + " to the VPC. Restart the cluster to retry.", cluster.getName(), vpcId);
             return;
         }
-        ClientVpc clientVpc = new ClientVpc(accountId, vpcId);
+        ClientVpc clientVpc = new ClientVpc(accountId, region, vpcId);
         for (String address : usable) {
             clusterNodeVpcs.put(address, new ClusterNodeVpc(clusterKey, clientVpc));
         }
@@ -1749,7 +1750,7 @@ public class EksClusterManager
             Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
             nodeInstance.setDockerContainerId(containerId);
             clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
-            registerClusterNodeVpc(cluster, accountId, containerIps.allIps());
+            registerClusterNodeVpc(cluster, accountId, region, containerIps.allIps());
             for (Consumer<Instance> listener : nodeRegistrationListeners) {
                 try {
                     listener.accept(nodeInstance);
