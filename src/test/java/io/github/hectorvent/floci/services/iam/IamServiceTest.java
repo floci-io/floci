@@ -304,6 +304,19 @@ class IamServiceTest {
         assertTrue(tags2.containsKey("env"));
     }
 
+    @Test
+    void tagUserCleansUpPreExistingDuplicateCasedTags() {
+        IamUser user = iamService.createUser("dup-tags-user", "/");
+        user.getTags().put("Department", "finance");
+        user.getTags().put("department", "old-hr");
+        assertEquals(2, user.getTags().size());
+
+        iamService.tagUser("dup-tags-user", Map.of("department", "new-hr"));
+        Map<String, String> tags = iamService.listUserTags("dup-tags-user");
+        assertEquals(1, tags.size());
+        assertEquals("new-hr", tags.get("Department"));
+    }
+
     // =========================================================================
     // Login Profiles
     // =========================================================================

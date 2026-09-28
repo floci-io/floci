@@ -1,5 +1,99 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.model.Address;
+import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.CapacityReservation;
+import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
+import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.model.IamInstanceProfileAssociation;
+import io.github.hectorvent.floci.services.ec2.model.Image;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceCreditSpecification;
+import io.github.hectorvent.floci.services.ec2.model.InstanceCreditSpecificationListResult;
+import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
+import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.IpRange;
+import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
+import io.github.hectorvent.floci.services.ec2.model.KeyPair;
+import io.github.hectorvent.floci.services.ec2.model.LaunchSpecification;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
+import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
+import io.github.hectorvent.floci.services.ec2.model.NatGateway;
+import io.github.hectorvent.floci.services.ec2.model.NatGatewayAddress;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAclAssociation;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAssociation;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAttachment;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceListResult;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterfacePrivateIpAddress;
+import io.github.hectorvent.floci.services.ec2.model.Placement;
+import io.github.hectorvent.floci.services.ec2.model.PrefixList;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
+import io.github.hectorvent.floci.services.ec2.model.ReferencedSecurityGroup;
+import io.github.hectorvent.floci.services.ec2.model.Reservation;
+import io.github.hectorvent.floci.services.ec2.model.Route;
+import io.github.hectorvent.floci.services.ec2.model.RouteTable;
+import io.github.hectorvent.floci.services.ec2.model.RouteTableAssociation;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
+import io.github.hectorvent.floci.services.ec2.model.Snapshot;
+import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.TransitGateway;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayOptions;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRoute;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTable;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTablePropagation;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachment;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachmentOptions;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
+import io.github.hectorvent.floci.services.ec2.model.Volume;
+import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
+import io.github.hectorvent.floci.services.ec2.model.VolumeModification;
+import io.github.hectorvent.floci.services.ec2.model.Vpc;
+import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpointDnsEntry;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
+import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
+import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnection;
+import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionStateReason;
+import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo;
+import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
+import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
+import jakarta.annotation.PostConstruct;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.context.ContextNotActiveException;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -21,107 +115,13 @@ import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
-import org.jboss.logging.Logger;
-
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.RequestContext;
-import io.github.hectorvent.floci.core.common.RequestScopes;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
-import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsPartition;
-import io.github.hectorvent.floci.core.common.AwsRegions;
-import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
-import io.github.hectorvent.floci.core.common.ContainerTeardown;
-import io.github.hectorvent.floci.core.resource.ExplorerResource;
-import io.github.hectorvent.floci.core.resource.ResourceProvider;
-import io.github.hectorvent.floci.core.resource.SupportedResourceType;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.ec2.model.Address;
-import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
-import io.github.hectorvent.floci.services.ec2.model.CapacityReservation;
-import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
-import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
-import io.github.hectorvent.floci.services.ec2.model.IamInstanceProfileAssociation;
-import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
-import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
-import io.github.hectorvent.floci.services.ec2.model.Image;
-import io.github.hectorvent.floci.services.ec2.model.Instance;
-import io.github.hectorvent.floci.services.ec2.model.InstanceCreditSpecification;
-import io.github.hectorvent.floci.services.ec2.model.InstanceCreditSpecificationListResult;
-import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
-import io.github.hectorvent.floci.services.ec2.model.InstanceState;
-import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
-import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAssociation;
-import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAttachment;
-import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceListResult;
-import io.github.hectorvent.floci.services.ec2.model.NetworkInterfacePrivateIpAddress;
-import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
-import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
-import io.github.hectorvent.floci.services.ec2.model.IpPermission;
-import io.github.hectorvent.floci.services.ec2.model.IpRange;
-import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
-import io.github.hectorvent.floci.services.ec2.model.KeyPair;
-import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
-import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
-import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
-import io.github.hectorvent.floci.services.ec2.model.NatGateway;
-import io.github.hectorvent.floci.services.ec2.model.NatGatewayAddress;
-import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
-import io.github.hectorvent.floci.services.ec2.model.NetworkAclAssociation;
-import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
-import io.github.hectorvent.floci.services.ec2.model.PrefixList;
-import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
-import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
-import io.github.hectorvent.floci.services.ec2.model.Placement;
-import io.github.hectorvent.floci.services.ec2.model.ReferencedSecurityGroup;
-import io.github.hectorvent.floci.services.ec2.model.Reservation;
-import io.github.hectorvent.floci.services.ec2.model.Route;
-import io.github.hectorvent.floci.services.ec2.model.RouteTable;
-import io.github.hectorvent.floci.services.ec2.model.RouteTableAssociation;
-import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
-import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
-import io.github.hectorvent.floci.services.ec2.model.Snapshot;
-import io.github.hectorvent.floci.services.ec2.model.Subnet;
-import io.github.hectorvent.floci.services.ec2.model.Tag;
-import io.github.hectorvent.floci.services.ec2.model.TransitGateway;
-import io.github.hectorvent.floci.services.ec2.model.TransitGatewayOptions;
-import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRoute;
-import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTable;
-import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTablePropagation;
-import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachment;
-import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachmentOptions;
-import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
-import io.github.hectorvent.floci.services.ec2.model.Volume;
-import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
-import io.github.hectorvent.floci.services.ec2.model.VolumeModification;
-import io.github.hectorvent.floci.services.ec2.model.Vpc;
-import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
-import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
-import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
-import io.github.hectorvent.floci.services.ec2.model.VpcEndpointDnsEntry;
-import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
-import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnection;
-import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionStateReason;
-import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo;
-import io.github.hectorvent.floci.services.iam.IamService;
-import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
-import jakarta.annotation.PostConstruct;
-import io.github.hectorvent.floci.services.ec2.model.LaunchSpecification;
-import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.context.ContextNotActiveException;
-import jakarta.inject.Inject;
 
 @ApplicationScoped
 public class Ec2Service implements ContainerTeardown, ResourceProvider {
@@ -253,6 +253,51 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders;
     private ClusterNodeInstanceProvider testClusterNodeInstanceProvider;
     private final Ec2VolumeBlockDeviceManager volumeBlockDeviceManager;
+    private jakarta.enterprise.inject.Instance<VpcRouteTableListener> routeTableListenersInstance;
+    private final List<VpcRouteTableListener> routeTableListeners = new CopyOnWriteArrayList<>();
+
+    public void addRouteTableListener(VpcRouteTableListener listener) {
+        if (listener != null && !this.routeTableListeners.contains(listener)) {
+            this.routeTableListeners.add(listener);
+        }
+    }
+
+    public void setRouteTableListener(VpcRouteTableListener listener) {
+        this.routeTableListeners.clear();
+        if (listener != null) {
+            this.routeTableListeners.add(listener);
+        }
+    }
+
+    public boolean attachContainerToVpc(String region, String vpcId, String containerId) {
+        if (vpcNetworkManager != null) {
+            return vpcNetworkManager.attachContainer(region, vpcId, containerId);
+        }
+        return false;
+    }
+
+    public boolean isVpcNetworkEnabled() {
+        return vpcNetworkManager != null && vpcNetworkManager.enabled();
+    }
+
+    private void notifyRouteTableUpdated(String region, RouteTable routeTable) {
+        for (VpcRouteTableListener listener : routeTableListeners) {
+            try {
+                listener.onRouteTableUpdated(region, routeTable);
+            } catch (Exception e) {
+                LOG.warnv("Route table listener failed for {0}: {1}", routeTable.getRouteTableId(), e.getMessage());
+            }
+        }
+        if (routeTableListenersInstance != null && !routeTableListenersInstance.isUnsatisfied()) {
+            for (VpcRouteTableListener listener : routeTableListenersInstance) {
+                try {
+                    listener.onRouteTableUpdated(region, routeTable);
+                } catch (Exception e) {
+                    LOG.warnv("CDI route table listener failed for {0}: {1}", routeTable.getRouteTableId(), e.getMessage());
+                }
+            }
+        }
+    }
 
     void setClusterNodeInstanceProvider(ClusterNodeInstanceProvider provider) {
         this.testClusterNodeInstanceProvider = provider;
@@ -283,7 +328,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         this.vpcNetworkManager = vpcNetworkManager;
     }
 
-    @Inject
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                       Ec2PortForwardManager portForwardManager,
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
@@ -296,6 +340,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 instanceTypeCatalog, storageFactory, requestContextInstance, iamService, volumeBlockDeviceManager);
         this.vpcNetworkManager = vpcNetworkManager;
         this.clusterNodeInstanceProviders = clusterNodeInstanceProviders;
+    }
+
+    @Inject
+    public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+                      Ec2PortForwardManager portForwardManager,
+                      AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
+                      jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
+                      VpcNetworkManager vpcNetworkManager, IamService iamService,
+                      jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders,
+                      Ec2VolumeBlockDeviceManager volumeBlockDeviceManager,
+                      jakarta.enterprise.inject.Instance<VpcRouteTableListener> routeTableListenersInstance) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, storageFactory, requestContextInstance, iamService, volumeBlockDeviceManager);
+        this.vpcNetworkManager = vpcNetworkManager;
+        this.clusterNodeInstanceProviders = clusterNodeInstanceProviders;
+        this.routeTableListenersInstance = routeTableListenersInstance;
     }
 
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
@@ -3113,9 +3174,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return resolved;
     }
 
-    private boolean securityGroupEnforcementEnabled() {
+    public boolean isSecurityGroupEnforcementEnabled() {
         return config.network() != null && config.network().securityGroupEnforcement() != null
                 && config.network().securityGroupEnforcement().enabled();
+    }
+
+    private boolean securityGroupEnforcementEnabled() {
+        return isSecurityGroupEnforcementEnabled();
     }
 
     private void reconcileFirewallPolicies(String region) {
@@ -7155,8 +7220,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     public List<RouteTable> describeRouteTables(String region, List<String> routeTableIds, Map<String, List<String>> filters) {
+        return describeRouteTables(callerAccountId(), region, routeTableIds, filters);
+    }
+
+    public List<RouteTable> describeRouteTables(String accountId, String region, List<String> routeTableIds, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
-        return routeTables.scan(k -> true).stream()
+        String safeAccount = accountId != null ? accountId : callerAccountId();
+        List<RouteTable> accountRouteTables = routeTables instanceof AccountAwareStorageBackend<RouteTable> aware
+                ? aware.scanForAccount(safeAccount, k -> true)
+                : routeTables.scan(k -> true);
+        return accountRouteTables.stream()
                 .filter(rt -> rt.getRegion().equals(region))
                 .filter(rt -> routeTableIds.isEmpty() || routeTableIds.contains(rt.getRouteTableId()))
                 .filter(rt -> matchesFilters(rt, filters, region))
@@ -7165,10 +7238,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public void deleteRouteTable(String region, String routeTableId) {
         ensureDefaultResources(region);
-        if (routeTables.get(key(region, routeTableId)).isEmpty()) {
+        RouteTable rt = routeTables.get(key(region, routeTableId)).orElse(null);
+        if (rt == null) {
             throw new AwsException("InvalidRouteTableID.NotFound", "The route table '" + routeTableId + "' does not exist", 400);
         }
         routeTables.delete(key(region, routeTableId));
+        notifyRouteTableUpdated(region, rt);
     }
 
     public RouteTableAssociation associateRouteTable(String region, String routeTableId, String subnetId) {
@@ -7188,6 +7263,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             next.add(assoc);
             current.setAssociations(next);
             routeTables.put(key(region, routeTableId), current);
+            notifyRouteTableUpdated(region, current);
         }
         return assoc;
     }
@@ -7204,6 +7280,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     next.removeIf(a -> a.getRouteTableAssociationId().equals(associationId));
                     current.setAssociations(next);
                     routeTables.put(key(region, current.getRouteTableId()), current);
+                    notifyRouteTableUpdated(region, current);
                 }
             }
         }
@@ -7308,13 +7385,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * to would be a behaviour change beyond this fix.
      */
     private static void requireEgressOnlyGatewayIsTheOnlyTarget(String gatewayId, String natGatewayId,
-                                                                String egressOnlyInternetGatewayId) {
+                                                                String egressOnlyInternetGatewayId,
+                                                                String vpcPeeringConnectionId,
+                                                                String instanceId,
+                                                                String networkInterfaceId) {
         if (!isSet(egressOnlyInternetGatewayId)) {
             return;
         }
-        if (isSet(gatewayId) || isSet(natGatewayId)) {
+        if (isSet(gatewayId) || isSet(natGatewayId) || isSet(vpcPeeringConnectionId)
+                || isSet(instanceId) || isSet(networkInterfaceId)) {
             throw new AwsException("InvalidParameterCombination",
-                    "EgressOnlyInternetGatewayId cannot be combined with GatewayId or NatGatewayId; "
+                    "EgressOnlyInternetGatewayId cannot be combined with another target; "
                             + "a route takes one target.", 400);
         }
     }
@@ -7327,14 +7408,55 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      */
     private static void requireVpcPeeringConnectionIsTheOnlyTarget(String gatewayId, String natGatewayId,
                                                                     String egressOnlyInternetGatewayId,
-                                                                    String vpcPeeringConnectionId) {
+                                                                    String vpcPeeringConnectionId,
+                                                                    String instanceId,
+                                                                    String networkInterfaceId) {
         if (!isSet(vpcPeeringConnectionId)) {
             return;
         }
-        if (isSet(gatewayId) || isSet(natGatewayId) || isSet(egressOnlyInternetGatewayId)) {
+        if (isSet(gatewayId) || isSet(natGatewayId) || isSet(egressOnlyInternetGatewayId)
+                || isSet(instanceId) || isSet(networkInterfaceId)) {
             throw new AwsException("InvalidParameterCombination",
-                    "VpcPeeringConnectionId cannot be combined with GatewayId, NatGatewayId or "
-                            + "EgressOnlyInternetGatewayId; a route takes one target.", 400);
+                    "VpcPeeringConnectionId cannot be combined with GatewayId, NatGatewayId, "
+                            + "EgressOnlyInternetGatewayId, InstanceId or NetworkInterfaceId; a route takes one target.", 400);
+        }
+    }
+
+    private String resolveInstanceOwnerId(String region, String instanceId) {
+        if (!isSet(instanceId)) {
+            return null;
+        }
+        getRequiredInstance(region, instanceId);
+        return callerAccountId();
+    }
+
+    private static void requireInstanceIsTheOnlyTarget(String gatewayId, String natGatewayId,
+                                                       String egressOnlyInternetGatewayId,
+                                                       String vpcPeeringConnectionId,
+                                                       String networkInterfaceId,
+                                                       String instanceId) {
+        if (!isSet(instanceId)) {
+            return;
+        }
+        if (isSet(gatewayId) || isSet(natGatewayId) || isSet(egressOnlyInternetGatewayId)
+                || isSet(vpcPeeringConnectionId) || isSet(networkInterfaceId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "InstanceId cannot be combined with another target; a route takes one target.", 400);
+        }
+    }
+
+    private static void requireNetworkInterfaceIsTheOnlyTarget(String gatewayId, String natGatewayId,
+                                                               String egressOnlyInternetGatewayId,
+                                                               String vpcPeeringConnectionId,
+                                                               String instanceId,
+                                                               String networkInterfaceId) {
+        if (!isSet(networkInterfaceId)) {
+            return;
+        }
+        if (isSet(gatewayId) || isSet(natGatewayId) || isSet(egressOnlyInternetGatewayId)
+                || isSet(vpcPeeringConnectionId) || isSet(instanceId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "NetworkInterfaceId cannot be combined with another target; a route takes one target.", 400);
         }
     }
 
@@ -7342,11 +7464,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                             String destinationIpv6CidrBlock, String destinationPrefixListId,
                             String gatewayId, String natGatewayId,
                             String egressOnlyInternetGatewayId, String vpcPeeringConnectionId) {
+        createRoute(region, routeTableId, destinationCidrBlock, destinationIpv6CidrBlock,
+                destinationPrefixListId, gatewayId, natGatewayId, egressOnlyInternetGatewayId,
+                vpcPeeringConnectionId, null, null);
+    }
+
+    public void createRoute(String region, String routeTableId, String destinationCidrBlock,
+                            String destinationIpv6CidrBlock, String destinationPrefixListId,
+                            String gatewayId, String natGatewayId,
+                            String egressOnlyInternetGatewayId, String vpcPeeringConnectionId,
+                            String instanceId, String networkInterfaceId) {
         requireExactlyOneDestination("CreateRoute", destinationCidrBlock, destinationIpv6CidrBlock,
                 destinationPrefixListId);
-        requireEgressOnlyGatewayIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId);
+        requireEgressOnlyGatewayIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId,
+                vpcPeeringConnectionId, instanceId, networkInterfaceId);
         requireVpcPeeringConnectionIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId,
-                vpcPeeringConnectionId);
+                vpcPeeringConnectionId, instanceId, networkInterfaceId);
+        requireInstanceIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId,
+                vpcPeeringConnectionId, networkInterfaceId, instanceId);
+        requireNetworkInterfaceIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId,
+                vpcPeeringConnectionId, instanceId, networkInterfaceId);
         final String canonicalDestinationCidrBlock = canonicalizeIpv4Cidr(destinationCidrBlock);
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
@@ -7364,15 +7501,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                         destinationPrefixListId)
                                 + " already exists", 400);
             }
+            String effectiveInstanceOwnerId = resolveInstanceOwnerId(region, instanceId);
             Route route = new Route(canonicalDestinationCidrBlock, gatewayId, "CreateRoute");
             route.setDestinationIpv6CidrBlock(destinationIpv6CidrBlock);
             route.setDestinationPrefixListId(destinationPrefixListId);
             route.setNatGatewayId(natGatewayId);
             route.setEgressOnlyInternetGatewayId(egressOnlyInternetGatewayId);
             route.setVpcPeeringConnectionId(vpcPeeringConnectionId);
+            route.setInstanceId(instanceId);
+            route.setInstanceOwnerId(effectiveInstanceOwnerId);
+            route.setNetworkInterfaceId(networkInterfaceId);
             next.add(route);
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
+            notifyRouteTableUpdated(region, current);
         }
     }
 
@@ -7380,25 +7522,39 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                              String destinationIpv6CidrBlock, String destinationPrefixListId,
                              String gatewayId, String natGatewayId, String vpcPeeringConnectionId) {
         replaceRoute(region, routeTableId, destinationCidrBlock, destinationIpv6CidrBlock,
-                destinationPrefixListId, gatewayId, natGatewayId, vpcPeeringConnectionId, false);
+                destinationPrefixListId, gatewayId, natGatewayId, vpcPeeringConnectionId,
+                null, null, false);
     }
 
     public void replaceRoute(String region, String routeTableId, String destinationCidrBlock,
                              String destinationIpv6CidrBlock, String destinationPrefixListId,
                              String gatewayId, String natGatewayId, String vpcPeeringConnectionId,
                              boolean dryRun) {
+        replaceRoute(region, routeTableId, destinationCidrBlock, destinationIpv6CidrBlock,
+                destinationPrefixListId, gatewayId, natGatewayId, vpcPeeringConnectionId,
+                null, null, dryRun);
+    }
+
+    public void replaceRoute(String region, String routeTableId, String destinationCidrBlock,
+                             String destinationIpv6CidrBlock, String destinationPrefixListId,
+                             String gatewayId, String natGatewayId, String vpcPeeringConnectionId,
+                             String instanceId, String networkInterfaceId,
+                             boolean dryRun) {
         requireExactlyOneDestination("ReplaceRoute", destinationCidrBlock, destinationIpv6CidrBlock,
                 destinationPrefixListId);
         // AWS takes exactly one target. Rejecting both-or-neither also keeps the targets this
-        // emulator cannot model (transit gateway, network interface, ...) from silently clearing
+        // emulator cannot model (transit gateway, ...) from silently clearing
         // the route and reporting success.
         boolean hasGateway = isSet(gatewayId);
         boolean hasNatGateway = isSet(natGatewayId);
         boolean hasPeeringConnection = isSet(vpcPeeringConnectionId);
-        if ((hasGateway ? 1 : 0) + (hasNatGateway ? 1 : 0) + (hasPeeringConnection ? 1 : 0) != 1) {
+        boolean hasInstance = isSet(instanceId);
+        boolean hasNetworkInterface = isSet(networkInterfaceId);
+        if ((hasGateway ? 1 : 0) + (hasNatGateway ? 1 : 0) + (hasPeeringConnection ? 1 : 0)
+                + (hasInstance ? 1 : 0) + (hasNetworkInterface ? 1 : 0) != 1) {
             throw new AwsException("InvalidParameterCombination",
-                    "ReplaceRoute takes exactly one target, and only GatewayId, NatGatewayId or "
-                            + "VpcPeeringConnectionId is supported.", 400);
+                    "ReplaceRoute takes exactly one target, and only GatewayId, NatGatewayId, "
+                            + "VpcPeeringConnectionId, InstanceId or NetworkInterfaceId is supported.", 400);
         }
         final String canonicalDestinationCidrBlock = canonicalizeIpv4Cidr(destinationCidrBlock);
 
@@ -7416,6 +7572,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                             destinationPrefixListId)
                                     + " does not exist", 400));
 
+            String effectiveInstanceOwnerId = hasInstance
+                    ? resolveInstanceOwnerId(region, instanceId)
+                    : null;
+
             if (dryRun) {
                 throw new AwsException("DryRunOperation",
                         "Request would have succeeded, but DryRun flag is set.", 412);
@@ -7428,9 +7588,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             replacement.setDestinationPrefixListId(destinationPrefixListId);
             replacement.setNatGatewayId(hasNatGateway ? natGatewayId : null);
             replacement.setVpcPeeringConnectionId(hasPeeringConnection ? vpcPeeringConnectionId : null);
+            replacement.setInstanceId(hasInstance ? instanceId : null);
+            replacement.setInstanceOwnerId(effectiveInstanceOwnerId);
+            replacement.setNetworkInterfaceId(hasNetworkInterface ? networkInterfaceId : null);
             next.set(next.indexOf(existing), replacement);
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
+            notifyRouteTableUpdated(region, current);
         }
     }
 
@@ -7447,6 +7611,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     destinationPrefixListId));
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
+            notifyRouteTableUpdated(region, current);
         }
     }
 
@@ -7603,6 +7768,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     public Optional<String> findVpcOwnerAccount(String region, String vpcId) {
         return findAnyVpcEntry(region, vpcId).map(AccountAwareStorageBackend.OwnedEntry::account);
     }
+
 
     public List<VpcPeeringConnection> describeVpcPeeringConnections(String region, List<String> ids,
                                                                      Map<String, List<String>> filters) {
@@ -8332,6 +8498,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "route.destination-prefix-list-id" -> rt.getRoutes().stream()
                         .anyMatch(r -> r.getDestinationPrefixListId() != null
                                 && matchesValue(values, r.getDestinationPrefixListId()));
+                case "route.instance-id" -> rt.getRoutes().stream()
+                        .anyMatch(r -> r.getInstanceId() != null && matchesValue(values, r.getInstanceId()));
+                case "route.network-interface-id" -> rt.getRoutes().stream()
+                        .anyMatch(r -> r.getNetworkInterfaceId() != null && matchesValue(values, r.getNetworkInterfaceId()));
                 default -> true;
             };
         }
@@ -8802,9 +8972,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         );
     }
 
-    // ─── Network Interfaces ─────────────────────────────────────────────────────
+    // ─── Network Interfaces ──────────────────────────────────────────────────────────
 
     public NetworkInterfaceListResult describeNetworkInterfaces(String region, List<String> networkInterfaceIds,
+                                                                 Map<String, List<String>> filters) {
+        return describeNetworkInterfaces(callerAccountId(), region, networkInterfaceIds, filters, 0, null);
+    }
+
+    public NetworkInterfaceListResult describeNetworkInterfaces(String region, List<String> networkInterfaceIds,
+                                                                   Map<String, List<String>> filters,
+                                                                   int maxResults, String nextToken) {
+        return describeNetworkInterfaces(callerAccountId(), region, networkInterfaceIds, filters, maxResults, nextToken);
+    }
+
+    public NetworkInterfaceListResult describeNetworkInterfaces(String accountId, String region,
+                                                                 List<String> networkInterfaceIds,
+                                                                 Map<String, List<String>> filters) {
+        return describeNetworkInterfaces(accountId, region, networkInterfaceIds, filters, 0, null);
+    }
+
+    public NetworkInterfaceListResult describeNetworkInterfaces(String accountId, String region,
+                                                                   List<String> networkInterfaceIds,
                                                                    Map<String, List<String>> filters,
                                                                    int maxResults, String nextToken) {
         // Validate pagination parameters
@@ -8828,9 +9016,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
 
         ensureDefaultResources(region);
+        String safeAccount = accountId != null ? accountId : callerAccountId();
         List<NetworkInterface> result = new ArrayList<>();
         Set<String> foundIds = new HashSet<>();
-        for (Instance inst : instances.scan(k -> true)) {
+        List<Instance> scopedInstances = instances instanceof AccountAwareStorageBackend<Instance> aware
+                ? aware.scanForAccount(safeAccount, k -> true)
+                : instances.scan(k -> true);
+        for (Instance inst : scopedInstances) {
             if (!inst.getRegion().equals(region)) continue;
             if (inst.getState() != null
                     && inst.getState().getName() != null
@@ -8845,7 +9037,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 // A standalone ENI attached to this instance is reported from its own record
                 // below, which is the side that knows its real attach time and its
                 // deleteOnTermination, both of which the instance-side copy would guess wrong.
-                if (networkInterfaces.get(key(region, eni.getNetworkInterfaceId())).isPresent()) {
+                Optional<NetworkInterface> standaloneNi = networkInterfaces instanceof AccountAwareStorageBackend<NetworkInterface> aware
+                        ? aware.getForAccount(safeAccount, key(region, eni.getNetworkInterfaceId()))
+                        : networkInterfaces.get(key(region, eni.getNetworkInterfaceId()));
+                if (standaloneNi.isPresent()) {
                     continue;
                 }
                 foundIds.add(eni.getNetworkInterfaceId());
@@ -8874,7 +9069,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 // resource. Read the interface's own entry in the tag store instead:
                 // CreateTags on the eni- id writes it, and so does a RunInstances
                 // TagSpecification with ResourceType=network-interface.
-                ni.getTagSet().addAll(tags.get(eni.getNetworkInterfaceId()).orElse(List.of()));
+                Optional<List<Tag>> tagList = tags instanceof AccountAwareStorageBackend<List<Tag>> aware
+                        ? aware.getForAccount(safeAccount, eni.getNetworkInterfaceId())
+                        : tags.get(eni.getNetworkInterfaceId());
+                ni.getTagSet().addAll(tagList.orElse(List.of()));
 
                 NetworkInterfaceAttachment att = new NetworkInterfaceAttachment();
                 att.setAttachmentId(eni.getAttachmentId());
@@ -8889,7 +9087,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 att.setDeleteOnTermination(true);
                 ni.setAttachment(att);
 
-                // Phase 3: privateIpAddressesSet — primary IP
+                // Phase 3: privateIpAddressesSet - primary IP
                 NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
                 primaryIp.setPrivateIpAddress(eni.getPrivateIpAddress());
                 primaryIp.setPrivateDnsName(eni.getPrivateDnsName());
@@ -8918,8 +9116,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // already surfaced above, an ENI used as an instance's launch-time interface (e.g. via
         // RunInstances' NetworkInterface.1.NetworkInterfaceId, the override-default-eni pattern)
         // is represented on the instance and would otherwise be double-counted here.
-        for (NetworkInterface standalone : networkInterfaces.scan(k -> k.startsWith(region + "::"))) {
-            NetworkInterface ni = releaseIfHostIsGone(region, standalone);
+        List<NetworkInterface> standaloneInterfaces = networkInterfaces instanceof AccountAwareStorageBackend<NetworkInterface> aware
+                ? aware.scanForAccount(safeAccount, k -> k.startsWith(region + "::"))
+                : networkInterfaces.scan(k -> k.startsWith(region + "::"));
+        for (NetworkInterface standalone : standaloneInterfaces) {
+            NetworkInterface ni = releaseIfHostIsGone(safeAccount, region, standalone);
             if (foundIds.contains(ni.getNetworkInterfaceId())) {
                 continue;
             }
@@ -9168,16 +9369,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     /** Removes an interface from an instance's own list, the mirror of attaching it. */
     private void detachFromInstance(String region, String instanceId, String networkInterfaceId) {
+        detachFromInstance(callerAccountId(), region, instanceId, networkInterfaceId);
+    }
+
+    private void detachFromInstance(String accountId, String region, String instanceId, String networkInterfaceId) {
         if (instanceId == null) {
             return;
         }
-        Instance inst = instances.get(key(region, instanceId)).orElse(null);
+        String safeAccount = accountId != null ? accountId : callerAccountId();
+        Instance inst = instances instanceof AccountAwareStorageBackend<Instance> aware
+                ? aware.getForAccount(safeAccount, key(region, instanceId)).orElse(null)
+                : instances.get(key(region, instanceId)).orElse(null);
         if (inst == null) {
             return;
         }
         if (inst.getNetworkInterfaces().removeIf(
                 e -> networkInterfaceId.equals(e.getNetworkInterfaceId()))) {
-            instances.put(key(region, instanceId), inst);
+            if (instances instanceof AccountAwareStorageBackend<Instance> aware) {
+                aware.putForAccount(safeAccount, key(region, instanceId), inst);
+            } else {
+                instances.put(key(region, instanceId), inst);
+            }
         }
     }
 
@@ -9258,11 +9470,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * read covers every such path at once, rather than chasing each terminal transition.
      */
     private NetworkInterface releaseIfHostIsGone(String region, NetworkInterface ni) {
+        return releaseIfHostIsGone(callerAccountId(), region, ni);
+    }
+
+    private NetworkInterface releaseIfHostIsGone(String accountId, String region, NetworkInterface ni) {
         NetworkInterfaceAttachment attachment = ni.getAttachment();
         if (attachment == null || attachment.getInstanceId() == null) {
             return ni;
         }
-        Instance host = instances.get(key(region, attachment.getInstanceId())).orElse(null);
+        String safeAccount = accountId != null ? accountId : (ni.getOwnerId() != null ? ni.getOwnerId() : callerAccountId());
+        Instance host = instances instanceof AccountAwareStorageBackend<Instance> aware
+                ? aware.getForAccount(safeAccount, key(region, attachment.getInstanceId())).orElse(null)
+                : instances.get(key(region, attachment.getInstanceId())).orElse(null);
         boolean hostIsGone = host == null || host.getState() == null
                 || "terminated".equals(host.getState().getName());
         if (!hostIsGone) {
@@ -9270,12 +9489,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         ni.setAttachment(null);
         ni.setStatus("available");
-        networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        if (networkInterfaces instanceof AccountAwareStorageBackend<NetworkInterface> aware) {
+            aware.putForAccount(safeAccount, key(region, ni.getNetworkInterfaceId()), ni);
+        } else {
+            networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        }
         // The dead instance has to let go of its copy as well. Releasing only the standalone
         // record would leave the terminated instance still reporting the interface, so once it is
         // reused two instance records would claim it, and a real one is not the winner by any
         // rule DescribeInstances applies.
-        detachFromInstance(region, attachment.getInstanceId(), ni.getNetworkInterfaceId());
+        detachFromInstance(safeAccount, region, attachment.getInstanceId(), ni.getNetworkInterfaceId());
         return ni;
     }
 

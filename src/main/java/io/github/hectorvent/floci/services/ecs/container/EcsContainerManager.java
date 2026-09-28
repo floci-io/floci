@@ -1529,11 +1529,6 @@ public class EcsContainerManager {
         return "127.0.0.1";
     }
     /**
-     * Tears down the firewall registration of a protected task. The ENI itself outlives this:
-     * it belongs to the task, not to its containers, and {@link #releaseTaskNetwork} frees it when
-     * the task reaches STOPPED.
-     */
-    /**
      * Issues the task's role credentials and makes sure the endpoint that serves them is up,
      * before any of its containers start.
      *
@@ -1629,6 +1624,11 @@ public class EcsContainerManager {
         }
     }
 
+    /**
+     * Tears down the firewall registration of a protected task. The ENI itself outlives this:
+     * it belongs to the task, not to its containers, and {@link #releaseTaskNetwork} frees it when
+     * the task reaches STOPPED.
+     */
     private void cleanupProtectedNetwork(EcsTaskHandle handle) {
         if (firewallManager != null && handle.getNetworkInterfaceId() != null) {
             firewallManager.unregister(handle.getNetworkInterfaceId());

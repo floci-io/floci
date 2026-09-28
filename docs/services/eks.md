@@ -408,6 +408,7 @@ The derived availability zone and instance ID match the synthetic EC2 node insta
 | `FLOCI_SERVICES_EKS_POD_IDENTITY_WEBHOOK` | `true` | Register a mutating admission webhook that injects pod identity credentials. Needs `FLOCI_TLS_ENABLED=true` |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
 | `FLOCI_SERVICES_EKS_EMBEDDED_DNS` | `true` | Inject Floci's embedded DNS server into cluster containers for Route 53 private hosted zones and internal name resolution |
+| `FLOCI_SERVICES_EKS_VPC_ROUTE_PROGRAMMING` | `true` | Program emulated VPC route table entries into k3s cluster containers |
 
 ### Kubernetes versions and network configuration
 
@@ -437,6 +438,27 @@ aws --endpoint-url http://localhost:4566 eks create-cluster \
 ```
 
 Floci validates that `serviceIpv4Cidr` falls within RFC 1918 private address ranges (`10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`), has a prefix length between `/12` and `/24`, and does not overlap with the VPC CIDR. When omitted, Floci defaults `serviceIpv4Cidr` to `10.100.0.0/16` (or `172.20.0.0/16` if `10.100.0.0/16` overlaps with the VPC). Internal pod CIDR (`--cluster-cidr`) defaults to `10.42.0.0/16` to avoid collisions with Docker bridge networks.
+
+### VPC route table programming
+
+When a cluster is created in a VPC (`resourcesVpcConfig.vpcId` is specified) and `floci.services.eks.vpc-route-programming` is enabled (`true` by default), Floci inspects the VPC route tables and programs matching routes into the k3s cluster container via `ip route replace <dest> via <gw>`.
+
+- **Association rules**:
+  - If the cluster specifies `subnetIds`, Floci resolves the route table explicitly associated with each subnet. Subnets without an explicit association fall back to the VPC main route table. Route tables associated only with other subnets in the VPC are ignored.
+  - If the cluster specifies no subnets, the VPC main route table is used.
+- **Programmable route targets**:
+  - **Instance targets** (`InstanceId`): Resolved to the EC2 container bridge IP or private IP address on the shared Docker network.
+  - **Network interface targets** (`NetworkInterfaceId`): Resolved to the ENI private IP address.
+- **Ignored and out-of-scope targets**:
+  - The default route (`0.0.0.0/0`) is never overridden, preserving the container's external network reachability and Docker bridge routing.
+  - Internet gateways (`igw-*`) and NAT gateways (`nat-*`) are out of scope because Docker networking already handles outbound traffic.
+  - VPC peering connections (`pcx-*`) and prefix lists are recorded in route table metadata but not programmed into the container kernel routing table.
+- **Lifecycle and dynamic updates**:
+  - Routes are programmed when a cluster starts or is restored after a restart.
+  - An event-driven listener updates active clusters dynamically whenever routes or associations change via `CreateRoute`, `ReplaceRoute`, `DeleteRoute`, `AssociateRouteTable`, or `DisassociateRouteTable`.
+- **Fault tolerance**:
+  - Route programming is idempotent.
+  - If routing commands fail inside the container (for example, if the `ip` tool is missing or returns a non-zero exit code), Floci logs a warning and the cluster proceeds to `ACTIVE` without failing creation.
 
 ### Pulling images from Floci ECR
 

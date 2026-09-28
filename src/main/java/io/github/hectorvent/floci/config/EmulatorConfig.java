@@ -2066,9 +2066,9 @@ public interface EmulatorConfig {
     interface EcsTaskRoleCredentialsConfig {
         /**
          * Opt-in: vends real task-role credentials over the AWS container-credentials wire
-         * contract. Off by default: reaching it from a task container needs a Docker network the
-         * task and Floci both have real access to, which the follow-up wiring this feeds into
-         * establishes; this alone has no way to satisfy it.
+         * contract. Off by default: reaching it from a task container needs a user-defined Docker
+         * network that both the task and the credentials proxy join, so the default bridge is not
+         * enough. Set {@code floci.services.ecs.docker-network} alongside this.
          */
         @WithDefault("false")
         boolean enabled();
@@ -2084,10 +2084,10 @@ public interface EmulatorConfig {
         /**
          * Port on the Floci host serving the credentials endpoint itself. Not the address a task
          * container talks to: real ECS SDKs hardcode 169.254.170.2, which nothing in Floci's own
-         * process can bind without also owning that address on the task's Docker network. A
-         * follow-up piece launches a small proxy container that holds that address and forwards
-         * to this port, the same way Lambda and ECS containers already reach Floci's other
-         * endpoints over {@code host.docker.internal}.
+         * process can bind without also owning that address on the task's Docker network. A small
+         * proxy container holds that address on each task network and forwards to this port, the
+         * same way Lambda and ECS containers already reach Floci's other endpoints over
+         * {@code host.docker.internal}.
          */
         @WithDefault("51679")
         int port();
@@ -3180,6 +3180,13 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean embeddedDns();
+
+        /**
+         * When true, programs static routes inside EKS cluster containers from emulated VPC route
+         * tables associated with the cluster's subnets or VPC.
+         */
+        @WithDefault("true")
+        boolean vpcRouteProgramming();
     }
 
     /**

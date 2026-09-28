@@ -321,10 +321,11 @@ public class ApiGatewayController {
     @Consumes(MediaType.WILDCARD)
     public Response createRestApi(@Context HttpHeaders headers,
                                   @QueryParam("mode") String mode,
+                                  @QueryParam("failonwarnings") boolean failOnWarnings,
                                   String body) {
         String region = regionResolver.resolveRegion(headers);
         if ("import".equals(mode)) {
-            RestApi api = service.importRestApi(region, body);
+            RestApi api = service.importRestApi(region, body, failOnWarnings);
             return Response.status(201).entity(toApiNode(region, api).toString()).type(MediaType.APPLICATION_JSON).build();
         }
         try {
@@ -343,9 +344,10 @@ public class ApiGatewayController {
     public Response putRestApi(@Context HttpHeaders headers,
                                @PathParam("apiId") String apiId,
                                @QueryParam("mode") String mode,
+                               @QueryParam("failonwarnings") boolean failOnWarnings,
                                String body) {
         String region = regionResolver.resolveRegion(headers);
-        RestApi api = service.putRestApi(region, apiId, mode, body);
+        RestApi api = service.putRestApi(region, apiId, mode, body, failOnWarnings);
         return Response.ok(toApiNode(region, api).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -2104,6 +2106,10 @@ public class ApiGatewayController {
         if (api.getDescription() != null) node.put("description", api.getDescription());
         node.put("createdDate", api.getCreatedDate());
         node.put("apiStatus", "AVAILABLE");
+        if (api.getWarnings() != null && !api.getWarnings().isEmpty()) {
+            ArrayNode warnings = node.putArray("warnings");
+            api.getWarnings().forEach(warnings::add);
+        }
         if (api.getTags() != null && !api.getTags().isEmpty()) {
             ObjectNode tagsNode = objectMapper.createObjectNode();
             api.getTags().forEach(tagsNode::put);

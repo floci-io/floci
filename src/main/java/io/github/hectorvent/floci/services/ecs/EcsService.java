@@ -348,6 +348,22 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /**
+     * Brings persisted services back to their desired count after a restart. Invoked from
+     * {@code EmulatorLifecycle} once storage is loaded. The bean is created lazily, so without this
+     * call neither the ECS stores nor the reconciler start until the first ECS request, and every
+     * persisted service stays without tasks until then. Creating the bean loads the stores and
+     * schedules the reconciler; this reports what that reconciler picks up.
+     */
+    public void restorePersistedRuntime() {
+        int persistedServices = servicesStore == null
+                ? services.size()
+                : servicesStore.scanAllAccountEntries(key -> true).size();
+        if (persistedServices > 0) {
+            LOG.infov("Reconciling {0} persisted ECS service(s)", persistedServices);
+        }
+    }
+
     boolean isReconcilerShutdown() {
         return reconciler.isShutdown();
     }

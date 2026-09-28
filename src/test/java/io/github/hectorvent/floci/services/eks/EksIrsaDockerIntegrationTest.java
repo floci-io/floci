@@ -44,6 +44,16 @@ class EksIrsaDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksIrsaDockerIntegrationTest.class);
     private static final String FORM = "application/x-www-form-urlencoded";
+
+    /**
+     * The root stand-in credential, for the IAM fixtures this test sets up. Those are ordinary
+     * management calls that AWS signs, and this test runs with enforcement on, so they carry a
+     * credential. The AssumeRoleWithWebIdentity calls under test stay unsigned on purpose: AWS
+     * serves that operation without credentials, which is the whole point of web identity.
+     */
+    private static final String SETUP_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/iam/aws4_request, "
+                    + "SignedHeaders=host, Signature=setup";
     private static final String ACCOUNT = "000000000000";
 
     public static final class Profile implements QuarkusTestProfile {
@@ -317,6 +327,7 @@ class EksIrsaDockerIntegrationTest {
     private String createRole(String name, String trustPolicy) {
         return given()
             .contentType(FORM)
+            .header("Authorization", SETUP_AUTH)
             .formParam("Action", "CreateRole")
             .formParam("Version", "2010-05-08")
             .formParam("RoleName", name)
@@ -332,6 +343,7 @@ class EksIrsaDockerIntegrationTest {
         try {
             given()
                 .contentType(FORM)
+                .header("Authorization", SETUP_AUTH)
                 .formParam("Action", "DeleteRole")
                 .formParam("Version", "2010-05-08")
                 .formParam("RoleName", name)

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
+import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentialsServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
@@ -93,6 +94,7 @@ public class EmulatorLifecycle {
     private final RdsService rdsService;
     private final TimestreamInfluxDbService timestreamInfluxDbService;
     private final ElbV2Service elbV2Service;
+    private final EcsService ecsService;
     private final ElbClassicService elbClassicService;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
@@ -133,6 +135,7 @@ public class EmulatorLifecycle {
                              TimestreamInfluxDbService timestreamInfluxDbService,
                              ElbV2Service elbV2Service,
                              ElbClassicService elbClassicService,
+                             EcsService ecsService,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
                              KinesisEventSourcePoller kinesisPoller,
@@ -171,6 +174,7 @@ public class EmulatorLifecycle {
         this.timestreamInfluxDbService = timestreamInfluxDbService;
         this.elbV2Service = elbV2Service;
         this.elbClassicService = elbClassicService;
+        this.ecsService = ecsService;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
         this.kinesisPoller = kinesisPoller;
@@ -258,6 +262,10 @@ public class EmulatorLifecycle {
         }
         if (config.services().elb().enabled()) {
             elbClassicService.restorePersistedRuntime();
+        }
+        // After the load balancers: the reconciler registers the tasks it starts as their targets.
+        if (config.services().ecs().enabled()) {
+            ecsService.restorePersistedRuntime();
         }
 
         if (isMetadataServerNeeded()) {

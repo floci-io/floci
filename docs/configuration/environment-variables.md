@@ -476,6 +476,10 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | _(none)_ | Docker network for ECS task containers |
 | `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | _(none)_ | Comma-separated allowlist of parent directories host volume `sourcePath`s must resolve under. By default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
 | `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES` | `false` | Allow any host path, bypassing `HOST_VOLUME_ROOTS`; traversal, the bare root, and the Docker socket (or an ancestor directory of it, e.g. `/var/run`) are still always rejected |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED` | `false` | Vend real task IAM role credentials to task containers over the AWS container-credentials contract. Requires `FLOCI_SERVICES_ECS_DOCKER_NETWORK` to name a user-defined Docker network: the default bridge will not work |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_TTL_SECONDS` | `21600` | Lifetime of the vended credentials. Matches the six hours AWS documents for task-role credentials |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT` | `51679` | Port on the Floci host serving the credentials endpoint. Not the address task containers use, which is always `169.254.170.2:80` |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PROXY_IMAGE` | `floci/network-helper:local` | Image for the per-network proxy that holds `169.254.170.2` and forwards to the port above |
 
 ### EC2
 

@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -43,7 +44,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -308,9 +311,27 @@ class RedshiftContainerManagerTest {
         manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
         assertTrue(manager.getContainer(ACCOUNT_ID, "test-cluster").isPresent());
 
+        clearInvocations(lifecycleManager);
         manager.stop(ACCOUNT_ID, "test-cluster");
         assertTrue(manager.getContainer(ACCOUNT_ID, "test-cluster").isEmpty());
         verify(lifecycleManager).removeIfExists("floci-aws-redshift-" + ACCOUNT_ID + "-test-cluster");
+    }
+
+    @Test
+    void startRemovesStaleContainerBeforeCreating() {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
+
+        // A container left under the fixed name by an earlier run would make createAndStart fail with a name conflict
+        InOrder order = inOrder(lifecycleManager);
+        order.verify(lifecycleManager).removeIfExists("floci-aws-redshift-" + ACCOUNT_ID + "-test-cluster");
+        order.verify(lifecycleManager).createAndStart(any());
+        // A legacy-named container may still hold a cluster's data, and no volume backs it
+        verify(lifecycleManager, never()).removeIfExists("floci-redshift-" + ACCOUNT_ID + "-test-cluster");
     }
 
     @Test
@@ -349,6 +370,7 @@ class RedshiftContainerManagerTest {
         // Data lives only in the container's writable layer (no volume): recreating it
         // would silently discard it, so a container found by name must never be recreated.
         verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).removeIfExists(anyString());
     }
 
     @Test

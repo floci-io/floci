@@ -26,10 +26,10 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Owns the small proxy container, one per Docker network, that holds the ECS container-credentials
  * address (169.254.170.2) and forwards to {@link EcsTaskRoleCredentialsServer}. A task container
- * needs its own address in 169.254.0.0/16 to reach this proxy at all (see the follow-up wiring
- * that gives it one): without a connected route for that range, the kernel routes toward the
- * default gateway instead of resolving the peer directly, and the connection is refused before it
- * reaches this proxy's socket.
+ * needs its own address in 169.254.0.0/16 to reach this proxy at all, which
+ * {@code EcsTaskLinkLocalAddresses} hands out: without a connected route for that range, the
+ * kernel routes toward the default gateway instead of resolving the peer directly, and the
+ * connection is refused before it reaches this proxy's socket.
  *
  * <p>Docker accepts a link-local address request even on a runtime that then does not honour it
  * (see the review discussion on #4063), so a bind is never trusted from the API call alone: after

@@ -2638,7 +2638,12 @@ public class ApiGatewayService {
     // ──────────────────────────── OpenAPI Import ────────────────────────────
 
     public RestApi importRestApi(String region, String specBody) {
-        OpenAPI openAPI = parseOpenApiSpec(specBody);
+        return importRestApi(region, specBody, false);
+    }
+
+    public RestApi importRestApi(String region, String specBody, boolean failOnWarnings) {
+        ParsedOpenApi parsed = parseOpenApiSpec(specBody, failOnWarnings);
+        OpenAPI openAPI = parsed.openAPI();
 
         String name = openAPI.getInfo() != null ? openAPI.getInfo().getTitle() : "Imported API";
         String description = openAPI.getInfo() != null ? openAPI.getInfo().getDescription() : null;
@@ -2650,6 +2655,8 @@ public class ApiGatewayService {
 
         try {
             applyOpenApiSpec(region, api.getId(), openAPI);
+            api.setWarnings(parsed.warnings());
+            apiStore.put(apiKey(region, api.getId()), api);
         } catch (RuntimeException e) {
             // AWS creates nothing when an import fails, and the error carries no id to clean up with.
             restoreRestApi(region, api.getId(), RestApiSnapshot.empty());
@@ -2660,12 +2667,19 @@ public class ApiGatewayService {
     }
 
     public RestApi putRestApi(String region, String apiId, String mode, String specBody) {
+        return putRestApi(region, apiId, mode, specBody, false);
+    }
+
+    public RestApi putRestApi(String region, String apiId, String mode, String specBody, boolean failOnWarnings) {
         // Note: mode=merge is accepted but treated as overwrite (merge semantics not yet implemented)
         getRestApi(region, apiId);
-        OpenAPI openAPI = parseOpenApiSpec(specBody);
+        ParsedOpenApi parsed = parseOpenApiSpec(specBody, failOnWarnings);
         RestApiSnapshot snapshot = snapshotRestApi(region, apiId);
         try {
-            return overwriteRestApi(region, apiId, openAPI);
+            RestApi api = overwriteRestApi(region, apiId, parsed.openAPI());
+            api.setWarnings(parsed.warnings());
+            apiStore.put(apiKey(region, apiId), api);
+            return api;
         } catch (RuntimeException e) {
             // A failed PutRestApi leaves the API as it was; the overwrite has already cleared it by now.
             restoreRestApi(region, apiId, snapshot);
@@ -2766,7 +2780,9 @@ public class ApiGatewayService {
         entries.forEach(store::put);
     }
 
-    private OpenAPI parseOpenApiSpec(String specBody) {
+    private record ParsedOpenApi(OpenAPI openAPI, List<String> warnings) {}
+
+    private ParsedOpenApi parseOpenApiSpec(String specBody, boolean failOnWarnings) {
         SwaggerParseResult result = new io.swagger.parser.OpenAPIParser().readContents(specBody, null, null);
         if (result.getOpenAPI() == null) {
             String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
@@ -2774,7 +2790,23 @@ public class ApiGatewayService {
         }
         OpenAPI openAPI = result.getOpenAPI();
         validateImportedAuthorizers(openAPI);
-        return openAPI;
+        List<String> warnings = result.getMessages() != null ? new ArrayList<>(result.getMessages()) : new ArrayList<>();
+        if (openAPI.getPaths() != null) {
+            for (Map.Entry<String, PathItem> entry : openAPI.getPaths().entrySet()) {
+                PathItem pathItem = entry.getValue();
+                Object anyMethod = pathItem.getExtensions() != null
+                        ? pathItem.getExtensions().get("x-amazon-apigateway-any-method") : null;
+                if (anyMethod != null) {
+                    OpenAPIDeserializer.ParseResult anyResult = new OpenAPIDeserializer.ParseResult();
+                    parseAnyMethodOperation(entry.getKey(), anyMethod, anyResult);
+                    warnings.addAll(anyResult.getMessages());
+                }
+            }
+        }
+        if (failOnWarnings && !warnings.isEmpty()) {
+            throw new AwsException("BadRequestException", String.join("; ", warnings), 400);
+        }
+        return new ParsedOpenApi(openAPI, List.copyOf(warnings));
     }
 
     private void validateImportedAuthorizers(OpenAPI openAPI) {
@@ -3115,6 +3147,11 @@ public class ApiGatewayService {
      * swagger model graph, which the native image does not have.
      */
     private Operation parseAnyMethodOperation(String path, Object anyMethodExt) {
+        return parseAnyMethodOperation(path, anyMethodExt, new OpenAPIDeserializer.ParseResult());
+    }
+
+    private Operation parseAnyMethodOperation(String path, Object anyMethodExt,
+                                               OpenAPIDeserializer.ParseResult result) {
         JsonNode node = Json.mapper().valueToTree(anyMethodExt);
         if (!(node instanceof ObjectNode operationNode)) {
             throw new AwsException("BadRequestException",
@@ -3123,7 +3160,7 @@ public class ApiGatewayService {
                     400);
         }
         return new OpenAPIDeserializer().getOperation(operationNode,
-                "paths.'" + path + "'.x-amazon-apigateway-any-method", new OpenAPIDeserializer.ParseResult());
+                "paths.'" + path + "'.x-amazon-apigateway-any-method", result);
     }
 
     private void applyOperation(String region, String apiId, String resourceId, String httpMethod,

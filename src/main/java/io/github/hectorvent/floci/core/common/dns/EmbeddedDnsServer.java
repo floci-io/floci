@@ -149,14 +149,14 @@ public class EmbeddedDnsServer {
             buf.getShort(); // qclass
             int questionEnd = buf.position();
 
-            vertx.<Optional<DnsAnswer>>executeBlocking(() -> resolveARecordWithOwnership(qname, myIp), false)
+            vertx.<Optional<DnsAnswer>>executeBlocking(() -> resolveRecordWithOwnership(qname, myIp, qtype), false)
                     .onSuccess(answer -> {
                         if (answer.isEmpty()) {
                             forwardAsync(vertx, socket, data, senderHost, senderPort);
                             return;
                         }
                         DnsAnswer records = answer.orElseThrow();
-                        byte[] response = qtype == 1 && !records.isEmpty()
+                        byte[] response = !records.isEmpty()
                                 ? buildAResponse(data, txId, questionOffset, questionEnd, records)
                                 : buildEmptyResponse(data, txId, questionOffset, questionEnd,
                                         records.nameExists() ? 0 : 3);
@@ -190,13 +190,19 @@ public class EmbeddedDnsServer {
     }
 
     Optional<DnsAnswer> resolveARecordWithOwnership(String name, String myIp) {
+        return resolveRecordWithOwnership(name, myIp, 1);
+    }
+
+    private Optional<DnsAnswer> resolveRecordWithOwnership(String name, String myIp, int type) {
         if (matchesSuffix(name)) {
-            return Optional.of(DnsAnswer.records(List.of(myIp), DnsAnswer.DEFAULT_TTL_SECONDS));
+            return Optional.of(type == 1 ? DnsAnswer.records(List.of(myIp), DnsAnswer.DEFAULT_TTL_SECONDS)
+                    : DnsAnswer.noData());
         }
         Optional<String> ec2PrivateDnsName = resolveEc2PrivateDnsName(name);
         return ec2PrivateDnsName
-                .map(address -> DnsAnswer.records(List.of(address), DnsAnswer.DEFAULT_TTL_SECONDS))
-                .map(Optional::of).orElseGet(() -> resolveFromRecordSources(name));
+                .map(address -> type == 1 ? DnsAnswer.records(List.of(address), DnsAnswer.DEFAULT_TTL_SECONDS)
+                        : DnsAnswer.noData())
+                .map(Optional::of).orElseGet(() -> resolveFromRecordSources(name, type));
     }
 
     /**
@@ -204,13 +210,13 @@ public class EmbeddedDnsServer {
      * today. A source that throws must not take the DNS server down with it: the query falls
      * through to the upstream resolvers, which is what happened before any source existed.
      */
-    private Optional<DnsAnswer> resolveFromRecordSources(String name) {
+    private Optional<DnsAnswer> resolveFromRecordSources(String name, int type) {
         if (recordSources == null) {
             return Optional.empty();
         }
         for (DnsRecordSource source : recordSources) {
             try {
-                Optional<DnsAnswer> answer = source.resolveIpv4(name);
+                Optional<DnsAnswer> answer = source.resolve(name, type);
                 if (answer != null && answer.isPresent()) {
                     return answer;
                 }
@@ -223,14 +229,16 @@ public class EmbeddedDnsServer {
     }
 
     byte[] buildEmptyResponse(byte[] query, short txId, int questionOffset, int questionEnd, int responseCode) {
-        ByteBuffer response = ByteBuffer.allocate(12 + questionEnd - questionOffset);
+        UdpPayload payload = udpPayload(query, questionEnd);
+        ByteBuffer response = ByteBuffer.allocate(12 + questionEnd - questionOffset + (payload.edns() ? 11 : 0));
         response.putShort(txId);
         response.putShort((short) (0x8580 | responseCode));
         response.putShort((short) 1);
         response.putShort((short) 0);
         response.putShort((short) 0);
-        response.putShort((short) 0);
+        response.putShort((short) (payload.edns() ? 1 : 0));
         response.put(query, questionOffset, questionEnd - questionOffset);
+        appendOpt(response, payload);
         return response.array();
     }
 
@@ -304,37 +312,82 @@ public class EmbeddedDnsServer {
     }
 
     byte[] buildAResponse(byte[] query, short txId, int questionOffset, int questionEnd, DnsAnswer answer) {
-        List<String> ips = answer.addresses();
+        List<DnsRecord> records = answer.records();
         int questionLength = questionEnd - questionOffset;
-        // header(12) + question + per answer(name-ptr(2) + type(2) + class(2) + ttl(4) + rdlen(2) + rdata(4))
-        ByteBuffer resp = ByteBuffer.allocate(12 + questionLength + 16 * ips.size());
+        List<byte[]> data = records.stream().map(DnsRecord::data).toList();
+        UdpPayload payload = udpPayload(query, questionEnd);
+        int responseLength = 12 + questionLength + (payload.edns() ? 11 : 0);
+        int answerCount = 0;
+        for (byte[] recordData : data) {
+            if (responseLength + 12 + recordData.length > payload.size()) {
+                break;
+            }
+            responseLength += 12 + recordData.length;
+            answerCount++;
+        }
+        boolean truncated = answerCount < records.size();
+        ByteBuffer resp = ByteBuffer.allocate(responseLength);
 
         // header
         resp.putShort(txId);
-        resp.putShort((short) 0x8180);      // QR=1, AA=1, RD=1, RCODE=0
+        resp.putShort((short) (0x8180 | (truncated ? 0x0200 : 0))); // QR=1, RD=1, RCODE=0
         resp.putShort((short) 1);           // qdcount
-        resp.putShort((short) ips.size());  // ancount
+        resp.putShort((short) answerCount); // ancount
         resp.putShort((short) 0);           // nscount
-        resp.putShort((short) 0);           // arcount
+        resp.putShort((short) (payload.edns() ? 1 : 0)); // arcount
 
         // question (copied verbatim from query)
         resp.put(query, questionOffset, questionLength);
 
-        // answers. A name with several registered addresses gets one A record each, which is
-        // what a Cloud Map service backed by more than one instance resolves to on AWS.
-        for (String ip : ips) {
+        // Each answer carries its own type and rdata; a CNAME can answer an address query.
+        for (int i = 0; i < answerCount; i++) {
             resp.putShort((short) 0xC00C); // name pointer to offset 12 (start of question name)
-            resp.putShort((short) 1);       // type A
+            resp.putShort((short) records.get(i).type());
             resp.putShort((short) 1);       // class IN
             resp.putInt(answer.ttlSeconds());
-            resp.putShort((short) 4);       // rdlength
+            resp.putShort((short) data.get(i).length);
+            resp.put(data.get(i));
+        }
+        appendOpt(resp, payload);
+        return resp.array();
+    }
 
-            for (String octet : ip.split("\\.")) {
-                resp.put((byte) Integer.parseInt(octet));
+    private record UdpPayload(int size, boolean edns) {}
+
+    private static UdpPayload udpPayload(byte[] query, int questionEnd) {
+        UdpPayload legacy = new UdpPayload(512, false);
+        ByteBuffer packet = ByteBuffer.wrap(query);
+        if (query.length < 12 || packet.getShort(4) != 1
+                || packet.getShort(6) != 0 || packet.getShort(8) != 0) {
+            return legacy;
+        }
+        int additionalCount = Short.toUnsignedInt(packet.getShort(10));
+        packet.position(questionEnd);
+        for (int i = 0; i < additionalCount; i++) {
+            readName(packet, query);
+            if (packet.remaining() < 10) {
+                return legacy;
+            }
+            int type = Short.toUnsignedInt(packet.getShort());
+            int size = Short.toUnsignedInt(packet.getShort());
+            int ttl = packet.getInt();
+            int dataLength = Short.toUnsignedInt(packet.getShort());
+            if (packet.remaining() < dataLength) {
+                return legacy;
+            }
+            packet.position(packet.position() + dataLength);
+            if (type == 41 && ((ttl >>> 16) & 0xFF) == 0) {
+                return new UdpPayload(Math.max(512, Math.min(size, MAX_DNS_UDP_RESPONSE)), true);
             }
         }
+        return legacy;
+    }
 
-        return resp.array();
+    private static void appendOpt(ByteBuffer response, UdpPayload payload) {
+        if (payload.edns()) {
+            response.put((byte) 0).putShort((short) 41).putShort((short) payload.size())
+                    .putInt(0).putShort((short) 0);
+        }
     }
 
     private void forwardAsync(Vertx vertx, DatagramSocket socket, byte[] query,

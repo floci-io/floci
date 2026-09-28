@@ -261,6 +261,11 @@ floci:
     ecs:
       enabled: true
       mock: false                             # true = tasks go to RUNNING without Docker (useful for CI)
+      docker-network: floci-net               # required for task-role credentials; must be user-defined
+      task-role-credentials:
+        enabled: false                        # vend real task IAM role credentials to task containers
+        ttl-seconds: 21600                    # six hours, matching AWS
+        port: 51679                           # Floci-side port; containers always use 169.254.170.2:80
 
     appsync:
       enabled: true

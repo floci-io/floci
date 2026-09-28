@@ -25,6 +25,11 @@ class IamTagValidationIntegrationTest {
     private static final String POLICY_DOCUMENT = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
     private static final String THUMBPRINT = "9e99a48a9960b14926bb7f3b02e22da2b0ab7280";
+    private static final String SAML_METADATA = "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\""
+            + " entityID=\"https://idp.example.test/untag-key\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\">"
+            + "<ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data>"
+            + "<ds:X509Certificate>dW50YWc=</ds:X509Certificate></ds:X509Data></ds:KeyInfo>"
+            + "</md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
 
     private static RequestSpecification iam(String action) {
         return given().header("Authorization", IAM_AUTH).formParam("Action", action);
@@ -366,5 +371,273 @@ class IamTagValidationIntegrationTest {
         assertInvalidTag(singleTag(iam("CreateUser").formParam("UserName", name), "bad#key", "v"),
                 "tags.1.member.key", "Member must satisfy regular expression pattern");
         assertNoSuchEntity(iam("GetUser").formParam("UserName", name));
+    }
+
+    private static void assertDuplicateTagKeys(RequestSpecification request, boolean caseInsensitiveNote) {
+        request.when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"))
+            .body("ErrorResponse.Error.Message", equalTo(caseInsensitiveNote
+                    ? "Duplicate tag keys found. Please note that Tag keys are case insensitive."
+                    : "Duplicate tag keys found."));
+    }
+
+    @Test
+    void tagUserWithExactDuplicateKeysInSingleRequestIsRejected() {
+        String name = unique("tag-dup-user");
+        createUser(name);
+        RequestSpecification request = iam("TagUser").formParam("UserName", name)
+            .formParam("Tags.member.1.Key", "key").formParam("Tags.member.1.Value", "v1")
+            .formParam("Tags.member.2.Key", "key").formParam("Tags.member.2.Value", "v2");
+        assertDuplicateTagKeys(request, true);
+    }
+
+    @Test
+    void tagUserWithCaseInsensitiveDuplicateKeysInSingleRequestIsRejected() {
+        String name = unique("tag-dup-user");
+        createUser(name);
+        RequestSpecification request = iam("TagUser").formParam("UserName", name)
+            .formParam("Tags.member.1.Key", "Department").formParam("Tags.member.1.Value", "finance")
+            .formParam("Tags.member.2.Key", "department").formParam("Tags.member.2.Value", "hr");
+        assertDuplicateTagKeys(request, true);
+    }
+
+    @Test
+    void createUserWithCaseInsensitiveDuplicateKeysIsRejected() {
+        String name = unique("create-dup-user");
+        RequestSpecification request = iam("CreateUser").formParam("UserName", name)
+            .formParam("Tags.member.1.Key", "Team").formParam("Tags.member.1.Value", "alpha")
+            .formParam("Tags.member.2.Key", "team").formParam("Tags.member.2.Value", "beta");
+        assertDuplicateTagKeys(request, true);
+        assertNoSuchEntity(iam("GetUser").formParam("UserName", name));
+    }
+
+    @Test
+    void tagRoleWithCaseInsensitiveDuplicateKeysInSingleRequestIsRejected() {
+        String name = unique("tag-dup-role");
+        iam("CreateRole").formParam("RoleName", name).formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .when().post("/").then().statusCode(200);
+        RequestSpecification request = iam("TagRole").formParam("RoleName", name)
+            .formParam("Tags.member.1.Key", "Name").formParam("Tags.member.1.Value", "first")
+            .formParam("Tags.member.2.Key", "name").formParam("Tags.member.2.Value", "second");
+        assertDuplicateTagKeys(request, true);
+    }
+
+    @Test
+    void createRoleWithCaseInsensitiveDuplicateKeysIsRejected() {
+        String name = unique("create-dup-role");
+        RequestSpecification request = iam("CreateRole").formParam("RoleName", name)
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .formParam("Tags.member.1.Key", "Env").formParam("Tags.member.1.Value", "dev")
+            .formParam("Tags.member.2.Key", "env").formParam("Tags.member.2.Value", "prod");
+        assertDuplicateTagKeys(request, true);
+        assertNoSuchEntity(iam("GetRole").formParam("RoleName", name));
+    }
+
+    @Test
+    void tagPolicyAllowsDifferentCasingInSameRequestAndRejectsExactDuplicates() {
+        String arn = iam("CreatePolicy").formParam("PolicyName", unique("tag-policy-casing"))
+            .formParam("PolicyDocument", POLICY_DOCUMENT)
+            .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
+
+        // Policies have case-sensitive keys, so different casings in the same request are allowed
+        iam("TagPolicy").formParam("PolicyArn", arn)
+            .formParam("Tags.member.1.Key", "Costcenter").formParam("Tags.member.1.Value", "1234")
+            .formParam("Tags.member.2.Key", "costcenter").formParam("Tags.member.2.Value", "5678")
+            .when().post("/").then().statusCode(200);
+
+        iam("ListPolicyTags").formParam("PolicyArn", arn).when().post("/").then()
+            .statusCode(200)
+            .body("ListPolicyTagsResponse.ListPolicyTagsResult.Tags.member.size()", equalTo(2));
+
+        // Exact duplicates in a single request are rejected
+        RequestSpecification exactDup = iam("TagPolicy").formParam("PolicyArn", arn)
+            .formParam("Tags.member.1.Key", "Duplicate").formParam("Tags.member.1.Value", "v1")
+            .formParam("Tags.member.2.Key", "Duplicate").formParam("Tags.member.2.Value", "v2");
+        assertDuplicateTagKeys(exactDup, false);
+    }
+
+    @Test
+    void tagUserWithDifferentCasedKeyReplacesExistingTagPreservingOriginalKeyCasing() {
+        String name = unique("tag-case-user");
+        createUser(name);
+
+        singleTag(iam("TagUser").formParam("UserName", name), "Department", "finance")
+            .when().post("/").then().statusCode(200);
+
+        singleTag(iam("TagUser").formParam("UserName", name), "department", "hr")
+            .when().post("/").then().statusCode(200);
+
+        iam("ListUserTags").formParam("UserName", name).when().post("/").then()
+            .statusCode(200)
+            .body("ListUserTagsResponse.ListUserTagsResult.Tags.member.size()", equalTo(1))
+            .body("ListUserTagsResponse.ListUserTagsResult.Tags.member[0].Key", equalTo("Department"))
+            .body("ListUserTagsResponse.ListUserTagsResult.Tags.member[0].Value", equalTo("hr"));
+    }
+
+    @Test
+    void untagUserRemovesTagCaseInsensitively() {
+        String name = unique("untag-case-user");
+        createUser(name);
+
+        singleTag(iam("TagUser").formParam("UserName", name), "Department", "finance")
+            .when().post("/").then().statusCode(200);
+
+        iam("UntagUser").formParam("UserName", name)
+            .formParam("TagKeys.member.1", "department")
+            .when().post("/").then().statusCode(200);
+
+        iam("ListUserTags").formParam("UserName", name).when().post("/").then()
+            .statusCode(200)
+            .body("ListUserTagsResponse.ListUserTagsResult.Tags.member.size()", equalTo(0));
+    }
+
+    @Test
+    void tagRoleWithDifferentCasedKeyReplacesExistingTagPreservingOriginalKeyCasing() {
+        String name = unique("tag-case-role");
+        iam("CreateRole").formParam("RoleName", name).formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .when().post("/").then().statusCode(200);
+
+        singleTag(iam("TagRole").formParam("RoleName", name), "Environment", "dev")
+            .when().post("/").then().statusCode(200);
+
+        singleTag(iam("TagRole").formParam("RoleName", name), "environment", "prod")
+            .when().post("/").then().statusCode(200);
+
+        iam("ListRoleTags").formParam("RoleName", name).when().post("/").then()
+            .statusCode(200)
+            .body("ListRoleTagsResponse.ListRoleTagsResult.Tags.member.size()", equalTo(1))
+            .body("ListRoleTagsResponse.ListRoleTagsResult.Tags.member[0].Key", equalTo("Environment"))
+            .body("ListRoleTagsResponse.ListRoleTagsResult.Tags.member[0].Value", equalTo("prod"));
+    }
+
+    @Test
+    void untagRoleRemovesTagCaseInsensitively() {
+        String name = unique("untag-case-role");
+        iam("CreateRole").formParam("RoleName", name).formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .when().post("/").then().statusCode(200);
+
+        singleTag(iam("TagRole").formParam("RoleName", name), "Environment", "dev")
+            .when().post("/").then().statusCode(200);
+
+        iam("UntagRole").formParam("RoleName", name)
+            .formParam("TagKeys.member.1", "ENVIRONMENT")
+            .when().post("/").then().statusCode(200);
+
+        iam("ListRoleTags").formParam("RoleName", name).when().post("/").then()
+            .statusCode(200)
+            .body("ListRoleTagsResponse.ListRoleTagsResult.Tags.member.size()", equalTo(0));
+    }
+
+    @Test
+    void retaggingUserAtFiftyTagsWithDifferentCaseStaysWithinQuota() {
+        String name = unique("tag-quota-case-user");
+        createUser(name);
+        tagUser(name, 1, 50).when().post("/").then().statusCode(200);
+
+        // Re-tagging first 5 keys with uppercase must not exceed quota
+        RequestSpecification retag = iam("TagUser").formParam("UserName", name);
+        for (int i = 1; i <= 5; i++) {
+            retag.formParam("Tags.member." + i + ".Key", "KEY" + i)
+                 .formParam("Tags.member." + i + ".Value", "updated" + i);
+        }
+        retag.when().post("/").then().statusCode(200);
+
+        iam("ListUserTags").formParam("UserName", name).when().post("/").then()
+            .statusCode(200)
+            .body("ListUserTagsResponse.ListUserTagsResult.Tags.member.size()", equalTo(50));
+    }
+
+    @Test
+    void tagUserWithUnicodeCaseInsensitiveDuplicateKeysIsRejected() {
+        String name = unique("tag-dup-unicode-user");
+        createUser(name);
+        RequestSpecification request = iam("TagUser")
+            .contentType("application/x-www-form-urlencoded; charset=UTF-8")
+            .formParam("UserName", name)
+            .formParam("Tags.member.1.Key", "I").formParam("Tags.member.1.Value", "upper")
+            .formParam("Tags.member.2.Key", "\u0131").formParam("Tags.member.2.Value", "dotless");
+        assertDuplicateTagKeys(request, true);
+    }
+
+    private static void assertInvalidTagKeys(RequestSpecification request, String constraint) {
+        assertInvalidTag(request, "tagKeys", "Member must satisfy constraint: [" + constraint);
+    }
+
+    @Test
+    void untagKeysAreHeldToTheTagKeyConstraintsOnEveryUntagAction() {
+        String user = unique("untag-key-user");
+        createUser(user);
+        assertInvalidTagKeys(iam("UntagUser").formParam("UserName", user).formParam("TagKeys.member.1", ""),
+                "Member must have length greater than or equal to 1");
+
+        String role = unique("untag-key-role");
+        iam("CreateRole").formParam("RoleName", role).formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .when().post("/").then().statusCode(200);
+        assertInvalidTagKeys(iam("UntagRole").formParam("RoleName", role).formParam("TagKeys.member.1", "k".repeat(129)),
+                "Member must have length less than or equal to 128");
+
+        String policyArn = iam("CreatePolicy").formParam("PolicyName", unique("untag-key-policy"))
+            .formParam("PolicyDocument", POLICY_DOCUMENT)
+            .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
+        assertInvalidTagKeys(iam("UntagPolicy").formParam("PolicyArn", policyArn).formParam("TagKeys.member.1", "cost#center"),
+                "Member must satisfy regular expression pattern");
+
+        String profile = unique("untag-key-profile");
+        iam("CreateInstanceProfile").formParam("InstanceProfileName", profile)
+            .when().post("/").then().statusCode(200);
+        assertInvalidTagKeys(iam("UntagInstanceProfile").formParam("InstanceProfileName", profile)
+                .formParam("TagKeys.member.1", "ok").formParam("TagKeys.member.2", "a,b"),
+                "Member must satisfy regular expression pattern");
+
+        String oidcArn = iam("CreateOpenIDConnectProvider")
+            .formParam("Url", "https://oidc.tag-max.example.com/" + unique("untag-key"))
+            .formParam("ThumbprintList.member.1", THUMBPRINT)
+            .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString(
+                    "CreateOpenIDConnectProviderResponse.CreateOpenIDConnectProviderResult.OpenIDConnectProviderArn");
+        assertInvalidTagKeys(iam("UntagOpenIDConnectProvider").formParam("OpenIDConnectProviderArn", oidcArn)
+                .formParam("TagKeys.member.1", ""),
+                "Member must have length greater than or equal to 1");
+
+        String samlArn = iam("CreateSAMLProvider")
+            .formParam("Name", unique("untag-key-saml"))
+            .formParam("SAMLMetadataDocument", SAML_METADATA)
+            .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateSAMLProviderResponse.CreateSAMLProviderResult.SAMLProviderArn");
+        assertInvalidTagKeys(iam("UntagSAMLProvider").formParam("SAMLProviderArn", samlArn)
+                .formParam("TagKeys.member.1", "k".repeat(129)),
+                "Member must have length less than or equal to 128");
+    }
+
+    @Test
+    void invalidUntagKeyRemovesNothing() {
+        String name = unique("untag-key-atomic");
+        createUser(name);
+        singleTag(iam("TagUser").formParam("UserName", name), "team", "platform")
+            .when().post("/").then().statusCode(200);
+
+        assertInvalidTagKeys(iam("UntagUser").formParam("UserName", name)
+                .formParam("TagKeys.member.1", "team").formParam("TagKeys.member.2", "bad#key"),
+                "Member must satisfy regular expression pattern");
+
+        iam("ListUserTags").formParam("UserName", name).when().post("/").then()
+            .statusCode(200)
+            .body("ListUserTagsResponse.ListUserTagsResult.Tags.member.Key", equalTo("team"));
+    }
+
+    @Test
+    void untagKeyAtTheLengthLimitIsAccepted() {
+        String name = unique("untag-key-limit");
+        createUser(name);
+        String scriptA = new String(Character.toChars(0x1D49C));
+        iam("UntagUser").formParam("UserName", name)
+            .contentType("application/x-www-form-urlencoded; charset=UTF-8")
+            .formParam("TagKeys.member.1", "k".repeat(128))
+            .formParam("TagKeys.member.2", scriptA.repeat(128))
+            .formParam("TagKeys.member.3", "Cost Center_.:/=+-@")
+            .when().post("/").then().statusCode(200);
     }
 }

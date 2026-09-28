@@ -43,8 +43,9 @@ quarkus:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
       # catalog (ec2/image-catalog.yaml), SageMaker reads its instance type
       # catalog (sagemaker/instance-type-catalog.yaml), AppSync's GraphQL
-      # parser reads its message bundles, and API Gateway's Velocity engine
-      # reads its default properties at runtime via
+      # parser reads its message bundles, EC2 security group enforcement builds
+      # its helper image from docker/*.Dockerfile, and API Gateway's Velocity
+      # engine reads its default properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
       # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
@@ -57,6 +58,7 @@ quarkus:
         - ui/*.html
         - appsync/*.mjs
         - ec2/*.yaml
+        - docker/*.Dockerfile
         - sagemaker/*.yaml
         - eks/*.json
         - aws/*.json
@@ -650,6 +652,7 @@ floci:
       irsa-signing-key: true       # sign k3s service account tokens with the cluster OIDC key
       pod-identity-webhook: true   # register a mutating webhook that injects pod identity credentials (needs floci.tls.enabled)
       embedded-dns: true           # point cluster containers at Floci's embedded DNS to resolve Route 53 private zones
+      vpc-route-programming: true  # program VPC routes into the cluster container for associated subnets
     mwaa:
       enabled: true
       mock: false

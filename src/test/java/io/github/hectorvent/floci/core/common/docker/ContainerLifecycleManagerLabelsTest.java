@@ -182,6 +182,21 @@ class ContainerLifecycleManagerLabelsTest {
     }
 
     @Test
+    void createOmitsDnsForContainerNetworkMode() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+        ContainerSpec spec = new ContainerSpec(
+                "busybox:stable", null, List.of(), null, null, null, Map.of(), List.of(),
+                "container:router-id", List.of(), List.of(), List.of(),
+                Map.of(), null, false, null, List.of("172.18.0.2"), null, null, List.of());
+
+        manager().create(spec);
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        assertTrue(hostConfig.getValue().getDns() == null || hostConfig.getValue().getDns().length == 0);
+    }
+
+    @Test
     void createIncludesNamespaceLabelWhenConfigured() {
         when(dockerConfig.resourceNamespace()).thenReturn(Optional.of("run-one"));
         CreateContainerCmd createCmd = stubCreateContainer();

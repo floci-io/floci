@@ -67,6 +67,9 @@ public class RedshiftContainerManager {
     public RedshiftContainerHandle start(String accountId, String clusterIdentifier, String masterUsername, String masterPassword) {
         String image = config.services().redshift().imageVersion();
         String containerName = containerName(accountId, clusterIdentifier);
+        // Only the current name: no volume backs this container, so removing a legacy-named survivor
+        // would destroy cluster data that adoptOrStart does not look for.
+        lifecycleManager.removeIfExists(containerName);
 
         List<String> envVars = List.of(
                 "POSTGRES_USER=" + masterUsername,

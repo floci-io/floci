@@ -392,6 +392,11 @@ it to a `docker exec` in the container. Deliberate limits:
 with `maxResults` and `nextToken`. Unlike every other ECS listing, which pages a hundred at a
 time, a request that names no `maxResults` gets ten ARNs and a `nextToken`.
 
+With persistent storage, services survive a restart but their tasks do not: task state is
+held in memory. The service scheduler starts at boot, so within a few seconds of startup every
+persisted service is brought back to its `desiredCount`, re-registering load balancer targets
+and Cloud Map instances as its tasks start, without waiting for an ECS request.
+
 #### Service deployments
 
 An `ACTIVE` service reports exactly one `PRIMARY` entry in `services[].deployments`,
@@ -695,6 +700,61 @@ Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default CPU units when the task definition omits it |
 | `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | *(unset)* | Approved parent directories for host volume bind mounts (`volumes[].host.sourcePath`) |
 | `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES` | `false` | Allow any host path, bypassing the `HOST_VOLUME_ROOTS` allowlist; traversal, the bare root, and the Docker socket are still always rejected |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED` | `false` | Vend real task IAM role credentials to task containers |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_TTL_SECONDS` | `21600` | Lifetime of the vended credentials |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT` | `51679` | Floci-side port serving the credentials endpoint |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PROXY_IMAGE` | `floci/network-helper:local` | Image for the per-network credentials proxy |
+
+### Task IAM role credentials
+
+Off by default. With `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED=true`, a task whose
+definition sets a resolvable `taskRoleArn` gets credentials for that role the way real ECS vends
+them: Floci
+writes `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` into every container in the task, pointing at one
+`/v2/credentials/{id}` path per task, and the AWS SDKs pick it up with no code change.
+
+**A user-defined Docker network is required.** Set `FLOCI_SERVICES_ECS_DOCKER_NETWORK` to a network
+you created; the default bridge will not work. The SDKs hardcode `169.254.170.2` for this endpoint,
+so Floci runs a small proxy container that holds that address on the task's network and forwards to
+`FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT`. Each task container is also given its own address
+in `169.254.0.0/16`, without which it would have no route to the endpoint at all. Docker only
+allows both of those on a user-defined network.
+
+```bash
+docker network create floci-net
+
+docker run -d --name floci \
+  -p 4566:4566 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --network floci-net \
+  -e FLOCI_SERVICES_ECS_DOCKER_NETWORK=floci-net \
+  -e FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED=true \
+  floci/floci:latest
+```
+
+Credentials a task sets for itself always win. Floci drops only the baseline `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` it would otherwise inject, because the SDKs read
+environment credentials before the container endpoint and leaving them in place would silently
+shadow the role. Anything the task definition sets explicitly is left alone.
+
+In three cases a task that asks for a role gets none. It starts without the relative URI and keeps
+whatever baseline credentials Floci would have injected anyway. Usually that is the emulator's
+default account, but if Floci itself was started with AWS credentials in its environment those are
+forwarded into the task instead, and Floci logs a warning once per process when it does that.
+
+Either way the task is not running as the role it asked for, so a policy test against it says
+nothing about that role: the call is evaluated against a different identity and may succeed or fail
+for reasons that have nothing to do with the role's policy.
+
+- **The role does not resolve.** It does not exist in the account, the ARN is malformed, or it
+  names a different account: Floci looks the role up in the account the request authenticated as
+  and requires an exact ARN match, so a cross-account `taskRoleArn` never resolves.
+- **No user-defined Docker network is configured.** The endpoint has nowhere to listen.
+- **The task runs under security-group enforcement.** Its containers join an isolated helper
+  namespace rather than the shared network the proxy sits on, so the endpoint would not be
+  reachable.
+
+Each of these logs a warning naming the task and the role it asked for.
 
 ### Host volume safety
 

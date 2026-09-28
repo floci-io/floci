@@ -30,4 +30,9 @@ public class CloudMapDnsRecordSource implements DnsRecordSource {
     public Optional<DnsAnswer> resolveIpv4(String name) {
         return cloudMapService.resolveDnsNameIfOwned(name);
     }
+
+    @Override
+    public Optional<DnsAnswer> resolve(String name, int type) {
+        return cloudMapService.resolveDnsNameIfOwned(name, type);
+    }
 }

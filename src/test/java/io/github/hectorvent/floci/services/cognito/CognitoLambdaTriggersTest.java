@@ -1101,7 +1101,7 @@ class CognitoLambdaTriggersTest {
 
         String session = (String) clockedService.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
                 Map.of("USERNAME", "alice")).get("Session");
-        clock.advance(Duration.ofMinutes(3).plusSeconds(1));
+        clock.advance(Duration.ofMinutes(client.getAuthSessionValidity()).plusSeconds(1));
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 clockedService.respondToAuthChallenge(client.getClientId(), "CUSTOM_CHALLENGE", session,
@@ -1109,6 +1109,45 @@ class CognitoLambdaTriggersTest {
         assertEquals("NotAuthorizedException", ex.getErrorCode());
         assertEquals("Invalid session for the user, session is expired.", ex.getMessage());
         verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any());
+    }
+
+    @Test
+    void customAuthSessionUsesConfiguredClientValidityAcrossOtherClientInitiation() {
+        MutableClock clock = new MutableClock();
+        CognitoService clockedService = serviceWithClock(clock);
+        UserPoolClient longClient = customAuthClient(clockedService);
+        longClient.setAuthSessionValidity(10);
+        UserPoolClient shortClient = clockedService.createUserPoolClient(
+                longClient.getUserPoolId(), "short", false, false, List.of(), List.of(),
+                null, List.of(), null, AUTH_FLOWS, null, null, List.of(), null, List.of(), null,
+                null, null, List.of(), null, null);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")))
+                .thenReturn(ok(Map.of("issueTokens", true)))
+                .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("privateChallengeParameters", Map.of("answer", "blue"))));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("answerCorrect", true)));
+
+        String longSession = (String) clockedService.initiateAuth(longClient.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "alice")).get("Session");
+        clock.advance(Duration.ofMinutes(4));
+        clockedService.initiateAuth(shortClient.getClientId(), "CUSTOM_AUTH", Map.of("USERNAME", "alice"));
+
+        Map<String, Object> result = clockedService.respondToAuthChallenge(longClient.getClientId(),
+                "CUSTOM_CHALLENGE", longSession, Map.of("USERNAME", "alice", "ANSWER", "blue"));
+        assertNotNull(result.get("AuthenticationResult"));
+
+        String expiringSession = (String) clockedService.initiateAuth(longClient.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "alice")).get("Session");
+        clock.advance(Duration.ofMinutes(longClient.getAuthSessionValidity()).plusSeconds(1));
+        AwsException expired = assertThrows(AwsException.class, () -> clockedService.respondToAuthChallenge(
+                longClient.getClientId(), "CUSTOM_CHALLENGE", expiringSession,
+                Map.of("USERNAME", "alice", "ANSWER", "blue")));
+        assertEquals("Invalid session for the user, session is expired.", expired.getMessage());
     }
 
     @Test

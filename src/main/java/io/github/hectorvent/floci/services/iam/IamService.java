@@ -523,7 +523,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void tagUser(String userName, Map<String, String> newTags) {
         synchronized (tagLock) {
             IamUser user = getUser(userName);
-            user.setTags(mergeTagsWithinQuota(user.getTags(), newTags, "TagsPerUser"));
+            user.setTags(mergeTagsWithinQuota(user.getTags(), newTags, "TagsPerUser", true));
             users.put(userName, user);
         }
     }
@@ -531,7 +531,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void untagUser(String userName, List<String> tagKeys) {
         synchronized (tagLock) {
             IamUser user = getUser(userName);
-            tagKeys.forEach(user.getTags()::remove);
+            removeTagsCaseInsensitive(user.getTags(), tagKeys);
             users.put(userName, user);
         }
     }
@@ -673,8 +673,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             String arn = iamArn("role", normalizedPath, roleName);
             IamRole role = new IamRole(roleId, roleName, normalizedPath, arn, assumeRolePolicyDocument);
             role.setDescription(description);
-            if (maxSessionDuration > 0) role.setMaxSessionDuration(maxSessionDuration);
-            if (tags != null) role.getTags().putAll(tags);
+            if (maxSessionDuration > 0) {
+                role.setMaxSessionDuration(maxSessionDuration);
+            }
+            if (tags != null) {
+                role.setTags(mergeTagsWithinQuota(role.getTags(), tags, "TagsPerRole", true));
+            }
             roles.put(roleName, role);
             LOG.infov("Created IAM role: {0}", roleName);
             return role;
@@ -887,7 +891,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void tagRole(String roleName, Map<String, String> newTags) {
         synchronized (tagLock) {
             IamRole role = getRole(roleName);
-            role.setTags(mergeTagsWithinQuota(role.getTags(), newTags, "TagsPerRole"));
+            role.setTags(mergeTagsWithinQuota(role.getTags(), newTags, "TagsPerRole", true));
             roles.put(roleName, role);
         }
     }
@@ -895,7 +899,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void untagRole(String roleName, List<String> tagKeys) {
         synchronized (tagLock) {
             IamRole role = getRole(roleName);
-            tagKeys.forEach(role.getTags()::remove);
+            removeTagsCaseInsensitive(role.getTags(), tagKeys);
             roles.put(roleName, role);
         }
     }
@@ -1258,7 +1262,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         rejectIfAwsManaged(policyArn);
         synchronized (tagLock) {
             IamPolicy policy = getPolicy(policyArn);
-            policy.setTags(mergeTagsWithinQuota(policy.getTags(), newTags, "TagsPerPolicy"));
+            policy.setTags(mergeTagsWithinQuota(policy.getTags(), newTags, "TagsPerPolicy", false));
             policies.put(policyArn, policy);
         }
     }
@@ -2081,7 +2085,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         synchronized (oidcProviderLock) {
             OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
-            provider.setTags(mergeTagsWithinQuota(provider.getTags(), newTags, "TagsPerOpenIdConnectProvider"));
+            provider.setTags(mergeTagsWithinQuota(provider.getTags(), newTags, "TagsPerOpenIdConnectProvider", false));
             oidcProviders.put(arn, provider);
         }
     }
@@ -2878,20 +2882,56 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         validateIamResourceName(instanceProfileName, "InstanceProfileName");
         synchronized (tagLock) {
             InstanceProfile profile = getInstanceProfile(instanceProfileName);
-            profile.setTags(mergeTagsWithinQuota(profile.getTags(), newTags, "TagsPerInstanceProfile"));
+            profile.setTags(mergeTagsWithinQuota(profile.getTags(), newTags, "TagsPerInstanceProfile", false));
             instanceProfiles.put(instanceProfileName, profile);
         }
     }
 
     private static Map<String, String> mergeTagsWithinQuota(Map<String, String> current,
-            Map<String, String> newTags, String quota) {
+            Map<String, String> newTags, String quota, boolean caseInsensitive) {
         Map<String, String> merged = new LinkedHashMap<>(current);
-        merged.putAll(newTags == null ? Map.of() : newTags);
+        if (newTags != null) {
+            if (caseInsensitive) {
+                for (Map.Entry<String, String> entry : newTags.entrySet()) {
+                    String newKey = entry.getKey();
+                    String newValue = entry.getValue();
+                    String existingKey = findKeyIgnoreCase(merged, newKey);
+                    if (existingKey != null) {
+                        merged.keySet().removeIf(k -> k.equalsIgnoreCase(newKey) && !k.equals(existingKey));
+                        merged.put(existingKey, newValue);
+                    } else {
+                        merged.put(newKey, newValue);
+                    }
+                }
+            } else {
+                merged.putAll(newTags);
+            }
+        }
         if (merged.size() > MAX_TAGS_PER_RESOURCE) {
             throw new AwsException("LimitExceeded",
                     "Cannot exceed quota for " + quota + ": " + MAX_TAGS_PER_RESOURCE, 409);
         }
         return merged;
+    }
+
+    private static String findKeyIgnoreCase(Map<String, String> map, String targetKey) {
+        for (String key : map.keySet()) {
+            if (key.equalsIgnoreCase(targetKey)) {
+                return key;
+            }
+        }
+        return null;
+    }
+
+    private static void removeTagsCaseInsensitive(Map<String, String> tags, List<String> tagKeys) {
+        if (tags == null || tagKeys == null || tags.isEmpty() || tagKeys.isEmpty()) {
+            return;
+        }
+        for (String tagKey : tagKeys) {
+            if (tagKey != null) {
+                tags.keySet().removeIf(existingKey -> existingKey.equalsIgnoreCase(tagKey));
+            }
+        }
     }
 
     public void untagInstanceProfile(String instanceProfileName, List<String> tagKeys) {

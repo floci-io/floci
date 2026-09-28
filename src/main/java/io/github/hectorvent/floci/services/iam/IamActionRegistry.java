@@ -1,19 +1,21 @@
 package io.github.hectorvent.floci.services.iam;
 
-import java.util.List;
-import java.util.regex.Pattern;
-
-import org.jboss.logging.Logger;
-
+import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
+import org.jboss.logging.Logger;
+
+import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Maps (credentialScope, httpMethod, requestPath) → IAM action string.
  *
  * For Query-protocol services (SQS, SNS, IAM, STS, ...) the Action form
- * parameter is mapped directly to {@code <service>:<Action>}.
+ * parameter, or the controller's Operation fallback, is mapped directly to
+ * {@code <service>:<Action>}.
  *
  * For REST-JSON services the first matching rule wins (specific before wildcard).
  */
@@ -93,8 +95,9 @@ public class IamActionRegistry {
     /**
      * Resolves the IAM action for an incoming request.
      *
-     * For Query-protocol services the action comes directly from the {@code Action}
-     * form param (e.g. {@code sqs:SendMessage}).
+     * For Query-protocol requests the action comes from {@code Action} or
+     * {@code Operation} (e.g. {@code sqs:SendMessage}). REST requests never
+     * read these caller-controlled fields as an IAM action.
      *
      * For JSON 1.1 protocol the action comes from {@code X-Amz-Target}
      * (e.g. {@code DynamoDB_20120810.PutItem} → {@code dynamodb:PutItem}).
@@ -104,16 +107,12 @@ public class IamActionRegistry {
      * Returns {@code null} when the action is unknown (caller treats this as ALLOW).
      */
     public String resolve(String credentialScope, ContainerRequestContext ctx) {
-        // Query-protocol: Action param → service:Action.
-        // AWS SDKs send Query-protocol calls (IAM, STS, EC2, SQS, SNS, ...) as
-        // POST with Action=... in the application/x-www-form-urlencoded body,
-        // not the URL query string — so we look in both places.
-        String queryAction = ctx.getUriInfo().getQueryParameters().getFirst("Action");
-        if (queryAction == null || queryAction.isBlank()) {
-            queryAction = readFormAction(ctx);
-        }
-        if (queryAction != null && !queryAction.isBlank()) {
-            return credentialScope + ":" + queryAction;
+        // REST requests with Action or Operation fields still use their method and path rules.
+        if (isQueryRequest(ctx)) {
+            String queryAction = queryAction(ctx);
+            if (queryAction != null && !queryAction.isBlank()) {
+                return credentialScope + ":" + queryAction;
+            }
         }
 
         // JSON 1.1: X-Amz-Target → service:OperationName
@@ -125,7 +124,7 @@ public class IamActionRegistry {
 
         // REST-JSON: match against rule table
         String method = ctx.getMethod().toUpperCase();
-        String path   = ctx.getUriInfo().getPath();
+        String path = ctx.getUriInfo().getPath();
         if (!path.startsWith("/")) path = "/" + path;
 
         // S3 sub-resource override: the URL path alone doesn't distinguish
@@ -150,6 +149,30 @@ public class IamActionRegistry {
 
         LOG.debugv("No action mapping for {0} {1} {2} — defaulting to ALLOW", credentialScope, method, path);
         return null;
+    }
+
+    /**
+     * Returns the Query-protocol action from the form body while preserving the entity stream for
+     * the controller. The controller dispatches only the form body, using the same Action-first,
+     * Operation-second rule. A URL Action must not override the operation that will execute.
+     */
+    public String queryAction(ContainerRequestContext ctx) {
+        return AwsQueryServiceResolver.action(
+                RequestBodyReader.formField(ctx, "Action"),
+                RequestBodyReader.formField(ctx, "Operation"));
+    }
+
+    /** The same form POST at the root that the Query controller dispatches. */
+    public static boolean isQueryRequest(ContainerRequestContext ctx) {
+        if (!"POST".equalsIgnoreCase(ctx.getMethod()) || ctx.getUriInfo() == null) {
+            return false;
+        }
+        String path = ctx.getUriInfo().getPath();
+        MediaType mediaType = ctx.getMediaType();
+        return (path == null || path.isEmpty() || "/".equals(path))
+                && mediaType != null
+                && "application".equalsIgnoreCase(mediaType.getType())
+                && "x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype());
     }
 
     /** One bucket sub-resource operation: the query parameter that selects it, and the IAM action. */
@@ -260,17 +283,4 @@ public class IamActionRegistry {
         return null;
     }
 
-    /**
-     * Reads {@code Action} from a {@code application/x-www-form-urlencoded}
-     * request body and restores the entity stream so downstream consumers
-     * (e.g. {@code AwsQueryController}'s {@code MultivaluedMap} injection)
-     * can still parse the form themselves. Returns {@code null} if the
-     * request is not form-encoded or the body has no {@code Action} field.
-     */
-    private static String readFormAction(ContainerRequestContext ctx) {
-        // Delegates to RequestBodyReader so this and ResourceArnBuilder's per-service resource
-        // lookups share one buffered copy of the body per request instead of each independently
-        // reading (and needing to reset) the live entity stream.
-        return RequestBodyReader.formField(ctx, "Action");
-    }
 }

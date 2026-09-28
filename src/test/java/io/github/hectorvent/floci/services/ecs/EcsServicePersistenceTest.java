@@ -106,6 +106,28 @@ class EcsServicePersistenceTest {
                 "deleted attribute must not reappear after restart");
     }
 
+    @Test
+    void persistedServiceGetsItsTasksBackAfterRestartWithoutAnEcsRequest() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+
+        EcsService first = serviceWithStorage(storage);
+        first.createCluster("app-cluster", Map.of(), REGION);
+        TaskDefinition td = first.registerTaskDefinition("web", List.of(container("app", "nginx:latest")),
+                NetworkMode.awsvpc, "256", "512", null, null, List.of("FARGATE"), null, REGION);
+        first.createService("app-cluster", "web-svc", td.getTaskDefinitionArn(),
+                2, LaunchType.FARGATE, List.of(), awsvpcConfiguration(), Map.of(), REGION);
+
+        // Task state is memory-only, so the restarted process starts with none. What EmulatorLifecycle
+        // does at boot is restore the persisted runtime, then the reconciler ticks.
+        EcsService restarted = serviceWithStorage(storage);
+        restarted.restorePersistedRuntime();
+        assertTrue(restarted.listTasks("app-cluster", null, null, "web-svc", REGION).isEmpty());
+
+        restarted.reconcile();
+
+        assertEquals(2, restarted.listTasks("app-cluster", null, null, "web-svc", REGION).size());
+    }
+
     private static ContainerDefinition container(String name, String image) {
         ContainerDefinition cd = new ContainerDefinition();
         cd.setName(name);

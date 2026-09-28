@@ -52,6 +52,12 @@ duplicate override IDs.
 **Protocol:** REST JSON
 **Endpoint:** `http://localhost:4566/restapis/...`
 
+`ImportRestApi` and `PutRestApi` return parser warnings in the REST API's `warnings` array.
+Set the lowercase query parameter `failonwarnings=true` (SDK: `failOnWarnings`) to reject
+a warning-bearing definition with `BadRequestException` before creating or overwriting
+the API. The default is `false`. A successful import with no warnings clears any prior
+warnings; malformed definitions and fatal import errors remain errors in either mode.
+
 ### Supported Operations
 
 | Category | Operations |

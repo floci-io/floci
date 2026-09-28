@@ -69,6 +69,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -404,9 +405,10 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public void restorePersistedRuntime() {
-        restoreClusters();
-        restoreInstances();
-        restoreProxies();
+        Map<Integer, String> persistedPortOwners = reservePersistedProxyPorts();
+        restoreClusters(persistedPortOwners);
+        restoreInstances(persistedPortOwners);
+        restoreProxies(persistedPortOwners);
         backfillManagedSecretOwnership();
         backfillInstanceEngineIdentifiers();
     }
@@ -7084,7 +7086,7 @@ public class RdsService implements Resettable, ResourceProvider {
         };
     }
 
-    private void restoreClusters() {
+    private void restoreClusters(Map<Integer, String> persistedPortOwners) {
         for (DbCluster cluster : allClusters()) {
             if (cluster.getStatus() == DbInstanceStatus.DELETING) {
                 continue;
@@ -7092,7 +7094,8 @@ public class RdsService implements Resettable, ResourceProvider {
             if (cluster.getStatus() == DbInstanceStatus.STOPPED) {
                 // A stopped cluster stays stopped across an emulator restart; StartDBCluster
                 // brings its container back. Its endpoint keeps its port when that port is free.
-                int port = reserveOrAllocateProxyPort(cluster.getProxyPort());
+                int port = claimRestoredProxyPort(
+                        persistedPortOwners, cluster.getDbClusterArn(), cluster.getProxyPort());
                 if (port != cluster.getProxyPort()) {
                     cluster.setProxyPort(port);
                     DbEndpoint endpoint = proxyEndpoint(port);
@@ -7114,7 +7117,8 @@ public class RdsService implements Resettable, ResourceProvider {
             int proxyPort = 0;
             boolean portReserved = false;
             try {
-                proxyPort = reserveOrAllocateProxyPort(cluster.getProxyPort());
+                proxyPort = claimRestoredProxyPort(
+                        persistedPortOwners, cluster.getDbClusterArn(), cluster.getProxyPort());
                 portReserved = true;
                 cluster.setProxyPort(proxyPort);
                 if (config.services().rds().mock()) {
@@ -7172,13 +7176,14 @@ public class RdsService implements Resettable, ResourceProvider {
                         : containerManager.getActiveHandle(cluster.getDbClusterArn());
                 boolean containerCleaned = stopRestoredContainer(cleanupHandle, e, "cluster",
                         cluster.getDbClusterIdentifier());
-                if (portReserved) {
-                    releaseProxyPort(proxyPort);
+                // A reserved port stays with the cluster, so a retry or the next boot reclaims
+                // the same endpoint instead of handing it to another database.
+                if (!portReserved) {
+                    cluster.setProxyPort(0);
+                    cluster.setEndpoint(null);
+                    cluster.setReaderEndpoint(null);
                 }
-                cluster.setProxyPort(0);
                 cluster.setStatus(DbInstanceStatus.FAILED);
-                cluster.setEndpoint(null);
-                cluster.setReaderEndpoint(null);
                 String retainedContainerId = !containerCleaned && cleanupHandle != null
                         ? cleanupHandle.getContainerId()
                         : restoredHandle == null ? persistedContainerId : null;
@@ -7196,14 +7201,15 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    private void restoreInstances() {
+    private void restoreInstances(Map<Integer, String> persistedPortOwners) {
         for (DbInstance instance : allInstances()) {
             if (instance.getStatus() == DbInstanceStatus.DELETING) {
                 continue;
             }
             if (instance.getStatus() == DbInstanceStatus.STOPPED) {
                 // Stays stopped across a restart; StartDBInstance brings the container back.
-                int port = reserveOrAllocateProxyPort(instance.getProxyPort());
+                int port = claimRestoredProxyPort(
+                        persistedPortOwners, instance.getDbInstanceArn(), instance.getProxyPort());
                 if (port != instance.getProxyPort()) {
                     instance.setProxyPort(port);
                     instance.setEndpoint(proxyEndpoint(port));
@@ -7232,7 +7238,8 @@ public class RdsService implements Resettable, ResourceProvider {
             int proxyPort = 0;
             boolean portReserved = false;
             try {
-                proxyPort = reserveOrAllocateProxyPort(instance.getProxyPort());
+                proxyPort = claimRestoredProxyPort(
+                        persistedPortOwners, instance.getDbInstanceArn(), instance.getProxyPort());
                 portReserved = true;
                 instance.setProxyPort(proxyPort);
                 if (config.services().rds().mock()) {
@@ -7311,12 +7318,13 @@ public class RdsService implements Resettable, ResourceProvider {
                         : containerManager.getActiveHandle(instance.getDbInstanceArn());
                 boolean containerCleaned = stopRestoredContainer(cleanupHandle, e, "instance",
                         instance.getDbInstanceIdentifier());
-                if (portReserved) {
-                    releaseProxyPort(proxyPort);
+                // A reserved port stays with the instance, so a retry or the next boot reclaims
+                // the same endpoint instead of handing it to another database.
+                if (!portReserved) {
+                    instance.setProxyPort(0);
+                    instance.setEndpoint(null);
                 }
-                instance.setProxyPort(0);
                 instance.setStatus(DbInstanceStatus.FAILED);
-                instance.setEndpoint(null);
                 String retainedContainerId = !containerCleaned && cleanupHandle != null
                         ? cleanupHandle.getContainerId()
                         : restoredHandle == null ? persistedContainerId : null;
@@ -7353,7 +7361,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /** Re-arms each persisted DB proxy's relay after a restart (clusters/instances restored first). */
-    private void restoreProxies() {
+    private void restoreProxies(Map<Integer, String> persistedPortOwners) {
         for (DbProxy proxy : allProxies()) {
             if (proxy.getDefaultAuthScheme() == null || proxy.getDefaultAuthScheme().isBlank()) {
                 proxy.setDefaultAuthScheme("NONE");
@@ -7386,7 +7394,8 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             boolean portReserved = false;
             try {
-                int proxyPort = reserveOrAllocateProxyPort(proxy.getProxyPort());
+                int proxyPort = claimRestoredProxyPort(
+                        persistedPortOwners, proxy.getDbProxyArn(), proxy.getProxyPort());
                 portReserved = true;
                 proxy.setProxyPort(proxyPort);
                 if (config.services().rds().mock()) {
@@ -8277,6 +8286,42 @@ public class RdsService implements Resettable, ResourceProvider {
             return 2;
         }
         return rawKey.equals(proxy.getDbProxyName()) ? 3 : Integer.MAX_VALUE;
+    }
+
+    /**
+     * Reserves every persisted endpoint port for its owner before any restore allocates one, so a
+     * resource restored earlier without a port cannot take the port of one restored later. When
+     * two records persisted the same port, the first one seen keeps it.
+     */
+    private Map<Integer, String> reservePersistedProxyPorts() {
+        Map<Integer, String> owners = new HashMap<>();
+        for (DbCluster cluster : allClusters()) {
+            if (cluster.getStatus() != DbInstanceStatus.DELETING) {
+                reservePersistedProxyPort(owners, cluster.getDbClusterArn(), cluster.getProxyPort());
+            }
+        }
+        for (DbInstance instance : allInstances()) {
+            if (instance.getStatus() != DbInstanceStatus.DELETING) {
+                reservePersistedProxyPort(owners, instance.getDbInstanceArn(), instance.getProxyPort());
+            }
+        }
+        for (DbProxy proxy : allProxies()) {
+            reservePersistedProxyPort(owners, proxy.getDbProxyArn(), proxy.getProxyPort());
+        }
+        return owners;
+    }
+
+    private void reservePersistedProxyPort(Map<Integer, String> owners, String ownerArn, int port) {
+        if (port > 0 && ownerArn != null && !owners.containsKey(port) && usedPorts.add(port)) {
+            owners.put(port, ownerArn);
+        }
+    }
+
+    private int claimRestoredProxyPort(Map<Integer, String> owners, String ownerArn, int persistedPort) {
+        if (persistedPort > 0 && ownerArn != null && ownerArn.equals(owners.get(persistedPort))) {
+            return persistedPort;
+        }
+        return allocateProxyPort();
     }
 
     private int reserveOrAllocateProxyPort(int persistedPort) {

@@ -13,12 +13,12 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
@@ -52,18 +52,20 @@ public class SesTemplateService {
     private final StorageBackend<String, EmailTemplate> templateStore;
     private final ObjectMapper objectMapper;
     private final SecureRandom boundaryRandom;
+    private final Clock clock;
 
     @Inject
-    public SesTemplateService(StorageFactory storageFactory, ObjectMapper objectMapper) {
+    public SesTemplateService(StorageFactory storageFactory, ObjectMapper objectMapper, Clock clock) {
         this(storageFactory.create("ses", "ses-templates.json",
-                new TypeReference<Map<String, EmailTemplate>>() {}), objectMapper, new SecureRandom());
+                new TypeReference<Map<String, EmailTemplate>>() {}), objectMapper, new SecureRandom(), clock);
     }
 
     SesTemplateService(StorageBackend<String, EmailTemplate> templateStore,
-                       ObjectMapper objectMapper, SecureRandom boundaryRandom) {
+                       ObjectMapper objectMapper, SecureRandom boundaryRandom, Clock clock) {
         this.templateStore = templateStore;
         this.objectMapper = objectMapper;
         this.boundaryRandom = boundaryRandom;
+        this.clock = clock;
     }
 
     public EmailTemplate createTemplate(EmailTemplate template, String region) {
@@ -74,7 +76,7 @@ public class SesTemplateService {
             throw new AwsException("AlreadyExists",
                     "Template " + template.getTemplateName() + " already exists.", 400);
         }
-        Instant now = Instant.now();
+        Instant now = Instant.now(clock);
         template.setCreatedTimestamp(now);
         template.setLastUpdatedTimestamp(now);
         templateStore.put(key, template);
@@ -95,7 +97,7 @@ public class SesTemplateService {
                 .orElseThrow(() -> new AwsException("TemplateDoesNotExist",
                         "Template " + template.getTemplateName() + " does not exist.", 400));
         template.setCreatedTimestamp(existing.getCreatedTimestamp());
-        template.setLastUpdatedTimestamp(Instant.now());
+        template.setLastUpdatedTimestamp(Instant.now(clock));
         // Tags are managed exclusively via Tag/UntagResource — preserve them on update (copied,
         // so the two objects never share a list instance).
         template.setTags(new ArrayList<>(existing.getTags()));
@@ -116,12 +118,7 @@ public class SesTemplateService {
 
     public List<EmailTemplate> listTemplates(String region) {
         String prefix = "template::" + region + "::";
-        List<EmailTemplate> all = new ArrayList<>(templateStore.scan(k -> k.startsWith(prefix)));
-        all.sort(Comparator.comparing(EmailTemplate::getCreatedTimestamp,
-                        Comparator.nullsLast(Comparator.naturalOrder()))
-                .thenComparing(EmailTemplate::getTemplateName,
-                        Comparator.nullsLast(Comparator.naturalOrder())));
-        return all;
+        return templateStore.scan(k -> k.startsWith(prefix));
     }
 
     /**
