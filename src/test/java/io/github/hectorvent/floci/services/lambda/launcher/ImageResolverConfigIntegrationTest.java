@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.smallrye.config.source.yaml.YamlConfigSource;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -33,7 +34,14 @@ class ImageResolverConfigIntegrationTest {
     public static class RuntimeImageProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.lambda.runtime-images.\"python3.12\"", DIGEST_IMAGE);
+            YamlConfigSource source = new YamlConfigSource("runtime-images", """
+                    floci:
+                      services:
+                        lambda:
+                          runtime-images:
+                            "python3.12": "%s"
+                    """.formatted(DIGEST_IMAGE));
+            return source.getProperties();
         }
     }
 }
