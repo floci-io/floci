@@ -91,7 +91,8 @@ class ApiGatewayOpenApiAwsVariablesIntegrationTest {
                 .header("Authorization", authorization)
                 .contentType(ContentType.JSON)
                 .queryParam("mode", "overwrite")
-                .body(spec("VariableOverwrite", URI, CREDENTIALS, "{}"))
+                .body(spec("VariableOverwrite", URI, CREDENTIALS,
+                        "{\"region\":\"${AWS::Region}\"}"))
                 .when().put("/restapis/" + apiId)
                 .then().statusCode(200);
 
@@ -106,18 +107,25 @@ class ApiGatewayOpenApiAwsVariablesIntegrationTest {
                 imported.path("uri").asText());
         assertEquals("arn:aws-us-gov:iam::000000000001:role/example-role",
                 imported.path("credentials").asText());
+        assertEquals("{\"region\":\"us-gov-west-1\"}", imported.path("requestTemplates")
+                .path("application/json").asText());
     }
 
     @Test
-    void importRestApiPreservesLiteralMappingTemplates() throws Exception {
-        String requestTemplate = "{\"literal\":\"${AWS::Region}\"}";
-        String responseTemplate = "{\"literal\":\"${AWS::AccountId}\"}";
-        ObjectNode definition = (ObjectNode) JSON.readTree(spec("LiteralTemplates", URI, CREDENTIALS,
+    void importRestApiResolvesVariablesAcrossDefinition() throws Exception {
+        String requestTemplate = "{\"region\":\"${AWS::Region}\"}";
+        String responseTemplate = "{\"account\":\"${AWS::AccountId}\"}";
+        ObjectNode definition = (ObjectNode) JSON.readTree(spec("DefinitionVariables", URI, CREDENTIALS,
                 requestTemplate));
         ObjectNode integration = (ObjectNode) definition.path("paths").path("/start").path("post")
                 .path("x-amazon-apigateway-integration");
+        integration.putObject("requestParameters")
+                .put("integration.request.header.X-Region", "'${AWS::Region}'");
         ((ObjectNode) integration.path("responses").path("default"))
                 .putObject("responseTemplates").put("application/json", responseTemplate);
+        definition.putObject("x-amazon-apigateway-gateway-responses")
+                .putObject("UNAUTHORIZED").putObject("responseTemplates")
+                .put("application/json", "{\"partition\":\"${AWS::Partition}\"}");
 
         String apiId = given()
                 .contentType(ContentType.JSON)
@@ -132,15 +140,25 @@ class ApiGatewayOpenApiAwsVariablesIntegrationTest {
                 .when().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST/integration")
                 .then().statusCode(200)
                 .extract().asString();
-        assertEquals(requestTemplate, JSON.readTree(importedIntegration)
-                .path("requestTemplates").path("application/json").asText());
+        JsonNode imported = JSON.readTree(importedIntegration);
+        assertEquals("{\"region\":\"us-east-1\"}", imported.path("requestTemplates")
+                .path("application/json").asText());
+        assertEquals("'us-east-1'", imported.path("requestParameters")
+                .path("integration.request.header.X-Region").asText());
 
         String importedResponse = given()
                 .when().get("/restapis/" + apiId + "/resources/" + resourceId
                         + "/methods/POST/integration/responses/200")
                 .then().statusCode(200)
                 .extract().asString();
-        assertEquals(responseTemplate, JSON.readTree(importedResponse)
+        assertEquals("{\"account\":\"000000000000\"}", JSON.readTree(importedResponse)
+                .path("responseTemplates").path("application/json").asText());
+
+        String gatewayResponse = given()
+                .when().get("/restapis/" + apiId + "/gatewayresponses/UNAUTHORIZED")
+                .then().statusCode(200)
+                .extract().asString();
+        assertEquals("{\"partition\":\"aws\"}", JSON.readTree(gatewayResponse)
                 .path("responseTemplates").path("application/json").asText());
     }
 

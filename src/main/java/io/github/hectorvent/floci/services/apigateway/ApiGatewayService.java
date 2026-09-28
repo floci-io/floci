@@ -2850,7 +2850,8 @@ public class ApiGatewayService {
     private record ParsedOpenApi(OpenAPI openAPI, List<String> warnings) {}
 
     private ParsedOpenApi parseOpenApiSpec(String region, String specBody, boolean failOnWarnings) {
-        SwaggerParseResult result = new io.swagger.parser.OpenAPIParser().readContents(specBody, null, null);
+        SwaggerParseResult result = new io.swagger.parser.OpenAPIParser()
+                .readContents(resolveOpenApiAwsVariables(region, specBody), null, null);
         if (result.getOpenAPI() == null) {
             String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
             throw new AwsException("BadRequestException", "Failed to parse OpenAPI spec: " + errors, 400);
@@ -2889,8 +2890,8 @@ public class ApiGatewayService {
                 continue;
             }
             String type = importedAuthorizerType(authDef, schemeName);
-            importedAuthorizerUri(region, authDef, schemeName);
-            importedProviderArns(region, authDef, schemeName);
+            importedAuthorizerUri(authDef, schemeName);
+            importedProviderArns(authDef, schemeName);
             int ttl = importedAuthorizerTtl(authDef, schemeName);
             String identitySource = resolveImportedIdentitySource(scheme, authDef, type, schemeName);
             if ("request".equalsIgnoreCase(type) && ttl > 0 && identitySource == null) {
@@ -2935,9 +2936,8 @@ public class ApiGatewayService {
                 "one of token, request, or cognito_user_pools");
     }
 
-    private String importedAuthorizerUri(String region, Map<String, Object> authDef, String schemeName) {
-        return resolveOpenApiAwsVariables(region,
-                importedAuthorizerString(authDef, "authorizerUri", schemeName));
+    private String importedAuthorizerUri(Map<String, Object> authDef, String schemeName) {
+        return importedAuthorizerString(authDef, "authorizerUri", schemeName);
     }
 
     private String importedAuthorizerString(
@@ -2953,7 +2953,7 @@ public class ApiGatewayService {
                 "x-amazon-apigateway-authorizer." + propertyName, schemeName, "a string");
     }
 
-    private List<String> importedProviderArns(String region, Map<String, Object> authDef, String schemeName) {
+    private List<String> importedProviderArns(Map<String, Object> authDef, String schemeName) {
         Object value = authDef.get("providerARNs");
         if (value == null) {
             return null;
@@ -2972,7 +2972,7 @@ public class ApiGatewayService {
                         schemeName,
                         "an array of strings");
             }
-            providerArns.add(resolveOpenApiAwsVariables(region, arn));
+            providerArns.add(arn);
         }
         return providerArns;
     }
@@ -3461,14 +3461,12 @@ public class ApiGatewayService {
         Map<String, Object> integrationRequest = new HashMap<>();
         integrationRequest.put("type", integrationExt.get("type"));
         integrationRequest.put("httpMethod", integrationExt.get("httpMethod"));
-        integrationRequest.put("uri", resolveOpenApiAwsVariables(region, (String) integrationExt.get("uri")));
+        integrationRequest.put("uri", integrationExt.get("uri"));
         integrationRequest.put("passthroughBehavior", integrationExt.get("passthroughBehavior"));
         for (String field : List.of("contentHandling", "timeoutInMillis", "connectionType",
                 "connectionId", "credentials", "cacheNamespace", "cacheKeyParameters", "tlsConfig")) {
             if (integrationExt.get(field) != null) {
-                integrationRequest.put(field, "credentials".equals(field)
-                        ? resolveOpenApiAwsVariables(region, (String) integrationExt.get(field))
-                        : integrationExt.get(field));
+                integrationRequest.put(field, integrationExt.get(field));
             }
         }
 
