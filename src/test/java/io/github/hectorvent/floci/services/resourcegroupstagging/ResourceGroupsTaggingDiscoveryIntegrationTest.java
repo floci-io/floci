@@ -453,6 +453,45 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     @Test
+    void iamRoleTaggedThroughTheTaggingApiIsNotListed() {
+        String role = "discovery-" + unique();
+        String marker = unique();
+        String roleArn = given()
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", role)
+            .formParam("AssumeRolePolicyDocument", """
+                {"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+                 "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]}""")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateRoleResponse.CreateRoleResult.Role.Arn");
+
+        tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"fd": "%s"}}
+                """.formatted(roleArn, marker))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", anEmptyMap());
+
+        getResources("""
+                {"TagFilters": [%s]}
+                """.formatted(tagFilter("fd", marker)))
+            .body("ResourceTagMappingList", empty());
+
+        given()
+            .header("Authorization", IAM_AUTH)
+            .formParam("Action", "DeleteRole")
+            .formParam("RoleName", role)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void tagResourcesRejectsArnFromAnotherRegion() {
         String marker = unique();
         String westArn = "arn:aws:sqs:eu-west-1:000000000000:discovery-" + marker;

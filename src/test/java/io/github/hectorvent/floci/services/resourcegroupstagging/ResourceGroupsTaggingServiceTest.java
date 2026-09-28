@@ -172,14 +172,11 @@ class ResourceGroupsTaggingServiceTest {
     }
 
     @Test
-    void storeEntryForGlobalProviderResourceKeepsTheStoreRules() {
+    void storeEntryForGlobalProviderResourceIsNotListed() {
         ResourceGroupsTaggingService service = service(List.of(provider(globalRole(Map.of("k", "v")))), List.of());
         service.tagResources(List.of(ROLE_ARN), Map.of("team", "a"), REGION);
 
-        List<ResourceTagMapping> items = allResources(service);
-
-        assertEquals(List.of(ROLE_ARN), arns(items));
-        assertEquals(Map.of("team", "a"), items.getFirst().getTags());
+        assertTrue(allResources(service).isEmpty());
     }
 
     @Test

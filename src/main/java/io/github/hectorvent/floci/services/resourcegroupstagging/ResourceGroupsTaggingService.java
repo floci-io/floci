@@ -362,11 +362,8 @@ public class ResourceGroupsTaggingService implements Resettable {
         for (ExplorerResource resource : providerResources()) {
             String arn = withoutWildcard(resource.arn());
             String resourceRegion = providerRegion(arn, resource.region());
-            if (resourceRegion == null) {
-                continue;
-            }
-            // The owner's region decides, so a store copy of a region-less ARN must not surface elsewhere.
-            if (!resourceRegion.equals(region) || !isVisible(arn, region, accountId)) {
+            // A global resource, or one owned in another region, hides any store copy of its ARN too.
+            if (resourceRegion == null || !resourceRegion.equals(region) || !isVisible(arn, region, accountId)) {
                 byArn.remove(arn);
                 continue;
             }
