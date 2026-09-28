@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource;
+import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -80,7 +82,8 @@ import java.util.stream.Collectors;
  * Not used when {@code floci.services.eks.mock=true}.
  */
 @ApplicationScoped
-public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteTableListener {
+public class EksClusterManager
+        implements ClusterNodeInstanceProvider, VpcRouteTableListener, DnsClientVpcSource {
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
@@ -173,6 +176,61 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
     }
 
     record ClusterNodeRecord(String accountId, String region, Instance instance) {}
+
+    /** Which cluster owns a Docker address its node container answers on, and where that cluster sits. */
+    record ClusterNodeVpc(String clusterResourceName, ClientVpc clientVpc) {}
+
+    private final Map<String, ClusterNodeVpc> clusterNodeVpcs = new ConcurrentHashMap<>();
+
+    /**
+     * A DNS query from a cluster container originates in the account, region and VPC the cluster was
+     * created with, which is what a Route 53 Resolver rule has to belong to for the query to follow
+     * it. A cluster with no resolvable VPC id claims no address: its queries resolve as they do
+     * without any rule rather than picking up another cluster's.
+     */
+    @Override
+    public Optional<ClientVpc> vpcForClient(String clientAddress) {
+        if (clientAddress == null || clientAddress.isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(clusterNodeVpcs.get(clientAddress.trim()))
+                .map(ClusterNodeVpc::clientVpc);
+    }
+
+    private void registerClusterNodeVpc(Cluster cluster, String accountId, String region,
+                                        Set<String> addresses) {
+        String clusterKey = clusterResourceName(cluster);
+        forgetClusterNodeVpcs(clusterKey);
+        String vpcId = cluster.getResourcesVpcConfig() != null
+                ? cluster.getResourcesVpcConfig().getVpcId() : null;
+        if (vpcId == null || vpcId.isBlank()) {
+            return;
+        }
+        Set<String> usable = new LinkedHashSet<>();
+        for (String address : addresses) {
+            if (address != null && !address.isBlank()) {
+                usable.add(address);
+            }
+        }
+        if (usable.isEmpty()) {
+            // Without the container's own addresses there is nothing to recognise its queries by, so
+            // resolver rules cannot apply to this cluster. Said out loud rather than left as silence:
+            // the cluster runs fine and only rule-steered names behave as though no rule existed.
+            LOG.warnv("Resolver rules will not apply to EKS cluster {0} in {1}: its container"
+                    + " addresses could not be determined, so its DNS queries cannot be attributed"
+                    + " to the VPC. Restart the cluster to retry.", cluster.getName(), vpcId);
+            return;
+        }
+        ClientVpc clientVpc = new ClientVpc(accountId, region, vpcId);
+        for (String address : usable) {
+            clusterNodeVpcs.put(address, new ClusterNodeVpc(clusterKey, clientVpc));
+        }
+    }
+
+    private void forgetClusterNodeVpcs(String clusterResourceName) {
+        clusterNodeVpcs.entrySet().removeIf(
+                entry -> clusterResourceName.equals(entry.getValue().clusterResourceName()));
+    }
 
     public EksClusterManager(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
@@ -1692,6 +1750,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
             Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
             nodeInstance.setDockerContainerId(containerId);
             clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
+            registerClusterNodeVpc(cluster, accountId, region, containerIps.allIps());
             for (Consumer<Instance> listener : nodeRegistrationListeners) {
                 try {
                     listener.accept(nodeInstance);
@@ -1936,6 +1995,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
             activeClusters.remove(clusterKey);
             programmedClusterRoutes.remove(clusterKey);
         }
+        forgetClusterNodeVpcs(clusterKey);
         ClusterNodeRecord record = clusterNodeInstances.remove(clusterKey);
         Instance nodeInstance = record != null ? record.instance() : null;
         if (metadataServer != null && nodeInstance != null) {

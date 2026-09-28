@@ -119,6 +119,7 @@ public class DynamoDbService {
     private static final int MIN_VECTOR_INDEX_NAME_LENGTH = 3;
     // The order AWS prints the enum constraint in, which is neither alphabetical nor the order
     // the API reference lists.
+    private static final Set<String> VALID_BILLING_MODES = Set.of("PROVISIONED", "PAY_PER_REQUEST");
     private static final List<String> VECTOR_DISTANCE_FUNCTIONS = List.of(
             DynamoDbVectorScoring.DOT_PRODUCT,
             DynamoDbVectorScoring.COSINE,
@@ -4792,6 +4793,16 @@ public class DynamoDbService {
      * leaves nothing behind. Returns the import already started with the same ClientToken,
      * or null when this is a new import.
      */
+    static void validateBillingMode(JsonNode request, String memberPrefix) {
+        JsonNode billingMode = request.path("BillingMode");
+        if (billingMode.isTextual() && !VALID_BILLING_MODES.contains(billingMode.asText())) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + billingMode.asText() + "' at '" + memberPrefix
+                    + "billingMode' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]", 400);
+        }
+    }
+
     public ImportTableDescription validateImportRequest(JsonNode request) {
         if (request.path("S3BucketSource").path("S3Bucket").asText("").isBlank()) {
             throw new AwsException("ValidationException", "S3BucketSource.S3Bucket is required", 400);
@@ -4816,6 +4827,7 @@ public class DynamoDbService {
                     + "' at 'inputCompressionType' failed to satisfy constraint: Member must satisfy enum value set: [GZIP, ZSTD, NONE]", 400);
         }
         DynamoDbTableNames.requireShortName(request.path("TableCreationParameters").path("TableName").asText(null));
+        validateBillingMode(request.path("TableCreationParameters"), "tableCreationParameters.");
         var clientToken = request.path("ClientToken").asText(null);
         if (clientToken != null && clientToken.isBlank()) {
             throw new AwsException("ValidationException",

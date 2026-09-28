@@ -478,6 +478,59 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
+    void createTableWithInvalidBillingModeFailsValidation() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "InvalidBillingModeTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "INVALID_MODE"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value 'INVALID_MODE' at 'billingMode' "
+                    + "failed to satisfy constraint: Member must satisfy enum value set: "
+                    + "[PROVISIONED, PAY_PER_REQUEST]"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "InvalidBillingModeTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void updateTableWithInvalidBillingModeFailsValidationBeforeTheTableLookup() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "NoSuchBillingModeTable", "BillingMode": "pay_per_request"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value 'pay_per_request' at 'billingMode' "
+                    + "failed to satisfy constraint: Member must satisfy enum value set: "
+                    + "[PROVISIONED, PAY_PER_REQUEST]"));
+    }
+
+    @Test
     void createTableWithGsiAndLsi() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")

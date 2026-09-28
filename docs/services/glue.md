@@ -207,8 +207,38 @@ finishes. One request runs at most 25 firing rounds; a longer chain continues on
 As an emulator safeguard (AWS has no such limit), triggers start at most 100 runs on behalf of the run
 that set off a chain, the one no trigger started, so a loop of triggers of any shape stops there.
 A run a trigger starts carries its `TriggerName`. `SCHEDULED` triggers are stored and can
-be activated, but no timer fires them. `EVENT` triggers and `WorkflowName` need workflows, which are
-not emulated yet.
+be activated, but no timer fires them. A trigger can belong to a workflow through `WorkflowName`, and an
+`EVENT` trigger must; `EVENT` triggers are stored, but no EventBridge event starts them.
+
+#### Workflows
+
+| Action | Description |
+|--------|-------------|
+| CreateWorkflow | Creates a workflow, with default run properties and an optional `MaxConcurrentRuns`. |
+| GetWorkflow | Retrieves a workflow with its `LastRun`, and with `IncludeGraph` its graph of trigger, job and crawler nodes. |
+| ListWorkflows | Lists workflow names. |
+| BatchGetWorkflows | Retrieves several workflows by name and reports the names not found. |
+| UpdateWorkflow | Applies the members the request sets. |
+| DeleteWorkflow | Deletes a workflow and its runs; its triggers are kept. Deleting one that does not exist succeeds. |
+| StartWorkflowRun | Starts a run: the workflow's starting triggers fire inside it. |
+| StopWorkflowRun | Stops a running workflow run and what is running in it. |
+| ResumeWorkflowRun | Starts chosen job and crawler nodes of a finished run again in a new run, and what follows them. |
+| GetWorkflowRun | Retrieves a run with its `Statistics`, and with `IncludeGraph` the job runs and crawls of each node. |
+| GetWorkflowRuns | Lists a workflow's runs, newest first. |
+| GetWorkflowRunProperties | Retrieves a run's properties. |
+| PutWorkflowRunProperties | Adds properties to a run, replacing any with the same name. |
+
+`StartWorkflowRun` fires the workflow's starting triggers (every trigger of the workflow that is not
+`CONDITIONAL`) inside a new run, with the default run properties overlaid by the request's. A
+workflow's activated `CONDITIONAL` triggers fire only on job runs and crawls of a running run of that
+workflow, evaluate `AND` within that run, and start their actions inside it; job runs in a workflow run
+get the `--WORKFLOW_NAME` and `--WORKFLOW_RUN_ID` arguments. A run is `COMPLETED` once nothing is
+running in it and nothing more fires. An action that cannot be launched (its job at its concurrency limit,
+its crawler already running) is reported in the run's `ErrorMessage`, and a run none of whose starting
+actions could launch ends `ERROR`. `ResumeWorkflowRun` starts each chosen job with the arguments it had in
+the original run; if a node cannot be launched (its job at its concurrency limit, its crawler running) the
+request fails before anything starts.
+Blueprints are not emulated.
 
 #### Classifiers
 

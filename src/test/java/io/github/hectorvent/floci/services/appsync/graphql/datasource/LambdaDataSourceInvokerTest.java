@@ -53,14 +53,29 @@ class LambdaDataSourceInvokerTest {
     }
 
     @Test
-    void onlyThePayloadReachesTheFunction() {
+    void jsOnlyThePayloadReachesTheFunction() {
         answers("{\"id\": \"1\"}");
 
         Object result = invoker.invoke(dataSource(),
-                Map.of("operation", "Invoke", "payload", Map.of("field", "getMessages")), "eu-west-1");
+                Map.of("version", "2018-05-29", "operation", "Invoke",
+                        "payload", Map.of("field", "getMessages")), "eu-west-1");
 
-        // The operation is AppSync's envelope, not something the function should see.
+        // Preserve the existing APPSYNC_JS behavior independently of VTL.
         assertEquals("{\"field\":\"getMessages\"}", capturePayload());
+        assertEquals(Map.of("id", "1"), result);
+    }
+
+    @Test
+    void vtlSendsTheEntireRequestDocumentToTheFunction() throws Exception {
+        answers("{\"id\": \"1\"}");
+
+        Object result = invoker.invokeVtl(dataSource(),
+                Map.of("version", "2018-05-29", "operation", "Invoke",
+                        "payload", Map.of("field", "getMessages")), "eu-west-1");
+
+        assertEquals(Map.of("version", "2018-05-29", "operation", "Invoke",
+                        "payload", Map.of("field", "getMessages")),
+                mapper.readValue(capturePayload(), Map.class));
         assertEquals(Map.of("id", "1"), result);
     }
 

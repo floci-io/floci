@@ -123,7 +123,7 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleCreateTable(JsonNode request, String region) {
-        var table = createTableFromSpec(request, region, "ACTIVE");
+        var table = createTableFromSpec(request, "", region, "ACTIVE");
 
         var response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
@@ -131,11 +131,13 @@ public class NativeDynamoDbJsonHandler {
     }
 
     /** Shared by CreateTable and ImportTable, whose TableCreationParameters use the same keys. */
-    private TableDefinition createTableFromSpec(JsonNode request, String region, String initialStatus) {
+    private TableDefinition createTableFromSpec(JsonNode request, String memberPrefix, String region,
+                                                String initialStatus) {
         // Distinguish missing (undefined) from empty ("") for TableName
         String tableNameRaw = (request.has("TableName") && !request.path("TableName").isNull())
                 ? request.path("TableName").asText() : null;
         String tableName = DynamoDbTableNames.requireShortName(tableNameRaw);
+        DynamoDbService.validateBillingMode(request, memberPrefix);
 
         List<KeySchemaElement> keySchema = new ArrayList<>();
         request.path("KeySchema").forEach(ks ->
@@ -1619,6 +1621,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleUpdateTable(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
+        DynamoDbService.validateBillingMode(request, "");
         JsonNode replicaUpdates = request.path("ReplicaUpdates");
         List<String> addRegions = new ArrayList<>();
         List<String> removeRegions = new ArrayList<>();
@@ -2892,7 +2895,8 @@ public class NativeDynamoDbJsonHandler {
                 return existing;
             }
             return dynamoDbService.startImport(request,
-                    createTableFromSpec(request.path("TableCreationParameters"), region, "CREATING"), region);
+                    createTableFromSpec(request.path("TableCreationParameters"), "tableCreationParameters.",
+                            region, "CREATING"), region);
         }
     }
 

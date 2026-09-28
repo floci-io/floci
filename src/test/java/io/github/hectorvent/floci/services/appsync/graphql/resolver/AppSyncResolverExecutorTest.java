@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlEngine;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceAuthorizer;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvoker;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvokers;
+import io.github.hectorvent.floci.services.appsync.graphql.datasource.LambdaDataSourceInvoker;
 import io.github.hectorvent.floci.services.appsync.graphql.js.AppSyncJsRuntime;
 import io.github.hectorvent.floci.services.appsync.graphql.js.JsEvaluation;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
@@ -16,8 +17,13 @@ import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.Resolver;
 import io.github.hectorvent.floci.services.appsync.model.ResolverKind;
 import io.github.hectorvent.floci.services.appsync.model.ResolverRuntimeName;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,9 +35,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -46,9 +55,12 @@ class AppSyncResolverExecutorTest {
     private final ScriptedJsRuntime jsRuntime = new ScriptedJsRuntime();
     private final RecordingInvoker invoker = new RecordingInvoker(DataSourceType.RELATIONAL_DATABASE);
     private final RecordingInvoker noneInvoker = new RecordingInvoker(DataSourceType.NONE);
+    private final RecordingInvoker dynamoDbInvoker =
+            new RecordingInvoker(DataSourceType.AMAZON_DYNAMODB);
+    private final RecordingInvoker lambdaInvoker = new RecordingInvoker(DataSourceType.AWS_LAMBDA);
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AppSyncResolverExecutor executor = new AppSyncResolverExecutor(appSync, jsRuntime,
-            new AppSyncDataSourceInvokers(List.of(invoker, noneInvoker),
+            new AppSyncDataSourceInvokers(List.of(invoker, noneInvoker, dynamoDbInvoker, lambdaInvoker),
                     mock(AppSyncDataSourceAuthorizer.class)), vtlEngine(), objectMapper);
 
     private static AppSyncVtlEngine vtlEngine() {
@@ -556,6 +568,213 @@ class AppSyncResolverExecutorTest {
     }
 
     @Test
+    void vtlDynamoDbResolverUsesTheExistingDataSourceInvoker() {
+        when(appSync.getDataSource(API_ID, "accountTable"))
+                .thenReturn(dataSource("accountTable", DataSourceType.AMAZON_DYNAMODB));
+        dynamoDbInvoker.answer = Map.of("id", "42", "name", "Acme");
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountTable");
+        resolver.setRequestMappingTemplate("""
+                {"version":"2018-05-29","operation":"GetItem",
+                 "key":{"id":{"S":$util.toJson($ctx.args.id)}}}
+                """);
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of("id", "42")));
+
+        assertEquals(Map.of("id", "42", "name", "Acme"), result.data());
+        assertTrue(result.errors().isEmpty());
+        assertEquals(1, dynamoDbInvoker.requests.size());
+        Map<?, ?> request = (Map<?, ?>) dynamoDbInvoker.requests.get(0);
+        assertEquals("2018-05-29", request.get("version"));
+        assertEquals("GetItem", request.get("operation"));
+    }
+
+    @Test
+    void vtlLambdaResolverUsesTheExistingDataSourceInvoker() {
+        when(appSync.getDataSource(API_ID, "accountFunction"))
+                .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
+        lambdaInvoker.answer = Map.of("accepted", true);
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountFunction");
+        resolver.setRequestMappingTemplate("""
+                {"version":"2018-05-29","operation":"Invoke",
+                 "payload":{"id":$util.toJson($ctx.args.id)}}
+                """);
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of("id", "42")));
+
+        assertEquals(Map.of("accepted", true), result.data());
+        assertTrue(result.errors().isEmpty());
+        Map<?, ?> request = (Map<?, ?>) lambdaInvoker.requests.get(0);
+        assertEquals("Invoke", request.get("operation"));
+        assertEquals(Map.of("id", "42"), request.get("payload"));
+    }
+
+    @Test
+    void vtlLambdaInvokeWithoutPayloadKeepsTheMemberAbsent() {
+        when(appSync.getDataSource(API_ID, "accountFunction"))
+                .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountFunction");
+        resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\",\"operation\":\"Invoke\"}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertTrue(result.errors().isEmpty());
+        Map<?, ?> request = (Map<?, ?>) lambdaInvoker.requests.get(0);
+        assertEquals("Invoke", request.get("operation"));
+        assertFalse(request.containsKey("payload"));
+    }
+
+    @Test
+    void vtlLambdaInvokeWithoutPayloadSendsTheDocumentToTheFunction() throws Exception {
+        String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";
+        DataSource lambdaDataSource = dataSource("accountFunction", DataSourceType.AWS_LAMBDA);
+        lambdaDataSource.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
+        when(appSync.getDataSource(API_ID, "accountFunction")).thenReturn(lambdaDataSource);
+        LambdaService lambdaService = mock(LambdaService.class);
+        when(lambdaService.invokeArn(eq(functionArn), any(byte[].class),
+                eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, null, "{}".getBytes(StandardCharsets.UTF_8),
+                        null, "request-id"));
+        AppSyncResolverExecutor lambdaExecutor = new AppSyncResolverExecutor(appSync, jsRuntime,
+                new AppSyncDataSourceInvokers(List.of(
+                        new LambdaDataSourceInvoker(lambdaService, objectMapper)),
+                        mock(AppSyncDataSourceAuthorizer.class)),
+                vtlEngine(), objectMapper);
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountFunction");
+        resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\",\"operation\":\"Invoke\"}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = lambdaExecutor.execute(resolver, invocation(Map.of()));
+
+        assertTrue(result.errors().isEmpty());
+        assertEquals(Map.of(), result.data());
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invokeArn(eq(functionArn), payload.capture(),
+                eq(InvocationType.RequestResponse));
+        assertEquals(Map.of("version", "2018-05-29", "operation", "Invoke"),
+                objectMapper.readValue(payload.getValue(), Map.class));
+    }
+
+    @Test
+    void vtlRdsResolverUsesTheExistingDataSourceInvoker() {
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        invoker.answer = Map.of("sqlStatementResults", List.of(Map.of("numberOfRecordsUpdated", 1)));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountDB");
+        resolver.setRequestMappingTemplate("""
+                {"version":"2018-05-29",
+                 "statements":["UPDATE account SET active = :active WHERE id = :id"],
+                 "variableMap":{":active":true,":id":$util.toJson($ctx.args.id)}}
+                """);
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of("id", "42")));
+
+        assertEquals(invoker.answer, result.data());
+        assertTrue(result.errors().isEmpty());
+        Map<?, ?> request = (Map<?, ?>) invoker.requests.get(0);
+        assertEquals(List.of("UPDATE account SET active = :active WHERE id = :id"),
+                request.get("statements"));
+        assertEquals(Map.of(":active", true, ":id", "42"), request.get("variableMap"));
+    }
+
+    @Test
+    void vtlDataSourceErrorIsAvailableToTheResponseTemplate() {
+        when(appSync.getDataSource(API_ID, "accountFunction"))
+                .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
+        lambdaInvoker.failure = new AwsException("LambdaExecutionException", "function failed", 400);
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountFunction");
+        resolver.setRequestMappingTemplate(
+                "{\"version\":\"2018-05-29\",\"operation\":\"Invoke\",\"payload\":{}}");
+        resolver.setResponseMappingTemplate("$util.toJson({\"handled\":$ctx.error.type})");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(Map.of("handled", "LambdaExecutionException"), result.data());
+        assertTrue(result.errors().isEmpty());
+        lambdaInvoker.failure = null;
+    }
+
+    @Test
+    void unsupportedVtlDynamoDbOperationFailsBeforeInvocation() {
+        when(appSync.getDataSource(API_ID, "accountTable"))
+                .thenReturn(dataSource("accountTable", DataSourceType.AMAZON_DYNAMODB));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountTable");
+        resolver.setRequestMappingTemplate(
+                "{\"version\":\"2018-05-29\",\"operation\":\"TransactWriteItems\"}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(1, result.errors().size());
+        assertEquals("UnsupportedOperation", result.errors().get(0).errorType());
+        assertTrue(result.errors().get(0).message().contains("TransactWriteItems"));
+        assertTrue(dynamoDbInvoker.requests.isEmpty());
+    }
+
+    @Test
+    void eventLambdaInvocationIsExplicitlyUnsupported() {
+        when(appSync.getDataSource(API_ID, "accountFunction"))
+                .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountFunction");
+        resolver.setRequestMappingTemplate("""
+                {"version":"2018-05-29","operation":"Invoke",
+                 "invocationType":"Event","payload":{}}
+                """);
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(1, result.errors().size());
+        assertEquals("UnsupportedOperation", result.errors().get(0).errorType());
+        assertTrue(lambdaInvoker.requests.isEmpty());
+    }
+
+    @Test
+    void batchLambdaInvocationDoesNotRunAsAnIndependentFieldCall() {
+        when(appSync.getDataSource(API_ID, "accountFunction"))
+                .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountFunction");
+        resolver.setRequestMappingTemplate("""
+                {"version":"2018-05-29","operation":"BatchInvoke",
+                 "payload":[{"id":"42"}]}
+                """);
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(1, result.errors().size());
+        assertEquals("UnsupportedOperation", result.errors().get(0).errorType());
+        assertTrue(lambdaInvoker.requests.isEmpty());
+    }
+
+    @Test
+    void malformedVtlRdsStatementsFailAsAMappingTemplateError() {
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountDB");
+        resolver.setRequestMappingTemplate(
+                "{\"version\":\"2018-05-29\",\"statements\":\"SELECT 1\"}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(1, result.errors().size());
+        assertEquals("MappingTemplate", result.errors().get(0).errorType());
+        assertTrue(invoker.requests.isEmpty());
+    }
+
+    @Test
     void vtlAppendErrorKeepsTheResponseData() {
         when(appSync.getDataSource(API_ID, "local")).thenReturn(dataSource("local", DataSourceType.NONE));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
@@ -615,10 +834,11 @@ class AppSyncResolverExecutorTest {
     }
 
     @Test
-    void vtlRequestReturnCannotBypassNonNoneDataSourceValidation() {
-        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+    void vtlRequestReturnCannotBypassUnsupportedDataSourceValidation() {
+        when(appSync.getDataSource(API_ID, "accountHttp"))
+                .thenReturn(dataSource("accountHttp", DataSourceType.HTTP));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
-        resolver.setDataSourceName("accountDB");
+        resolver.setDataSourceName("accountHttp");
         resolver.setRequestMappingTemplate("#return({\"short\":\"circuit\"})");
         resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
 

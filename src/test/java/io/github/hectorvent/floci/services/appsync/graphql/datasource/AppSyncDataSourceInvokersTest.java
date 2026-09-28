@@ -28,6 +28,27 @@ import static org.mockito.Mockito.when;
 class AppSyncDataSourceInvokersTest {
 
     @Test
+    void deniedRoleCannotReachTheVtlBackingInvoker() {
+        AppSyncDataSourceAuthorizer authorizer = mock(AppSyncDataSourceAuthorizer.class);
+        AppSyncDataSourceInvoker invoker = mock(AppSyncDataSourceInvoker.class);
+        when(invoker.type()).thenReturn(DataSourceType.AWS_LAMBDA);
+        DataSource source = new DataSource();
+        source.setName("Products");
+        source.setType(DataSourceType.AWS_LAMBDA);
+        Map<String, Object> request = Map.of("version", "2018-05-29", "operation", "Invoke");
+        doThrow(new AwsException("AccessDeniedException", "Denied", 403))
+                .when(authorizer).authorize(source, request, "us-east-1");
+
+        AppSyncDataSourceInvokers dispatch = new AppSyncDataSourceInvokers(List.of(invoker), authorizer);
+        AwsException error = assertThrows(AwsException.class,
+                () -> dispatch.invokeVtl(source, request, "us-east-1"));
+
+        assertEquals("AccessDeniedException", error.getErrorCode());
+        verify(authorizer).authorize(source, request, "us-east-1");
+        verify(invoker, never()).invokeVtl(any(), any(), any());
+    }
+
+    @Test
     void deniedRoleCannotReachTheBackingInvoker() {
         AppSyncDataSourceAuthorizer authorizer = mock(AppSyncDataSourceAuthorizer.class);
         DataSource source = new DataSource();
