@@ -1,18 +1,28 @@
 package io.github.hectorvent.floci.services.appsync.graphql.datasource;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
 import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
+import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class AppSyncDataSourceInvokersTest {
 
@@ -42,5 +52,48 @@ class AppSyncDataSourceInvokersTest {
                 () -> dispatch.invoke(source, request, "us-east-1"));
         assertEquals("AccessDeniedException", error.getErrorCode());
         verify(authorizer).authorize(source, request, "us-east-1");
+    }
+
+    @Test
+    void realRolePolicyIsEnforcedBeforeLambdaDispatch() {
+        String roleArn = "arn:aws:iam::000000000000:role/appsync/Resolver";
+        String functionArn = "arn:aws:lambda:us-east-1:000000000000:function:products";
+        IamService iam = mock(IamService.class);
+        IamRole role = new IamRole("id", "Resolver", "/appsync/", roleArn, """
+                {"Statement":{"Effect":"Allow","Action":"sts:AssumeRole",
+                  "Principal":{"Service":"appsync.amazonaws.com"}}}
+                """);
+        when(iam.findRole("000000000000", "Resolver")).thenReturn(Optional.of(role));
+        ObjectMapper mapper = new ObjectMapper();
+        AppSyncDataSourceAuthorizer authorizer = new AppSyncDataSourceAuthorizer(iam,
+                new AssumeRolePolicyEvaluator(mapper), new IamPolicyEvaluator(mapper), mapper);
+        AppSyncDataSourceInvoker invoker = mock(AppSyncDataSourceInvoker.class);
+        when(invoker.type()).thenReturn(DataSourceType.AWS_LAMBDA);
+        AppSyncDataSourceInvokers dispatch = new AppSyncDataSourceInvokers(List.of(invoker), authorizer);
+        DataSource source = new DataSource();
+        source.setName("Products");
+        source.setType(DataSourceType.AWS_LAMBDA);
+        source.setDataSourceArn(
+                "arn:aws:appsync:us-east-1:000000000000:apis/example/datasources/Products");
+        source.setServiceRoleArn(roleArn);
+        source.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
+        Map<String, Object> request = Map.of("operation", "Invoke", "payload", Map.of());
+
+        when(iam.resolvePrincipalContext(roleArn)).thenReturn(CallerContext.of(List.of("""
+                {"Statement":{"Effect":"Allow","Action":"lambda:InvokeFunction",
+                  "Resource":"arn:aws:lambda:us-east-1:000000000000:function:other"}}
+                """)));
+        AwsException error = assertThrows(AwsException.class,
+                () -> dispatch.invoke(source, request, "us-east-1"));
+        assertEquals("AccessDeniedException", error.getErrorCode());
+        verify(invoker, never()).invoke(any(), any(), any());
+
+        when(iam.resolvePrincipalContext(roleArn)).thenReturn(CallerContext.of(List.of("""
+                {"Statement":{"Effect":"Allow","Action":"lambda:InvokeFunction",
+                  "Resource":"arn:aws:lambda:us-east-1:000000000000:function:products"}}
+                """)));
+        when(invoker.invoke(source, request, "us-east-1")).thenReturn(Map.of("accepted", true));
+        assertEquals(Map.of("accepted", true), dispatch.invoke(source, request, "us-east-1"));
+        verify(invoker).invoke(source, request, "us-east-1");
     }
 }
