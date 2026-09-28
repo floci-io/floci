@@ -345,13 +345,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 // the wire path, where /bucket//key names the distinct object /key.
                 RoutingContext routingContext = currentVertxRequest.getCurrent();
                 HttpServerRequest request = routingContext == null ? null : routingContext.request();
-                String rawUri = request == null ? null : request.uri();
-                if (rawUri == null || !rawUri.startsWith("/")) {
+                // Use the wire path that S3's SigV4 verifier signs. uri() may instead be an
+                // absolute-form request target forwarded by a proxy.
+                String rawPath = request == null ? null : request.path();
+                if (rawPath == null || !rawPath.startsWith("/")) {
                     ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
                     return;
                 }
-                int queryStart = rawUri.indexOf('?');
-                String rawPath = rawUri.substring(0, queryStart < 0 ? rawUri.length() : queryStart);
                 String decodedPath;
                 try {
                     decodedPath = URLDecoder.decode(rawPath.replace("+", "%2B"), StandardCharsets.UTF_8);
