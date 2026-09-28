@@ -380,6 +380,8 @@ with a warning. The synthesized EC2 instance reports the selected type.
 First-group selection is serialized per cluster. If the replacement fails, Floci recreates the
 previous node, marks that node group `CREATE_FAILED`, and keeps its data volume. If recovery also
 fails, the cluster becomes `FAILED` instead of waiting indefinitely for readiness.
+Groups remain `CREATING` while launch-template user data runs. Later groups wait for the first
+group's result before accepting its node type as the shared capacity.
 
 The container receives a hard CPU quota equal to the selected type's vCPUs and a memory limit
 equal to its catalog memory plus 10% headroom (at least 128 MiB). Both are capped by Docker's host

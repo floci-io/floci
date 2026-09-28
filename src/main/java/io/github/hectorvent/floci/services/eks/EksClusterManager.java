@@ -667,7 +667,7 @@ public class EksClusterManager
             closeQuietly(clusterLogHandles.remove(clusterResourceName(cluster)));
             cluster.setContainerId(null);
             startCluster(cluster, oldPort);
-            lifecycleManager.removeIfExists(backupName);
+            lifecycleManager.removeIfExistsStrict(backupName);
             LOG.infov("Replaced EKS cluster {0} to apply current node capacity limits", cluster.getName());
         } catch (RuntimeException replacement) {
             LOG.warnv("Could not replace EKS cluster {0} for node capacity: {1}; restoring surviving node",
