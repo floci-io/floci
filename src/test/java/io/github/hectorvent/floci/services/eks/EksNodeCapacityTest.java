@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
+import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogNetworkCard;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -51,6 +52,21 @@ class EksNodeCapacityTest {
         assertEquals(60, limits.kubeCpuMilli());
         assertEquals(3000, limits.systemCpuMilli());
         assertEquals(8192 - 4096 + 100, limits.evictionMemoryMib());
+    }
+
+    @Test
+    void largeManagedNodeUsesThe250PodCapForMemoryReservation() {
+        CatalogInstanceType type = new CatalogInstanceType();
+        type.vcpu = 32;
+        type.memoryMib = 131072;
+        type.ipv4AddressesPerInterface = 50;
+        CatalogNetworkCard card = new CatalogNetworkCard();
+        card.networkCardIndex = 0;
+        card.maximumNetworkInterfaces = 15;
+        type.networkCards = List.of(card);
+
+        EksNodeCapacity.Limits limits = EksNodeCapacity.calculate(type, 262144 * MIB, 64, 0, 0);
+        assertEquals(255 + 11 * 250, limits.kubeMemoryMib());
     }
 
     @Test

@@ -394,6 +394,8 @@ reservation excludes the Docker host CPUs outside the container quota. Its absol
 limit, plus a 100 MiB eviction buffer. This is necessary because kubelet in the nested container
 can report host memory while the kernel enforces the smaller cgroup limit.
 The EKS node filesystem eviction defaults remain at 10% available space and 5% free inodes.
+The pod-density calculation uses EKS managed node group caps of 110 pods up to 30 vCPUs and
+250 pods above 30 vCPUs; it does not change k3s `maxPods`.
 
 If Docker cannot report host capacity, or the host or configured ceiling is too small to leave
 256 MiB for pods after reservations, Floci warns and launches the cluster without resource limits

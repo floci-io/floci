@@ -54,8 +54,9 @@ final class EksNodeCapacity {
                 .mapToInt(card -> card.maximumNetworkInterfaces)
                 .findFirst().orElse(0);
         int addresses = type.ipv4AddressesPerInterface == null ? 0 : type.ipv4AddressesPerInterface;
+        int podCap = type.vcpu > 30 ? 250 : 110;
         int maxPods = interfaces > 0 && addresses > 0
-                ? Math.min(110, interfaces * (addresses - 1) + 2) : 110;
+                ? Math.min(podCap, interfaces * (addresses - 1) + 2) : podCap;
         long kubeMemoryMib = 11L * maxPods + 255;
         long systemMemoryMib = Math.max(128, memoryMib / 10);
         long evictionBufferMib = 100;
