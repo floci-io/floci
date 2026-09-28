@@ -244,10 +244,7 @@ class TlsConfigSourceCertificateReuseTest {
         assertFalse(Files.readString(metadataFile).contains("*.amazonaws.com"),
             "Initial metadata should not contain the AWS wildcard");
 
-        long initialModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
-
-        // Wait a bit to ensure timestamp difference
-        Thread.sleep(100);
+        String initialCert = Files.readString(certFile);
 
         // Enable AWS endpoint spoofing
         System.setProperty("floci.dns.spoof-aws-endpoints", "true");
@@ -255,10 +252,11 @@ class TlsConfigSourceCertificateReuseTest {
         // Act: Create new TlsConfigSource - should regenerate certificate
         new TlsConfigSource();
 
-        // Assert: Certificate and metadata should be regenerated with the AWS wildcards
-        long newModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
-        assertTrue(newModifiedTime > initialModifiedTime,
-            "Certificate should be regenerated when the spoof flag flips (newer timestamp)");
+        // Assert: Certificate and metadata should be regenerated with the AWS wildcards.
+        // Comparing content (rather than mtime after a sleep) keeps this deterministic on
+        // filesystems with coarse timestamp resolution.
+        assertNotEquals(initialCert, Files.readString(certFile),
+            "Certificate should be regenerated when the spoof flag flips (content changed)");
         assertTrue(Files.readString(metadataFile).contains("*.amazonaws.com"),
             "New metadata should contain the AWS wildcard");
     }

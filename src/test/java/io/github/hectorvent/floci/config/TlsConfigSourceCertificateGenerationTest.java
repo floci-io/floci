@@ -261,23 +261,80 @@ class TlsConfigSourceCertificateGenerationTest {
     }
 
     /**
-     * Test that the regional AWS wildcard follows the configured default region
+     * A client can hit an explicit HTTPS AWS endpoint outside floci.default-region (a
+     * cross-region call, or a Lambda whose own AWS_REGION differs from the emulator default).
+     * DNS spoofing routes it to Floci regardless of region, so the cert must cover every
+     * published region, including ones the emulator does not advertise (eu-north-1), not
+     * just the configured default.
      */
     @Test
-    void testAwsRegionalWildcardFollowsConfiguredDefaultRegion() throws Exception {
-        // Arrange
+    void testAwsRegionalWildcardsCoverEveryKnownRegion() throws Exception {
+        // Catches: SANs limited to the configured default region, failing the handshake elsewhere
         System.setProperty("floci.dns.spoof-aws-endpoints", "true");
         System.setProperty("floci.default-region", "eu-west-1");
 
-        // Act
         new TlsConfigSource();
 
-        // Assert
         List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-server.crt"));
-        assertTrue(sans.contains("*.eu-west-1.amazonaws.com"),
-            "Certificate SANs should include '*.eu-west-1.amazonaws.com' for the configured region");
-        assertFalse(sans.contains("*.us-east-1.amazonaws.com"),
-            "Certificate SANs should not include the wildcard of a region that is not configured");
+        for (String region : List.of("us-east-1", "eu-west-1", "eu-north-1", "ap-southeast-2")) {
+            assertTrue(sans.contains("*." + region + ".amazonaws.com"),
+                "Certificate SANs should include '*." + region + ".amazonaws.com' regardless of the "
+                    + "configured default region");
+            assertTrue(sans.contains("*.s3." + region + ".amazonaws.com"),
+                "Certificate SANs should include regional virtual-hosted S3 for " + region);
+        }
+    }
+
+    /**
+     * A wildcard SAN matches exactly one label (RFC 6125 6.4.3), so {@code *.<region>.amazonaws.com}
+     * does not cover endpoints where a resource id adds a label before the service name. DNS
+     * spoofing still routes them to Floci, so each needs a dedicated SAN.
+     */
+    @Test
+    void testCertificateCoversMultiLabelRegionalEndpointsWhenSpoofEnabled() throws Exception {
+        // Catches: a missing SAN for execute-api, dkr.ecr, lambda-url or s3.dualstack hosts
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+
+        new TlsConfigSource();
+
+        List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-server.crt"));
+        assertTrue(sans.contains("*.execute-api.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover API Gateway execute-api endpoints");
+        assertTrue(sans.contains("*.dkr.ecr.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover ECR dkr.ecr endpoints");
+        assertTrue(sans.contains("*.s3.dualstack.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover dualstack virtual-hosted S3 endpoints");
+        assertTrue(sans.contains("*.lambda-url.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover Lambda function URL endpoints");
+    }
+
+    /**
+     * S3 publishes more endpoint forms than the dotted regional one: website (dotted and
+     * hyphenated), legacy hyphenated regional, FIPS and its dualstack variant, and the regionless
+     * transfer-acceleration endpoints. The set follows S3VirtualHostFilter#isS3QualifierTail.
+     */
+    @Test
+    void testCertificateCoversEveryS3EndpointFormWhenSpoofEnabled() throws Exception {
+        // Catches: an S3 endpoint form that is routed to Floci but has no matching SAN
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+
+        new TlsConfigSource();
+
+        List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-server.crt"));
+        assertTrue(sans.contains("*.s3-website-us-east-1.amazonaws.com"),
+            "Certificate SANs should cover the hyphenated S3 website endpoint form");
+        assertTrue(sans.contains("*.s3-website.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover the dotted S3 website endpoint form");
+        assertTrue(sans.contains("*.s3-us-east-1.amazonaws.com"),
+            "Certificate SANs should cover the legacy hyphenated S3 regional endpoint form");
+        assertTrue(sans.contains("*.s3-fips.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover the S3 FIPS endpoint");
+        assertTrue(sans.contains("*.s3-fips.dualstack.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover the dualstack S3 FIPS endpoint");
+        assertTrue(sans.contains("*.s3-accelerate.amazonaws.com"),
+            "Certificate SANs should cover the regionless S3 transfer-acceleration endpoint");
+        assertTrue(sans.contains("*.s3-accelerate.dualstack.amazonaws.com"),
+            "Certificate SANs should cover the dualstack S3 transfer-acceleration endpoint");
     }
 
     /**

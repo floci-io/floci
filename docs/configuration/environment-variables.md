@@ -150,7 +150,7 @@ Some tools construct SDK clients with explicit real-AWS endpoints (e.g. `https:/
 Combine it with `FLOCI_TLS_ENABLED=true` so hardcoded `https://` endpoints work end to end:
 
 - the TLS proxy already serves HTTPS on port 443, where those clients connect;
-- the generated self-signed certificate additionally covers `*.amazonaws.com` and `*.<default-region>.amazonaws.com` (flipping the flag regenerates the certificate).
+- the generated self-signed certificate additionally covers `*.amazonaws.com` and `*.<region>.amazonaws.com` for every published region, plus the multi-label and S3 endpoint forms (flipping the flag regenerates the certificate).
 
 ---
 
