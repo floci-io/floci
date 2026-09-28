@@ -149,7 +149,7 @@ public class SsmJsonHandler {
         }
         response.set("Parameters", parametersArray);
         response.set("InvalidParameters", invalidParameterNames(names,
-                params.stream().map(Parameter::getName).toList()));
+                params.stream().map(p -> p.getName() + (p.getSelector() == null ? "" : p.getSelector())).toList()));
         return Response.ok(response).build();
     }
 
@@ -931,15 +931,20 @@ public class SsmJsonHandler {
 
     private Response handleLabelParameterVersion(JsonNode request, String region) {
         String name = request.path("Name").asText();
-        long parameterVersion = request.path("ParameterVersion").asLong();
+        Long parameterVersion = request.hasNonNull("ParameterVersion")
+                ? request.path("ParameterVersion").asLong()
+                : null;
         List<String> labels = new ArrayList<>();
         request.path("Labels").forEach(l -> labels.add(l.asText()));
 
-        ssmService.labelParameterVersion(name, parameterVersion, labels, region);
+        SsmService.LabelParameterVersionResult result = ssmService.labelParameterVersion(
+                name, parameterVersion, labels, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("InvalidLabels", objectMapper.createArrayNode());
-        response.put("ParameterVersion", parameterVersion);
+        ArrayNode invalidArray = objectMapper.createArrayNode();
+        result.invalidLabels().forEach(invalidArray::add);
+        response.set("InvalidLabels", invalidArray);
+        response.put("ParameterVersion", result.parameterVersion());
         return Response.ok(response).build();
     }
 
@@ -987,6 +992,9 @@ public class SsmJsonHandler {
         node.put("LastModifiedDate", p.getLastModifiedDate().toEpochMilli() / 1000.0);
         node.put("ARN", p.getArn());
         node.put("DataType", p.getDataType());
+        if (p.getSelector() != null) {
+            node.put("Selector", p.getSelector());
+        }
         return node;
     }
 

@@ -205,9 +205,16 @@ public class SsmService implements ResourceProvider {
     }
 
     public Parameter getParameter(String name, String region) {
-        return findParameter(name, region)
-                .orElseThrow(() -> new AwsException("ParameterNotFound",
-                        "Parameter " + name + " not found.", 400));
+        return findParameter(name, region).orElseThrow(() -> {
+            int separator = name == null ? -1 : name.lastIndexOf(':');
+            if (separator > 0 && separator < name.length() - 1
+                    && parameterStore.get(regionKey(region, name.substring(0, separator))).isPresent()) {
+                return new AwsException("ParameterVersionNotFound",
+                        "Systems Manager could not find version or label " + name.substring(separator + 1)
+                                + " of " + name.substring(0, separator) + ". Verify the version and try again.", 400);
+            }
+            return new AwsException("ParameterNotFound", "Parameter " + name + " not found.", 400);
+        });
     }
 
     public List<Parameter> getParameters(List<String> names, String region) {
@@ -243,7 +250,48 @@ public class SsmService implements ResourceProvider {
         if (stored.isPresent()) {
             return stored;
         }
+        Optional<Parameter> selected = findSelectedVersion(name, region);
+        if (selected.isPresent()) {
+            return selected;
+        }
         return publicParameter(name, region);
+    }
+
+    /**
+     * A read may name a version or label as {@code name:version} or {@code name:label}. A
+     * parameter name cannot contain a colon, so the last one always starts the selector. The
+     * answer is a copy built from the history entry: it carries the base name and the selector
+     * as AWS returns them, and nothing is written back.
+     */
+    private Optional<Parameter> findSelectedVersion(String name, String region) {
+        int separator = name == null ? -1 : name.lastIndexOf(':');
+        if (separator <= 0 || separator == name.length() - 1) {
+            return Optional.empty();
+        }
+        String baseName = name.substring(0, separator);
+        String selector = name.substring(separator + 1);
+        String storageKey = regionKey(region, baseName);
+        Optional<Parameter> current = parameterStore.get(storageKey);
+        if (current.isEmpty()) {
+            return Optional.empty();
+        }
+        boolean isVersion = selector.chars().allMatch(Character::isDigit);
+        // A label may sit on several versions; the newest one wins.
+        return historyStore.get(storageKey).orElse(List.of()).stream()
+                .filter(h -> isVersion
+                        ? String.valueOf(h.getVersion()).equals(selector)
+                        : h.getLabels() != null && h.getLabels().contains(selector))
+                .max(Comparator.comparingLong(ParameterHistory::getVersion))
+                .map(h -> {
+                    Parameter parameter = new Parameter(baseName, h.getValue(), h.getType());
+                    parameter.setVersion(h.getVersion());
+                    parameter.setDescription(h.getDescription());
+                    parameter.setLastModifiedDate(h.getLastModifiedDate());
+                    parameter.setArn(current.get().getArn());
+                    parameter.setDataType(current.get().getDataType());
+                    parameter.setSelector(":" + selector);
+                    return parameter;
+                });
     }
 
     /**
@@ -408,39 +456,111 @@ public class SsmService implements ResourceProvider {
         });
     }
 
-    public void labelParameterVersion(String name, long parameterVersion, List<String> labels, String region) {
+    public record LabelParameterVersionResult(long parameterVersion, List<String> invalidLabels) {}
+
+    public synchronized LabelParameterVersionResult labelParameterVersion(String name, Long parameterVersion,
+                                                             List<String> labels, String region) {
         String storageKey = regionKey(region, name);
-        if (parameterStore.get(storageKey).isEmpty()) {
-            throw new AwsException("ParameterNotFound",
-                    "Parameter " + name + " not found.", 400);
+        Parameter current = parameterStore.get(storageKey).orElseThrow(() ->
+                new AwsException("ParameterNotFound", "Parameter " + name + " not found.", 400));
+
+        long targetVersion = parameterVersion == null
+                ? current.getVersion()
+                : parameterVersion;
+
+        List<ParameterHistory> existingHistory = historyStore.get(storageKey).orElse(List.of());
+        List<ParameterHistory> updatedHistory = new ArrayList<>(existingHistory.size());
+
+        ParameterHistory targetCopy = null;
+        for (ParameterHistory h : existingHistory) {
+            ParameterHistory copy = new ParameterHistory(h);
+            if (copy.getVersion() == targetVersion) {
+                targetCopy = copy;
+            }
+            updatedHistory.add(copy);
         }
 
-        List<ParameterHistory> history = historyStore.get(storageKey)
-                .orElse(List.of());
+        if (targetCopy == null) {
+            throw new AwsException("ParameterVersionNotFound",
+                    "Parameter version " + targetVersion + " not found.", 400);
+        }
 
-        history = new ArrayList<>(history);
-
-        boolean found = false;
-        for (ParameterHistory h : history) {
-            if (h.getVersion() == parameterVersion) {
-                List<String> existing = h.getLabels() != null ? new ArrayList<>(h.getLabels()) : new ArrayList<>();
-                for (String label : labels) {
-                    if (!existing.contains(label)) {
-                        existing.add(label);
+        List<String> invalidLabels = new ArrayList<>();
+        List<String> validLabels = new ArrayList<>();
+        if (labels != null) {
+            for (String label : labels) {
+                if (isValidLabel(label)) {
+                    if (!validLabels.contains(label)) {
+                        validLabels.add(label);
+                    }
+                } else {
+                    if (!invalidLabels.contains(label)) {
+                        invalidLabels.add(label);
                     }
                 }
-                h.setLabels(existing);
-                found = true;
-                break;
             }
         }
 
-        if (!found) {
-            throw new AwsException("ParameterVersionNotFound", "Parameter version " + parameterVersion + " not found.", 400);
+        List<String> targetLabels = targetCopy.getLabels() != null
+                ? new ArrayList<>(targetCopy.getLabels())
+                : new ArrayList<>();
+
+        int newLabelCount = targetLabels.size();
+        for (String validLabel : validLabels) {
+            if (!targetLabels.contains(validLabel)) {
+                newLabelCount++;
+            }
+        }
+        if (newLabelCount > 10) {
+            throw new AwsException("ParameterVersionLabelLimitExceeded",
+                    "The parameter version already has the maximum number of labels (10).", 400);
         }
 
-        historyStore.put(storageKey, history);
-        LOG.infov("Labeled parameter {0} version {1} with labels {2}", name, parameterVersion, labels);
+        for (ParameterHistory h : updatedHistory) {
+            if (h.getVersion() != targetVersion && h.getLabels() != null) {
+                List<String> otherLabels = new ArrayList<>(h.getLabels());
+                if (otherLabels.removeAll(validLabels)) {
+                    h.setLabels(otherLabels);
+                }
+            }
+        }
+
+        for (String validLabel : validLabels) {
+            if (!targetLabels.contains(validLabel)) {
+                targetLabels.add(validLabel);
+            }
+        }
+        targetCopy.setLabels(targetLabels);
+
+        historyStore.put(storageKey, updatedHistory);
+        LOG.infov("Labeled parameter {0} version {1} with labels {2}", name, targetVersion, validLabels);
+        return new LabelParameterVersionResult(targetVersion, invalidLabels);
+    }
+
+    public synchronized LabelParameterVersionResult labelParameterVersion(String name, long parameterVersion,
+                                                             List<String> labels, String region) {
+        return labelParameterVersion(name, Long.valueOf(parameterVersion), labels, region);
+    }
+
+    private static boolean isValidLabel(String label) {
+        if (label == null || label.isEmpty() || label.length() > 100) {
+            return false;
+        }
+        if (Character.isDigit(label.charAt(0))) {
+            return false;
+        }
+        String lower = label.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("aws") || lower.startsWith("ssm")) {
+            return false;
+        }
+        for (int i = 0; i < label.length(); i++) {
+            char c = label.charAt(i);
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                    || c == '.' || c == '-' || c == '_')) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
