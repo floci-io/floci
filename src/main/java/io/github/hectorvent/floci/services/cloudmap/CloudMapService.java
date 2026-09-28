@@ -164,6 +164,12 @@ public class CloudMapService {
         return result;
     }
 
+    public void updateNamespace(String id, String description) {
+        Namespace ns = requireNamespace(id);
+        ns.setDescription(description);
+        namespaceStore.put(id, ns);
+    }
+
     public Operation deleteNamespace(String id, String region) {
         Namespace ns = requireNamespace(id);
         boolean hasServices = scan(serviceStore).stream()
@@ -246,6 +252,21 @@ public class CloudMapService {
             result.add(s);
         }
         return result;
+    }
+
+    /**
+     * A DNS service keeps its DnsConfig when {@code dnsConfig} is null, since AWS cannot remove it;
+     * a null description or health check config clears it, as AWS UpdateService does.
+     */
+    public void updateService(String id, String description, String dnsConfig, String healthCheckConfig) {
+        Service service = requireService(id);
+        if (dnsConfig != null) {
+            parseDnsConfig(dnsConfig);
+            service.setDnsConfig(dnsConfig);
+        }
+        service.setDescription(description);
+        service.setHealthCheckConfig(healthCheckConfig);
+        serviceStore.put(id, service);
     }
 
     public void deleteService(String id) {

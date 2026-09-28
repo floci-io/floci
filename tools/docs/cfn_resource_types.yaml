@@ -29,6 +29,7 @@ order:
   - AWS::ElasticLoadBalancingV2
   - AWS::AutoScaling
   - AWS::Route53
+  - AWS::ServiceDiscovery
   - AWS::ApiGateway
   - AWS::ApiGatewayV2
   - AWS::AppSync
@@ -143,6 +144,7 @@ service_labels:
   AWS::SSM: SSM
   AWS::Scheduler: EventBridge Scheduler
   AWS::SecretsManager: Secrets Manager
+  AWS::ServiceDiscovery: Cloud Map
   AWS::StepFunctions: Step Functions
   AWS::WAFv2: WAFv2
   Custom: CloudFormation
