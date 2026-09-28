@@ -414,7 +414,9 @@ The reservation formulas follow the [EKS AMI nodeadm source](https://github.com/
 On restore, a surviving container whose capacity label differs from the current calculation is
 recreated against the retained data volume, reusing its published API port. Floci keeps the old
 container until the replacement starts and restarts it if replacement fails. This also upgrades
-containers started before resource limits were available.
+containers started before resource limits were available. If Docker cannot remove the stopped
+backup after a successful replacement, the new node keeps running and cluster deletion retries
+the backup cleanup before removing the data volume.
 
 #### Cluster node provider ID and topology labels
 

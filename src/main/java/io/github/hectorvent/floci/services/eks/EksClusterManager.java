@@ -656,8 +656,15 @@ public class EksClusterManager
         String oldId = cluster.getContainerId();
         int oldPort = cluster.getHostPort();
         String containerName = cluster.getDockerName();
-        String backupName = containerName + "-capacity-backup-" + UUID.randomUUID();
+        String backupName = capacityBackupName(cluster);
         DockerClient docker = lifecycleManager.getDockerClient();
+        try {
+            lifecycleManager.removeIfExistsStrict(backupName);
+        } catch (RuntimeException cleanup) {
+            LOG.warnv("Could not clear prior EKS capacity backup for cluster {0}: {1}; keeping current node",
+                    cluster.getName(), cleanup.getMessage());
+            return;
+        }
         boolean renamed = false;
         try {
             docker.renameContainerCmd(oldId).withName(backupName).exec();
@@ -667,7 +674,6 @@ public class EksClusterManager
             closeQuietly(clusterLogHandles.remove(clusterResourceName(cluster)));
             cluster.setContainerId(null);
             startCluster(cluster, oldPort);
-            lifecycleManager.removeIfExistsStrict(backupName);
             LOG.infov("Replaced EKS cluster {0} to apply current node capacity limits", cluster.getName());
         } catch (RuntimeException replacement) {
             LOG.warnv("Could not replace EKS cluster {0} for node capacity: {1}; restoring surviving node",
@@ -685,7 +691,19 @@ public class EksClusterManager
                 throw new IllegalStateException("Could not restore EKS cluster " + cluster.getName()
                         + " after node capacity replacement failed", rollback);
             }
+            return;
         }
+        try {
+            lifecycleManager.removeIfExistsStrict(backupName);
+        } catch (RuntimeException cleanup) {
+            LOG.warnv("EKS cluster {0} replacement is running, but its stopped capacity backup"
+                    + " could not be removed: {1}; cluster deletion will retry",
+                    cluster.getName(), cleanup.getMessage());
+        }
+    }
+
+    private static String capacityBackupName(Cluster cluster) {
+        return cluster.getDockerName() + "-capacity-backup";
     }
 
     /**
@@ -776,6 +794,9 @@ public class EksClusterManager
      * cluster's workloads survive a Floci restart and are re-latched by {@link #restoreCluster}.
      */
     public void stopCluster(Cluster cluster) {
+        if (cluster.getContainerId() != null && cluster.getDockerName() != null) {
+            lifecycleManager.removeIfExistsStrict(capacityBackupName(cluster));
+        }
         unregisterMetadataEndpoint(cluster);
         Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
         if (cluster.getContainerId() == null) {

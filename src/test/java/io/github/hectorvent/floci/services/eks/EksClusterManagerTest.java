@@ -492,6 +492,24 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void backupCleanupFailureKeepsTheNewNodeRunning() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(containerFromJson("{\"Id\":\"cid-old\"}")));
+            when(lifecycleManager.adopt("cid-old", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            stubFreshStart("cid-new", 6440);
+            Mockito.doNothing().doThrow(new IllegalStateException("Docker cleanup failed"))
+                    .when(lifecycleManager).removeIfExistsStrict("floci-eks-demo-capacity-backup");
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            verify(lifecycleManager, Mockito.times(1)).adopt("cid-old", List.of(6443));
+            verify(lifecycleManager, never()).removeIfExistsStrict("floci-eks-demo");
+        }
+
+        @Test
         void recreatesTheContainerWhenNoneSurvives() {
             when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
             stubFreshStart("cid-new", 6440);
