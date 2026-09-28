@@ -276,6 +276,8 @@ public class SsmService implements ResourceProvider {
             secret = secretsManager.describeSecret(secretId, region);
             boolean byId = selector != null && secret.getVersions().containsKey(selector);
             // By the ARN just described, so a secret replaced in between is not found rather than read.
+            // A miss still falls back to a secret named like the ARN's last part ("app-AbCdEf"), a
+            // name AWS warns against, so that fallback is deliberately not guarded here.
             version = secretsManager.getSecretValue(secret.getArn(), byId ? selector : null,
                     byId ? null : selector, region);
         } catch (AwsException e) {
