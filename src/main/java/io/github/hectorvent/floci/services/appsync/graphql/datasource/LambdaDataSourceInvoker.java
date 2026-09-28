@@ -45,18 +45,20 @@ public class LambdaDataSourceInvoker implements AppSyncDataSourceInvoker {
     public Object invoke(DataSource dataSource, Object request, String region) {
         String functionArn = functionArn(dataSource);
         Object payload = payloadOf(request);
-        if ("BatchInvoke".equals(operationOf(request)) && payload instanceof List<?> batch) {
+        Object lambdaEvent = request instanceof Map<?, ?> map && map.get("operation") != null
+                ? request : payload;
+        if ("BatchInvoke".equals(operationOf(request)) && payload instanceof List<?>) {
             List<Object> results = new ArrayList<>();
-            // One invocation with the whole list, as AppSync does: the function is expected to
-            // answer with a list of the same length, in order.
-            Object answered = invokeOnce(functionArn, batch, region);
+            // One invocation with the request document, as AppSync does: the function is expected
+            // to answer with a list of the same length, in order.
+            Object answered = invokeOnce(functionArn, lambdaEvent, region);
             if (answered instanceof List<?> list) {
                 return list;
             }
             results.add(answered);
             return results;
         }
-        return invokeOnce(functionArn, payload, region);
+        return invokeOnce(functionArn, lambdaEvent, region);
     }
 
     @Override
@@ -111,9 +113,7 @@ public class LambdaDataSourceInvoker implements AppSyncDataSourceInvoker {
     }
 
     /**
-     * AppSync sends {@code {operation, payload}}; a resolver that returns a bare object with no
-     * {@code operation} is treated as the payload itself, which is how the older function-request
-     * shape behaved.
+     * A legacy resolver request with no {@code operation} retains its older bare-payload behavior.
      */
     private Object payloadOf(Object request) {
         if (request instanceof Map<?, ?> map && map.containsKey("payload")) {

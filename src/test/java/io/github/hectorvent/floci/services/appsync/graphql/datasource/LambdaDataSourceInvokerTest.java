@@ -53,15 +53,14 @@ class LambdaDataSourceInvokerTest {
     }
 
     @Test
-    void jsOnlyThePayloadReachesTheFunction() {
+    void jsSendsTheEntireRequestDocumentToTheFunction() throws Exception {
         answers("{\"id\": \"1\"}");
 
-        Object result = invoker.invoke(dataSource(),
-                Map.of("version", "2018-05-29", "operation", "Invoke",
-                        "payload", Map.of("field", "getMessages")), "eu-west-1");
+        Map<String, Object> request = Map.of("version", "2018-05-29", "operation", "Invoke",
+                "payload", Map.of("field", "getMessages"));
+        Object result = invoker.invoke(dataSource(), request, "eu-west-1");
 
-        // Preserve the existing APPSYNC_JS behavior independently of VTL.
-        assertEquals("{\"field\":\"getMessages\"}", capturePayload());
+        assertEquals(request, mapper.readValue(capturePayload(), Map.class));
         assertEquals(Map.of("id", "1"), result);
     }
 
@@ -89,13 +88,23 @@ class LambdaDataSourceInvokerTest {
     }
 
     @Test
-    void aBatchInvokeAnswersTheListTheFunctionReturned() {
+    void aLegacyRequestWithoutOperationStillUnwrapsPayload() {
+        answers("{}");
+
+        invoker.invoke(dataSource(), Map.of("payload", Map.of("field", "getMessages")), "eu-west-1");
+
+        assertEquals("{\"field\":\"getMessages\"}", capturePayload());
+    }
+
+    @Test
+    void aBatchInvokeSendsTheRequestDocumentAndAnswersTheList() throws Exception {
         answers("[{\"id\": \"1\"}, {\"id\": \"2\"}]");
 
-        Object result = invoker.invoke(dataSource(),
-                Map.of("operation", "BatchInvoke", "payload", List.of(Map.of("id", "1"), Map.of("id", "2"))),
-                "eu-west-1");
+        Map<String, Object> request = Map.of("operation", "BatchInvoke",
+                "payload", List.of(Map.of("id", "1"), Map.of("id", "2")));
+        Object result = invoker.invoke(dataSource(), request, "eu-west-1");
 
+        assertEquals(request, mapper.readValue(capturePayload(), Map.class));
         assertEquals(List.of(Map.of("id", "1"), Map.of("id", "2")), result);
     }
 
