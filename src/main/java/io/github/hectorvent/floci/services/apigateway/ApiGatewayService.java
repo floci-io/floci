@@ -2068,7 +2068,11 @@ public class ApiGatewayService {
                 throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
             }
         }
-        requireEndpointTypeAvailable(newEndpointConfigurationType, region);
+        // Only a change of type is held to the partition: an EDGE domain stored before the rule
+        // existed must still take certificate or security-policy updates.
+        if (!Objects.equals(newEndpointConfigurationType, domain.getEndpointConfigurationType())) {
+            requireEndpointTypeAvailable(newEndpointConfigurationType, region);
+        }
         domain.setCertificateName(newCertificateName);
         domain.setCertificateArn(newCertificateArn);
         domain.setRegionalCertificateName(newRegionalCertificateName);

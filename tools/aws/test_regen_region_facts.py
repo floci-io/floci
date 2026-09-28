@@ -224,13 +224,27 @@ def test_self_check_holds_the_values_to_what_partitions_json_publishes(tmp_path)
         output.write_text(json.dumps(document))
         return r.self_check(output, partitions)
 
-    assert problems(lambda d: None) == []
-    # ap-southeast-1's NLB zone is twelve characters; real zone ids run from twelve to twenty-one
     region = next(iter(good["regions"]))
-    assert problems(lambda d: d["regions"][region].update(nlbHostedZoneId="ZKVM4W9LS7TM")) == []
-    assert problems(lambda d: d["regions"][region].update(nlbHostedZoneId="nope"))
-    assert problems(lambda d: d["regions"].update({"xx-nowhere-1": {}}))
     partition = next(iter(good["partitions"]))
-    assert problems(lambda d: d["partitions"][partition].update(vpcEndpointServiceNamePrefix="com.example.vpce"))
-    assert problems(lambda d: d["partitions"][partition].update(samlSignOnUrl="http://signin.example/saml"))
-    assert problems(lambda d: d["partitions"].pop(partition))
+    accepted = {
+        "unchanged": lambda d: None,
+        # ap-southeast-1's NLB zone is twelve characters; real zone ids run from twelve to twenty-one
+        "twelve-character zone": lambda d: d["regions"][region].update(nlbHostedZoneId="ZKVM4W9LS7TM"),
+    }
+    rejected = {
+        "not a zone id": lambda d: d["regions"][region].update(nlbHostedZoneId="nope"),
+        "unpublished region": lambda d: d["regions"].update({"xx-nowhere-1": {}}),
+        "wrong endpoint prefix": lambda d: d["partitions"][partition].update(
+            vpcEndpointServiceNamePrefix="com.example.vpce"),
+        "plain-http SAML URL": lambda d: d["partitions"][partition].update(
+            samlSignOnUrl="http://signin.example/saml"),
+        "missing partition": lambda d: d["partitions"].pop(partition),
+        "partition entry not an object": lambda d: d["partitions"].update({partition: "invalid"}),
+        "region entry not an object": lambda d: d["regions"].update({region: ["invalid"]}),
+    }
+    for label, mutate in accepted.items():
+        found = problems(mutate)
+        assert found == [], label
+    for label, mutate in rejected.items():
+        found = problems(mutate)
+        assert found, label

@@ -253,6 +253,12 @@ def self_check(path: Path, partitions_path: Path = PARTITIONS) -> list[str]:
             problems.append(f"{path}: '{key}' is missing or empty")
     if problems:
         return problems
+    for key in ("partitions", "regions"):
+        for name, entry in document[key].items():
+            if not isinstance(entry, dict):
+                problems.append(f"{path}: {key}.{name} is not an object: {entry!r}")
+    if problems:
+        return problems
 
     partitions_doc = json.loads(partitions_path.read_text(encoding="utf-8"))["partitions"]
     for partition in partitions_doc:
