@@ -465,10 +465,15 @@ public class EksService implements TagHandler, ResourceProvider {
         if (!config.services().eks().mock()) {
             boolean keepRunning = config.services().eks().keepRunningOnShutdown();
             for (Cluster cluster : allClusters()) {
-                if (keepRunning) {
-                    clusterManager.detachCluster(cluster);
-                } else {
-                    clusterManager.stopCluster(cluster);
+                try {
+                    if (keepRunning) {
+                        clusterManager.detachCluster(cluster);
+                    } else {
+                        clusterManager.stopCluster(cluster);
+                    }
+                } catch (RuntimeException e) {
+                    LOG.warnv("Could not clean up EKS cluster {0} during shutdown: {1}",
+                            cluster.getName(), e.getMessage());
                 }
             }
         }

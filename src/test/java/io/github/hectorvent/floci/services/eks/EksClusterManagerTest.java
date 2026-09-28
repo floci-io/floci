@@ -568,6 +568,20 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void backupCleanupFailureDoesNotLeaveTheLiveNodeRunning() {
+            Cluster cluster = cluster();
+            cluster.setDockerName("floci-eks-demo");
+            cluster.setContainerId("cid-new");
+            Mockito.doThrow(new IllegalStateException("Docker cleanup failed"))
+                    .when(lifecycleManager).removeIfExistsStrict("floci-eks-demo-capacity-backup");
+
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            verify(lifecycleManager).stopAndRemove("cid-new", null);
+            verify(lifecycleManager, never()).removeVolume(anyString());
+        }
+
+        @Test
         void stopClusterRemovesTheDataVolumeInMemoryStorageMode() {
             when(storage.mode()).thenReturn("memory");
 

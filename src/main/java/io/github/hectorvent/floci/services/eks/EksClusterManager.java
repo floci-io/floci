@@ -794,9 +794,6 @@ public class EksClusterManager
      * cluster's workloads survive a Floci restart and are re-latched by {@link #restoreCluster}.
      */
     public void stopCluster(Cluster cluster) {
-        if (cluster.getContainerId() != null && cluster.getDockerName() != null) {
-            lifecycleManager.removeIfExistsStrict(capacityBackupName(cluster));
-        }
         unregisterMetadataEndpoint(cluster);
         Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
         if (cluster.getContainerId() == null) {
@@ -804,6 +801,11 @@ public class EksClusterManager
             return;
         }
         lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
+        if (cluster.getDockerName() != null) {
+            // A failed backup cleanup must not leave the live node running. Keep the cluster
+            // record so explicit deletion can be retried once Docker accepts the removal.
+            lifecycleManager.removeIfExistsStrict(capacityBackupName(cluster));
+        }
         ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, clusterResourceName(cluster));
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
     }

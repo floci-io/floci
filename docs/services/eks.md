@@ -416,7 +416,8 @@ recreated against the retained data volume, reusing its published API port. Floc
 container until the replacement starts and restarts it if replacement fails. This also upgrades
 containers started before resource limits were available. If Docker cannot remove the stopped
 backup after a successful replacement, the new node keeps running and cluster deletion retries
-the backup cleanup before removing the data volume.
+the backup cleanup after stopping the live node. If cleanup still fails, deletion reports the
+error and can be retried before the data volume is removed.
 
 #### Cluster node provider ID and topology labels
 
