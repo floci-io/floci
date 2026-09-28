@@ -491,10 +491,19 @@ jobs:
             "$@" floci:test-native
           SH
           cat > wait-floci.sh <<'SH'
+          health=starting
           for _ in $(seq 1 60); do
-            [ "$(docker inspect -f '{{.State.Health.Status}}' floci)" = healthy ] && exit 0
+            health=$(docker inspect -f '{{.State.Health.Status}}' floci)
+            if [ "$health" = healthy ]; then
+              exit 0
+            fi
+            if [ "$health" = unhealthy ]; then
+              break
+            fi
             sleep 1
           done
+          echo "::error::floci did not report healthy (last status: $health)"
+          docker inspect -f '{{json .State.Health}}' floci
           docker logs --tail 50 floci
           exit 1
           SH
