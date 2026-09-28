@@ -54,6 +54,7 @@ class ApiGatewayHttpProxyIntegrationTest {
     private static final AtomicReference<String> lastForwardedHeader = new AtomicReference<>();
     private static final AtomicReference<String> lastAuthorization = new AtomicReference<>();
     private static final AtomicReference<String> lastAmzDate = new AtomicReference<>();
+    private static final AtomicReference<String> lastCallerAuthorization = new AtomicReference<>();
     private static final AtomicReference<String> lastHost = new AtomicReference<>();
     private static final AtomicReference<List<String>> lastTraceHeaders = new AtomicReference<>();
 
@@ -84,6 +85,7 @@ class ApiGatewayHttpProxyIntegrationTest {
         lastForwardedHeader.set(exchange.getRequestHeaders().getFirst("X-Forwarded-Tenant"));
         lastAuthorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
         lastAmzDate.set(exchange.getRequestHeaders().getFirst("X-Amz-Date"));
+        lastCallerAuthorization.set(exchange.getRequestHeaders().getFirst("X-Caller-Authorization"));
         lastHost.set(exchange.getRequestHeaders().getFirst("Host"));
         List<String> trace = exchange.getRequestHeaders().get("X-Trace");
         lastTraceHeaders.set(trace == null ? null : List.copyOf(trace));
@@ -112,6 +114,7 @@ class ApiGatewayHttpProxyIntegrationTest {
         lastForwardedHeader.set(null);
         lastAuthorization.set(null);
         lastAmzDate.set(null);
+        lastCallerAuthorization.set(null);
         lastHost.set(null);
         lastTraceHeaders.set(null);
     }
@@ -347,6 +350,27 @@ class ApiGatewayHttpProxyIntegrationTest {
         assertEquals("/orders", lastPath.get());
         assertNull(lastAuthorization.get());
         assertEquals(signed.get("X-Amz-Date"), lastAmzDate.get());
+    }
+
+    @Test
+    void methodRequestAuthorizationStillResolvesInParameterMappingOnAwsIamRoute() throws Exception {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-iam-auth-mapping-api", backendUri(),
+                "{\"integration.request.header.X-Caller-Authorization\":\"method.request.header.Authorization\"}",
+                "AWS_IAM");
+        String path = "/execute-api/" + apiId + "/test/orders";
+        Map<String, String> signed = ExecuteApiRequestSigner.signedHeaders(
+                "GET", path, Map.of(), "localhost:" + RestAssured.port, null,
+                "test", "test", "us-east-1", Instant.now());
+
+        // Only the header the integration receives is dropped: the method request still carries
+        // Authorization, so an explicit mapping from it resolves as it did before.
+        given().headers(signed)
+                .when().get(path)
+                .then().statusCode(200);
+
+        assertEquals(signed.get("Authorization"), lastCallerAuthorization.get());
+        assertNull(lastAuthorization.get());
     }
 
     @Test
