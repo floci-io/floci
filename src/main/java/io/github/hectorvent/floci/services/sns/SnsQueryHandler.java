@@ -140,7 +140,7 @@ public class SnsQueryHandler {
             return xmlErrorResponse("InvalidParameter", "SMS attributes are required.", 400);
         }
         snsService.setSmsAttributes(attributes, region);
-        return Response.ok(AwsQueryResponse.envelopeNoResult("SetSMSAttributes", AwsNamespaces.SNS)).build();
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetSMSAttributes", AwsNamespaces.SNS)).build();
     }
 
     private Response handleGetSmsAttributes(MultivaluedMap<String, String> params, String region) {

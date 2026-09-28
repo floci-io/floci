@@ -1305,7 +1305,8 @@ class SnsIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .body(containsString("<SetSMSAttributesResult>"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
