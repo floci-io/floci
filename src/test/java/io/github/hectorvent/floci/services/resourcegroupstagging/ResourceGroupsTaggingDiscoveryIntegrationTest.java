@@ -365,6 +365,36 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     @Test
+    void domainSegmentNestedUnderRestApiArnIsRejected() {
+        String marker = unique();
+        String apiId = createRestApi(marker);
+        String domainName = "discovery-" + marker + ".example.com";
+        given()
+            .contentType("application/json")
+            .body("""
+                {"domainName": "%s", "regionalCertificateArn": "%s",
+                 "endpointConfiguration": {"types": ["REGIONAL"]}, "tags": {"fd": "%s"}}
+                """.formatted(domainName, ARN_PREFIX.formatted("acm") + "certificate/" + UUID.randomUUID(), marker))
+        .when()
+            .post("/domainnames")
+        .then()
+            .statusCode(201);
+
+        putNestedTagIsRejected(APIGATEWAY_ARN_PREFIX + "/restapis/" + apiId + "/domainnames/" + domainName);
+        given()
+        .when()
+            .get("/domainnames/" + domainName)
+        .then()
+            .statusCode(200)
+            .body("tags.fd", equalTo(marker))
+            .body("tags", not(hasKey("nested")));
+        restApiTagsAreUnchanged(apiId, marker);
+
+        given().when().delete("/domainnames/" + domainName).then().statusCode(202);
+        given().when().delete("/restapis/" + apiId).then().statusCode(202);
+    }
+
+    @Test
     void deploymentArnIsRejectedByTheTagsPath() {
         String marker = unique();
         String apiId = createRestApi(marker);

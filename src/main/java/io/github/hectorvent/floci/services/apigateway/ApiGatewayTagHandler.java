@@ -8,6 +8,8 @@ import jakarta.inject.Inject;
 
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * {@link TagHandler} implementation for API Gateway.
@@ -25,8 +27,8 @@ public class ApiGatewayTagHandler implements TagHandler {
     private static final String API_KEYS = "/apikeys/";
     private static final String DOMAIN_NAMES = "/domainnames/";
     private static final String REST_APIS = "/restapis/";
-    private static final String STAGES = "/stages/";
     private static final String USAGE_PLANS = "/usageplans/";
+    private static final Pattern STAGE_RESOURCE = Pattern.compile("/restapis/[^/]+/stages/([^/]+)");
 
     private final ApiGatewayService service;
 
@@ -47,7 +49,7 @@ public class ApiGatewayTagHandler implements TagHandler {
 
     @Override
     public Map<String, String> listTags(String region, String arn) {
-        String domainName = domainNameFromArn(arn);
+        String domainName = topLevelIdFromArn(arn, DOMAIN_NAMES);
         if (domainName != null) {
             return service.getDomainNameTags(region, domainName);
         }
@@ -67,7 +69,7 @@ public class ApiGatewayTagHandler implements TagHandler {
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        String domainName = domainNameFromArn(arn);
+        String domainName = topLevelIdFromArn(arn, DOMAIN_NAMES);
         String apiKeyId = topLevelIdFromArn(arn, API_KEYS);
         String usagePlanId = topLevelIdFromArn(arn, USAGE_PLANS);
         String stageName = stageNameFromArn(arn);
@@ -86,7 +88,7 @@ public class ApiGatewayTagHandler implements TagHandler {
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
-        String domainName = domainNameFromArn(arn);
+        String domainName = topLevelIdFromArn(arn, DOMAIN_NAMES);
         String apiKeyId = topLevelIdFromArn(arn, API_KEYS);
         String usagePlanId = topLevelIdFromArn(arn, USAGE_PLANS);
         String stageName = stageNameFromArn(arn);
@@ -124,36 +126,23 @@ public class ApiGatewayTagHandler implements TagHandler {
     }
 
     /**
-     * The stage a {@code /restapis/<apiId>/stages/<stageName>} ARN names, or null for any other ARN.
-     * Stages carry their own tags; without this they would land on the REST API.
+     * The stage an ARN whose resource part is exactly {@code /restapis/<apiId>/stages/<stageName>}
+     * names, or null for any other ARN. Stages carry their own tags; without this they would land on
+     * the REST API.
      */
     private static String stageNameFromArn(String arn) {
-        int at = arn.indexOf(STAGES);
-        if (at < 0 || !arn.contains("/restapis/")) {
+        if (!AwsArnUtils.isArn(arn)) {
             return null;
         }
-        String stageName = arn.substring(at + STAGES.length());
-        return stageName.isEmpty() || stageName.contains("/") ? null : stageName;
-    }
-
-    /**
-     * The domain a {@code /domainnames/<name>} ARN names, or null for any other ARN. A base path
-     * mapping ARN continues past the domain and is not taggable, so it falls through to the REST API
-     * parse and its "invalid ARN" answer.
-     */
-    private static String domainNameFromArn(String arn) {
-        int at = arn.indexOf(DOMAIN_NAMES);
-        if (at < 0) {
-            return null;
-        }
-        String domainName = arn.substring(at + DOMAIN_NAMES.length());
-        return domainName.isEmpty() || domainName.contains("/") ? null : domainName;
+        Matcher matcher = STAGE_RESOURCE.matcher(AwsArnUtils.parse(arn).resource());
+        return matcher.matches() ? matcher.group(1) : null;
     }
 
     /**
      * The id an ARN whose resource part is exactly {@code <prefix><id>} names, such as
-     * {@code /apikeys/<apiKeyId>} or {@code /usageplans/<usagePlanId>}, or null for any other ARN,
-     * including one that nests the prefix under another resource.
+     * {@code /apikeys/<apiKeyId>} or {@code /domainnames/<domainName>}, or null for any other ARN,
+     * including one that nests the prefix under another resource. A base path mapping ARN continues
+     * past the domain, so it falls through to the REST API parse and its "invalid ARN" answer.
      */
     private static String topLevelIdFromArn(String arn, String prefix) {
         if (!AwsArnUtils.isArn(arn)) {
