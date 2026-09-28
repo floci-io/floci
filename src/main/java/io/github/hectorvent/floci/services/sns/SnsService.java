@@ -53,6 +53,7 @@ import java.util.Collections;
 import java.util.Deque;
 import java.util.HexFormat;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -68,6 +69,9 @@ public class SnsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SnsService.class);
     private static final Duration FIFO_DEDUP_WINDOW = Duration.ofMinutes(5);
+    private static final Set<String> SMS_ATTRIBUTE_NAMES = Set.of("MonthlySpendLimit",
+            "DeliveryStatusIAMRole", "DeliveryStatusSuccessSamplingRate", "DefaultSenderID",
+            "DefaultSMSType", "UsageReportS3Bucket");
     /** Includes the original send and two immediate retries for local SQS fan-out. */
     private static final int SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS = 3;
     private static final String SUBSCRIPTION_REDRIVE_POLICY = "RedrivePolicy";
@@ -111,6 +115,7 @@ public class SnsService implements Resettable, ResourceProvider {
     private final StorageBackend<String, PlatformEndpoint> platformEndpointStore;
     private final Deque<PushNotification> pushCapture = new ConcurrentLinkedDeque<>();
     private final StorageBackend<String, SentSms> smsStore;
+    private final StorageBackend<String, Map<String, String>> smsAttributesStore;
     private final RegionResolver regionResolver;
     private final SqsService sqsService;
     private final LambdaService lambdaService;
@@ -141,6 +146,9 @@ public class SnsService implements Resettable, ResourceProvider {
                         }),
                 storageFactory.create("sns", "sns-sms.json",
                         new TypeReference<Map<String, SentSms>>() {
+                        }),
+                storageFactory.create("sns", "sns-sms-attributes.json",
+                        new TypeReference<Map<String, Map<String, String>>>() {
                         }),
                 regionResolver,
                 sqsService,
@@ -194,6 +202,7 @@ public class SnsService implements Resettable, ResourceProvider {
         this.platformAppStore = platformAppStore;
         this.platformEndpointStore = platformEndpointStore;
         this.smsStore = new InMemoryStorage<>();
+        this.smsAttributesStore = new InMemoryStorage<>();
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
@@ -222,11 +231,26 @@ public class SnsService implements Resettable, ResourceProvider {
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService, FirehoseService firehoseService,
                String baseUrl, ObjectMapper objectMapper) {
+        this(topicStore, subscriptionStore, platformAppStore, platformEndpointStore,
+                smsStore, new InMemoryStorage<>(), regionResolver, sqsService,
+                lambdaService, firehoseService, baseUrl, objectMapper);
+    }
+
+    SnsService(StorageBackend<String, Topic> topicStore,
+               StorageBackend<String, Subscription> subscriptionStore,
+               StorageBackend<String, PlatformApplication> platformAppStore,
+               StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+               StorageBackend<String, SentSms> smsStore,
+               StorageBackend<String, Map<String, String>> smsAttributesStore,
+               RegionResolver regionResolver, SqsService sqsService,
+               LambdaService lambdaService, FirehoseService firehoseService,
+               String baseUrl, ObjectMapper objectMapper) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
         this.platformEndpointStore = platformEndpointStore;
         this.smsStore = smsStore;
+        this.smsAttributesStore = smsAttributesStore;
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
@@ -239,6 +263,63 @@ public class SnsService implements Resettable, ResourceProvider {
     public void clear() {
         pushCapture.clear();
         fifoDeduplicationCache.clear();
+    }
+
+    public synchronized void setSmsAttributes(Map<String, String> attributes, String region) {
+        String key = regionResolver.getAccountId() + "::" + region;
+        Map<String, String> updated = new LinkedHashMap<>(smsAttributesStore.get(key).orElse(Map.of()));
+        for (Map.Entry<String, String> entry : attributes.entrySet()) {
+            String name = entry.getKey();
+            String value = entry.getValue();
+            if (!SMS_ATTRIBUTE_NAMES.contains(name) || value == null) {
+                throw new AwsException("InvalidParameter", "Invalid SMS attribute: " + name, 400);
+            }
+            if (value.isEmpty()) {
+                updated.remove(name);
+                continue;
+            }
+            if ("DefaultSMSType".equals(name)
+                    && !"Promotional".equals(value) && !"Transactional".equals(value)) {
+                throw new AwsException("InvalidParameter", "Invalid DefaultSMSType: " + value, 400);
+            }
+            if ("MonthlySpendLimit".equals(name)) {
+                try {
+                    if (new BigDecimal(value).signum() < 0) {
+                        throw new NumberFormatException("negative amount");
+                    }
+                } catch (NumberFormatException e) {
+                    throw new AwsException("InvalidParameter", "Invalid MonthlySpendLimit: " + value, 400);
+                }
+            }
+            if ("DeliveryStatusSuccessSamplingRate".equals(name)) {
+                try {
+                    int rate = Integer.parseInt(value);
+                    if (rate < 0 || rate > 100) {
+                        throw new NumberFormatException("out of range");
+                    }
+                } catch (NumberFormatException e) {
+                    throw new AwsException("InvalidParameter",
+                            "Invalid DeliveryStatusSuccessSamplingRate: " + value, 400);
+                }
+            }
+            updated.put(name, value);
+        }
+        smsAttributesStore.put(key, updated);
+    }
+
+    public Map<String, String> getSmsAttributes(List<String> names, String region) {
+        String key = regionResolver.getAccountId() + "::" + region;
+        Map<String, String> stored = smsAttributesStore.get(key).orElse(Map.of());
+        if (names == null || names.isEmpty()) {
+            return new LinkedHashMap<>(stored);
+        }
+        Map<String, String> selected = new LinkedHashMap<>();
+        for (String name : names) {
+            if (stored.containsKey(name)) {
+                selected.put(name, stored.get(name));
+            }
+        }
+        return selected;
     }
 
     public Topic createTopic(String name, Map<String, String> attributes,

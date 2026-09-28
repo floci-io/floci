@@ -34,6 +34,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class SnsServiceTest {
 
@@ -63,6 +64,47 @@ class SnsServiceTest {
         assertNotNull(topic);
         assertEquals("my-topic", topic.getName());
         assertEquals("arn:aws:sns:us-east-1:000000000000:my-topic", topic.getTopicArn());
+    }
+
+    @Test
+    void smsAttributesAreScopedToAccountAndRegion() {
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("111122223333", "444455556666", "111122223333");
+        SnsService service = new SnsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), regionResolver, null, null, null, BASE_URL, new ObjectMapper());
+
+        service.setSmsAttributes(Map.of("DefaultSMSType", "Transactional", "MonthlySpendLimit", "10"), REGION);
+
+        assertTrue(service.getSmsAttributes(List.of(), REGION).isEmpty());
+        assertEquals(Map.of("DefaultSMSType", "Transactional", "MonthlySpendLimit", "10"),
+                service.getSmsAttributes(List.of(), REGION));
+        assertTrue(service.getSmsAttributes(List.of(), "us-west-2").isEmpty());
+        assertEquals(Map.of("DefaultSMSType", "Transactional"),
+                service.getSmsAttributes(List.of("DefaultSMSType"), REGION));
+    }
+
+    @Test
+    void smsAttributesRejectInvalidValuesWithoutChangingStoredSettings() {
+        snsService.setSmsAttributes(Map.of("DefaultSMSType", "Promotional"), REGION);
+
+        assertThrows(AwsException.class, () -> snsService.setSmsAttributes(
+                Map.of("DefaultSMSType", "Bulk"), REGION));
+        assertThrows(AwsException.class, () -> snsService.setSmsAttributes(
+                Map.of("DeliveryStatusSuccessSamplingRate", "101"), REGION));
+        assertEquals(Map.of("DefaultSMSType", "Promotional"),
+                snsService.getSmsAttributes(List.of(), REGION));
+    }
+
+    @Test
+    void emptySmsAttributeResetsOnlyThatPreference() {
+        snsService.setSmsAttributes(Map.of("DefaultSMSType", "Transactional",
+                "MonthlySpendLimit", "10"), REGION);
+
+        snsService.setSmsAttributes(Map.of("DefaultSMSType", ""), REGION);
+
+        assertEquals(Map.of("MonthlySpendLimit", "10"),
+                snsService.getSmsAttributes(List.of(), REGION));
     }
 
     @Test

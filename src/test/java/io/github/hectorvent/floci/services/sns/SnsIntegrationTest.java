@@ -1291,4 +1291,43 @@ class SnsIntegrationTest {
         .then()
             .statusCode(200);
     }
+
+    @Test
+    @Order(150)
+    void smsAttributesRoundTripAcrossQueryAndJsonProtocols() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SetSMSAttributes")
+            .formParam("attributes.entry.1.key", "DefaultSMSType")
+            .formParam("attributes.entry.1.value", "Transactional")
+            .formParam("attributes.entry.2.key", "MonthlySpendLimit")
+            .formParam("attributes.entry.2.value", "10")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetSMSAttributes")
+            .formParam("attributes.member.1", "DefaultSMSType")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<key>DefaultSMSType</key>"))
+            .body(containsString("<value>Transactional</value>"))
+            .body(not(containsString("MonthlySpendLimit")));
+
+        given()
+            .contentType(SNS_CONTENT_TYPE)
+            .header("X-Amz-Target", "SNS_20100331.GetSMSAttributes")
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("attributes.DefaultSMSType", equalTo("Transactional"))
+            .body("attributes.MonthlySpendLimit", equalTo("10"));
+    }
 }

@@ -12,6 +12,8 @@
 | `ListTopics` | List all topics |
 | `GetTopicAttributes` | Get topic configuration |
 | `SetTopicAttributes` | Update topic configuration |
+| `GetSMSAttributes` | Read account SMS preferences in this region |
+| `SetSMSAttributes` | Set account SMS preferences in this region |
 | `Subscribe` | Subscribe an endpoint (SQS, HTTP, Lambda, email) |
 | `Unsubscribe` | Remove a subscription |
 | `ListSubscriptions` | List all subscriptions |
@@ -34,6 +36,11 @@
 | `GetEndpointAttributes` | Read endpoint attributes |
 | `SetEndpointAttributes` | Update endpoint attributes (e.g. `Enabled=false` to simulate token expiry) |
 | `ListEndpointsByPlatformApplication` | List endpoints under a platform app |
+
+SMS preferences are stored per account and region. `GetSMSAttributes` can select individual
+names; omitting the list returns all configured preferences. Setting an empty value clears
+that preference. SMS delivery remains mocked, so these settings do not generate delivery
+reports or CloudWatch delivery logs.
 
 ## Configuration
 
