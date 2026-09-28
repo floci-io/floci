@@ -1720,6 +1720,57 @@ class SsmIntegrationTest {
             .body("InvalidParameters", contains("/selector/param:9"));
     }
 
+    @Test
+    void labelParameterVersion_validationErrors() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/test/param", "Labels": [] }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/test/param", "Labels": [""] }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/test/param", "Labels": ["%s"] }
+                """.formatted("a".repeat(101)))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/test/param", "Labels": ["l1","l2","l3","l4","l5","l6","l7","l8","l9","l10","l11"] }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
     private io.restassured.response.ValidatableResponse describeParameters(String body) {
         return given()
             .header("X-Amz-Target", "AmazonSSM.DescribeParameters")

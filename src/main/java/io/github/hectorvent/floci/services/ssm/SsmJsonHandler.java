@@ -929,13 +929,52 @@ public class SsmJsonHandler {
         return Response.ok(response).build();
     }
 
+    private static final int MAX_LABELS = 10;
+    private static final int MAX_LABEL_LENGTH = 100;
+
+    private List<String> requireLabels(JsonNode request) {
+        JsonNode labelsNode = request.path("Labels");
+        if (labelsNode.isMissingNode() || labelsNode.isNull()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'labels' failed to satisfy constraint: Member must not be null",
+                    400);
+        }
+        if (!labelsNode.isArray() || labelsNode.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                    400);
+        }
+        if (labelsNode.size() > MAX_LABELS) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to "
+                            + MAX_LABELS,
+                    400);
+        }
+        List<String> labels = new ArrayList<>(labelsNode.size());
+        for (JsonNode l : labelsNode) {
+            String label = l.asText();
+            if (!l.isTextual() || label.isEmpty()) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                        400);
+            }
+            if (label.length() > MAX_LABEL_LENGTH) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to "
+                                + MAX_LABEL_LENGTH,
+                        400);
+            }
+            labels.add(label);
+        }
+        return labels;
+    }
+
     private Response handleLabelParameterVersion(JsonNode request, String region) {
         String name = request.path("Name").asText();
         Long parameterVersion = request.hasNonNull("ParameterVersion")
                 ? request.path("ParameterVersion").asLong()
                 : null;
-        List<String> labels = new ArrayList<>();
-        request.path("Labels").forEach(l -> labels.add(l.asText()));
+        List<String> labels = requireLabels(request);
 
         SsmService.LabelParameterVersionResult result = ssmService.labelParameterVersion(
                 name, parameterVersion, labels, region);

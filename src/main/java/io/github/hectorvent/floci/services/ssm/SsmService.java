@@ -276,7 +276,7 @@ public class SsmService implements ResourceProvider {
             return Optional.empty();
         }
         boolean isVersion = selector.chars().allMatch(Character::isDigit);
-        // A label may sit on several versions; the newest one wins.
+        // A label is unique across parameter versions because attaching it moves it from any prior version.
         return historyStore.get(storageKey).orElse(List.of()).stream()
                 .filter(h -> isVersion
                         ? String.valueOf(h.getVersion()).equals(selector)
@@ -460,6 +460,29 @@ public class SsmService implements ResourceProvider {
 
     public synchronized LabelParameterVersionResult labelParameterVersion(String name, Long parameterVersion,
                                                              List<String> labels, String region) {
+        if (labels == null || labels.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                    400);
+        }
+        if (labels.size() > 10) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to 10",
+                    400);
+        }
+        for (String label : labels) {
+            if (label == null || label.isEmpty()) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                        400);
+            }
+            if (label.length() > 100) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to 100",
+                        400);
+            }
+        }
+
         String storageKey = regionKey(region, name);
         Parameter current = parameterStore.get(storageKey).orElseThrow(() ->
                 new AwsException("ParameterNotFound", "Parameter " + name + " not found.", 400));

@@ -234,10 +234,10 @@ class SsmServiceTest {
         ssmService.putParameter("/app/key", "v1", "String", null, false, region);
 
         SsmService.LabelParameterVersionResult result = ssmService.labelParameterVersion(
-                "/app/key", 1L, List.of("2", "aws:label", "ssm.label", "valid-label", "valid.label_1", ""), region);
+                "/app/key", 1L, List.of("2", "aws:label", "ssm.label", "valid-label", "valid.label_1"), region);
 
         assertEquals(1, result.parameterVersion());
-        assertEquals(List.of("2", "aws:label", "ssm.label", ""), result.invalidLabels());
+        assertEquals(List.of("2", "aws:label", "ssm.label"), result.invalidLabels());
 
         Parameter labeled = ssmService.getParameter("/app/key:valid-label", region);
         assertEquals("v1", labeled.getValue());
@@ -247,6 +247,49 @@ class SsmServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> ssmService.getParameter("/app/key:2", region));
         assertEquals("ParameterVersionNotFound", ex.getErrorCode());
+    }
+
+    @Test
+    void labelParameterVersionEmptyLabelsThrowsValidationException() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.labelParameterVersion("/app/key", 1L, List.of(), region));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void labelParameterVersionMoreThan10LabelsThrowsValidationException() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        List<String> elevenLabels = List.of(
+                "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10", "l11");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.labelParameterVersion("/app/key", 1L, elevenLabels, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void labelParameterVersionEmptyLabelStringThrowsValidationException() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.labelParameterVersion("/app/key", 1L, List.of(""), region));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void labelParameterVersionLabelOver100CharsThrowsValidationException() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        String tooLong = "a".repeat(101);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.labelParameterVersion("/app/key", 1L, List.of(tooLong), region));
+        assertEquals("ValidationException", ex.getErrorCode());
     }
 
     @Test
