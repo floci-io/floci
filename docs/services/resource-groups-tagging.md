@@ -50,7 +50,7 @@ the owning service's value wins. CloudWatch Logs log group ARNs are returned
 without the trailing `:*`.
 
 `TagResources` forwards the tags to the owning service only when that service
-registers a shared tag handler, such as API Gateway, and currently lists the
+registers a tag handler, such as API Gateway or MSK, and currently lists the
 exact ARN as one of its resources visible to the request's region and account,
 by the same rule reads use. The tags then live only in the owning
 service, so `GetApiKey` shows a tag set through `TagResources`, and nothing is

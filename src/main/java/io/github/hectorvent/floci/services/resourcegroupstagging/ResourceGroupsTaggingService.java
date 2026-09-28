@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.resourcegroupstagging.model.ResourceTagMapping;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Any;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -52,7 +53,7 @@ public class ResourceGroupsTaggingService implements Resettable {
     @Inject
     public ResourceGroupsTaggingService(StorageFactory storageFactory,
                                         Instance<ResourceProvider> providers,
-                                        Instance<TagHandler> tagHandlers,
+                                        @Any Instance<TagHandler> tagHandlers,
                                         RegionResolver regionResolver) {
         // The upcasts select the Iterable constructor instead of recursing into this one.
         this(storageFactory, (Iterable<ResourceProvider>) providers, (Iterable<TagHandler>) tagHandlers,

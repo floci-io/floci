@@ -465,6 +465,43 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     @Test
+    void taggingApiWritesReachTheMskCluster() {
+        String marker = unique();
+        String clusterArn = given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "discovery-%s", "kafkaVersion": "3.6.0", "tags": {"fd": "%s"}}
+                """.formatted(marker, marker))
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(200)
+            .extract().path("clusterArn");
+
+        tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"added": "yes"}}
+                """.formatted(clusterArn))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", anEmptyMap());
+        mskTags(clusterArn)
+            .body("tags.fd", equalTo(marker))
+            .body("tags.added", equalTo("yes"));
+
+        tagging("UntagResources", """
+                {"ResourceARNList": ["%s"], "TagKeys": ["added"]}
+                """.formatted(clusterArn))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", anEmptyMap());
+        mskTags(clusterArn)
+            .body("tags.fd", equalTo(marker))
+            .body("tags", not(hasKey("added")));
+
+        given().when().delete("/v1/clusters/{arn}", clusterArn).then().statusCode(200);
+    }
+
+    @Test
     void usagePlanIsDiscoveredByType() {
         String marker = unique();
         String planId = given()
@@ -575,6 +612,15 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
         .then()
             .statusCode(201)
             .extract().path("id");
+    }
+
+    private static ValidatableResponse mskTags(String arn) {
+        return given()
+            .pathParam("arn", arn)
+        .when()
+            .get("/v1/tags/{arn}")
+        .then()
+            .statusCode(200);
     }
 
     private static void deleteApiKey(String id) {
