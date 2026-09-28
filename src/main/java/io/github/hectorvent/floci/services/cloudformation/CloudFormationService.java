@@ -1448,6 +1448,10 @@ public class CloudFormationService implements ResourceProvider {
 
                     StackResource resource = stack.getResources().get(logicalId);
                     StackResource previousResource = resource;
+                    String priorId = previousResource != null ? previousResource.getPhysicalId() : null;
+                    Map<String, String> priorAttrs = previousResource != null
+                            ? Map.copyOf(previousResource.getAttributes())
+                            : Map.of();
                     if (resource == null) {
                         resource = new StackResource();
                         resource.setLogicalId(logicalId);
@@ -1495,7 +1499,6 @@ public class CloudFormationService implements ResourceProvider {
                     resourceAttrs.put(logicalId, resource.getAttributes());
 
                     if (!isCreate) {
-                        String priorId = previousResource != null ? previousResource.getPhysicalId() : null;
                         boolean replaced = dispatcher.hasReplacementUpdate(resource)
                                 || (priorId != null && !priorId.equals(resource.getPhysicalId()));
                         if (replaced) {
@@ -1508,6 +1511,32 @@ public class CloudFormationService implements ResourceProvider {
                                             allResourceIds, deps, conditions);
                                     if (deps.contains(logicalId)) {
                                         changedResourceIds.add(candidateId);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Cập nhật in-place nhưng có thể thay đổi attribute (ví dụ LatestVersionNumber của LaunchTemplate)
+                            Map<String, String> newAttrs = resource.getAttributes();
+                            Set<String> changedAttrNames = new HashSet<>();
+                            if (newAttrs != null) {
+                                for (Map.Entry<String, String> entry : newAttrs.entrySet()) {
+                                    if (!Objects.equals(entry.getValue(), priorAttrs.get(entry.getKey()))) {
+                                        changedAttrNames.add(entry.getKey());
+                                    }
+                                }
+                            }
+                            for (String priorKey : priorAttrs.keySet()) {
+                                if (newAttrs == null || !newAttrs.containsKey(priorKey)) {
+                                    changedAttrNames.add(priorKey);
+                                }
+                            }
+                            if (!changedAttrNames.isEmpty()) {
+                                for (String candidateId : sortedLogicalIds) {
+                                    if (!changedResourceIds.contains(candidateId)) {
+                                        if (referencesAnyAttribute(resources.path(candidateId).path("Properties"),
+                                                logicalId, changedAttrNames, conditions)) {
+                                            changedResourceIds.add(candidateId);
+                                        }
                                     }
                                 }
                             }
@@ -3130,6 +3159,112 @@ public class CloudFormationService implements ResourceProvider {
                 deps.add(resourcePart);
             }
         }
+    }
+
+    /**
+     * Kiểm tra xem một node trong template có tham chiếu đến bất kỳ attribute nào bị thay đổi
+     * của tài nguyên targetLogicalId hay không (thông qua Fn::GetAtt hoặc Fn::Sub).
+     * Được dùng để kéo lại (pull in) các tài nguyên phụ thuộc khi một tài nguyên được cập nhật in-place
+     * nhưng có attribute bị thay đổi (ví dụ LatestVersionNumber của LaunchTemplate).
+     */
+    private boolean referencesAnyAttribute(JsonNode node, String targetLogicalId, Set<String> targetAttrNames,
+                                           Map<String, Boolean> conditions) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return false;
+        }
+        if (node.isObject()) {
+            if (node.has("Fn::GetAtt")) {
+                JsonNode getAtt = node.get("Fn::GetAtt");
+                String logicalId = null;
+                if (getAtt.isArray() && getAtt.size() >= 2) {
+                    logicalId = getAtt.get(0).asText();
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 1; i < getAtt.size(); i++) {
+                        if (i > 1) {
+                            sb.append('.');
+                        }
+                        sb.append(getAtt.get(i).asText());
+                    }
+                    if (targetLogicalId.equals(logicalId)
+                            && (targetAttrNames.contains(sb.toString()) || targetAttrNames.contains(getAtt.get(1).asText()))) {
+                        return true;
+                    }
+                } else if (getAtt.isTextual()) {
+                    String[] parts = getAtt.textValue().split("\\.", 2);
+                    logicalId = parts[0];
+                    String attrName = parts.length > 1 ? parts[1] : null;
+                    if (targetLogicalId.equals(logicalId) && attrName != null && targetAttrNames.contains(attrName)) {
+                        return true;
+                    }
+                }
+            }
+            if (node.has("Fn::If")) {
+                JsonNode fnIf = node.get("Fn::If");
+                if (fnIf.isArray() && fnIf.size() == 3) {
+                    if (conditions != null && conditions.containsKey(fnIf.get(0).asText())) {
+                        boolean condition = conditions.get(fnIf.get(0).asText());
+                        return referencesAnyAttribute(fnIf.get(condition ? 1 : 2), targetLogicalId, targetAttrNames, conditions);
+                    }
+                    return referencesAnyAttribute(fnIf.get(1), targetLogicalId, targetAttrNames, conditions)
+                            || referencesAnyAttribute(fnIf.get(2), targetLogicalId, targetAttrNames, conditions);
+                }
+            }
+            if (node.has("Fn::Sub")) {
+                if (subReferencesAttribute(node.get("Fn::Sub"), targetLogicalId, targetAttrNames, conditions)) {
+                    return true;
+                }
+            }
+            for (Iterator<JsonNode> it = node.elements(); it.hasNext(); ) {
+                if (referencesAnyAttribute(it.next(), targetLogicalId, targetAttrNames, conditions)) {
+                    return true;
+                }
+            }
+            return false;
+        } else if (node.isArray()) {
+            for (JsonNode item : node) {
+                if (referencesAnyAttribute(item, targetLogicalId, targetAttrNames, conditions)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean subReferencesAttribute(JsonNode sub, String targetLogicalId, Set<String> targetAttrNames,
+                                           Map<String, Boolean> conditions) {
+        String template;
+        Set<String> explicitVars = new HashSet<>();
+
+        if (sub.isTextual()) {
+            template = sub.textValue();
+        } else if (sub.isArray() && sub.size() >= 1) {
+            template = sub.get(0).asText();
+            if (sub.size() >= 2 && sub.get(1).isObject()) {
+                sub.get(1).fieldNames().forEachRemaining(explicitVars::add);
+                if (referencesAnyAttribute(sub.get(1), targetLogicalId, targetAttrNames, conditions)) {
+                    return true;
+                }
+            }
+        } else {
+            return false;
+        }
+
+        Matcher matcher = SUB_VAR_PATTERN.matcher(template);
+        while (matcher.find()) {
+            String varName = matcher.group(1);
+            if (varName.startsWith("AWS::") || explicitVars.contains(varName)) {
+                continue;
+            }
+            int dot = varName.indexOf('.');
+            if (dot > 0) {
+                String resourcePart = varName.substring(0, dot);
+                String attrPart = varName.substring(dot + 1);
+                if (targetLogicalId.equals(resourcePart) && targetAttrNames.contains(attrPart)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static String stackStorageKey(String stackName, String region) {

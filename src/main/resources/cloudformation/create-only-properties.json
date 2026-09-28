@@ -1,4 +1,5 @@
 {
+  "AWS::ApiGateway::Account": [],
   "AWS::ApiGateway::ApiKey": [
     "GenerateDistinctId",
     "Name",
@@ -32,10 +33,12 @@
     "ParentId",
     "RestApiId"
   ],
+  "AWS::ApiGateway::RestApi": [],
   "AWS::ApiGateway::Stage": [
     "RestApiId",
     "StageName"
   ],
+  "AWS::ApiGateway::UsagePlan": [],
   "AWS::ApiGateway::UsagePlanKey": [
     "KeyId",
     "UsagePlanId",
@@ -70,6 +73,7 @@
   "AWS::AppSync::FunctionConfiguration": [
     "ApiId"
   ],
+  "AWS::AppSync::GraphQLApi": [],
   "AWS::AppSync::GraphQLSchema": [
     "ApiId"
   ],
@@ -141,6 +145,11 @@
   "AWS::CloudFormation::CustomResource": [
     "ServiceToken"
   ],
+  "AWS::CloudFront::CachePolicy": [],
+  "AWS::CloudFront::Distribution": [],
+  "AWS::CloudFront::OriginAccessControl": [],
+  "AWS::CloudFront::OriginRequestPolicy": [],
+  "AWS::CloudFront::ResponseHeadersPolicy": [],
   "AWS::CloudTrail::Trail": [
     "TrailName"
   ],
@@ -168,6 +177,7 @@
   "AWS::CodePipeline::Webhook": [
     "Name"
   ],
+  "AWS::Cognito::UserPool": [],
   "AWS::Cognito::UserPoolClient": [
     "GenerateSecret",
     "UserPoolId"
@@ -230,6 +240,7 @@
     "SecurityGroups",
     "SubnetId"
   ],
+  "AWS::EC2::InternetGateway": [],
   "AWS::EC2::LaunchTemplate": [
     "LaunchTemplateName"
   ],
@@ -432,6 +443,7 @@
     "Description",
     "Path"
   ],
+  "AWS::IAM::Policy": [],
   "AWS::IAM::Role": [
     "Path",
     "RoleName"
@@ -455,9 +467,6 @@
   "AWS::IoT::TopicRule": [
     "RuleName"
   ],
-  "AWS::KMS::Alias": [
-    "AliasName"
-  ],
   "AWS::Kinesis::Stream": [
     "Name"
   ],
@@ -474,6 +483,10 @@
     "IcebergDestinationConfiguration/CatalogConfiguration",
     "SnowflakeDestinationConfiguration/SnowflakeVpcConfiguration"
   ],
+  "AWS::KMS::Alias": [
+    "AliasName"
+  ],
+  "AWS::KMS::Key": [],
   "AWS::Lambda::Alias": [
     "Name",
     "FunctionName"
@@ -540,12 +553,15 @@
     "FilterName",
     "LogGroupName"
   ],
+  "AWS::Organizations::Account": [],
+  "AWS::Organizations::Organization": [],
   "AWS::Organizations::OrganizationalUnit": [
     "ParentId"
   ],
   "AWS::Organizations::Policy": [
     "Type"
   ],
+  "AWS::Organizations::ResourcePolicy": [],
   "AWS::Pipes::Pipe": [
     "Name",
     "Source",
@@ -638,6 +654,7 @@
   "AWS::Redshift::ClusterSecurityGroup": [
     "Description"
   ],
+  "AWS::Redshift::ClusterSubnetGroup": [],
   "AWS::Route53::HostedZone": [
     "Name"
   ],
@@ -653,6 +670,15 @@
   "AWS::S3::BucketPolicy": [
     "Bucket"
   ],
+  "AWS::Scheduler::ScheduleGroup": [
+    "Name"
+  ],
+  "AWS::SecretsManager::Secret": [
+    "Name"
+  ],
+  "AWS::SecretsManager::SecretTargetAttachment": [
+    "SecretId"
+  ],
   "AWS::SNS::Subscription": [
     "Endpoint",
     "Protocol",
@@ -662,21 +688,14 @@
     "TopicName",
     "FifoTopic"
   ],
+  "AWS::SNS::TopicPolicy": [],
   "AWS::SQS::Queue": [
     "FifoQueue",
     "QueueName"
   ],
+  "AWS::SQS::QueuePolicy": [],
   "AWS::SSM::Parameter": [
     "Name"
-  ],
-  "AWS::Scheduler::ScheduleGroup": [
-    "Name"
-  ],
-  "AWS::SecretsManager::Secret": [
-    "Name"
-  ],
-  "AWS::SecretsManager::SecretTargetAttachment": [
-    "SecretId"
   ],
   "AWS::StepFunctions::StateMachine": [
     "StateMachineName",

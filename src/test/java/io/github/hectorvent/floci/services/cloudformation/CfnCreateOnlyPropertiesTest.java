@@ -28,6 +28,13 @@ class CfnCreateOnlyPropertiesTest {
     }
 
     @Test
+    void isCreateOnly_treatsEmptySchemaListAsAuthoritative() {
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGateway::RestApi", "Name"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Cognito::UserPool", "UserPoolName"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGateway::UsagePlan", "UsagePlanName"));
+    }
+
+    @Test
     void isCreateOnly_fallsBackToHeuristicForCustomOrUnknownTypes() {
         assertTrue(CfnCreateOnlyProperties.isCreateOnly("Custom::Widget", "WidgetName"));
         assertTrue(CfnCreateOnlyProperties.isCreateOnly("Custom::Widget", "Name"));

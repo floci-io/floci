@@ -38,8 +38,17 @@ public final class CfnCreateOnlyProperties {
 
     public static boolean isCreateOnly(String resourceType, String propertyName) {
         Set<String> createOnly = PROPERTIES.get(resourceType);
-        if (createOnly != null && createOnly.contains(propertyName)) {
-            return true;
+        if (createOnly != null) {
+            // Danh sách schema là authoritative cho kiểu tài nguyên này, kể cả khi rỗng
+            if (createOnly.contains(propertyName)) {
+                return true;
+            }
+            for (String prop : createOnly) {
+                if (prop.startsWith(propertyName + "/")) {
+                    return true;
+                }
+            }
+            return false;
         }
         if ("Name".equals(propertyName)
                 || propertyName.endsWith("Identifier")

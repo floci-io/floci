@@ -5,6 +5,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -622,6 +623,85 @@ class CfnUnchangedResourceUpdateIntegrationTest {
         assertTrue(queueStatuses.contains("CREATE_COMPLETE"));
         assertFalse(queueStatuses.contains("UPDATE_IN_PROGRESS"));
         assertFalse(queueStatuses.contains("UPDATE_COMPLETE"));
+
+        deleteStack(stackName);
+    }
+
+    @Test
+    void createChangeSet_updateRestApiAndUserPoolRename_reportsReplacementFalse() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "probe-cs-rename-" + suffix;
+        String changeSetName = "cs-rename-" + suffix;
+
+        String initialTemplate = """
+                {
+                  "Resources": {
+                    "Api": {
+                      "Type": "AWS::ApiGateway::RestApi",
+                      "Properties": {"Name": "api-initial-%s"}
+                    },
+                    "Pool": {
+                      "Type": "AWS::Cognito::UserPool",
+                      "Properties": {"UserPoolName": "pool-initial-%s"}
+                    }
+                  }
+                }
+                """.formatted(suffix, suffix);
+
+        String updatedTemplate = """
+                {
+                  "Resources": {
+                    "Api": {
+                      "Type": "AWS::ApiGateway::RestApi",
+                      "Properties": {"Name": "api-renamed-%s"}
+                    },
+                    "Pool": {
+                      "Type": "AWS::Cognito::UserPool",
+                      "Properties": {"UserPoolName": "pool-renamed-%s"}
+                    }
+                  }
+                }
+                """.formatted(suffix, suffix);
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "CreateStack").formParam("StackName", stackName)
+                .formParam("TemplateBody", initialTemplate)
+                .when().post("/").then().statusCode(200);
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeStacks").formParam("StackName", stackName)
+                .when().post("/").then().statusCode(200)
+                .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "CreateChangeSet")
+                .formParam("StackName", stackName)
+                .formParam("ChangeSetName", changeSetName)
+                .formParam("ChangeSetType", "UPDATE")
+                .formParam("TemplateBody", updatedTemplate)
+                .when().post("/").then().statusCode(200);
+
+        String desc = given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "DescribeChangeSet")
+                .formParam("StackName", stackName)
+                .formParam("ChangeSetName", changeSetName)
+                .when().post("/").then().statusCode(200)
+                .extract().body().asString();
+
+        List<Map<String, String>> members = XmlParser.extractGroups(desc, "ResourceChange");
+        Map<String, String> apiChange = members.stream()
+                .filter(m -> "Api".equals(m.get("LogicalResourceId")))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("Modify", apiChange.get("Action"));
+        assertEquals("False", apiChange.get("Replacement"));
+
+        Map<String, String> poolChange = members.stream()
+                .filter(m -> "Pool".equals(m.get("LogicalResourceId")))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("Modify", poolChange.get("Action"));
+        assertEquals("False", poolChange.get("Replacement"));
 
         deleteStack(stackName);
     }
