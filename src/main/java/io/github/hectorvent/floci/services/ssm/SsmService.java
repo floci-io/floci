@@ -275,7 +275,9 @@ public class SsmService implements ResourceProvider {
         try {
             secret = secretsManager.describeSecret(secretId, region);
             boolean byId = selector != null && secret.getVersions().containsKey(selector);
-            version = secretsManager.getSecretValue(secretId, byId ? selector : null, byId ? null : selector, region);
+            // By the ARN just described, so a secret replaced in between is not found rather than read.
+            version = secretsManager.getSecretValue(secret.getArn(), byId ? selector : null,
+                    byId ? null : selector, region);
         } catch (AwsException e) {
             if ("ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw new AwsException("ParameterNotFound", "An error occurred (ParameterNotFound) when referencing "
