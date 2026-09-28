@@ -629,7 +629,7 @@ class AppSyncResolverExecutorTest {
     }
 
     @Test
-    void jsLambdaResolverSendsTheRequestDocumentToTheFunction() throws Exception {
+    void jsLambdaResolverSendsOnlyThePayloadToTheFunction() throws Exception {
         String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";
         DataSource lambdaDataSource = dataSource("accountFunction", DataSourceType.AWS_LAMBDA);
         lambdaDataSource.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
@@ -653,11 +653,11 @@ class AppSyncResolverExecutorTest {
         assertEquals(Map.of("id", "42"), result.data());
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
         verify(lambdaService).invokeArn(eq(functionArn), payload.capture(), eq(InvocationType.RequestResponse));
-        assertEquals(request, objectMapper.readValue(payload.getValue(), Map.class));
+        assertEquals(request.get("payload"), objectMapper.readValue(payload.getValue(), Map.class));
     }
 
     @Test
-    void vtlLambdaInvokeWithoutPayloadSendsTheDocumentToTheFunction() throws Exception {
+    void vtlLambdaResolverSendsOnlyPayloadToTheFunction() throws Exception {
         String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";
         DataSource lambdaDataSource = dataSource("accountFunction", DataSourceType.AWS_LAMBDA);
         lambdaDataSource.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
@@ -673,17 +673,20 @@ class AppSyncResolverExecutorTest {
                 vtlEngine(), objectMapper);
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("accountFunction");
-        resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\",\"operation\":\"Invoke\"}");
+        resolver.setRequestMappingTemplate("""
+                {"version":"2018-05-29","operation":"Invoke",
+                 "payload":{"field":"getPost","arguments":{"id":$util.toJson($ctx.args.id)}}}
+                """);
         resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
 
-        ResolverOutcome result = lambdaExecutor.execute(resolver, invocation(Map.of()));
+        ResolverOutcome result = lambdaExecutor.execute(resolver, invocation(Map.of("id", "42")));
 
         assertTrue(result.errors().isEmpty());
         assertEquals(Map.of(), result.data());
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
         verify(lambdaService).invokeArn(eq(functionArn), payload.capture(),
                 eq(InvocationType.RequestResponse));
-        assertEquals(Map.of("version", "2018-05-29", "operation", "Invoke"),
+        assertEquals(Map.of("field", "getPost", "arguments", Map.of("id", "42")),
                 objectMapper.readValue(payload.getValue(), Map.class));
     }
 

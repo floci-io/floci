@@ -53,29 +53,36 @@ class LambdaDataSourceInvokerTest {
     }
 
     @Test
-    void jsSendsTheEntireRequestDocumentToTheFunction() throws Exception {
+    void jsOnlyThePayloadReachesTheFunction() {
         answers("{\"id\": \"1\"}");
 
-        Map<String, Object> request = Map.of("version", "2018-05-29", "operation", "Invoke",
-                "payload", Map.of("field", "getMessages"));
-        Object result = invoker.invoke(dataSource(), request, "eu-west-1");
+        Object result = invoker.invoke(dataSource(),
+                Map.of("version", "2018-05-29", "operation", "Invoke",
+                        "payload", Map.of("field", "getMessages")), "eu-west-1");
 
-        assertEquals(request, mapper.readValue(capturePayload(), Map.class));
+        assertEquals("{\"field\":\"getMessages\"}", capturePayload());
         assertEquals(Map.of("id", "1"), result);
     }
 
     @Test
-    void vtlSendsTheEntireRequestDocumentToTheFunction() throws Exception {
+    void vtlOnlyThePayloadReachesTheFunction() throws Exception {
         answers("{\"id\": \"1\"}");
 
         Object result = invoker.invokeVtl(dataSource(),
                 Map.of("version", "2018-05-29", "operation", "Invoke",
                         "payload", Map.of("field", "getMessages")), "eu-west-1");
 
-        assertEquals(Map.of("version", "2018-05-29", "operation", "Invoke",
-                        "payload", Map.of("field", "getMessages")),
-                mapper.readValue(capturePayload(), Map.class));
+        assertEquals(Map.of("field", "getMessages"), mapper.readValue(capturePayload(), Map.class));
         assertEquals(Map.of("id", "1"), result);
+    }
+
+    @Test
+    void vtlWithoutPayloadDoesNotSendRequestMetadata() throws Exception {
+        answers("{}");
+
+        invoker.invokeVtl(dataSource(), Map.of("version", "2018-05-29", "operation", "Invoke"), "eu-west-1");
+
+        assertEquals(Map.of(), mapper.readValue(capturePayload(), Map.class));
     }
 
     @Test
@@ -97,14 +104,14 @@ class LambdaDataSourceInvokerTest {
     }
 
     @Test
-    void aBatchInvokeSendsTheRequestDocumentAndAnswersTheList() throws Exception {
+    void aBatchInvokeSendsOnlyThePayloadAndAnswersTheList() throws Exception {
         answers("[{\"id\": \"1\"}, {\"id\": \"2\"}]");
 
         Map<String, Object> request = Map.of("operation", "BatchInvoke",
                 "payload", List.of(Map.of("id", "1"), Map.of("id", "2")));
         Object result = invoker.invoke(dataSource(), request, "eu-west-1");
 
-        assertEquals(request, mapper.readValue(capturePayload(), Map.class));
+        assertEquals(request.get("payload"), mapper.readValue(capturePayload(), List.class));
         assertEquals(List.of(Map.of("id", "1"), Map.of("id", "2")), result);
     }
 
