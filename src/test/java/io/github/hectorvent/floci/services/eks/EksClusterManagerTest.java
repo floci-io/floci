@@ -2585,6 +2585,10 @@ class EksClusterManagerTest {
 
             manager.startCluster(cluster);
             assertEquals(mockAuditHandle, manager.getLogHandle(cluster));
+            verify(logStreamer).execLogCallbackForAccount(
+                    "000000000000", "/aws/eks/audit-cluster/cluster",
+                    "kube-apiserver-audit-container-id-1234567890123456789",
+                    "us-east-1", "eks-audit:audit-cluster", false);
 
             manager.stopCluster(cluster);
             verify(lifecycleManager).stopAndRemove("container-id-123456789012345678901234567890", mockAuditHandle);

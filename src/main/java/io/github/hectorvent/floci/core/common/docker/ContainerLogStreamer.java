@@ -35,7 +35,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 
 /**
- * Streams Docker container logs to both the Floci console logger and CloudWatch Logs.
+ * Streams Docker container logs to CloudWatch Logs and, by default, the Floci console logger.
  * Consolidates the log streaming pattern used across container managers.
  */
 @ApplicationScoped
@@ -85,7 +85,14 @@ public class ContainerLogStreamer {
     public Closeable attachForAccount(
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix) {
-        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null);
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null, true);
+    }
+
+    /** Attaches a stream with optional console output while always forwarding to CloudWatch Logs. */
+    public Closeable attachForAccount(
+            String accountId, String containerId, String logGroup, String logStream,
+            String region, String logPrefix, boolean logToConsole) {
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null, logToConsole);
     }
 
     /**
@@ -94,21 +101,28 @@ public class ContainerLogStreamer {
     public Closeable attachFromNowForAccount(
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix) {
-        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, Instant.now());
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, Instant.now(), true);
     }
 
     /** {@code since} of null follows the container's complete log history. */
     Closeable attachForAccount(
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix, Instant since) {
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, since, true);
+    }
+
+    private Closeable attachForAccount(
+            String accountId, String containerId, String logGroup, String logStream,
+            String region, String logPrefix, Instant since, boolean logToConsole) {
         ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
 
-        // Trim trailing whitespace and drop blank lines, then fan each reassembled line out to the
-        // console logger and CloudWatch Logs.
+        // Trim trailing whitespace and drop blank lines before forwarding each reassembled line.
         Consumer<String> emitter = line -> {
             String trimmed = line.stripTrailing();
             if (!trimmed.isEmpty()) {
-                LOG.infov("[{0}] {1}", logPrefix, trimmed);
+                if (logToConsole) {
+                    LOG.infov("[{0}] {1}", logPrefix, trimmed);
+                }
                 forwardToCloudWatchLogs(accountId, logGroup, logStream, region, trimmed);
             }
         };
@@ -155,7 +169,14 @@ public class ContainerLogStreamer {
 
     public ResultCallback.Adapter<Frame> execLogCallbackForAccount(
             String accountId, String logGroup, String logStream, String region, String logPrefix) {
-        return frameCallback(accountId, logGroup, logStream, region, logPrefix);
+        return execLogCallbackForAccount(accountId, logGroup, logStream, region, logPrefix, true);
+    }
+
+    /** Returns an exec callback with optional console output and CloudWatch Logs delivery. */
+    public ResultCallback.Adapter<Frame> execLogCallbackForAccount(
+            String accountId, String logGroup, String logStream, String region, String logPrefix,
+            boolean logToConsole) {
+        return frameCallback(accountId, logGroup, logStream, region, logPrefix, logToConsole);
     }
 
     /**
@@ -165,7 +186,7 @@ public class ContainerLogStreamer {
      *                  default account
      */
     private ResultCallback.Adapter<Frame> frameCallback(String accountId, String logGroup, String logStream,
-                                                        String region, String logPrefix) {
+                                                        String region, String logPrefix, boolean logToConsole) {
         return new ResultCallback.Adapter<>() {
             @Override
             public void onNext(Frame frame) {
@@ -174,7 +195,9 @@ public class ContainerLogStreamer {
                 }
                 String line = new String(frame.getPayload(), StandardCharsets.UTF_8).stripTrailing();
                 if (!line.isEmpty()) {
-                    LOG.infov("[{0}] {1}", logPrefix, line);
+                    if (logToConsole) {
+                        LOG.infov("[{0}] {1}", logPrefix, line);
+                    }
                     forwardToCloudWatchLogs(accountId, logGroup, logStream, region, line);
                 }
             }

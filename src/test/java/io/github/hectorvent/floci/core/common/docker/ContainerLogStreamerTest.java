@@ -7,6 +7,8 @@ import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.io.Closeable;
@@ -17,6 +19,10 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -24,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
@@ -74,6 +81,91 @@ class ContainerLogStreamerTest {
 
         verify(cloudWatchLogsService).putLogEventsForAccount(
                 eq("555555555555"), eq("/aws/lambda/example"), eq("stream"), anyList(), eq("us-east-1"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void attachedStreamAlwaysReachesCloudWatchAndConsoleIsOptional(boolean logToConsole) {
+        DockerClient dockerClient = mock(DockerClient.class);
+        LogContainerCmd command = mock(LogContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.logContainerCmd("container-1")).thenReturn(command);
+        CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(dockerClient, cloudWatchLogsService);
+
+        if (logToConsole) {
+            streamer.attachForAccount("555555555555", "container-1", "/aws/eks/cluster/cluster",
+                    "stream", "us-east-1", "eks:cluster");
+        } else {
+            streamer.attachForAccount("555555555555", "container-1", "/aws/eks/cluster/cluster",
+                    "stream", "us-east-1", "eks:cluster", false);
+        }
+        ArgumentCaptor<ContainerLogStreamer.LogReassemblyCallback> callback =
+                ArgumentCaptor.forClass(ContainerLogStreamer.LogReassemblyCallback.class);
+        verify(command).exec(callback.capture());
+
+        List<LogRecord> records = captureConsoleLogs(() ->
+                callback.getValue().onNext(new Frame(StreamType.STDOUT, utf8("audit event\n"))));
+
+        assertEquals(logToConsole ? 1 : 0, records.size());
+        verify(cloudWatchLogsService).putLogEventsForAccount(
+                eq("555555555555"), eq("/aws/eks/cluster/cluster"), eq("stream"),
+                argThat(events ->
+                        events.size() == 1 && "audit event".equals(events.getFirst().get("message"))),
+                eq("us-east-1"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void execStreamAlwaysReachesCloudWatchAndConsoleIsOptional(boolean logToConsole) {
+        CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(null, cloudWatchLogsService);
+        ResultCallback.Adapter<Frame> callback = logToConsole
+                ? streamer.execLogCallbackForAccount("555555555555", "/aws/eks/cluster/cluster",
+                        "stream", "us-east-1", "eks-audit:cluster")
+                : streamer.execLogCallbackForAccount("555555555555", "/aws/eks/cluster/cluster",
+                        "stream", "us-east-1", "eks-audit:cluster", false);
+
+        List<LogRecord> records = captureConsoleLogs(() ->
+                callback.onNext(new Frame(StreamType.STDOUT, utf8("audit event\n"))));
+
+        assertEquals(logToConsole ? 1 : 0, records.size());
+        verify(cloudWatchLogsService).putLogEventsForAccount(
+                eq("555555555555"), eq("/aws/eks/cluster/cluster"), eq("stream"),
+                argThat(events ->
+                        events.size() == 1 && "audit event".equals(events.getFirst().get("message"))),
+                eq("us-east-1"));
+    }
+
+    private static List<LogRecord> captureConsoleLogs(Runnable action) {
+        Logger logger = Logger.getLogger(ContainerLogStreamer.class.getName());
+        Level previousLevel = logger.getLevel();
+        List<LogRecord> records = new ArrayList<>();
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getLevel().intValue() >= Level.INFO.intValue()) {
+                    records.add(record);
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        handler.setLevel(Level.ALL);
+        logger.setLevel(Level.INFO);
+        logger.addHandler(handler);
+        try {
+            action.run();
+        } finally {
+            logger.removeHandler(handler);
+            logger.setLevel(previousLevel);
+        }
+        return records;
     }
 
     @Test
