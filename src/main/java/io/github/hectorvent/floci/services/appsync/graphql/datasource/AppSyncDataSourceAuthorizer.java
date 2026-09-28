@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
 import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
@@ -27,16 +28,19 @@ public class AppSyncDataSourceAuthorizer {
     private final IamService iamService;
     private final AssumeRolePolicyEvaluator trustEvaluator;
     private final IamPolicyEvaluator policyEvaluator;
+    private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
     public AppSyncDataSourceAuthorizer(IamService iamService,
                                        AssumeRolePolicyEvaluator trustEvaluator,
                                        IamPolicyEvaluator policyEvaluator,
+                                       RegionResolver regionResolver,
                                        ObjectMapper objectMapper) {
         this.iamService = iamService;
         this.trustEvaluator = trustEvaluator;
         this.policyEvaluator = policyEvaluator;
+        this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
 
@@ -93,9 +97,11 @@ public class AppSyncDataSourceAuthorizer {
             return;
         }
         CallerContext caller = iamService.resolvePrincipalContext(roleArn);
+        Map<String, List<String>> conditionContext = region == null
+                ? Map.of() : Map.of("aws:RequestedRegion", List.of(region));
         for (Permission permission : permissions) {
             if (policyEvaluator.simulatePrincipalPolicy(caller, permission.action(),
-                    permission.resource(), Map.of()) != IamPolicyEvaluator.SimulationDecision.ALLOWED) {
+                    permission.resource(), conditionContext) != IamPolicyEvaluator.SimulationDecision.ALLOWED) {
                 throw denied(dataSource, "service role cannot perform " + permission.action()
                         + " on " + permission.resource());
             }
@@ -107,8 +113,8 @@ public class AppSyncDataSourceAuthorizer {
         return switch (dataSource.getType()) {
             case AMAZON_DYNAMODB -> dynamoDbPermissions(dataSource, request, region, roleId);
             case AWS_LAMBDA -> lambdaPermissions(dataSource);
-            case RELATIONAL_DATABASE -> relationalPermissions(dataSource, region, roleId);
-            default -> List.of();
+            case RELATIONAL_DATABASE -> relationalPermissions(dataSource, region);
+            default -> throw denied(dataSource, "data source type is not supported for role authorization");
         };
     }
 
@@ -123,11 +129,8 @@ public class AppSyncDataSourceAuthorizer {
         String action = switch (operation) {
             case "GetItem", "PutItem", "UpdateItem", "DeleteItem", "Query", "Scan" ->
                     "dynamodb:" + operation;
-            default -> null;
+            default -> throw denied(dataSource, "DynamoDB operation is not supported for role authorization");
         };
-        if (action == null) {
-            return List.of();
-        }
         String resource = new AwsArnUtils.Arn(roleId.partition(), "dynamodb", region,
                 roleId.accountId(), "table/" + table).toString();
         String index = normalized.path("index").asText(null);
@@ -143,8 +146,7 @@ public class AppSyncDataSourceAuthorizer {
         return functionArn == null ? List.of() : List.of(new Permission("lambda:InvokeFunction", functionArn));
     }
 
-    private List<Permission> relationalPermissions(DataSource dataSource, String region,
-                                                    AwsArnUtils.Arn roleId) {
+    private List<Permission> relationalPermissions(DataSource dataSource, String region) {
         Map<String, Object> config = dataSource.getRelationalDatabaseConfig();
         Object rawEndpoint = config == null ? null : config.get("rdsHttpEndpointConfig");
         if (!(rawEndpoint instanceof Map<?, ?> endpoint)) {
@@ -157,9 +159,8 @@ public class AppSyncDataSourceAuthorizer {
         }
         String endpointRegion = text(endpoint, "awsRegion");
         String clusterArn = cluster.startsWith("arn:") ? cluster
-                : new AwsArnUtils.Arn(roleId.partition(), "rds",
-                        endpointRegion == null ? region : endpointRegion,
-                        roleId.accountId(), "cluster:" + cluster).toString();
+                : AwsArnUtils.Arn.of("rds", endpointRegion == null ? region : endpointRegion,
+                        regionResolver.getAccountId(), "cluster:" + cluster).toString();
         List<Permission> permissions = new ArrayList<>();
         permissions.add(new Permission("rds-data:ExecuteStatement", clusterArn));
         permissions.add(new Permission("secretsmanager:GetSecretValue", secret));

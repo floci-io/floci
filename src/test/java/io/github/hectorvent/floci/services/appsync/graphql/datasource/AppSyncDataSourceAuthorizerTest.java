@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.datasource;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
 import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
@@ -32,9 +33,11 @@ class AppSyncDataSourceAuthorizerTest {
             """;
 
     private final IamService iam = mock(IamService.class);
+    private final RegionResolver regionResolver = mock(RegionResolver.class);
     private final ObjectMapper mapper = new ObjectMapper();
     private final AppSyncDataSourceAuthorizer authorizer = new AppSyncDataSourceAuthorizer(
-            iam, new AssumeRolePolicyEvaluator(mapper), new IamPolicyEvaluator(mapper), mapper);
+            iam, new AssumeRolePolicyEvaluator(mapper), new IamPolicyEvaluator(mapper),
+            regionResolver, mapper);
 
     private record DynamoDbRequest(String operation, String index) {}
 
@@ -141,6 +144,46 @@ class AppSyncDataSourceAuthorizerTest {
     }
 
     @Test
+    void sourceArnConditionsAreCaseSensitive() {
+        DataSource source = dataSource(DataSourceType.AWS_LAMBDA);
+        role("""
+                {"Statement":{"Effect":"Allow","Action":"sts:AssumeRole",
+                  "Principal":{"Service":"appsync.amazonaws.com"},
+                  "Condition":{"ArnLike":{"aws:SourceArn":"arn:aws:appsync:us-east-1:000000000000:apis/EXAMPLE"}}}}
+                """, allow("lambda:InvokeFunction", "*"));
+        denied(authorizer, source, Map.of("operation", "Invoke"));
+    }
+
+    @Test
+    void missingTrustEffectDoesNotGrantAccess() {
+        DataSource source = dataSource(DataSourceType.AWS_LAMBDA);
+        role("""
+                {"Statement":{"Action":"sts:AssumeRole",
+                  "Principal":{"Service":"appsync.amazonaws.com"}}}
+                """, allow("lambda:InvokeFunction", "*"));
+        denied(authorizer, source, Map.of("operation", "Invoke"));
+    }
+
+    @Test
+    void requestedRegionConditionUsesInvocationRegion() {
+        DataSource source = dataSource(DataSourceType.AWS_LAMBDA);
+        role(TRUST, """
+                {"Statement":{"Effect":"Allow","Action":"lambda:InvokeFunction",
+                  "Resource":"*","Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-1"}}}}
+                """);
+        authorizer.authorize(source, Map.of("operation", "Invoke"), "us-east-1");
+        assertThrows(AwsException.class,
+                () -> authorizer.authorize(source, Map.of("operation", "Invoke"), "eu-west-1"));
+    }
+
+    @Test
+    void unsupportedOperationCannotSkipPolicyEvaluation() {
+        DataSource source = dataSource(DataSourceType.AMAZON_DYNAMODB);
+        role(TRUST, allow("dynamodb:GetItem", "*"));
+        denied(authorizer, source, Map.of("operation", "BatchGetItem"));
+    }
+
+    @Test
     void conditionalDenyOnlyAppliesToItsSourceAccount() {
         DataSource source = dataSource(DataSourceType.AWS_LAMBDA);
         role("""
@@ -217,6 +260,7 @@ class AppSyncDataSourceAuthorizerTest {
     @Test
     void rdsRequiresBothClusterAndSecretPermissions() {
         DataSource source = dataSource(DataSourceType.RELATIONAL_DATABASE);
+        when(regionResolver.getAccountId()).thenReturn("000000000000");
         String cluster = "arn:aws:rds:us-east-1:000000000000:cluster:products";
         String secret = "arn:aws:secretsmanager:us-east-1:000000000000:secret:products";
         role(TRUST, allow("rds-data:ExecuteStatement", cluster));
@@ -228,5 +272,19 @@ class AppSyncDataSourceAuthorizerTest {
                 ]}
                 """.formatted(cluster, secret));
         authorizer.authorize(source, "select 1", "us-east-1");
+    }
+
+    @Test
+    void rdsAuthorizationChecksTheActualTargetAccount() {
+        DataSource source = dataSource(DataSourceType.RELATIONAL_DATABASE);
+        when(regionResolver.getAccountId()).thenReturn("111111111111");
+        role(TRUST, """
+                {"Statement":[
+                  {"Effect":"Allow","Action":"rds-data:ExecuteStatement",
+                   "Resource":"arn:aws:rds:us-east-1:000000000000:cluster:products"},
+                  {"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"*"}
+                ]}
+                """);
+        denied(authorizer, source, "select 1");
     }
 }

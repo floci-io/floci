@@ -62,6 +62,9 @@ public class AssumeRolePolicyEvaluator {
             LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
             return false;
         }
+        if (!hasValidEffects(statements)) {
+            return false;
+        }
 
         boolean allow = false;
         if (statements.isArray()) {
@@ -90,6 +93,9 @@ public class AssumeRolePolicyEvaluator {
             statements = objectMapper.readTree(trustPolicyDocument).path("Statement");
         } catch (Exception e) {
             LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
+            return false;
+        }
+        if (!hasValidEffects(statements)) {
             return false;
         }
         boolean allow = false;
@@ -124,6 +130,9 @@ public class AssumeRolePolicyEvaluator {
             LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
             return false;
         }
+        if (!hasValidEffects(statements)) {
+            return false;
+        }
         boolean allow = false;
         if (statements.isArray()) {
             for (JsonNode statement : statements) {
@@ -142,6 +151,29 @@ public class AssumeRolePolicyEvaluator {
 
     private enum Match { ALLOW, DENY, NO_MATCH }
 
+    private boolean hasValidEffects(JsonNode statements) {
+        if (statements.isArray()) {
+            if (statements.isEmpty()) {
+                return false;
+            }
+            for (JsonNode statement : statements) {
+                if (!validEffect(statement)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return validEffect(statements);
+    }
+
+    private boolean validEffect(JsonNode statement) {
+        if (!statement.isObject()) {
+            return false;
+        }
+        String effect = statement.path("Effect").asText("");
+        return "Allow".equals(effect) || "Deny".equals(effect);
+    }
+
     private Match evaluateStatement(JsonNode stmt, String callerArn, String callerAccount) {
         if (!actionApplies(stmt)) {
             return Match.NO_MATCH;
@@ -149,14 +181,14 @@ public class AssumeRolePolicyEvaluator {
         if (!matchesPrincipal(stmt.get("Principal"), callerArn, callerAccount)) {
             return Match.NO_MATCH;
         }
-        return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
+        return effectOf(stmt);
     }
 
     private Match evaluateServiceStatement(JsonNode stmt, String servicePrincipal) {
         if (!actionApplies(stmt) || !matchesServicePrincipal(stmt.get("Principal"), servicePrincipal)) {
             return Match.NO_MATCH;
         }
-        return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
+        return effectOf(stmt);
     }
 
     private Match evaluateServiceStatement(JsonNode stmt, String servicePrincipal,
@@ -168,7 +200,15 @@ public class AssumeRolePolicyEvaluator {
         if (condition != Match.ALLOW) {
             return condition;
         }
-        return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
+        return effectOf(stmt);
+    }
+
+    private Match effectOf(JsonNode stmt) {
+        return switch (stmt.path("Effect").asText("")) {
+            case "Allow" -> Match.ALLOW;
+            case "Deny" -> Match.DENY;
+            default -> Match.NO_MATCH;
+        };
     }
 
     /** ALLOW means the condition matches, NO_MATCH means it does not, DENY means unsupported. */
@@ -224,7 +264,33 @@ public class AssumeRolePolicyEvaluator {
         if ("StringEquals".equals(operator)) {
             return values.asText().equals(actual);
         }
-        return IamPolicyEvaluator.globMatches(values.asText(), actual);
+        return globMatchesCaseSensitive(values.asText(), actual);
+    }
+
+    private boolean globMatchesCaseSensitive(String pattern, String value) {
+        int patternIndex = 0;
+        int valueIndex = 0;
+        int starIndex = -1;
+        int starValueIndex = -1;
+        while (valueIndex < value.length()) {
+            if (patternIndex < pattern.length()
+                    && (pattern.charAt(patternIndex) == '?' || pattern.charAt(patternIndex) == value.charAt(valueIndex))) {
+                patternIndex++;
+                valueIndex++;
+            } else if (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
+                starIndex = patternIndex++;
+                starValueIndex = valueIndex;
+            } else if (starIndex >= 0) {
+                patternIndex = starIndex + 1;
+                valueIndex = ++starValueIndex;
+            } else {
+                return false;
+            }
+        }
+        while (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
+            patternIndex++;
+        }
+        return patternIndex == pattern.length();
     }
 
     private boolean matchesServicePrincipal(JsonNode principalNode, String servicePrincipal) {

@@ -290,8 +290,9 @@ resource. An indexed DynamoDB Query or Scan checks the index ARN. RDS execution 
 Missing roles, missing trust, and insufficient permissions fail the field instead of calling
 the underlying service. IAM condition support here is limited to what Floci's trust and policy
 evaluators implement. `aws:SourceArn` and `aws:SourceAccount` trust conditions are checked for
-the calling API; unsupported condition operators fail closed. This is not a complete emulation
-of AWS STS AssumeRole credentials.
+the calling API; identity-policy checks include `aws:RequestedRegion` for the resolver invocation.
+Unsupported trust conditions and unmapped DynamoDB operations fail closed. This is not a complete
+emulation of AWS STS AssumeRole credentials.
 
 
 The GraphQL engine runs in the `floci-sidecar-graphql` container, so the sidecar walks the query and

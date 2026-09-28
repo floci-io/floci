@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.datasource;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
 import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
@@ -66,7 +67,8 @@ class AppSyncDataSourceInvokersTest {
         when(iam.findRole("000000000000", "Resolver")).thenReturn(Optional.of(role));
         ObjectMapper mapper = new ObjectMapper();
         AppSyncDataSourceAuthorizer authorizer = new AppSyncDataSourceAuthorizer(iam,
-                new AssumeRolePolicyEvaluator(mapper), new IamPolicyEvaluator(mapper), mapper);
+                new AssumeRolePolicyEvaluator(mapper), new IamPolicyEvaluator(mapper),
+                mock(RegionResolver.class), mapper);
         AppSyncDataSourceInvoker invoker = mock(AppSyncDataSourceInvoker.class);
         when(invoker.type()).thenReturn(DataSourceType.AWS_LAMBDA);
         AppSyncDataSourceInvokers dispatch = new AppSyncDataSourceInvokers(List.of(invoker), authorizer);
