@@ -224,9 +224,9 @@ public class AppSyncResolverExecutor {
 
             for (FunctionConfiguration function : functions) {
                 Stage functionStage = Stage.of(function);
-                DataSource vtlDataSource = functionStage.vtl()
-                        ? requireVtlDataSource(function.getDataSourceName(),
-                                "function " + function.getName()) : null;
+                if (functionStage.vtl()) {
+                    validateVtlFunctionVersion(functionStage);
+                }
                 Object request = callHandler(functionStage, REQUEST, null, null, null);
                 if (returned) {
                     return result(earlyReturnValue);
@@ -235,6 +235,9 @@ public class AppSyncResolverExecutor {
                     previousResult = request;
                     continue;
                 }
+                DataSource vtlDataSource = functionStage.vtl()
+                        ? requireVtlDataSource(function.getDataSourceName(),
+                                "function " + function.getName()) : null;
                 Invocation invocation = functionStage.vtl()
                         ? invokeDataSource(vtlDataSource,
                                 prepareVtlDataSourceRequest(functionStage, vtlDataSource, request), true)
@@ -356,11 +359,6 @@ public class AppSyncResolverExecutor {
             if (!(request instanceof Map<?, ?> map)) {
                 throw mappingTemplateError("VTL request mapping template must render a JSON object");
             }
-            if (stage.function() && !"2018-05-29".equals(stage.functionVersion())) {
-                throw new AwsException("UnsupportedOperation",
-                        "Floci does not execute AppSync VTL function version "
-                                + stage.functionVersion(), 400);
-            }
             validateVtlRequestVersion(map);
             return switch (dataSource.getType()) {
                 case NONE -> prepareVtlNoneRequest(map);
@@ -370,6 +368,14 @@ public class AppSyncResolverExecutor {
                 default -> throw unsupportedVtlDataSource(dataSource.getType(), dataSource.getName(),
                         stage.function() ? "function" : "UNIT resolver");
             };
+        }
+
+        private void validateVtlFunctionVersion(Stage stage) {
+            if (!"2018-05-29".equals(stage.functionVersion())) {
+                throw new AwsException("UnsupportedOperation",
+                        "Floci does not execute AppSync VTL function version "
+                                + stage.functionVersion(), 400);
+            }
         }
 
         private Object prepareVtlNoneRequest(Map<?, ?> request) {

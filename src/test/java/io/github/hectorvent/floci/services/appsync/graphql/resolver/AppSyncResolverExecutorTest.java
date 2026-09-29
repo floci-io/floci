@@ -40,6 +40,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -948,7 +949,8 @@ class AppSyncResolverExecutorTest {
                         null, "request-id"));
         AppSyncResolverExecutor lambdaExecutor = new AppSyncResolverExecutor(appSync, jsRuntime,
                 new AppSyncDataSourceInvokers(List.of(
-                        new LambdaDataSourceInvoker(lambdaService, objectMapper))),
+                        new LambdaDataSourceInvoker(lambdaService, objectMapper)),
+                        mock(AppSyncDataSourceAuthorizer.class)),
                 vtlEngine(), objectMapper);
         Resolver resolver = resolver(ResolverKind.PIPELINE, null);
         resolver.setRequestMappingTemplate("{}");
@@ -967,7 +969,7 @@ class AppSyncResolverExecutorTest {
     @Test
     void vtlFunctionRequestReturnSkipsItsDataSourceAndContinuesThePipeline() {
         when(appSync.getDataSource(API_ID, "local"))
-                .thenReturn(dataSource("local", DataSourceType.NONE));
+                .thenThrow(new AwsException("NotFoundException", "Data source not found", 404));
         when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
         when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "local",
                 "#return({\"cached\":true})", "$util.toJson($ctx.result)"));
@@ -988,8 +990,28 @@ class AppSyncResolverExecutorTest {
         assertEquals("continued", result.data());
         assertTrue(result.errors().isEmpty());
         assertTrue(noneInvoker.requests.isEmpty());
+        verify(appSync, never()).getDataSource(API_ID, "local");
         assertEquals(List.of("pipeline-code#request", "fn2-code#request",
                 "fn2-code#response", "pipeline-code#response"), jsRuntime.calls);
+    }
+
+    @Test
+    void vtlFunctionRequestReturnCannotBypassUnsupportedFunctionVersion() {
+        FunctionConfiguration function = vtlFunction("fn1", "local",
+                "#return({\"cached\":true})", "$util.toJson($ctx.result)");
+        function.setFunctionVersion("2017-02-28");
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function);
+        Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+        jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(Map.of()));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(1, result.errors().size());
+        assertEquals("UnsupportedOperation", result.errors().get(0).errorType());
+        assertTrue(result.errors().get(0).message().contains("2017-02-28"));
+        verify(appSync, never()).getDataSource(API_ID, "local");
+        assertTrue(noneInvoker.requests.isEmpty());
     }
 
     @Test
