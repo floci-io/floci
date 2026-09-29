@@ -49,6 +49,7 @@ public class ApiGatewayTagHandler implements TagHandler {
 
     @Override
     public Map<String, String> listTags(String region, String arn) {
+        rejectAccountOrOtherRegion(region, arn);
         String domainName = topLevelIdFromArn(arn, DOMAIN_NAMES);
         if (domainName != null) {
             return service.getDomainNameTags(region, domainName);
@@ -69,6 +70,7 @@ public class ApiGatewayTagHandler implements TagHandler {
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
+        rejectAccountOrOtherRegion(region, arn);
         String domainName = topLevelIdFromArn(arn, DOMAIN_NAMES);
         String apiKeyId = topLevelIdFromArn(arn, API_KEYS);
         String usagePlanId = topLevelIdFromArn(arn, USAGE_PLANS);
@@ -88,6 +90,7 @@ public class ApiGatewayTagHandler implements TagHandler {
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
+        rejectAccountOrOtherRegion(region, arn);
         String domainName = topLevelIdFromArn(arn, DOMAIN_NAMES);
         String apiKeyId = topLevelIdFromArn(arn, API_KEYS);
         String usagePlanId = topLevelIdFromArn(arn, USAGE_PLANS);
@@ -102,6 +105,28 @@ public class ApiGatewayTagHandler implements TagHandler {
             service.untagStage(region, apiIdFromArn(arn), stageName, tagKeys);
         } else {
             service.untagResource(region, restApiIdFromArn(arn), tagKeys);
+        }
+    }
+
+    /**
+     * API Gateway ARNs carry no account: AWS rejects one that does, even the caller's own, before
+     * resolving anything, and answers an ARN naming another region as a missing resource. A string
+     * that is not an ARN is left to the parse and its errors.
+     */
+    private static void rejectAccountOrOtherRegion(String region, String arn) {
+        if (!AwsArnUtils.isArn(arn)) {
+            return;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        // ponytail: AWS names the resource type in both messages ("on RestApi <id>", "Invalid API
+        // identifier specified <account>:<id>"); Floci uses one generic message per error.
+        if (!parsed.accountId().isEmpty()) {
+            AwsArnUtils.Arn canonical = new AwsArnUtils.Arn(
+                    parsed.partition(), parsed.service(), parsed.region(), "", parsed.resource());
+            throw new AwsException("BadRequestException", "Expected ARN " + canonical + ", not " + arn, 400);
+        }
+        if (!parsed.region().isEmpty() && !parsed.region().equals(region)) {
+            throw new AwsException("NotFoundException", "Invalid resource identifier specified", 404);
         }
     }
 
