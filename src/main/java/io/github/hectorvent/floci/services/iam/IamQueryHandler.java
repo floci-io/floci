@@ -2227,8 +2227,11 @@ public class IamQueryHandler {
     }
 
     /**
-     * IAM's constraint-violation shape for a list member. Unlike the scalar form it does not quote
-     * the value, matching how AWS reports an over-long list rather than echoing every member back.
+     * The constraint-violation shape used for a list member. Unlike the scalar form it leaves the
+     * value out, which is Floci's choice rather than a rule AWS follows: captured violations
+     * elsewhere in AWS do quote the list, such as Lambda's {@code Value '[x86_64, arm64]' at
+     * 'architectures'}, while IAM's own are inconsistent about it. Omitting it keeps a request that
+     * breaks the limit from echoing every member back in the error message.
      */
     private static void checkListLength(int members, String param, int limit) {
         if (members > limit) {
