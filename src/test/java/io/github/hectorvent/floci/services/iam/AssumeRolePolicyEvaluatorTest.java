@@ -44,6 +44,15 @@ class AssumeRolePolicyEvaluatorTest {
     }
 
     @Test
+    void aServicePrincipalMatchesExactlyAndCaseSensitivelyInEitherForm() {
+        assertFalse(evaluator.allowsService(trust("{\"Service\":\"*.amazonaws.com\"}"), "redshift.amazonaws.com"));
+        assertFalse(evaluator.allowsService(
+                trust("{\"Service\":\"Redshift.amazonaws.com\"}"), "redshift.amazonaws.com"));
+        assertFalse(evaluator.allowsService(
+                trust("{\"Service\":\"redshift.AMAZONAWS.COM.CN\"}"), "redshift.amazonaws.com"));
+    }
+
+    @Test
     void allowsAccountRootPrincipal() {
         assertTrue(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws:iam::111111111111:root\"}"), CALLER_ARN, CALLER_ACCOUNT));

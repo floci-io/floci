@@ -775,9 +775,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 throw new AwsException("InvalidInput",
                         "A role named " + roleName + " already exists; supply a different CustomSuffix.", 400);
             }
+            // A legacy spelling (es.amazonaws.com.cn) names the same role, so its path and trust
+            // policy carry the universal principal the name was derived from.
+            String principal = ServicePrincipals.canonical(awsServiceName);
             String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                    + "\"Principal\":{\"Service\":\"" + awsServiceName + "\"},\"Action\":\"sts:AssumeRole\"}]}";
-            IamRole role = createRole(roleName, SERVICE_LINKED_ROLE_PATH + awsServiceName + "/",
+                    + "\"Principal\":{\"Service\":\"" + principal + "\"},\"Action\":\"sts:AssumeRole\"}]}";
+            IamRole role = createRole(roleName, SERVICE_LINKED_ROLE_PATH + principal + "/",
                     trustPolicy, description, 0, Map.of());
             role.setServiceLinkedRole(true);
             roles.put(roleName, role);

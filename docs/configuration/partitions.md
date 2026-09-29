@@ -107,7 +107,9 @@ did before.
   `eventSource`, service-linked role paths) uses it. The older per-partition forms the CDK
   retired (`elasticmapreduce.amazonaws.com.cn`, `logs.<region>.amazonaws.com.cn`,
   `config.c2s.ic.gov`) are still accepted wherever Floci matches a principal against a policy,
-  such as a role's trust policy, so a policy written in either form works.
+  such as a role's trust policy, so a policy written in either form works; matching stays exact
+  and case-sensitive. `CreateServiceLinkedRole` given a legacy form creates the same role as the
+  universal one: its name, path and trust policy all use `<service>.amazonaws.com`.
 - **XML namespaces** and the S3 canned-ACL group URIs (`http://acs.amazonaws.com/groups/...`)
   are identifiers, not hosts.
 - **AWS managed policy ARNs** keep the literal `aws` account slot: `arn:aws-cn:iam::aws:policy/AdministratorAccess`.

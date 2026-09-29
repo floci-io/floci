@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.core.common;
 
-import java.util.Locale;
 import java.util.Optional;
 
 /**
@@ -37,20 +36,21 @@ public final class ServicePrincipals {
     /**
      * Folds any partition or regional form of a service principal to the universal one:
      * {@code logs.cn-north-1.amazonaws.com.cn} and {@code config.c2s.ic.gov} become
-     * {@code logs.amazonaws.com} and {@code config.amazonaws.com}. A string that ends with no
-     * published DNS suffix is returned trimmed and lower-cased but otherwise unchanged, so a
-     * wildcard such as {@code *} or a non-principal value passes through.
+     * {@code logs.amazonaws.com} and {@code config.amazonaws.com}. Case is kept, since AWS
+     * matches principals case-sensitively; a string that ends with no published DNS suffix, as
+     * written, is returned trimmed but otherwise unchanged.
      */
     public static String canonical(String principal) {
         if (principal == null) {
             return null;
         }
-        String lower = principal.trim().toLowerCase(Locale.ROOT);
-        Optional<AwsPartitions.DnsSuffixMatch> match = AwsPartitions.stripKnownDnsSuffix(lower);
-        if (match.isEmpty()) {
-            return lower;
+        String trimmed = principal.trim();
+        Optional<AwsPartitions.DnsSuffixMatch> match = AwsPartitions.stripKnownDnsSuffix(trimmed);
+        // Principals are case-sensitive, so only a suffix written the way AWS publishes it folds.
+        if (match.isEmpty() || !trimmed.endsWith("." + match.get().dnsSuffix())) {
+            return trimmed;
         }
-        String labels = match.get().prefix();
+        String labels = trimmed.substring(0, trimmed.length() - match.get().dnsSuffix().length() - 1);
         int lastDot = labels.lastIndexOf('.');
         if (lastDot > 0 && AwsRegions.isRegionId(labels.substring(lastDot + 1))) {
             labels = labels.substring(0, lastDot);

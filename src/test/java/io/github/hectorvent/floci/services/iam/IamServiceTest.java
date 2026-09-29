@@ -602,10 +602,13 @@ class IamServiceTest {
 
     @Test
     void createServiceLinkedRoleAcceptsTheLegacyPartitionFormOfThePrincipal() {
-        // AWS still honours the pre-universal China principal; the derived name and the
-        // universal path are the same either way.
+        // AWS still honours the pre-universal China principal; the derived name, the path and the
+        // trust policy are the universal ones either way.
         IamRole role = iamService.createServiceLinkedRole("autoscaling.amazonaws.com.cn", null, null);
         assertEquals("AWSServiceRoleForAutoScaling", role.getRoleName());
+        assertEquals("/aws-service-role/autoscaling.amazonaws.com/", role.getPath());
+        assertTrue(role.getAssumeRolePolicyDocument().contains("\"Service\":\"autoscaling.amazonaws.com\""),
+                role.getAssumeRolePolicyDocument());
 
         IamRole es = iamService.createServiceLinkedRole("es.amazonaws.com.cn", null, null);
         assertEquals("AWSServiceRoleForEs", es.getRoleName());

@@ -39,10 +39,17 @@ class ServicePrincipalsTest {
     }
 
     @Test
-    void aValueWithNoPublishedSuffixPassesThroughForGlobMatching() {
+    void aValueWithNoPublishedSuffixPassesThroughUnchanged() {
         assertEquals("*", ServicePrincipals.canonical("*"));
         assertEquals("*.amazonaws.com", ServicePrincipals.canonical("*.amazonaws.com"));
-        assertEquals("ec2.internal", ServicePrincipals.canonical("EC2.internal"));
+        assertEquals("EC2.internal", ServicePrincipals.canonical("EC2.internal"));
+    }
+
+    /** AWS matches principals case-sensitively, so only a suffix written as published folds. */
+    @Test
+    void caseIsKeptAndAnUpperCaseSuffixDoesNotFold() {
+        assertEquals("Logs.amazonaws.com", ServicePrincipals.canonical("Logs.cn-north-1.amazonaws.com.cn"));
+        assertEquals("logs.AMAZONAWS.COM.CN", ServicePrincipals.canonical("logs.AMAZONAWS.COM.CN"));
         assertNotEquals(ServicePrincipals.of("ec2"), ServicePrincipals.canonical("ec2.internal"));
     }
 
