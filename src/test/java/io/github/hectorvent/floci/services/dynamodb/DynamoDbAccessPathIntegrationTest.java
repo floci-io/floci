@@ -363,7 +363,8 @@ class DynamoDbAccessPathIntegrationTest {
                 }
                 """.formatted(TABLE))
             .statusCode(400)
-            .body("__type", equalTo("ValidationException"));
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("NUMBER_VALUE cannot be converted to String"));
     }
 
     @Test
