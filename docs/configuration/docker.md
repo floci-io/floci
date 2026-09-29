@@ -62,6 +62,16 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_MAX_CONNECTIONS`
 
+Long-lived log-follow and exec-output streams use a second, separate pool so they can never starve create, start, stop and remove calls. Its size defaults to 512 and follows the same rule (at least 1):
+
+```yaml
+floci:
+  docker:
+    streaming-max-connections: 512
+```
+
+Environment variable: `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS`
+
 ## Private Registry Authentication
 
 Any service that pulls a container image from a private registry (Lambda image functions, custom OpenSearch images, private Postgres images, etc.) needs Docker credentials. Two approaches are supported and can be combined.
