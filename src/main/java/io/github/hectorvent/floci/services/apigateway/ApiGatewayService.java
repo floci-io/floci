@@ -1372,6 +1372,7 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     public void tagUsagePlan(String region, String usagePlanId, Map<String, String> tags) {
+        ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
         Map<String, String> merged = new HashMap<>(getUsagePlan(region, usagePlanId).getTags());
         merged.putAll(tags);
         replaceUsagePlanTags(region, usagePlanId, merged);

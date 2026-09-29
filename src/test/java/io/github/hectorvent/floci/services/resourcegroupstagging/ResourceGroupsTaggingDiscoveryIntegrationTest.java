@@ -274,6 +274,45 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     @Test
+    void usagePlanRejectionOfReservedTagIsReportedInFailedResourcesMap() {
+        String marker = unique();
+        String planId = given()
+            .contentType("application/json")
+            .body("""
+                {"name": "discovery-%s", "tags": {"rsid": "%s"}}
+                """.formatted(marker, marker))
+        .when()
+            .post("/usageplans")
+        .then()
+            .statusCode(201)
+            .extract().path("id");
+        String arn = APIGATEWAY_ARN_PREFIX + "/usageplans/" + planId;
+
+        tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"floci:override-id": "x%s"}}
+                """.formatted(arn, marker))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap", hasKey(arn))
+            .body("FailedResourcesMap['%s'].StatusCode".formatted(arn), equalTo(400))
+            .body("FailedResourcesMap['%s'].ErrorCode".formatted(arn), equalTo("BadRequestException"))
+            .body("FailedResourcesMap['%s'].ErrorMessage".formatted(arn), containsString("floci:override-id"));
+
+        getResources(rsidFilter("apigateway:usageplans", marker))
+            .body("ResourceTagMappingList.ResourceARN", contains(arn))
+            .body("ResourceTagMappingList[0].Tags.Key", not(hasItem("floci:override-id")));
+        given()
+        .when()
+            .get("/usageplans/" + planId)
+        .then()
+            .statusCode(200)
+            .body("tags.rsid", equalTo(marker))
+            .body("tags.size()", equalTo(1));
+
+        given().when().delete("/usageplans/" + planId).then().statusCode(202);
+    }
+
+    @Test
     void deploymentArnDoesNotRetagTheRestApi() {
         String marker = unique();
         String apiId = createRestApi(marker);
