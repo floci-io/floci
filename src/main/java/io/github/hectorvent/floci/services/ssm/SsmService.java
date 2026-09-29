@@ -255,9 +255,14 @@ public class SsmService implements ResourceProvider {
     /**
      * The resource IAM checks a reference read on: the secret's ARN, or for a secret that does not
      * exist, the ARN a GetSecretValue by that name is checked on, so a missing secret is refused too.
+     * Null for a malformed name, which AWS rejects before it calls Secrets Manager.
      */
     String secretReferenceArn(String name, String region) {
-        String secretId = SecretReferenceName.of(name).secretId();
+        SecretReferenceName reference = SecretReferenceName.of(name);
+        if (reference.malformed()) {
+            return null;
+        }
+        String secretId = reference.secretId();
         try {
             return secretsManager.describeSecret(secretId, region).getArn();
         } catch (AwsException expected) {
@@ -275,7 +280,7 @@ public class SsmService implements ResourceProvider {
         SecretReferenceName reference = SecretReferenceName.of(name);
         String secretId = reference.secretId();
         String selector = reference.selector();
-        if (selector != null && (selector.isEmpty() || selector.contains(":"))) {
+        if (reference.malformed()) {
             throw new AwsException("ValidationException", "Invalid parameter name. Please use correct syntax "
                     + "for referencing a version/label  <name>:<version/label>", 400);
         }
@@ -319,6 +324,11 @@ public class SsmService implements ResourceProvider {
             return colon < 0 ? new SecretReferenceName(reference, null)
                     : new SecretReferenceName(reference.substring(0, colon), reference.substring(colon + 1));
         }
+
+        /** A trailing colon or a second one, which AWS rejects before anything else. */
+        boolean malformed() {
+            return selector != null && (selector.isEmpty() || selector.contains(":"));
+        }
     }
 
     /**
@@ -333,7 +343,7 @@ public class SsmService implements ResourceProvider {
         if (version.getSecretString() != null) {
             result.put("secretString", version.getSecretString());
         }
-        // ponytail: AWS dumps a binary secret's ByteBuffer internals here; left out until a caller reads them.
+        // AWS dumps a binary secret's ByteBuffer internals here; left out until a caller reads them.
         if (version.getVersionStages() != null) {
             ArrayNode stages = result.putArray("versionStages");
             version.getVersionStages().forEach(stages::add);

@@ -117,7 +117,8 @@ aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.31/amazon-linux-20
 Secrets Manager, so an application, an ECS task secret or a CodeBuild `parameter-store`
 variable can read a secret through Parameter Store.
 The answer is a `SecureString` with the secret's value and ARN and `Version` 0, and
-`SourceResult` carries the Secrets Manager `GetSecretValue` result as a JSON string. A
+`SourceResult` carries the Secrets Manager `GetSecretValue` result as a JSON string, without
+`secretBinary` for a binary secret. A
 `:<version-id>` or `:<staging-label>` suffix, such as `:AWSPREVIOUS`, selects a version and is
 echoed as `Selector`. As on AWS, `WithDecryption` must be true, and a missing secret is
 `ParameterNotFound`; `GetParameters` lists a reference it cannot answer in `InvalidParameters`.

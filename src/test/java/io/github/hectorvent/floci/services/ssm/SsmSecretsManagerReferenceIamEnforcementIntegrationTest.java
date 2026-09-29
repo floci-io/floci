@@ -56,6 +56,17 @@ class SsmSecretsManagerReferenceIamEnforcementIntegrationTest {
     }
 
     @Test
+    void aMalformedReferenceGetsTheSyntaxErrorBeforeTheCallerIsChecked() {
+        String caller = createUserWithPolicy("ssm-only-syntax", SSM_ONLY);
+
+        ssm(caller, "GetParameter", "{\"Name\": \"" + PREFIX + "app:a:b\", \"WithDecryption\": true}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Invalid parameter name. Please use correct syntax "
+                    + "for referencing a version/label  <name>:<version/label>"));
+    }
+
+    @Test
     void getParametersFailsAsAWholeWhenOneReferenceIsRefused() {
         String secret = createSecret("refs-denied");
         String caller = createUserWithPolicy("ssm-only-batch", SSM_ONLY);

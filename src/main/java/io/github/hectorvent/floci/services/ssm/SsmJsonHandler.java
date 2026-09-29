@@ -174,8 +174,10 @@ public class SsmJsonHandler {
             return;
         }
         for (String name : names) {
-            if (name.startsWith(SsmService.SECRET_REFERENCE_PREFIX)) {
-                authorizeSecretRead(authorization, ssmService.secretReferenceArn(name, region));
+            String secretArn = name.startsWith(SsmService.SECRET_REFERENCE_PREFIX)
+                    ? ssmService.secretReferenceArn(name, region) : null;
+            if (secretArn != null) {
+                authorizeSecretRead(authorization, secretArn);
             }
         }
     }
