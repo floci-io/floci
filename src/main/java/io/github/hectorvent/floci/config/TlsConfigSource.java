@@ -207,6 +207,20 @@ public class TlsConfigSource implements ConfigSource {
     }
 
     /**
+     * Whether {@code floci.dns.spoof-aws-endpoints} is set where this source can read it (system
+     * property or environment variable). It cannot see application.yml, so a flag set only there
+     * leaves the certificate without the AWS SANs.
+     */
+    public static boolean spoofAwsEndpointsVisibleToTls() {
+        return "true".equalsIgnoreCase(resolveProperty("floci.dns.spoof-aws-endpoints", "false"));
+    }
+
+    /** Whether {@code floci.tls.enabled} is set where this source can read it. */
+    public static boolean tlsEnabledVisibleToTls() {
+        return "true".equalsIgnoreCase(resolveProperty("floci.tls.enabled", "false"));
+    }
+
+    /**
      * The full SAN list the server certificate must cover for the current configuration:
      * defaults, custom hostnames, and the AWS endpoint wildcards when
      * {@code floci.dns.spoof-aws-endpoints} is enabled. Used both for generation and for the
@@ -265,7 +279,7 @@ public class TlsConfigSource implements ConfigSource {
      * itself routes; keep the two in sync so the SAN list does not drift from what gets spoofed.
      */
     private List<String> awsSpoofSans() {
-        if (!"true".equalsIgnoreCase(resolveProperty("floci.dns.spoof-aws-endpoints", "false"))) {
+        if (!spoofAwsEndpointsVisibleToTls()) {
             return List.of();
         }
         List<String> sans = new ArrayList<>(List.of("*.amazonaws.com", "*.s3.amazonaws.com"));

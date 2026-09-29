@@ -152,6 +152,8 @@ Combine it with `FLOCI_TLS_ENABLED=true` so hardcoded `https://` endpoints work 
 - the TLS proxy already serves HTTPS on port 443, where those clients connect;
 - the generated self-signed certificate additionally covers `*.amazonaws.com` and `*.<region>.amazonaws.com` for every published region, plus the multi-label and S3 endpoint forms (flipping the flag regenerates the certificate).
 
+With TLS, set `FLOCI_DNS_SPOOF_AWS_ENDPOINTS` as an environment variable (or `-Dfloci.dns.spoof-aws-endpoints=true`), because the certificate generator does not read `application.yml`; Floci logs a warning at startup if the flag is only set there.
+
 ---
 
 ## Initialization Hooks

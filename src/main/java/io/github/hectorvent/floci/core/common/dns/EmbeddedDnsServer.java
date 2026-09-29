@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common.dns;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsConfigSource;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.quarkus.runtime.Startup;
 import io.vertx.core.Vertx;
@@ -99,6 +100,15 @@ public class EmbeddedDnsServer {
         this(suffixes, List.of());
     }
 
+    /**
+     * The certificate generator cannot read application.yml, so DNS spoofing without AWS SANs on
+     * the certificate only happens when the flag and TLS are on but the flag is not visible to it.
+     */
+    static boolean shouldWarnSpoofInvisibleToTls(boolean spoofConfigured, boolean tlsEnabled,
+                                                 boolean spoofVisibleToTls) {
+        return spoofConfigured && tlsEnabled && !spoofVisibleToTls;
+    }
+
     EmbeddedDnsServer(List<String> suffixes, boolean spoofAwsEndpoints) {
         this(suffixes, List.of());
         if (spoofAwsEndpoints) {
@@ -141,6 +151,13 @@ public class EmbeddedDnsServer {
             config.dns().extraSuffixes().ifPresent(suffixes::addAll);
             if (config.dns().spoofAwsEndpoints()) {
                 suffixes.add(AWS_ENDPOINT_SUFFIX);
+                if (shouldWarnSpoofInvisibleToTls(true, TlsConfigSource.tlsEnabledVisibleToTls(),
+                        TlsConfigSource.spoofAwsEndpointsVisibleToTls())) {
+                    LOG.warn("floci.dns.spoof-aws-endpoints is set in application config but the TLS "
+                            + "certificate only reads it from FLOCI_DNS_SPOOF_AWS_ENDPOINTS or "
+                            + "-Dfloci.dns.spoof-aws-endpoints; https:// calls to amazonaws.com will "
+                            + "fail the handshake until it is set there.");
+                }
             }
 
             DatagramSocket socket = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));
