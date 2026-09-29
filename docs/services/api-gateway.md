@@ -31,8 +31,9 @@ aws apigateway create-rest-api \
 ```
 
 The override key is consumed rather than stored, so it never appears in the tags the API returns. Any
-other tags in the same request are kept. Because an ID cannot change after creation, supplying either
-override key to `TagResource` is rejected with `BadRequestException`.
+other tags in the same request are kept. Because an ID cannot change after creation, an override that
+differs from the API's ID is rejected with `BadRequestException`. Resending the current ID is accepted,
+so CloudFormation and Terraform updates keep working.
 
 Values must be non-blank and must not contain whitespace, control characters, or `/`, `?`, `#`, since
 those would break the endpoint URL. An invalid value is rejected with `BadRequestException`.

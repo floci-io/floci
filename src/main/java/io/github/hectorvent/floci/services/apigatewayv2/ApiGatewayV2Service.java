@@ -252,8 +252,8 @@ public class ApiGatewayV2Service {
         if (request.containsKey("tags")) {
             @SuppressWarnings("unchecked")
             Map<String, String> tags = (Map<String, String>) request.get("tags");
-            ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags);
-            api.setTags(tags);
+            ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags, apiId);
+            api.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
         }
         if (request.containsKey("corsConfiguration")) {
             @SuppressWarnings("unchecked")
