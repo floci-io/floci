@@ -434,7 +434,9 @@ a `Catch` on the child's own error name never takes it. The cause is the child's
 response as JSON, PascalCase with its keys in alphabetical order: `Cause` and `Error` when the
 child has them, then `ExecutionArn`, `Input`, `InputDetails`, `Name`, `RedriveCount`,
 `RedriveStatus`, `StartDate`, `StateMachineArn`, `Status` and `StopDate`, with dates in epoch
-milliseconds and no `Output`. A parent that needs the child's error reads it from there, for
+milliseconds and no `Output`. A child started through an alias also carries `StateMachineAliasArn`
+and `StateMachineVersionArn`, and one started through a version carries `StateMachineVersionArn`,
+each in its alphabetical place. A parent that needs the child's error reads it from there, for
 example with `States.StringToJson($.Cause)` after a `Catch`.
 
 A `Name` a Standard child already used fails the calling task with the child's collision error, named

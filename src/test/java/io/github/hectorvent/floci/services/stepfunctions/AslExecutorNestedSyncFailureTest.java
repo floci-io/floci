@@ -29,6 +29,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -112,6 +113,74 @@ class AslExecutorNestedSyncFailureTest {
                 .findFirst().orElseThrow(() -> new AssertionError("no TaskFailed in " + history));
         assertEquals("States.TaskFailed", taskFailed.getDetails().get("error"));
         assertEquals(expectedCause, taskFailed.getDetails().get("cause"));
+    }
+
+    @Test
+    void aChildStartedThroughAnAliasCarriesTheAliasAndVersionInTheirAlphabeticalPlaces() {
+        Execution failed = child("FAILED", "Boom", null);
+        failed.setStateMachineAliasArn(CHILD_SM_ARN + ":live");
+        failed.setStateMachineVersionArn(CHILD_SM_ARN + ":1");
+        when(sfnService.describeExecution(CHILD_ARN)).thenReturn(failed);
+
+        Execution execution = run(".sync:2", "");
+
+        // Measured on AWS: an alias carries both ARNs, between StartDate and Status.
+        assertEquals("{\"Error\":\"Boom\"," + CHILD_TAIL.replace(
+                        "\"StateMachineArn\":", "\"StateMachineAliasArn\":\"" + CHILD_SM_ARN + ":live\",\"StateMachineArn\":")
+                        + "\"StateMachineVersionArn\":\"" + CHILD_SM_ARN + ":1\","
+                        + "\"Status\":\"FAILED\",\"StopDate\":1790676767071}",
+                execution.getCause());
+    }
+
+    @Test
+    void aChildStartedThroughAVersionCarriesTheVersionOnly() {
+        Execution failed = child("FAILED", "Boom", null);
+        failed.setStateMachineVersionArn(CHILD_SM_ARN + ":1");
+        when(sfnService.describeExecution(CHILD_ARN)).thenReturn(failed);
+
+        Execution execution = run(".sync", "");
+
+        assertEquals("{\"Error\":\"Boom\"," + CHILD_TAIL
+                        + "\"StateMachineVersionArn\":\"" + CHILD_SM_ARN + ":1\","
+                        + "\"Status\":\"FAILED\",\"StopDate\":1790676767071}",
+                execution.getCause());
+    }
+
+    @Test
+    void aTerminalStatusIsReadTogetherWithTheFieldsWrittenBeforeItsMonitorIsReleased() throws Exception {
+        // The child's worker writes its terminal fields under the execution's monitor. This writer
+        // publishes the status first and holds the monitor for 200 ms before writing the rest, and
+        // the parent's first read of the child lands inside that window, so a reader that skipped
+        // the monitor would build the cause from a half-written child.
+        Execution live = child("RUNNING", null, null);
+        CountDownLatch statusWritten = new CountDownLatch(1);
+        Thread writer = new Thread(() -> {
+            synchronized (live) {
+                live.setStatus("FAILED");
+                statusWritten.countDown();
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                live.setError("Boom");
+                live.setCause("custom cause");
+                live.setStopDate(1790676767.071);
+            }
+        });
+        when(sfnService.describeExecution(CHILD_ARN)).thenAnswer(invocation -> {
+            if (writer.getState() == Thread.State.NEW) {
+                writer.start();
+                statusWritten.await();
+            }
+            return live;
+        });
+
+        Execution execution = run(".sync", "");
+        writer.join();
+
+        assertEquals("{\"Cause\":\"custom cause\",\"Error\":\"Boom\"," + CHILD_TAIL
+                + "\"Status\":\"FAILED\",\"StopDate\":1790676767071}", execution.getCause());
     }
 
     @Test

@@ -1722,7 +1722,13 @@ public class AslExecutor {
             }
             io.github.hectorvent.floci.services.stepfunctions.model.Execution current =
                     sfnService.get().describeExecution(execArn);
-            String status = current.getStatus();
+            String status;
+            // The child's worker and StopExecution write its terminal fields under this monitor,
+            // status last. Reading the status under it makes everything written before it visible,
+            // so a terminal status is never seen without the error, cause and stop date behind it.
+            synchronized (current) {
+                status = current.getStatus();
+            }
             if ("RUNNING".equals(status)) {
                 continue;
             }
@@ -1759,7 +1765,9 @@ public class AslExecutor {
      * The cause of a {@code .sync} Task whose child ended other than SUCCEEDED, as measured on AWS
      * for {@code .sync} and {@code .sync:2} alike: the child's DescribeExecution response in
      * PascalCase with its keys in alphabetical order, {@code Cause} and {@code Error} only when the
-     * child has them, dates in epoch milliseconds, and no {@code Output}. Floci does not implement
+     * child has them, {@code StateMachineAliasArn} and {@code StateMachineVersionArn} only when it
+     * was started through an alias or a version (an alias carries both), dates in epoch
+     * milliseconds, and no {@code Output}. Floci does not implement
      * redrive, so the two redrive fields carry what AWS reports for a child never redriven.
      */
     private String nestedExecutionFailureCause(Execution child) {
@@ -1777,7 +1785,13 @@ public class AslExecutor {
         cause.put("RedriveCount", 0);
         cause.put("RedriveStatus", "REDRIVABLE");
         cause.put("StartDate", Math.round(child.getStartDate() * 1000));
+        if (child.getStateMachineAliasArn() != null) {
+            cause.put("StateMachineAliasArn", child.getStateMachineAliasArn());
+        }
         cause.put("StateMachineArn", child.getStateMachineArn());
+        if (child.getStateMachineVersionArn() != null) {
+            cause.put("StateMachineVersionArn", child.getStateMachineVersionArn());
+        }
         cause.put("Status", child.getStatus());
         if (child.getStopDate() != null) {
             cause.put("StopDate", Math.round(child.getStopDate() * 1000));
