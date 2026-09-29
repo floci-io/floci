@@ -119,8 +119,11 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -314,6 +317,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     void putInstanceForTest(Instance instance) {
         instances.put(key(instance.getRegion(), instance.getInstanceId()), instance);
+    }
+
+    void deleteInstanceForTest(String region, String instanceId) {
+        instances.delete(key(region, instanceId));
+    }
+
+    void putVolumeForTest(Volume volume) {
+        volumes.put(key(volume.getRegion(), volume.getVolumeId()), volume);
+    }
+
+    void deleteVolumeForTest(String region, String volumeId) {
+        volumes.delete(key(region, volumeId));
     }
 
     // Public, no request context - for callers (and tests) that construct this service directly
@@ -8843,20 +8858,104 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     public void deleteVolume(String region, String volumeId) {
-        Volume volume = volumes.get(key(region, volumeId)).orElseThrow(() ->
-                new AwsException("InvalidVolume.NotFound",
-                        "The volume '" + volumeId + "' does not exist.", 400));
-        if ("in-use".equals(volume.getState()) || !volume.getAttachments().isEmpty()) {
-            throw new AwsException("VolumeInUse",
-                    "Volume " + volumeId + " is currently attached to an instance", 400);
+        if (volumeId == null || volumeId.isBlank()) {
+            throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
         }
-        if (volumeBlockDeviceManager != null && volumeBlockDeviceManager.isAvailable()) {
-            if (!volumeBlockDeviceManager.deleteVolume(volumeId)) {
-                throw new AwsException("InternalError",
-                        "Failed to delete backing storage for volume " + volumeId, 500);
+        withVolumeLock(volumeId, () -> {
+            ensureDefaultResources(region);
+            Volume volume = volumes.get(key(region, volumeId)).orElseThrow(() ->
+                    new AwsException("InvalidVolume.NotFound",
+                            "The volume '" + volumeId + "' does not exist.", 400));
+            if ("in-use".equals(volume.getState()) || !volume.getAttachments().isEmpty()) {
+                throw new AwsException("VolumeInUse",
+                        "Volume " + volumeId + " is currently attached to an instance", 400);
+            }
+            if (volumeBlockDeviceManager != null && volumeBlockDeviceManager.isAvailable()) {
+                if (!volumeBlockDeviceManager.deleteVolume(volumeId)) {
+                    throw new AwsException("InternalError",
+                            "Failed to delete backing storage for volume " + volumeId, 500);
+                }
+            }
+            volumes.delete(key(region, volumeId));
+        });
+    }
+
+    private static final class RefCountedLock {
+        private final ReentrantLock lock = new ReentrantLock();
+        private final AtomicInteger refCount = new AtomicInteger(1);
+    }
+
+    private final ConcurrentHashMap<String, RefCountedLock> volumeLocks = new ConcurrentHashMap<>();
+
+    private <T> T withVolumeLock(String volumeId, Supplier<T> action) {
+        if (volumeId == null) {
+            return action.get();
+        }
+        RefCountedLock refLock = volumeLocks.compute(volumeId, (k, v) -> {
+            if (v == null) {
+                return new RefCountedLock();
+            }
+            v.refCount.incrementAndGet();
+            return v;
+        });
+        refLock.lock.lock();
+        try {
+            return action.get();
+        } finally {
+            refLock.lock.unlock();
+            volumeLocks.computeIfPresent(volumeId, (k, v) -> {
+                if (v.refCount.decrementAndGet() <= 0) {
+                    return null;
+                }
+                return v;
+            });
+        }
+    }
+
+    private void withVolumeLock(String volumeId, Runnable action) {
+        withVolumeLock(volumeId, () -> {
+            action.run();
+            return null;
+        });
+    }
+
+    private static boolean isSameDevice(String d1, String d2) {
+        if (d1 == null && d2 == null) {
+            return true;
+        }
+        if (d1 == null || d2 == null) {
+            return false;
+        }
+        String n1 = d1.startsWith("/") ? d1 : "/dev/" + d1;
+        String n2 = d2.startsWith("/") ? d2 : "/dev/" + d2;
+        return n1.equals(n2);
+    }
+
+    private boolean isRootVolume(String region, Volume volume) {
+        if (volume == null || volume.getAttachments().isEmpty()) {
+            return false;
+        }
+        for (VolumeAttachment att : volume.getAttachments()) {
+            if (att.getInstanceId() == null) {
+                continue;
+            }
+            Instance inst = findAnyInstance(key(region, att.getInstanceId()))
+                    .or(() -> findExternalInstance(callerAccountId(), region, att.getInstanceId()))
+                    .orElse(null);
+            if (inst == null) {
+                for (Instance candidate : instances.scan(k -> true)) {
+                    if (att.getInstanceId().equals(candidate.getInstanceId()) && region.equals(candidate.getRegion())) {
+                        inst = candidate;
+                        break;
+                    }
+                }
+            }
+            if (inst != null && volume.getVolumeId().equals(inst.getRootVolumeId())
+                    && isSameDevice(att.getDevice(), inst.getRootDeviceName())) {
+                return true;
             }
         }
-        volumes.delete(key(region, volumeId));
+        return false;
     }
 
     public VolumeModification modifyVolume(String region, String volumeId, Integer size,
@@ -8865,100 +8964,116 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (volumeId == null || volumeId.isBlank()) {
             throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
         }
-        ensureDefaultResources(region);
-        Volume volume = getRequiredVolume(region, volumeId);
+        return withVolumeLock(volumeId, () -> {
+            ensureDefaultResources(region);
+            Volume volume = getRequiredVolume(region, volumeId);
 
-        if (size != null && size <= 0) {
-            throw new AwsException("InvalidParameterValue",
-                    "Value (" + size + ") for parameter size is invalid.", 400);
-        }
-        if (size != null && size < volume.getSize()) {
-            throw new AwsException("InvalidParameterValue",
-                    "New size cannot be smaller than existing size", 400);
-        }
-
-        String targetVolumeType = volumeType != null ? volumeType : volume.getVolumeType();
-        if (volumeType != null && !VALID_VOLUME_TYPES.contains(volumeType)) {
-            throw new AwsException("InvalidParameterValue",
-                    "Value (" + volumeType + ") for parameter volumeType is invalid. Unknown volume type.", 400);
-        }
-
-        if (throughput != null && !"gp3".equals(targetVolumeType)) {
-            throw new AwsException("InvalidParameterCombination",
-                    "The parameter Throughput is not supported for " + targetVolumeType + " volumes", 400);
-        }
-
-        if (iops != null && !"gp3".equals(targetVolumeType) && !"io1".equals(targetVolumeType) && !"io2".equals(targetVolumeType)) {
-            throw new AwsException("InvalidParameterCombination",
-                    "The parameter iops is not supported for " + targetVolumeType + " volumes", 400);
-        }
-
-        if (multiAttachEnabled != null && multiAttachEnabled && !"io1".equals(targetVolumeType) && !"io2".equals(targetVolumeType)) {
-            throw new AwsException("InvalidParameterCombination",
-                    "The parameter MultiAttachEnabled is not supported for " + targetVolumeType + " volumes", 400);
-        }
-
-        if (dryRun) {
-            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
-        }
-
-        Integer originalSize = volume.getSize();
-        String originalVolumeType = volume.getVolumeType();
-        Integer originalIops = volume.getIops() > 0 ? volume.getIops() : null;
-        Integer originalThroughput = volume.getThroughput();
-        Boolean originalMultiAttachEnabled = volume.getMultiAttachEnabled();
-
-        int targetSize = size != null ? size : volume.getSize();
-        Integer targetIops = iops != null ? iops : (volume.getIops() > 0 ? volume.getIops() : null);
-        Integer targetThroughput = throughput != null ? throughput : volume.getThroughput();
-        Boolean targetMultiAttach = multiAttachEnabled != null ? multiAttachEnabled : volume.getMultiAttachEnabled();
-
-        if ("gp3".equals(targetVolumeType)) {
-            if (targetIops == null) {
-                targetIops = 3000;
+            if (size != null && size <= 0) {
+                throw new AwsException("InvalidParameterValue",
+                        "Value (" + size + ") for parameter size is invalid.", 400);
             }
-            if (targetThroughput == null) {
-                targetThroughput = 125;
+            if (size != null && size < volume.getSize()) {
+                throw new AwsException("InvalidParameterValue",
+                        "New size cannot be smaller than existing size", 400);
             }
-        } else if ("io1".equals(targetVolumeType) || "io2".equals(targetVolumeType)) {
-            if (targetIops == null) {
-                targetIops = 3000;
+
+            String targetVolumeType = volumeType != null ? volumeType : volume.getVolumeType();
+            if (volumeType != null && !VALID_VOLUME_TYPES.contains(volumeType)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Value (" + volumeType + ") for parameter volumeType is invalid. Unknown volume type.", 400);
             }
-            targetThroughput = null;
-        } else {
-            targetIops = null;
-            targetThroughput = null;
-            targetMultiAttach = false;
-        }
 
-        volume.setSize(targetSize);
-        volume.setVolumeType(targetVolumeType);
-        volume.setIops(targetIops != null ? targetIops : 0);
-        volume.setThroughput(targetThroughput);
-        volume.setMultiAttachEnabled(targetMultiAttach);
-        volumes.put(key(region, volumeId), volume);
+            if (throughput != null && !"gp3".equals(targetVolumeType)) {
+                throw new AwsException("InvalidParameterCombination",
+                        "The parameter Throughput is not supported for " + targetVolumeType + " volumes", 400);
+            }
 
-        Instant now = Instant.now();
-        VolumeModification mod = new VolumeModification();
-        mod.setVolumeId(volumeId);
-        mod.setModificationState("completed");
-        mod.setTargetSize(targetSize);
-        mod.setTargetVolumeType(targetVolumeType);
-        mod.setTargetIops(targetIops);
-        mod.setTargetThroughput(targetThroughput);
-        mod.setTargetMultiAttachEnabled(targetMultiAttach);
-        mod.setOriginalSize(originalSize);
-        mod.setOriginalVolumeType(originalVolumeType);
-        mod.setOriginalIops(originalIops);
-        mod.setOriginalThroughput(originalThroughput);
-        mod.setOriginalMultiAttachEnabled(originalMultiAttachEnabled);
-        mod.setProgress(100L);
-        mod.setStartTime(now);
-        mod.setEndTime(now);
-        mod.setRegion(region);
+            if (iops != null && !"gp3".equals(targetVolumeType) && !"io1".equals(targetVolumeType) && !"io2".equals(targetVolumeType)) {
+                throw new AwsException("InvalidParameterCombination",
+                        "The parameter iops is not supported for " + targetVolumeType + " volumes", 400);
+            }
 
-        volumeModifications.put(key(region, volumeId), mod);
-        return mod;
+            if (multiAttachEnabled != null && multiAttachEnabled && !"io1".equals(targetVolumeType) && !"io2".equals(targetVolumeType)) {
+                throw new AwsException("InvalidParameterCombination",
+                        "The parameter MultiAttachEnabled is not supported for " + targetVolumeType + " volumes", 400);
+            }
+
+            if (dryRun) {
+                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+            }
+
+            Integer originalSize = volume.getSize();
+            String originalVolumeType = volume.getVolumeType();
+            Integer originalIops = volume.getIops() > 0 ? volume.getIops() : null;
+            Integer originalThroughput = volume.getThroughput();
+            Boolean originalMultiAttachEnabled = volume.getMultiAttachEnabled();
+
+            int targetSize = size != null ? size : volume.getSize();
+            Integer targetIops = iops != null ? iops : (volume.getIops() > 0 ? volume.getIops() : null);
+            Integer targetThroughput = throughput != null ? throughput : volume.getThroughput();
+            Boolean targetMultiAttach = multiAttachEnabled != null ? multiAttachEnabled : volume.getMultiAttachEnabled();
+
+            if ("gp3".equals(targetVolumeType)) {
+                if (targetIops == null) {
+                    targetIops = 3000;
+                }
+                if (targetThroughput == null) {
+                    targetThroughput = 125;
+                }
+            } else if ("io1".equals(targetVolumeType) || "io2".equals(targetVolumeType)) {
+                if (targetIops == null) {
+                    targetIops = 3000;
+                }
+                targetThroughput = null;
+            } else {
+                targetIops = null;
+                targetThroughput = null;
+                targetMultiAttach = false;
+            }
+
+            boolean resizeSuccess = true;
+            if (volumeBlockDeviceManager != null && volumeBlockDeviceManager.isAvailable()
+                    && targetSize > originalSize && !isRootVolume(region, volume)) {
+                resizeSuccess = volumeBlockDeviceManager.resizeVolume(volumeId, targetSize);
+            }
+
+            Instant now = Instant.now();
+            VolumeModification mod = new VolumeModification();
+            mod.setVolumeId(volumeId);
+            mod.setTargetSize(targetSize);
+            mod.setTargetVolumeType(targetVolumeType);
+            mod.setTargetIops(targetIops);
+            mod.setTargetThroughput(targetThroughput);
+            mod.setTargetMultiAttachEnabled(targetMultiAttach);
+            mod.setOriginalSize(originalSize);
+            mod.setOriginalVolumeType(originalVolumeType);
+            mod.setOriginalIops(originalIops);
+            mod.setOriginalThroughput(originalThroughput);
+            mod.setOriginalMultiAttachEnabled(originalMultiAttachEnabled);
+            mod.setStartTime(now);
+            mod.setEndTime(now);
+            mod.setRegion(region);
+
+            if (!resizeSuccess) {
+                mod.setModificationState("failed");
+                mod.setStatusMessage("Failed to resize volume backing file or loop device");
+                mod.setProgress(0L);
+                volumeModifications.put(key(region, volumeId), mod);
+                return mod;
+            }
+
+            volume.setSize(targetSize);
+            volume.setVolumeType(targetVolumeType);
+            volume.setIops(targetIops != null ? targetIops : 0);
+            volume.setThroughput(targetThroughput);
+            volume.setMultiAttachEnabled(targetMultiAttach);
+            volumes.put(key(region, volumeId), volume);
+
+            mod.setModificationState("completed");
+            mod.setProgress(100L);
+            volumeModifications.put(key(region, volumeId), mod);
+            return mod;
+        });
     }
 
     public List<VolumeModification> describeVolumesModifications(String region, List<String> volumeIds,
