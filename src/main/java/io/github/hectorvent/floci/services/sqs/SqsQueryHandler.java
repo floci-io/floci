@@ -273,6 +273,7 @@ public class SqsQueryHandler {
         Set<String> requestedAttrs = new LinkedHashSet<>();
         requestedAttrs.addAll(collectIndexed(params, "AttributeName."));
         requestedAttrs.addAll(collectIndexed(params, "MessageSystemAttributeName."));
+        Set<String> requestedMessageAttrs = new LinkedHashSet<>(collectIndexed(params, "MessageAttributeName."));
 
         List<Message> messages = sqsService.receiveMessage(queueUrl, maxMessages, visibilityTimeout, waitTimeSeconds, region);
         String senderId = sqsService.senderIdFor(queueUrl);
@@ -290,6 +291,9 @@ public class SqsQueryHandler {
             writeSystemAttributesXml(xml, msg, requestedAttrs, senderId);
             if (msg.getMessageAttributes() != null && !msg.getMessageAttributes().isEmpty()) {
                 for (Map.Entry<String, MessageAttributeValue> entry : msg.getMessageAttributes().entrySet()) {
+                    if (!SqsMessageAttributeSelector.includes(requestedMessageAttrs, entry.getKey())) {
+                        continue;
+                    }
                     xml.start("MessageAttribute")
                        .elem("Name", entry.getKey())
                        .start("Value")

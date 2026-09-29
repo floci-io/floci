@@ -107,6 +107,78 @@ class SqsIntegrationTest {
         SqsIntegrationTest.receiptHandle = receiptHandle;
     }
 
+    @Test
+    void receiveMessage_messageAttributeNamesFiltersOutput() {
+        String filterQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-message-attribute-filter-queue")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", filterQueueUrl)
+                .formParam("MessageBody", "filter-test")
+                .formParam("MessageAttribute.1.Name", "color.primary")
+                .formParam("MessageAttribute.1.Value.DataType", "String")
+                .formParam("MessageAttribute.1.Value.StringValue", "red")
+                .formParam("MessageAttribute.2.Name", "secret")
+                .formParam("MessageAttribute.2.Value.DataType", "String")
+                .formParam("MessageAttribute.2.Value.StringValue", "private")
+            .when().post("/").then().statusCode(200);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", filterQueueUrl)
+                .formParam("VisibilityTimeout", "0")
+            .when().post("/").then().statusCode(200)
+                .body(containsString("<Body>filter-test</Body>"))
+                .body(not(containsString("<MessageAttribute>")));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", filterQueueUrl)
+                .formParam("VisibilityTimeout", "0")
+                .formParam("MessageAttributeName.1", "color.primary")
+            .when().post("/").then().statusCode(200)
+                .body(containsString("<Name>color.primary</Name>"))
+                .body(not(containsString("<Name>secret</Name>")));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", filterQueueUrl)
+                .formParam("VisibilityTimeout", "0")
+                .formParam("MessageAttributeName.1", "color.*")
+            .when().post("/").then().statusCode(200)
+                .body(containsString("<Name>color.primary</Name>"))
+                .body(not(containsString("<Name>secret</Name>")));
+
+            for (String allSelector : new String[]{"All", ".*"}) {
+                given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "ReceiveMessage")
+                    .formParam("QueueUrl", filterQueueUrl)
+                    .formParam("VisibilityTimeout", "0")
+                    .formParam("MessageAttributeName.1", allSelector)
+                .when().post("/").then().statusCode(200)
+                    .body(containsString("<Name>color.primary</Name>"))
+                    .body(containsString("<Name>secret</Name>"));
+            }
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", filterQueueUrl)
+            .when().post("/");
+        }
+    }
+
     private static String receiptHandle;
 
     @Test
