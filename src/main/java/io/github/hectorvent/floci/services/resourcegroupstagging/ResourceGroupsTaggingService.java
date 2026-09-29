@@ -147,6 +147,8 @@ public class ResourceGroupsTaggingService implements Resettable {
      * @return the owning service's rejection per ARN, empty when every ARN was tagged
      * @throws AwsException {@code InvalidParameterException} when an ARN names another region;
      *                      nothing is tagged then
+     * @throws AwsException {@code InternalServiceException} when an owning service cannot be read;
+     *                      nothing is changed then
      */
     public Map<String, AwsException> applyTags(List<String> resourceArns, Map<String, String> tags, String region) {
         rejectOtherRegion(resourceArns, region, "TagResources");
@@ -175,6 +177,8 @@ public class ResourceGroupsTaggingService implements Resettable {
      * @return the owning service's rejection per ARN, empty when every ARN was untagged
      * @throws AwsException {@code InvalidParameterException} when an ARN names another region;
      *                      nothing is untagged then
+     * @throws AwsException {@code InternalServiceException} when an owning service cannot be read;
+     *                      nothing is changed then
      */
     public Map<String, AwsException> removeTags(List<String> resourceArns, List<String> tagKeys, String region) {
         rejectOtherRegion(resourceArns, region, "UntagResources");
@@ -216,7 +220,7 @@ public class ResourceGroupsTaggingService implements Resettable {
             if (listed == null) {
                 String accountId = regionResolver != null ? regionResolver.getAccountId() : null;
                 listed = new HashSet<>();
-                for (ExplorerResource resource : providerResources()) {
+                for (ExplorerResource resource : providerResources(true)) {
                     String listedArn = withoutWildcard(resource.arn());
                     String resourceRegion = providerRegion(listedArn, resource.region());
                     if (resourceRegion != null && resourceRegion.equals(region)
@@ -359,7 +363,7 @@ public class ResourceGroupsTaggingService implements Resettable {
                 byArn.computeIfAbsent(arn, ViewEntry::of).mapping().getTags().putAll(stored.getTags());
             }
         }
-        for (ExplorerResource resource : providerResources()) {
+        for (ExplorerResource resource : providerResources(false)) {
             String arn = withoutWildcard(resource.arn());
             String resourceRegion = providerRegion(arn, resource.region());
             // A global resource, or one owned in another region, hides any store copy of its ARN too.
@@ -381,8 +385,9 @@ public class ResourceGroupsTaggingService implements Resettable {
         return new ArrayList<>(byArn.values());
     }
 
-    // Tags are copied inside the try so a live tag map that changes mid-copy skips only its provider.
-    private List<ExplorerResource> providerResources() {
+    // Tags are copied inside the try so a live tag map that changes mid-copy skips only its provider,
+    // unless strict: a write then fails rather than guess the owner of a resource it cannot see.
+    private List<ExplorerResource> providerResources(boolean strict) {
         List<ExplorerResource> resources = new ArrayList<>();
         for (ResourceProvider provider : providers) {
             try {
@@ -396,6 +401,10 @@ public class ResourceGroupsTaggingService implements Resettable {
             } catch (RuntimeException e) {
                 LOG.warnv(e, "ResourceProvider {0} failed to supply resources; excluding it from tag discovery",
                         provider.getClass().getSimpleName());
+                if (strict) {
+                    throw new AwsException("InternalServiceException",
+                            "An owning service could not be read. Retry the request.", 500);
+                }
             }
         }
         return resources;

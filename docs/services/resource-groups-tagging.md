@@ -65,7 +65,9 @@ one the owning service does not list such as an API Gateway deployment ARN,
 goes to the tagging store and the owning service is not called.
 `UntagResources` routes the same way, and also removes the keys from the
 tagging store for every ARN, including one the owning service rejects, so a
-copy stored earlier can always be cleared.
+copy stored earlier can always be cleared. When an owning service cannot be
+read while routing, `TagResources` and `UntagResources` fail with
+`InternalServiceException` (HTTP 500) and change nothing, so SDKs retry them.
 
 ## Filtering
 

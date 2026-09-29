@@ -189,21 +189,52 @@ class ResourceGroupsTaggingServiceTest {
 
     @Test
     void failingProviderIsSkipped() {
-        ResourceProvider failing = new ResourceProvider() {
-            @Override
-            public List<ExplorerResource> getResources() {
-                throw new IllegalStateException("storage unavailable");
-            }
-
-            @Override
-            public Set<SupportedResourceType> getSupportedResourceTypes() {
-                return Set.of();
-            }
-        };
-        ResourceGroupsTaggingService service = service(List.of(failing,
+        ResourceGroupsTaggingService service = service(List.of(failingProvider(),
                 provider(resource(QUEUE_ARN, "sqs:queue", Map.of("k", "v")))), List.of());
 
         assertEquals(List.of(QUEUE_ARN), arns(allResources(service)));
+    }
+
+    @Test
+    void tagResourcesFailsWhenAnOwnerCannotBeRead() {
+        RecordingTagHandler handler = new RecordingTagHandler("sqs", false);
+        ResourceGroupsTaggingService service = service(List.of(failingProvider()), List.of(handler));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.applyTags(List.of(QUEUE_ARN), Map.of("k", "v"), REGION));
+
+        assertEquals("InternalServiceException", error.getErrorCode());
+        assertEquals(500, error.getHttpStatus());
+        assertTrue(handler.tagged.isEmpty());
+        assertTrue(service.getTagsForResource(REGION, QUEUE_ARN).isEmpty());
+        assertTrue(allResources(service).isEmpty());
+    }
+
+    @Test
+    void untagResourcesFailsWhenAnOwnerCannotBeRead() {
+        RecordingTagHandler handler = new RecordingTagHandler("sqs", false);
+        ResourceGroupsTaggingService service = service(List.of(failingProvider()), List.of(handler));
+        service.tagResources(List.of(QUEUE_ARN), Map.of("k", "v"), REGION);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.removeTags(List.of(QUEUE_ARN), List.of("k"), REGION));
+
+        assertEquals("InternalServiceException", error.getErrorCode());
+        assertEquals(500, error.getHttpStatus());
+        assertTrue(handler.untagged.isEmpty());
+        assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, QUEUE_ARN));
+    }
+
+    @Test
+    void storeOnlyWriteSucceedsWhenAProviderCannotBeRead() {
+        RecordingTagHandler handler = new RecordingTagHandler("sqs", false);
+        ResourceGroupsTaggingService service = service(List.of(failingProvider()), List.of(handler));
+
+        service.applyTags(List.of(INSTANCE_ARN), Map.of("a", "1", "b", "2"), REGION);
+        service.removeTags(List.of(INSTANCE_ARN), List.of("a"), REGION);
+
+        assertEquals(Map.of("b", "2"), service.getTagsForResource(REGION, INSTANCE_ARN));
+        assertTrue(handler.tagged.isEmpty());
     }
 
     @Test
@@ -525,6 +556,20 @@ class ResourceGroupsTaggingServiceTest {
             types.add(new SupportedResourceType(resource.resourceType(), resource.service(), true));
         }
         return new FakeProvider(List.of(resources), types);
+    }
+
+    private static ResourceProvider failingProvider() {
+        return new ResourceProvider() {
+            @Override
+            public List<ExplorerResource> getResources() {
+                throw new IllegalStateException("storage unavailable");
+            }
+
+            @Override
+            public Set<SupportedResourceType> getSupportedResourceTypes() {
+                return Set.of();
+            }
+        };
     }
 
     private record FakeProvider(List<ExplorerResource> resources, Set<SupportedResourceType> types)
