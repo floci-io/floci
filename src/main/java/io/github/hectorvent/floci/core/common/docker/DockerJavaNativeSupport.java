@@ -6,7 +6,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * Registers the docker-java classes that Jackson reads or writes for GraalVM native image reflection.
  * These are the model and the Jackson-annotated classes that the Docker commands Floci runs reach,
  * as responses, request bodies or config files. A new command may need its classes added here.
- * Commands and their executors are created with new, so they need no registration.
+ * The core.command classes listed here are request bodies. Jackson reads their fields, so keep them.
+ * Other commands and all executors are created with new and need no registration.
  */
 @RegisterForReflection(classNames = {
     "com.github.dockerjava.api.command.CreateContainerResponse",
