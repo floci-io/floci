@@ -47,6 +47,12 @@ Resolved revisions appear in `ListPipelineExecutions` summaries, as on AWS. `Rol
 with the object key and version ID the target execution consumed, so rolling back redeploys that
 version rather than the latest upload.
 
+`RollbackStage` starts a new execution with `executionType: ROLLBACK` and
+`rollbackMetadata.rollbackTargetPipelineExecutionId` pointing at the target execution. The stage must
+have succeeded in the target execution, otherwise the call fails with `UnableToRollbackStageException`.
+The emulator has no per-execution artifact archive, so source-only stages re-run first to seed input
+artifacts, then only the rolled-back stage executes; intermediate stages are skipped.
+
 The following providers execute against local Floci services:
 
 | Category | Provider | Behavior |
