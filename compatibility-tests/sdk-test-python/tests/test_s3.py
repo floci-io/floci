@@ -313,12 +313,9 @@ class TestS3BucketTagging:
 
         s3_client.delete_bucket_tagging(Bucket=test_bucket)
 
-        # Either empty tags or NoSuchTagSet error
-        try:
-            response = s3_client.get_bucket_tagging(Bucket=test_bucket)
-            assert len(response.get("TagSet", [])) == 0
-        except ClientError:
-            pass  # NoSuchTagSet is also acceptable
+        with pytest.raises(ClientError) as exc_info:
+            s3_client.get_bucket_tagging(Bucket=test_bucket)
+        assert exc_info.value.response["Error"]["Code"] == "NoSuchTagSet"
 
 
 class TestS3LargeObject:
