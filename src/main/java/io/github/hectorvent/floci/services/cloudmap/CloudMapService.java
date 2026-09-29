@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.MissingNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -27,14 +28,12 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -257,18 +256,17 @@ public class CloudMapService {
     }
 
     /**
-     * Only the TTLs of the existing DNS records can change, as on AWS: a DnsConfig with other record
-     * types, or for a service without one, is rejected. A null {@code dnsConfig} keeps the stored
-     * one, since AWS cannot remove it; a null description or health check config clears it, as AWS
-     * UpdateService does.
+     * Only the TTLs of the existing DNS records can change, as on AWS: any other DnsConfig change
+     * (record types or count, RoutingPolicy), or a DnsConfig for a service without one, is rejected.
+     * A null {@code dnsConfig} keeps the stored one, since AWS cannot remove it; a null description
+     * or health check config clears it, as AWS UpdateService does.
      */
     public void updateService(String id, String description, String dnsConfig, String healthCheckConfig) {
         Service service = requireService(id);
         if (dnsConfig != null) {
-            Set<String> types = recordTypes(parseDnsConfig(dnsConfig));
-            if (service.getDnsConfig() == null || !types.equals(recordTypes(dnsConfigNode(service)))) {
+            if (!withoutTtls(parseDnsConfig(dnsConfig)).equals(withoutTtls(dnsConfigNode(service)))) {
                 throw new AwsException("InvalidInput",
-                        "The DNS record types of a service can't be updated.", 400);
+                        "Only the TTLs of a service's DNS records can be updated.", 400);
             }
             service.setDnsConfig(dnsConfig);
         }
@@ -606,12 +604,14 @@ public class CloudMapService {
         return config;
     }
 
-    private static Set<String> recordTypes(JsonNode dnsConfig) {
-        Set<String> types = new HashSet<>();
-        for (JsonNode record : dnsConfig.path("DnsRecords")) {
-            types.add(record.path("Type").asText().toUpperCase(Locale.ROOT));
+    private static JsonNode withoutTtls(JsonNode dnsConfig) {
+        JsonNode copy = dnsConfig.deepCopy();
+        for (JsonNode record : copy.path("DnsRecords")) {
+            if (record instanceof ObjectNode object) {
+                object.remove("TTL");
+            }
         }
-        return types;
+        return copy;
     }
 
     /** Returns -1 when the service has no record of the requested type. */

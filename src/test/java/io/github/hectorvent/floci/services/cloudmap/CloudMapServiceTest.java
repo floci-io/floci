@@ -49,6 +49,31 @@ class CloudMapServiceTest {
     }
 
     @Test
+    void updateServiceRejectsAChangedRoutingPolicy() {
+        Service service = createService(privateDnsNamespace(), "routing", "original", A_RECORD_DNS_CONFIG);
+
+        AwsException error = assertThrows(AwsException.class, () -> cloudMapService.updateService(
+                service.getId(), "original",
+                "{\"RoutingPolicy\":\"WEIGHTED\",\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":60}]}", null));
+
+        assertEquals("InvalidInput", error.getErrorCode());
+        assertEquals(A_RECORD_DNS_CONFIG, cloudMapService.getService(service.getId()).getDnsConfig());
+    }
+
+    @Test
+    void updateServiceRejectsAnAddedRecord() {
+        Service service = createService(privateDnsNamespace(), "added", "original", A_RECORD_DNS_CONFIG);
+
+        AwsException error = assertThrows(AwsException.class, () -> cloudMapService.updateService(
+                service.getId(), "original",
+                "{\"RoutingPolicy\":\"MULTIVALUE\",\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":60},"
+                        + "{\"Type\":\"A\",\"TTL\":60}]}", null));
+
+        assertEquals("InvalidInput", error.getErrorCode());
+        assertEquals(A_RECORD_DNS_CONFIG, cloudMapService.getService(service.getId()).getDnsConfig());
+    }
+
+    @Test
     void updateServiceRejectsADnsConfigForAServiceWithoutOne() {
         Service service = createService(privateDnsNamespace(), "nodns", null, null);
 
