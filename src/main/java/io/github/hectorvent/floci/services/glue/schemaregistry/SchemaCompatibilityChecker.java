@@ -1,5 +1,10 @@
 package io.github.hectorvent.floci.services.glue.schemaregistry;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.apicurio.registry.content.ContentHandle;
 import io.apicurio.registry.content.canon.AvroContentCanonicalizer;
 import io.apicurio.registry.content.canon.ContentCanonicalizer;
@@ -20,6 +25,7 @@ import io.apicurio.registry.rules.validity.ValidityLevel;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -27,6 +33,13 @@ import java.util.stream.Collectors;
  * Pure utility — no CDI. Stateless.
  */
 public final class SchemaCompatibilityChecker {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Set<String> AVRO_SCHEMA_PROPERTIES = Set.of(
+            "type", "name", "namespace", "doc", "aliases", "fields", "symbols", "default",
+            "order", "items", "values", "size", "logicalType", "precision", "scale");
+    private static final Set<String> AVRO_FIELD_PROPERTIES = Set.of(
+            "name", "type", "doc", "default", "order", "aliases");
 
     public record Result(boolean compatible, String reason) {
         public static Result ok() {
@@ -70,7 +83,38 @@ public final class SchemaCompatibilityChecker {
     public static String canonicalize(String definition, String dataFormat) {
         ContentCanonicalizer canon = canonicalizerFor(dataFormat);
         ContentHandle handle = ContentHandle.create(definition);
-        return canon.canonicalize(handle, Map.of()).content();
+        String canonical = canon.canonicalize(handle, Map.of()).content();
+        if (!"AVRO".equals(dataFormat)) {
+            return canonical;
+        }
+        try {
+            JsonNode schema = JSON.readTree(canonical);
+            stripAvroCustomAttributes(schema);
+            return schema.toString();
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Unable to canonicalize AVRO schema", e);
+        }
+    }
+
+    private static void stripAvroCustomAttributes(JsonNode schema) {
+        if (schema instanceof ArrayNode union) {
+            for (JsonNode branch : union) {
+                stripAvroCustomAttributes(branch);
+            }
+        } else if (schema instanceof ObjectNode object) {
+            object.retain(AVRO_SCHEMA_PROPERTIES);
+            stripAvroCustomAttributes(object.get("type"));
+            stripAvroCustomAttributes(object.get("items"));
+            stripAvroCustomAttributes(object.get("values"));
+            if (object.get("fields") instanceof ArrayNode fields) {
+                for (JsonNode field : fields) {
+                    if (field instanceof ObjectNode fieldObject) {
+                        fieldObject.retain(AVRO_FIELD_PROPERTIES);
+                        stripAvroCustomAttributes(fieldObject.get("type"));
+                    }
+                }
+            }
+        }
     }
 
     /**

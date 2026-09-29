@@ -6,6 +6,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -160,6 +161,30 @@ class SchemaCompatibilityCheckerTest {
         String c1 = SchemaCompatibilityChecker.canonicalize(AVRO_V1, "AVRO");
         String c2 = SchemaCompatibilityChecker.canonicalize(spaced, "AVRO");
         assertEquals(c1, c2);
+    }
+
+    @Test
+    void canonicalizeIgnoresAvroCustomAttributes() {
+        String withCustomAttributes = "{\"type\":\"record\",\"name\":\"User\",\"namespace\":\"x\","
+                + "\"x-record\":{\"any\":true},\"fields\":[{\"name\":\"id\",\"type\":\"long\","
+                + "\"x-field\":\"value\"}]}";
+        assertEquals(SchemaCompatibilityChecker.canonicalize(AVRO_V1, "AVRO"),
+                SchemaCompatibilityChecker.canonicalize(withCustomAttributes, "AVRO"));
+    }
+
+    @Test
+    void canonicalizeIgnoresNestedAvroCustomAttributesButPreservesDefaults() {
+        String base = "{\"type\":\"record\",\"name\":\"Outer\",\"fields\":[{\"name\":\"inner\","
+                + "\"type\":{\"type\":\"record\",\"name\":\"Inner\",\"fields\":[{\"name\":\"value\","
+                + "\"type\":\"string\"}]},\"default\":{\"value\":\"one\"}}]}";
+        String withCustom = base.replace("\"name\":\"Inner\"", "\"name\":\"Inner\",\"x-record\":true")
+                .replace("\"name\":\"value\"", "\"name\":\"value\",\"x-field\":42");
+        String changedDefault = base.replace("\"value\":\"one\"", "\"value\":\"two\"");
+
+        assertEquals(SchemaCompatibilityChecker.canonicalize(base, "AVRO"),
+                SchemaCompatibilityChecker.canonicalize(withCustom, "AVRO"));
+        assertNotEquals(SchemaCompatibilityChecker.canonicalize(base, "AVRO"),
+                SchemaCompatibilityChecker.canonicalize(changedDefault, "AVRO"));
     }
 
     @Test
