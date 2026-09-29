@@ -131,4 +131,56 @@ class ExternalReferenceScannerTest {
         assertThat(ExternalReferenceScanner.writeTarget(
                 "INSERT INTO public.t VALUES (1) ON CONFLICT DO UPDATE SET x = 1", SCHEMAS), equalTo(Optional.empty()));
     }
+
+    @Test
+    void writeTargetSeesPastDollarQuotedBodiesAndEscapeStrings() {
+        assertThat(ExternalReferenceScanner.writeTarget(
+                "SELECT $$ it's $$; INSERT INTO analytics.events VALUES (1)", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", "events"))));
+        assertThat(ExternalReferenceScanner.writeTarget(
+                "SELECT $tag$ it's $$ still inside $tag$; DELETE FROM analytics.events", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", "events"))));
+        assertThat(ExternalReferenceScanner.writeTarget(
+                "SELECT E'it\\'s'; INSERT INTO analytics.events VALUES (1)", SCHEMAS),
+                equalTo(Optional.of(new Reference("analytics", "events"))));
+    }
+
+    @Test
+    void ignoresReferencesInsideDollarQuotesAndNestedComments() {
+        assertThat(ExternalReferenceScanner.scan("SELECT $$ FROM analytics.events $$", SCHEMAS), empty());
+        assertThat(ExternalReferenceScanner.scan("SELECT 1 /* a /* FROM analytics.events */ FROM analytics.other */", SCHEMAS), empty());
+    }
+
+    @Test
+    void positionalParametersAreNotDollarQuotes() {
+        assertThat(ExternalReferenceScanner.scan("SELECT $1 FROM analytics.events WHERE id = $2", SCHEMAS),
+                contains(new Reference("analytics", "events")));
+    }
+
+    @Test
+    void detectsSelectIntoViewAndIndexTargets() {
+        Optional<Reference> expected = Optional.of(new Reference("analytics", "events"));
+        assertThat(ExternalReferenceScanner.writeTarget("SELECT * INTO analytics.events FROM public.t", SCHEMAS), equalTo(expected));
+        assertThat(ExternalReferenceScanner.writeTarget("CREATE OR REPLACE VIEW analytics.events AS SELECT 1", SCHEMAS), equalTo(expected));
+        assertThat(ExternalReferenceScanner.writeTarget("CREATE MATERIALIZED VIEW analytics.events AS SELECT 1", SCHEMAS), equalTo(expected));
+        assertThat(ExternalReferenceScanner.writeTarget("CREATE UNIQUE INDEX i ON analytics.events (id)", SCHEMAS), equalTo(expected));
+        assertThat(ExternalReferenceScanner.writeTarget("CREATE INDEX i ON public.t (id)", SCHEMAS), equalTo(Optional.empty()));
+        assertThat(ExternalReferenceScanner.writeTarget("SELECT * INTO public.copy FROM analytics.events", SCHEMAS), equalTo(Optional.empty()));
+    }
+
+    @Test
+    void fromInsideExpressionFunctionsIsNotATableList() {
+        assertThat(ExternalReferenceScanner.scan("SELECT EXTRACT(year FROM analytics.ts) FROM public.t", SCHEMAS), empty());
+        assertThat(ExternalReferenceScanner.scan("SELECT SUBSTRING(a FROM analytics.b), TRIM(BOTH 'x' FROM analytics.c) FROM public.t", SCHEMAS), empty());
+        assertThat(ExternalReferenceScanner.scan("SELECT * FROM public.t WHERE a IS DISTINCT FROM analytics.b", SCHEMAS), empty());
+    }
+
+    @Test
+    void tableListInsideExpressionFunctionStillCounts() {
+        assertThat(ExternalReferenceScanner.scan(
+                "SELECT EXTRACT(year FROM (SELECT max(ts) FROM analytics.events)) FROM public.t", SCHEMAS),
+                contains(new Reference("analytics", "events")));
+        assertThat(ExternalReferenceScanner.scan("SELECT EXTRACT(year FROM ts) FROM analytics.events", SCHEMAS),
+                contains(new Reference("analytics", "events")));
+    }
 }

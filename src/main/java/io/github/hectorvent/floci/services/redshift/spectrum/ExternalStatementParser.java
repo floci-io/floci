@@ -13,29 +13,44 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class ExternalStatementParser {
-    private static final Pattern CREATE_SCHEMA = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(.+?)\\s+FROM\\s+DATA\\s+CATALOG\\s+DATABASE\\s+'((?:''|[^'])*)'(?:\\s+REGION\\s+'(?:''|[^'])*')?\\s+IAM_ROLE\\s+(.+?)(\\s+CREATE\\s+EXTERNAL\\s+DATABASE\\s+IF\\s+NOT\\s+EXISTS)?\\s*;?\\s*$");
+    private static final Pattern CREATE_SCHEMA = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(IF\\s+NOT\\s+EXISTS\\s+)?(.+?)\\s+FROM\\s+DATA\\s+CATALOG\\s+DATABASE\\s+'((?:''|[^'])*)'(?:\\s+REGION\\s+'(?:''|[^'])*')?\\s+IAM_ROLE\\s+(.+?)(\\s+CREATE\\s+EXTERNAL\\s+DATABASE\\s+IF\\s+NOT\\s+EXISTS)?\\s*;?\\s*$");
     private static final Pattern CREATE_EXTERNAL_TABLE = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\b.*");
     private static final Pattern CREATE_EXTERNAL = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\b.*");
     private static final Pattern SERDE_PROPERTIES = Pattern.compile("(?is)WITH\\s+SERDEPROPERTIES\\s*\\(");
-    private static final Pattern CREATE_TABLE_HEAD = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\s+(.+?)\\.(.+?)\\s*\\(");
-    private static final Pattern DROP_TABLE = Pattern.compile("(?is)^\\s*DROP\\s+TABLE\\s+(IF\\s+EXISTS\\s+)?([^.;\\s]+)\\.([^.;\\s]+)(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
-    private static final Pattern DROP_SCHEMA = Pattern.compile("(?is)^\\s*DROP\\s+SCHEMA\\s+(IF\\s+EXISTS\\s+)?([^\\s;]+)(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
+    private static final String NAME = "(\"(?:\"\"|[^\"])+\"|[^.;,\\s\"()]+)";
+    private static final Pattern CREATE_TABLE_HEAD = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\s+" + NAME + "\\s*\\.\\s*" + NAME + "\\s*\\(");
+    private static final Pattern DROP_TABLE = Pattern.compile("(?is)^\\s*DROP\\s+TABLE\\s+(IF\\s+EXISTS\\s+)?" + NAME + "\\.\\s*" + NAME + "(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
+    private static final Pattern DROP_SCHEMA = Pattern.compile("(?is)^\\s*DROP\\s+SCHEMA\\s+(IF\\s+EXISTS\\s+)?" + NAME + "(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
+    private static final Pattern TABLE_PROPERTIES = Pattern.compile("(?is)(?:TBLPROPERTIES|TABLE\\s+PROPERTIES)\\s*\\(");
+    private static final Pattern PARTITION_VALUE = Pattern.compile("(?is)([^,=]+)=\\s*'((?:''|[^'])*)'\\s*(?:,|$)");
+    private static final Pattern LOCATION_VALUE = Pattern.compile("(?is)LOCATION\\s+'((?:''|[^'])*)'");
+    private static final Pattern SERDE_VALUE = Pattern.compile("(?is)SERDE\\s+'((?:''|[^'])*)'");
+    private static final Pattern TERMINATED_BY_VALUE = Pattern.compile("(?is)TERMINATED BY\\s+'((?:''|[^'])*)'");
+    private static final Pattern STORED_AS_VALUE = Pattern.compile("(?is)STORED AS\\s+([A-Za-z]+)");
+    private static final Pattern QUOTED_LITERAL = Pattern.compile("'(?:''|[^'])*'");
+    private static final Pattern QUOTED_PAIR = Pattern.compile("'((?:''|[^'])*)'\\s*=\\s*'((?:''|[^'])*)'");
+    private static final Pattern PARTITION_HEAD = Pattern.compile("(?is)PARTITION\\s*\\(");
+    private static final Pattern PARTITION_LOCATION = Pattern.compile("(?is)\\s*LOCATION\\s+'((?:''|[^'])*)'");
     private static final Pattern PARTITIONED_BY = Pattern.compile("(?is)PARTITIONED\\s+BY\\s*\\(");
-    private static final Pattern ADD_PARTITIONS = Pattern.compile("(?is)^\\s*ALTER\\s+TABLE\\s+([^.;\\s]+)\\.([^.;\\s]+)\\s+ADD\\s+(IF\\s+NOT\\s+EXISTS\\s+)?(.+?)\\s*;?\\s*$");
+    private static final Pattern ADD_PARTITIONS = Pattern.compile("(?is)^\\s*ALTER\\s+TABLE\\s+" + NAME + "\\.\\s*" + NAME + "\\s+ADD\\s+(IF\\s+NOT\\s+EXISTS\\s+)?(.+?)\\s*;?\\s*$");
 
     public Optional<ExternalStatement> parse(String sql) {
         if (sql == null) {
             return Optional.empty();
         }
-        String text = sql.trim();
+        String text = stripLeadingComments(sql);
         Matcher schema = CREATE_SCHEMA.matcher(text);
         if (schema.matches()) {
-            String role = schema.group(3).trim();
-            if (role.equalsIgnoreCase("default") || !role.startsWith("'")) {
+            String role = schema.group(4).trim();
+            if (role.equalsIgnoreCase("default")) {
                 throw new SpectrumSqlException("0A000", "IAM_ROLE DEFAULT is not supported");
             }
-            return Optional.of(new ExternalStatement.CreateSchema(identifier(schema.group(1)),
-                    schema.group(2).replace("''", "'"), unquote(role), schema.group(4) != null));
+            if (!QUOTED_LITERAL.matcher(role).matches()) {
+                throw new SpectrumSqlException("42601", "IAM_ROLE must be a single quoted role ARN");
+            }
+            return Optional.of(new ExternalStatement.CreateSchema(identifier(schema.group(2)),
+                    schema.group(3).replace("''", "'"), unquote(role), schema.group(5) != null,
+                    schema.group(1) != null));
         }
         if (CREATE_EXTERNAL_TABLE.matcher(text).matches()) {
             return Optional.of(parseTable(text));
@@ -86,14 +101,17 @@ public class ExternalStatementParser {
             }
             partitions = columns(tail.substring(partitionOpen + 1, partitionClose));
         }
-        String location = value(tail, "LOCATION");
+        String location = value(tail, LOCATION_VALUE);
         if (location == null || !location.startsWith("s3://")) {
             throw new SpectrumSqlException("22023", "external table location must be an s3:// URI");
         }
-        String serde = value(tail, "SERDE");
-        String delimiter = value(tail, "TERMINATED BY");
-        String stored = keywordValue(tail, "STORED AS");
-        if (stored == null || !(stored.equalsIgnoreCase("PARQUET") || stored.equalsIgnoreCase("TEXTFILE"))) {
+        String serde = value(tail, SERDE_VALUE);
+        String delimiter = value(tail, TERMINATED_BY_VALUE);
+        String stored = keywordValue(tail, STORED_AS_VALUE);
+        if (stored == null) {
+            throw new SpectrumSqlException("0A000", "external table requires a STORED AS clause");
+        }
+        if (!(stored.equalsIgnoreCase("PARQUET") || stored.equalsIgnoreCase("TEXTFILE"))) {
             throw new SpectrumSqlException("0A000", "unsupported external table format: " + stored);
         }
         ExternalStatement.TableFormat format = stored.equalsIgnoreCase("PARQUET")
@@ -103,6 +121,23 @@ public class ExternalStatementParser {
         Map<String, String> properties = properties(tail);
         return new ExternalStatement.CreateTable(identifier(matcher.group(1)), identifier(matcher.group(2)), columns, partitions,
                 format, location, delimiter, serde, properties, serdeProperties(tail));
+    }
+
+    private static String stripLeadingComments(String sql) {
+        String text = sql.trim();
+        while (true) {
+            int end;
+            if (text.startsWith("--")) {
+                end = text.indexOf('\n');
+                end = end < 0 ? text.length() : end;
+            } else if (text.startsWith("/*")) {
+                end = text.indexOf("*/", 2);
+                end = end < 0 ? text.length() : end + 2;
+            } else {
+                return text;
+            }
+            text = text.substring(end).trim();
+        }
     }
 
     private static int matchingParen(String text, int open) {
@@ -137,7 +172,7 @@ public class ExternalStatementParser {
                 throw new SpectrumSqlException("0A000", "malformed column definition");
             }
             result.add(new ExternalStatement.ColumnDefinition(identifier(parts[0]),
-                    parts[1].replace(" ", "").toLowerCase(Locale.ROOT)));
+                    GlueTypeMapper.canonicalGlueType(parts[1])));
         }
         return result;
     }
@@ -172,13 +207,13 @@ public class ExternalStatementParser {
         return result;
     }
 
-    private static String value(String text, String key) {
-        Matcher matcher = Pattern.compile("(?is)" + Pattern.quote(key) + "\\s+'((?:''|[^'])*)'").matcher(text);
+    private static String value(String text, Pattern pattern) {
+        Matcher matcher = pattern.matcher(text);
         return matcher.find() ? matcher.group(1).replace("''", "'") : null;
     }
 
-    private static String keywordValue(String text, String key) {
-        Matcher matcher = Pattern.compile("(?is)" + Pattern.quote(key) + "\\s+([A-Za-z]+)").matcher(text);
+    private static String keywordValue(String text, Pattern pattern) {
+        Matcher matcher = pattern.matcher(text);
         return matcher.find() ? matcher.group(1) : null;
     }
 
@@ -191,45 +226,61 @@ public class ExternalStatementParser {
             if (close < 0) {
                 throw new SpectrumSqlException("0A000", "malformed SERDEPROPERTIES clause");
             }
-            Matcher pair = Pattern.compile("'((?:''|[^'])*)'\\s*=\\s*'((?:''|[^'])*)'")
-                    .matcher(text.substring(open + 1, close));
-            while (pair.find()) {
-                result.put(pair.group(1).replace("''", "'"), pair.group(2).replace("''", "'"));
-            }
+            result.putAll(quotedPairs(text.substring(open + 1, close)));
         }
         return result;
     }
 
     private static Map<String, String> properties(String text) {
         Map<String, String> result = new LinkedHashMap<>();
-        Matcher matcher = Pattern.compile("(?is)(?:TBLPROPERTIES|TABLE\\s+PROPERTIES)\\s*\\((.*?)\\)").matcher(text);
+        Matcher matcher = TABLE_PROPERTIES.matcher(text);
         if (matcher.find()) {
-            Matcher pair = Pattern.compile("'([^']*)'\\s*=\\s*'([^']*)'").matcher(matcher.group(1));
-            while (pair.find()) {
-                result.put(pair.group(1), pair.group(2));
+            int open = matcher.end() - 1;
+            int close = matchingParen(text, open);
+            if (close < 0) {
+                throw new SpectrumSqlException("0A000", "malformed TABLE PROPERTIES clause");
             }
+            result.putAll(quotedPairs(text.substring(open + 1, close)));
+        }
+        return result;
+    }
+
+    private static Map<String, String> quotedPairs(String text) {
+        Map<String, String> result = new LinkedHashMap<>();
+        Matcher pair = QUOTED_PAIR.matcher(text);
+        while (pair.find()) {
+            result.put(pair.group(1).replace("''", "'"), pair.group(2).replace("''", "'"));
         }
         return result;
     }
 
     private static List<ExternalStatement.PartitionSpec> parsePartitions(String text) {
         List<ExternalStatement.PartitionSpec> result = new ArrayList<>();
-        Matcher matcher = Pattern.compile("(?is)PARTITION\\s*\\(([^)]*)\\)\\s*LOCATION\\s+'((?:''|[^'])*)'").matcher(text);
+        Matcher head = PARTITION_HEAD.matcher(text);
         int end = 0;
-        while (matcher.find()) {
-            if (!text.substring(end, matcher.start()).isBlank()) {
+        while (head.find(end)) {
+            if (!text.substring(end, head.start()).isBlank()) {
+                return List.of();
+            }
+            int open = head.end() - 1;
+            int close = matchingParen(text, open);
+            if (close < 0) {
+                return List.of();
+            }
+            Matcher location = PARTITION_LOCATION.matcher(text).region(close + 1, text.length());
+            if (!location.lookingAt()) {
                 return List.of();
             }
             Map<String, String> values = new LinkedHashMap<>();
-            Matcher value = Pattern.compile("(?is)([^,=]+)=\\s*'((?:''|[^'])*)'\\s*(?:,|$)").matcher(matcher.group(1).trim() + ",");
+            Matcher value = PARTITION_VALUE.matcher(text.substring(open + 1, close).trim() + ",");
             while (value.find()) {
                 values.put(identifier(value.group(1)), value.group(2).replace("''", "'"));
             }
             if (values.isEmpty()) {
                 return List.of();
             }
-            result.add(new ExternalStatement.PartitionSpec(values, matcher.group(2).replace("''", "'")));
-            end = matcher.end();
+            result.add(new ExternalStatement.PartitionSpec(values, location.group(1).replace("''", "'")));
+            end = location.end();
         }
         return end == text.length() || text.substring(end).isBlank() ? result : List.of();
     }

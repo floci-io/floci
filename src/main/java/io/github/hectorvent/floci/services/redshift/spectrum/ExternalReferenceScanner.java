@@ -22,6 +22,9 @@ public final class ExternalReferenceScanner {
     /** Keywords after which the following names are table sources. */
     private static final Set<String> TABLE_INTRODUCERS = Set.of("from", "join", "using", "into", "update");
 
+    /** Functions whose argument list uses FROM as an expression separator, not to start a table list. */
+    private static final Set<String> EXPRESSION_FROM_FUNCTIONS = Set.of("extract", "substring", "trim", "overlay", "position");
+
     /** Keywords that end a table-source list: what follows is an expression or a new clause. */
     private static final Set<String> CLAUSE_ENDERS = Set.of("select", "where", "group", "order", "having",
             "limit", "offset", "union", "intersect", "except", "on", "set", "values", "returning", "window",
@@ -56,23 +59,41 @@ public final class ExternalReferenceScanner {
     public static Set<Reference> scan(String sql, Set<String> schemaNames) {
         Set<Reference> result = new LinkedHashSet<>();
         Deque<Boolean> outerContexts = new ArrayDeque<>();
+        Deque<Boolean> expressionFromParens = new ArrayDeque<>();
         boolean tableContext = false;
+        String previousKeyword = null;
         for (Token token : tokenize(sql)) {
             if (!token.isChain()) {
                 switch (token.symbol()) {
-                    case '(' -> outerContexts.push(tableContext);
-                    case ')' -> tableContext = !outerContexts.isEmpty() && outerContexts.pop();
+                    case '(' -> {
+                        outerContexts.push(tableContext);
+                        expressionFromParens.push(previousKeyword != null && EXPRESSION_FROM_FUNCTIONS.contains(previousKeyword));
+                    }
+                    case ')' -> {
+                        tableContext = !outerContexts.isEmpty() && outerContexts.pop();
+                        if (!expressionFromParens.isEmpty()) {
+                            expressionFromParens.pop();
+                        }
+                    }
                     case ';' -> {
                         tableContext = false;
                         outerContexts.clear();
+                        expressionFromParens.clear();
                     }
                     default -> {
                         // a comma keeps the current context: it separates items of the same list
                     }
                 }
+                previousKeyword = null;
                 continue;
             }
             String keyword = token.keyword();
+            boolean expressionFrom = "from".equals(keyword)
+                    && ("distinct".equals(previousKeyword) || !expressionFromParens.isEmpty() && expressionFromParens.peek());
+            previousKeyword = keyword;
+            if (expressionFrom) {
+                continue;
+            }
             if (keyword != null && TABLE_INTRODUCERS.contains(keyword)) {
                 tableContext = true;
             } else if (keyword != null && CLAUSE_ENDERS.contains(keyword)) {
@@ -97,7 +118,8 @@ public final class ExternalReferenceScanner {
 
     /**
      * The first external table or schema an {@code INSERT}, {@code UPDATE}, {@code DELETE}, {@code MERGE},
-     * {@code TRUNCATE}, {@code COPY}, {@code CREATE TABLE}, {@code ALTER TABLE} or {@code DROP} anywhere in
+     * {@code TRUNCATE}, {@code COPY}, {@code SELECT INTO}, {@code CREATE TABLE}, {@code CREATE VIEW}, {@code CREATE INDEX},
+     * {@code ALTER TABLE} or {@code DROP} anywhere in
      * {@code sql} changes: every statement of a batch and every data-modifying CTE is checked, not only
      * the first write. The external DDL Floci implements is parsed before this is reached.
      */
@@ -191,7 +213,22 @@ public final class ExternalReferenceScanner {
                     || keywordAt(tokens, index, "unlogged") || keywordAt(tokens, index, "local")) {
                 index++;
             }
-            if (!keywordAt(tokens, index, "table")) {
+            if (keywordAt(tokens, index, "or") && keywordAt(tokens, index + 1, "replace")) {
+                index += 2;
+                while (keywordAt(tokens, index, "temp") || keywordAt(tokens, index, "temporary")) {
+                    index++;
+                }
+            }
+            if (keywordAt(tokens, index, "materialized")) {
+                index++;
+            }
+            if (keywordAt(tokens, index, "unique")) {
+                index++;
+            }
+            if (keywordAt(tokens, index, "index")) {
+                return indexTable(tokens, index + 1);
+            }
+            if (!(keywordAt(tokens, index, "table") || keywordAt(tokens, index, "view"))) {
                 return -1;
             }
             index++;
@@ -210,17 +247,29 @@ public final class ExternalReferenceScanner {
         if (keywordAt(tokens, i, "copy")) {
             return i + 1;
         }
-        if (keywordAt(tokens, i, "insert") && keywordAt(tokens, i + 1, "into")) {
-            return skipOnly(tokens, i + 2);
-        }
-        if (keywordAt(tokens, i, "merge") && keywordAt(tokens, i + 1, "into")) {
-            return skipOnly(tokens, i + 2);
+        if (keywordAt(tokens, i, "into")) {
+            int index = i + 1;
+            while (keywordAt(tokens, index, "temp") || keywordAt(tokens, index, "temporary")
+                    || keywordAt(tokens, index, "unlogged") || keywordAt(tokens, index, "table")) {
+                index++;
+            }
+            return skipOnly(tokens, index);
         }
         if (keywordAt(tokens, i, "update")) {
             return skipOnly(tokens, i + 1);
         }
         if (keywordAt(tokens, i, "delete") && keywordAt(tokens, i + 1, "from")) {
             return skipOnly(tokens, i + 2);
+        }
+        return -1;
+    }
+
+    /** {@code CREATE INDEX [CONCURRENTLY] [IF NOT EXISTS] name ON [ONLY] table}: {@code from} follows INDEX. */
+    private static int indexTable(List<Token> tokens, int from) {
+        for (int index = from; index < from + 6 && index < tokens.size(); index++) {
+            if (keywordAt(tokens, index, "on")) {
+                return skipOnly(tokens, index + 1);
+            }
         }
         return -1;
     }
@@ -269,7 +318,9 @@ public final class ExternalReferenceScanner {
             char c = sql.charAt(i);
             if (c == '\'' || c == '-' && i + 1 < sql.length() && sql.charAt(i + 1) == '-'
                     || c == '/' && i + 1 < sql.length() && sql.charAt(i + 1) == '*') {
-                i = skip(sql, i);
+                i = skip(sql, i, c == '\'' && isEscapeStringPrefix(sql, i));
+            } else if (c == '$' && dollarTagEnd(sql, i) > 0) {
+                i = skipDollarQuoted(sql, i);
             } else if (c == '"' || Character.isLetter(c) || c == '_') {
                 List<Word> chain = new ArrayList<>();
                 i = read(sql, i, chain);
@@ -303,7 +354,7 @@ public final class ExternalReferenceScanner {
                 i++;
             } else if (sql.charAt(i) == '-' && i + 1 < sql.length() && sql.charAt(i + 1) == '-'
                     || sql.charAt(i) == '/' && i + 1 < sql.length() && sql.charAt(i + 1) == '*') {
-                i = skip(sql, i);
+                i = skip(sql, i, false);
             } else {
                 break;
             }
@@ -340,22 +391,66 @@ public final class ExternalReferenceScanner {
         return i;
     }
 
-    private static int skip(String sql, int start) {
+    private static boolean isEscapeStringPrefix(String sql, int quote) {
+        if (quote == 0 || Character.toLowerCase(sql.charAt(quote - 1)) != 'e') {
+            return false;
+        }
+        if (quote == 1) {
+            return true;
+        }
+        char before = sql.charAt(quote - 2);
+        return !(Character.isLetterOrDigit(before) || before == '_' || before == '$');
+    }
+
+    /** Returns the index just past an opening dollar-quote tag such as {@code $$} or {@code $body$}, or -1. */
+    private static int dollarTagEnd(String sql, int start) {
+        int i = start + 1;
+        if (i < sql.length() && (Character.isLetter(sql.charAt(i)) || sql.charAt(i) == '_')) {
+            while (i < sql.length() && (Character.isLetterOrDigit(sql.charAt(i)) || sql.charAt(i) == '_')) {
+                i++;
+            }
+        }
+        return i < sql.length() && sql.charAt(i) == '$' ? i + 1 : -1;
+    }
+
+    private static int skipDollarQuoted(String sql, int start) {
+        int bodyStart = dollarTagEnd(sql, start);
+        int close = sql.indexOf(sql.substring(start, bodyStart), bodyStart);
+        return close < 0 ? sql.length() : close + (bodyStart - start);
+    }
+
+    private static int skip(String sql, int start, boolean backslashEscapes) {
         if (sql.charAt(start) == '\'') {
             int i = start + 1;
             while (i < sql.length()) {
-                if (sql.charAt(i) == '\'' && (i + 1 >= sql.length() || sql.charAt(i + 1) != '\'')) {
+                char c = sql.charAt(i);
+                if (backslashEscapes && c == '\\') {
+                    i += 2;
+                } else if (c == '\'' && (i + 1 >= sql.length() || sql.charAt(i + 1) != '\'')) {
                     return i + 1;
+                } else {
+                    i += c == '\'' ? 2 : 1;
                 }
-                i += sql.charAt(i) == '\'' ? 2 : 1;
             }
-            return i;
+            return sql.length();
         }
         if (sql.charAt(start) == '-') {
             int i = sql.indexOf('\n', start + 2);
             return i < 0 ? sql.length() : i;
         }
-        int i = sql.indexOf("*/", start + 2);
-        return i < 0 ? sql.length() : i + 2;
+        int depth = 1;
+        int i = start + 2;
+        while (i < sql.length() && depth > 0) {
+            if (sql.startsWith("/*", i)) {
+                depth++;
+                i += 2;
+            } else if (sql.startsWith("*/", i)) {
+                depth--;
+                i += 2;
+            } else {
+                i++;
+            }
+        }
+        return Math.min(i, sql.length());
     }
 }

@@ -6,12 +6,15 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
 @ApplicationScoped
 public class ExternalCatalogRegistry implements Resettable {
+    private static final char SEPARATOR = '|';
     private final AccountAwareStorageBackend<ExternalSchemaBinding> bindings;
 
     public ExternalCatalogRegistry(StorageFactory storageFactory) {
@@ -32,7 +35,7 @@ public class ExternalCatalogRegistry implements Resettable {
     }
 
     public List<ExternalSchemaBinding> list(String accountId, String clusterKey, String databaseName) {
-        String prefix = clusterKey + "|" + databaseName + "|";
+        String prefix = prefix(clusterKey, databaseName);
         return bindings.scanForAccount(accountId, key -> key.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(ExternalSchemaBinding::schemaName)).toList();
     }
@@ -43,7 +46,7 @@ public class ExternalCatalogRegistry implements Resettable {
     }
 
     public synchronized void removeCluster(String accountId, String clusterKey) {
-        String prefix = clusterKey + "|";
+        String prefix = prefix(clusterKey);
         for (String key : bindings.keysForAccount(accountId)) {
             if (key.startsWith(prefix)) {
                 bindings.deleteForAccount(accountId, key);
@@ -59,6 +62,19 @@ public class ExternalCatalogRegistry implements Resettable {
     }
 
     private static String key(String clusterKey, String databaseName, String schemaName) {
-        return clusterKey + "|" + databaseName + "|" + schemaName;
+        return prefix(clusterKey, databaseName) + encode(schemaName);
+    }
+
+    private static String prefix(String clusterKey, String databaseName) {
+        return prefix(clusterKey) + encode(databaseName) + SEPARATOR;
+    }
+
+    private static String prefix(String clusterKey) {
+        return encode(clusterKey) + SEPARATOR;
+    }
+
+    /** Percent-encodes a component so a quoted identifier containing the separator cannot collide with another key. */
+    private static String encode(String component) {
+        return URLEncoder.encode(component, StandardCharsets.UTF_8);
     }
 }

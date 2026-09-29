@@ -13,6 +13,21 @@ public final class GlueTypeMapper {
     private GlueTypeMapper() {
     }
 
+    /** Rewrites Redshift type aliases to the Hive type names that Glue stores; other types pass through lowercased. */
+    public static String canonicalGlueType(String type) {
+        String normalized = normalize(type);
+        return switch (normalized) {
+            case "doubleprecision", "float8" -> "double";
+            case "real", "float4" -> "float";
+            case "int2" -> "smallint";
+            case "int4" -> "int";
+            case "int8" -> "bigint";
+            case "bool" -> "boolean";
+            default -> normalized.startsWith("charactervarying(") ? "varchar" + normalized.substring("charactervarying".length())
+                    : normalized;
+        };
+    }
+
     public static String toPostgres(String glueType) {
         String type = normalize(glueType);
         Matcher sized = SIZED_STRING.matcher(type);

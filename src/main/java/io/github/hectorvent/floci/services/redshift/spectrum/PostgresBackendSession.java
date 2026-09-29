@@ -37,22 +37,12 @@ public final class PostgresBackendSession implements BackendSql {
             PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
             awaitCopyIn(decoder);
             byte[] chunk = new byte[8192];
-            try {
-                int read = data.read(chunk);
-                while (read > 0) {
-                    output.write('d');
-                    writeInt32(output, read + 4);
-                    output.write(chunk, 0, read);
-                    read = data.read(chunk);
-                }
-            } catch (IOException exception) {
-                writeCopyFail(output, exception.getMessage());
-                try {
-                    awaitReady(decoder);
-                } catch (IOException | SpectrumReadException backendFailure) {
-                    exception.addSuppressed(backendFailure);
-                }
-                throw exception;
+            int read = readChunk(output, decoder, data, chunk);
+            while (read > 0) {
+                output.write('d');
+                writeInt32(output, read + 4);
+                output.write(chunk, 0, read);
+                read = readChunk(output, decoder, data, chunk);
             }
             output.write('c');
             writeInt32(output, 4);
@@ -60,6 +50,22 @@ public final class PostgresBackendSession implements BackendSql {
             return rowCount(awaitReady(decoder));
         } catch (IOException exception) {
             throw new SpectrumReadException(SQLSTATE_IO, "Unable to load external table data", exception);
+        }
+    }
+
+    /** A failure reading the source aborts the COPY on the backend; a failure writing to the backend socket does not. */
+    private static int readChunk(OutputStream output, PostgresWireDecoder decoder, InputStream data, byte[] chunk)
+            throws IOException {
+        try {
+            return data.read(chunk);
+        } catch (IOException exception) {
+            writeCopyFail(output, exception.getMessage());
+            try {
+                awaitReady(decoder);
+            } catch (IOException | SpectrumReadException backendFailure) {
+                exception.addSuppressed(backendFailure);
+            }
+            throw exception;
         }
     }
 

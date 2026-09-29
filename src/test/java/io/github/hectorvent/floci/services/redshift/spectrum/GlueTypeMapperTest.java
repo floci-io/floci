@@ -30,4 +30,18 @@ class GlueTypeMapperTest {
         assertThat(GlueTypeMapper.duckProjection("we\"ird", "string"),
                 equalTo("COALESCE(CAST(\"we\"\"ird\" AS VARCHAR), '\\N') AS \"we\"\"ird\""));
     }
+
+    @Test
+    void canonicalisesRedshiftAliases() {
+        assertThat(GlueTypeMapper.canonicalGlueType("DOUBLE PRECISION"), equalTo("double"));
+        assertThat(GlueTypeMapper.canonicalGlueType("float8"), equalTo("double"));
+        assertThat(GlueTypeMapper.canonicalGlueType("real"), equalTo("float"));
+        assertThat(GlueTypeMapper.canonicalGlueType("int2"), equalTo("smallint"));
+        assertThat(GlueTypeMapper.canonicalGlueType("int4"), equalTo("int"));
+        assertThat(GlueTypeMapper.canonicalGlueType("INT8"), equalTo("bigint"));
+        assertThat(GlueTypeMapper.canonicalGlueType("bool"), equalTo("boolean"));
+        assertThat(GlueTypeMapper.canonicalGlueType("character varying(20)"), equalTo("varchar(20)"));
+        assertThat(GlueTypeMapper.canonicalGlueType("Decimal(10, 2)"), equalTo("decimal(10,2)"));
+        assertThat(GlueTypeMapper.canonicalGlueType("array<string>"), equalTo("array<string>"));
+    }
 }

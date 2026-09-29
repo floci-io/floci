@@ -2,11 +2,13 @@ package io.github.hectorvent.floci.services.redshift.spectrum;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -40,6 +42,63 @@ class PostgresBackendSessionTest {
             executor.shutdownNow();
         }
     }
+
+    @Test
+    void executeSurfacesBackendErrorWithItsSqlState() throws Exception {
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket backend = new Socket("localhost", listener.getLocalPort())) {
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            Future<Character> queryMessage = executor.submit(() -> {
+                try (Socket socket = listener.accept()) {
+                    Frame query = readFrame(socket.getInputStream());
+                    send(socket.getOutputStream(), 'E', new byte[]{'C', '4', '2', 'P', '0', '1', 0,
+                        'M', 'n', 'o', ' ', 't', 'a', 'b', 'l', 'e', 0, 0});
+                    send(socket.getOutputStream(), 'Z', new byte[]{'I'});
+                    return query.type();
+                }
+            });
+
+            SpectrumReadException thrown = assertThrows(SpectrumReadException.class,
+                    () -> new PostgresBackendSession(backend).execute("SELECT 1"));
+
+            assertEquals("42P01", thrown.sqlState());
+            assertEquals('Q', queryMessage.get());
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void copyInStreamsDataAndReturnsTheRowCountFromTheCommandTag() throws Exception {
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket backend = new Socket("localhost", listener.getLocalPort())) {
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            Future<String> received = executor.submit(() -> {
+                try (Socket socket = listener.accept()) {
+                    InputStream input = socket.getInputStream();
+                    OutputStream output = socket.getOutputStream();
+                    readFrame(input);
+                    send(output, 'G', new byte[]{0, 0, 0});
+                    StringBuilder data = new StringBuilder();
+                    Frame frame = readFrame(input);
+                    while (frame.type() == 'd') {
+                        data.append(new String(frame.body(), StandardCharsets.UTF_8));
+                        frame = readFrame(input);
+                    }
+                    send(output, 'C', "COPY 3\0".getBytes(StandardCharsets.UTF_8));
+                    send(output, 'Z', new byte[]{'I'});
+                    return data + "|" + frame.type();
+                }
+            });
+
+            long rows = new PostgresBackendSession(backend).copyIn("COPY \"t\" FROM STDIN",
+                    new ByteArrayInputStream("a\nb\nc\n".getBytes(StandardCharsets.UTF_8)));
+
+            assertEquals(3, rows);
+            assertEquals("a\nb\nc\n|c", received.get());
+            executor.shutdownNow();
+        }
+    }
+
 
     private static Character serveCopyFailure(ServerSocket listener) throws IOException {
         try (Socket socket = listener.accept()) {

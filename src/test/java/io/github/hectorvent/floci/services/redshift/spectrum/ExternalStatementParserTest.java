@@ -133,4 +133,77 @@ class ExternalStatementParserTest {
         assertThat(parser.parse("drop table analytics.events cascade").orElseThrow(),
                 equalTo(new ExternalStatement.DropTable("analytics", "events", false, true)));
     }
+
+    @Test
+    void parsesCreateExternalSchemaIfNotExists() {
+        ExternalStatement.CreateSchema schema = (ExternalStatement.CreateSchema) parser.parse(
+                "CREATE EXTERNAL SCHEMA IF NOT EXISTS Analytics FROM DATA CATALOG DATABASE 'lake' IAM_ROLE 'arn:aws:iam::000000000000:role/R'").orElseThrow();
+        assertThat(schema.schemaName(), equalTo("analytics"));
+        assertThat(schema.ifNotExists(), equalTo(true));
+        ExternalStatement.CreateSchema plain = (ExternalStatement.CreateSchema) parser.parse(
+                "CREATE EXTERNAL SCHEMA analytics FROM DATA CATALOG DATABASE 'lake' IAM_ROLE 'arn:aws:iam::000000000000:role/R'").orElseThrow();
+        assertThat(plain.ifNotExists(), equalTo(false));
+    }
+
+    @Test
+    void canonicalisesRedshiftTypeAliasesToHiveTypes() {
+        ExternalStatement.CreateTable table = (ExternalStatement.CreateTable) parser.parse(
+                "CREATE EXTERNAL TABLE analytics.events (a DOUBLE PRECISION, b int8, c float4, d bool, e character varying(10)) "
+                        + "STORED AS PARQUET LOCATION 's3://bucket/events/'").orElseThrow();
+        assertThat(table.columns().stream().map(ExternalStatement.ColumnDefinition::type).toList(),
+                equalTo(List.of("double", "bigint", "float", "boolean", "varchar(10)")));
+    }
+
+    @Test
+    void parsesTablePropertiesWithParenthesesAndEscapedQuotes() {
+        ExternalStatement.CreateTable table = (ExternalStatement.CreateTable) parser.parse(
+                "CREATE EXTERNAL TABLE analytics.events (id BIGINT) STORED AS PARQUET LOCATION 's3://bucket/events/' "
+                        + "TABLE PROPERTIES ('comment'='a (b) it''s', 'numRows'='5')").orElseThrow();
+        assertThat(table.properties().get("comment"), equalTo("a (b) it's"));
+        assertThat(table.properties().get("numRows"), equalTo("5"));
+    }
+
+    @Test
+    void parsesPartitionValuesContainingClosingParentheses() {
+        ExternalStatement.AddPartitions add = (ExternalStatement.AddPartitions) parser.parse(
+                "ALTER TABLE analytics.events ADD PARTITION (region='eu (west)') LOCATION 's3://bucket/events/eu/'").orElseThrow();
+        assertThat(add.partitions().get(0).values().get("region"), equalTo("eu (west)"));
+        assertThat(add.partitions().get(0).location(), equalTo("s3://bucket/events/eu/"));
+    }
+
+    @Test
+    void parsesStatementsThatStartWithComments() {
+        assertThat(parser.parse("-- drop it\n/* now */ DROP TABLE analytics.events").orElseThrow(),
+                equalTo(new ExternalStatement.DropTable("analytics", "events", false, false)));
+    }
+
+    @Test
+    void parsesQuotedNamesContainingDotsAndSpaces() {
+        assertThat(parser.parse("DROP TABLE \"my.schema\".\"my table\"").orElseThrow(),
+                equalTo(new ExternalStatement.DropTable("my.schema", "my table", false, false)));
+        assertThat(parser.parse("DROP SCHEMA \"a b\" CASCADE").orElseThrow(),
+                equalTo(new ExternalStatement.DropSchema("a b", false, true)));
+    }
+
+    @Test
+    void rejectsIamRoleThatIsNotOneQuotedLiteral() {
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class, () -> parser.parse(
+                "CREATE EXTERNAL SCHEMA a FROM DATA CATALOG DATABASE 'lake' IAM_ROLE 'arn'; DROP TABLE x"));
+        assertThat(exception.sqlState(), equalTo("42601"));
+    }
+
+    @Test
+    void reportsMissingStoredAsClearly() {
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class, () -> parser.parse(
+                "CREATE EXTERNAL TABLE analytics.events (id BIGINT) LOCATION 's3://bucket/events/'"));
+        assertThat(exception.getMessage(), equalTo("external table requires a STORED AS clause"));
+    }
+
+    @Test
+    void keepsPropertyOrderAsWritten() {
+        ExternalStatement.CreateTable table = (ExternalStatement.CreateTable) parser.parse(
+                "CREATE EXTERNAL TABLE analytics.events (id BIGINT) STORED AS PARQUET LOCATION 's3://bucket/events/' "
+                        + "TABLE PROPERTIES ('z'='1', 'a'='2', 'm'='3')").orElseThrow();
+        assertThat(List.copyOf(table.properties().keySet()), equalTo(List.of("z", "a", "m")));
+    }
 }
