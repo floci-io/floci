@@ -406,6 +406,7 @@ public class LambdaService implements ResourceProvider {
         String role = (String) request.get("Role");
         String handler = (String) request.get("Handler");
         String runtime = (String) request.get("Runtime");
+        validateEnum(request.get("PackageType"), "packageType", List.of("Zip", "Image"));
         String packageType = request.getOrDefault("PackageType", "Zip").toString();
         String description = (String) request.get("Description");
         int timeout = toInt(request.get("Timeout"), config != null ? config.services().lambda().defaultTimeoutSeconds() : 3);
@@ -783,6 +784,7 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("Runtime")) {
             validateEnum(request.get("Runtime"), "runtime", RUNTIME_VALUES);
         }
+        validatePattern(request.get("KMSKeyArn"), "kmsKeyArn", KMS_KEY_ARN_PATTERN);
         if (request.containsKey("SnapStart")) {
             validateSnapStart(snapStart);
         }
@@ -1244,6 +1246,7 @@ public class LambdaService implements ResourceProvider {
             if (eventSourceArn == null || eventSourceArn.isBlank()) {
                 throw new AwsException("InvalidParameterValueException", "EventSourceArn is required", 400);
             }
+            validatePattern(eventSourceArn, "eventSourceArn", EVENT_SOURCE_ARN_PATTERN);
             if (!eventSourceArn.contains(":sqs:") && !eventSourceArn.contains(":kinesis:")
                     && !eventSourceArn.contains(":dynamodb:")) {
                 throw new AwsException("InvalidParameterValueException",
@@ -2516,6 +2519,7 @@ public class LambdaService implements ResourceProvider {
     public LambdaAlias createAlias(String region, String functionName, String aliasName,
                                    String functionVersion, String description,
                                    java.util.Map<String, Double> routingConfig) {
+        validateAliasName(aliasName);
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
         if (aliasStore != null && aliasStore.get(region, functionName, aliasName).isPresent()) {
@@ -2556,6 +2560,7 @@ public class LambdaService implements ResourceProvider {
     public LambdaAlias updateAlias(String region, String functionName, String aliasName,
                                    String functionVersion, String description,
                                    java.util.Map<String, Double> routingConfig) {
+        validateAliasName(aliasName);
         LambdaAlias alias = getAlias(region, functionName, aliasName);
         if (functionVersion != null) alias.setFunctionVersion(functionVersion);
         if (description != null) alias.setDescription(description);
@@ -2564,6 +2569,12 @@ public class LambdaService implements ResourceProvider {
         alias.setRevisionId(UUID.randomUUID().toString());
         if (aliasStore != null) aliasStore.save(region, alias);
         return alias;
+    }
+
+    /** Alias shape in botocore: 1-128 characters matching {@link #ALIAS_NAME_PATTERN}. */
+    private static void validateAliasName(String aliasName) {
+        validateMaxLength(aliasName, "name", 128);
+        validatePattern(aliasName, "name", ALIAS_NAME_PATTERN);
     }
 
     public void deleteAlias(String region, String functionName, String aliasName) {

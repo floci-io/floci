@@ -1964,4 +1964,56 @@ class LambdaServiceTest {
             pool.shutdownNow();
         }
     }
+
+    @Test
+    void updateFunctionConfiguration_malformedKmsKeyArn_isRejectedAndNotStored() {
+        // Catches: UpdateFunctionConfiguration storing a KMSKeyArn that violates the botocore pattern
+        service.createFunction(REGION, baseRequest("kms-update-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateFunctionConfiguration(
+                REGION, "kms-update-fn", new HashMap<>(Map.of("KMSKeyArn", "not-an-arn"))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertNull(service.getFunction(REGION, "kms-update-fn").getKmsKeyArn());
+    }
+
+    @Test
+    void createAlias_invalidName_isRejectedAndNotStored() {
+        // Catches: CreateAlias accepting an all-digit or over-128-character alias name
+        service.createFunction(REGION, baseRequest("alias-name-fn"));
+
+        AwsException digits = assertThrows(AwsException.class,
+                () -> service.createAlias(REGION, "alias-name-fn", "123", "$LATEST", null, null));
+        AwsException tooLong = assertThrows(AwsException.class,
+                () -> service.createAlias(REGION, "alias-name-fn", "a".repeat(129), "$LATEST", null, null));
+
+        assertEquals("ValidationException", digits.getErrorCode());
+        assertEquals("ValidationException", tooLong.getErrorCode());
+        assertEquals(0, service.listAliases(REGION, "alias-name-fn").size());
+    }
+
+    @Test
+    void createEventSourceMapping_malformedEventSourceArn_isRejectedAndNotStored() {
+        // Catches: CreateEventSourceMapping accepting an ARN that only contains ":sqs:" but is not a valid ARN
+        LambdaFunction fn = service.createFunction(REGION, baseRequest("esm-arn-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                new HashMap<>(Map.of("FunctionName", "esm-arn-fn", "EventSourceArn", "junk:sqs:queue"))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(0, service.listEventSourceMappings(fn.getFunctionArn()).size());
+    }
+
+    @Test
+    void createFunction_unknownPackageType_isRejectedAndNotStored() {
+        // Catches: CreateFunction accepting a PackageType outside the Zip/Image enum
+        Map<String, Object> request = baseRequest("package-type-fn");
+        request.put("PackageType", "Rar");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(REGION, request));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("ResourceNotFoundException",
+                assertThrows(AwsException.class, () -> service.getFunction(REGION, "package-type-fn")).getErrorCode());
+    }
 }
