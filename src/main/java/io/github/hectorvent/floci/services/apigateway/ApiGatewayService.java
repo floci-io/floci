@@ -2858,7 +2858,7 @@ public class ApiGatewayService {
             throw new AwsException("BadRequestException", "Failed to parse OpenAPI spec: " + errors, 400);
         }
         OpenAPI openAPI = result.getOpenAPI();
-        validateImportedAuthorizers(region, openAPI);
+        validateImportedAuthorizers(openAPI);
         List<String> warnings = result.getMessages() != null ? new ArrayList<>(result.getMessages()) : new ArrayList<>();
         if (openAPI.getPaths() != null) {
             for (Map.Entry<String, PathItem> entry : openAPI.getPaths().entrySet()) {
@@ -2878,7 +2878,7 @@ public class ApiGatewayService {
         return new ParsedOpenApi(openAPI, List.copyOf(warnings));
     }
 
-    private void validateImportedAuthorizers(String region, OpenAPI openAPI) {
+    private void validateImportedAuthorizers(OpenAPI openAPI) {
         if (openAPI.getComponents() == null || openAPI.getComponents().getSecuritySchemes() == null) {
             return;
         }
