@@ -1400,6 +1400,7 @@ public class CloudFormationService implements ResourceProvider {
         boolean updateCommitted = false;
         Set<String> attemptedResourceIds = new LinkedHashSet<>();
         try {
+            boolean templateOrParamsChanged = isTemplateOrParamsChanged(stack, templateBody, params);
             Set<String> changedResourceIds = isCreate
                     ? Set.of()
                     : changedResourceIds(stack, templateBody, params, region);
@@ -1460,8 +1461,9 @@ public class CloudFormationService implements ResourceProvider {
             if (resources.isObject()) {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
 
+                boolean shouldSkipUnchanged = templateOrParamsChanged || !changedResourceIds.isEmpty();
                 for (String logicalId : sortedLogicalIds) {
-                    if (!isCreate && !changedResourceIds.contains(logicalId)) {
+                    if (!isCreate && shouldSkipUnchanged && !changedResourceIds.contains(logicalId)) {
                         continue;
                     }
                     JsonNode resDef = resources.get(logicalId);
@@ -1478,9 +1480,14 @@ public class CloudFormationService implements ResourceProvider {
                     StackResource resource = stack.getResources().get(logicalId);
                     StackResource previousResource = resource;
                     String priorId = previousResource != null ? previousResource.getPhysicalId() : null;
-                    Map<String, String> priorAttrs = previousResource != null
-                            ? Map.copyOf(previousResource.getAttributes())
-                            : Map.of();
+                    Map<String, String> priorAttrs = new HashMap<>();
+                    if (previousResource != null && previousResource.getAttributes() != null) {
+                        for (Map.Entry<String, String> entry : previousResource.getAttributes().entrySet()) {
+                            if (entry.getValue() != null) {
+                                priorAttrs.put(entry.getKey(), entry.getValue());
+                            }
+                        }
+                    }
                     if (resource == null) {
                         resource = new StackResource();
                         resource.setLogicalId(logicalId);
@@ -1738,6 +1745,19 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
         return changedResourceIds;
+    }
+
+    private boolean isTemplateOrParamsChanged(Stack stack, String templateBody, Map<String, String> params) {
+        String oldTemplate = stack.getOriginalTemplateBody() != null
+                ? stack.getOriginalTemplateBody()
+                : stack.getTemplateBody();
+        if (oldTemplate != null && !oldTemplate.equals(templateBody)) {
+            return true;
+        }
+        Map<String, String> oldParams = stack.parametersSnapshot();
+        Map<String, String> safeParams = params != null ? params : Map.of();
+        Map<String, String> safeOldParams = oldParams != null ? oldParams : Map.of();
+        return !safeParams.equals(safeOldParams);
     }
 
     private boolean isNestedStackChanged(Stack parentStack, String logicalId, JsonNode newDef,
