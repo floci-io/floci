@@ -200,11 +200,11 @@ class ResourceGroupsTaggingServiceTest {
         RecordingTagHandler handler = new RecordingTagHandler("sqs", false);
         ResourceGroupsTaggingService service = service(List.of(failingProvider()), List.of(handler));
 
-        AwsException error = assertThrows(AwsException.class,
-                () -> service.applyTags(List.of(QUEUE_ARN), Map.of("k", "v"), REGION));
+        Map<String, AwsException> failures = service.applyTags(List.of(QUEUE_ARN), Map.of("k", "v"), REGION);
 
-        assertEquals("InternalServiceException", error.getErrorCode());
-        assertEquals(500, error.getHttpStatus());
+        assertEquals(Set.of(QUEUE_ARN), failures.keySet());
+        assertEquals("InternalServiceException", failures.get(QUEUE_ARN).getErrorCode());
+        assertEquals(500, failures.get(QUEUE_ARN).getHttpStatus());
         assertTrue(handler.tagged.isEmpty());
         assertTrue(service.getTagsForResource(REGION, QUEUE_ARN).isEmpty());
         assertTrue(allResources(service).isEmpty());
@@ -216,13 +216,27 @@ class ResourceGroupsTaggingServiceTest {
         ResourceGroupsTaggingService service = service(List.of(failingProvider()), List.of(handler));
         service.tagResources(List.of(QUEUE_ARN), Map.of("k", "v"), REGION);
 
-        AwsException error = assertThrows(AwsException.class,
-                () -> service.removeTags(List.of(QUEUE_ARN), List.of("k"), REGION));
+        Map<String, AwsException> failures = service.removeTags(List.of(QUEUE_ARN), List.of("k"), REGION);
 
-        assertEquals("InternalServiceException", error.getErrorCode());
-        assertEquals(500, error.getHttpStatus());
+        assertEquals(Set.of(QUEUE_ARN), failures.keySet());
+        assertEquals("InternalServiceException", failures.get(QUEUE_ARN).getErrorCode());
+        assertEquals(500, failures.get(QUEUE_ARN).getHttpStatus());
         assertTrue(handler.untagged.isEmpty());
-        assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, QUEUE_ARN));
+        assertTrue(service.getTagsForResource(REGION, QUEUE_ARN).isEmpty());
+    }
+
+    @Test
+    void listedOwnerIsTaggedWhenAnotherProviderFails() {
+        RecordingTagHandler handler = new RecordingTagHandler("sqs", false);
+        ResourceGroupsTaggingService service = service(List.of(failingProvider(),
+                provider(resource(QUEUE_ARN, "sqs:queue", Map.of()))), List.of(handler));
+
+        assertTrue(service.applyTags(List.of(QUEUE_ARN), Map.of("k", "v"), REGION).isEmpty());
+        assertTrue(service.removeTags(List.of(QUEUE_ARN), List.of("k"), REGION).isEmpty());
+
+        assertEquals(Map.of("k", "v"), handler.tagged.get(QUEUE_ARN));
+        assertEquals(List.of("k"), handler.untagged.get(QUEUE_ARN));
+        assertTrue(service.getTagsForResource(REGION, QUEUE_ARN).isEmpty());
     }
 
     @Test

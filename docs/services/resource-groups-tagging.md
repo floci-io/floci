@@ -66,8 +66,9 @@ goes to the tagging store and the owning service is not called.
 `UntagResources` routes the same way, and also removes the keys from the
 tagging store for every ARN, including one the owning service rejects, so a
 copy stored earlier can always be cleared. When an owning service cannot be
-read while routing, `TagResources` and `UntagResources` fail with
-`InternalServiceException` (HTTP 500) and change nothing, so SDKs retry them.
+read while routing, an ARN that has an owning service but that no service lists
+is reported in `FailedResourcesMap` with `InternalServiceException` (status
+500) and left unchanged, while ARNs a service lists still reach it.
 
 ## Filtering
 

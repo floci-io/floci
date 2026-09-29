@@ -144,17 +144,19 @@ public class ResourceGroupsTaggingService implements Resettable {
      * the tagging store. {@link #tagResources} stays store-only for services that dual-write, so
      * they can never recurse through their own handler.
      *
-     * @return the owning service's rejection per ARN, empty when every ARN was tagged
+     * @return the owning service's rejection per ARN, empty when every ARN was tagged; an ARN whose
+     *         owner could not be read is reported as {@code InternalServiceException}
      * @throws AwsException {@code InvalidParameterException} when an ARN names another region;
      *                      nothing is tagged then
-     * @throws AwsException {@code InternalServiceException} when an owning service cannot be read;
-     *                      nothing is changed then
      */
     public Map<String, AwsException> applyTags(List<String> resourceArns, Map<String, String> tags, String region) {
         rejectOtherRegion(resourceArns, region, "TagResources");
         Map<String, AwsException> failures = new LinkedHashMap<>();
-        Map<String, TagHandler> owners = listedOwners(resourceArns, region);
+        Map<String, TagHandler> owners = listedOwners(resourceArns, region, failures);
         for (String arn : resourceArns) {
+            if (failures.containsKey(arn)) {
+                continue;
+            }
             TagHandler owner = owners.get(arn);
             if (owner == null) {
                 tagResources(List.of(arn), tags, region);
@@ -174,16 +176,15 @@ public class ResourceGroupsTaggingService implements Resettable {
      * leave the tagging store for every ARN, including one its owning service rejected, so a copy
      * stored earlier can always be cleared.
      *
-     * @return the owning service's rejection per ARN, empty when every ARN was untagged
+     * @return the owning service's rejection per ARN, empty when every ARN was untagged; an ARN whose
+     *         owner could not be read is reported as {@code InternalServiceException}
      * @throws AwsException {@code InvalidParameterException} when an ARN names another region;
      *                      nothing is untagged then
-     * @throws AwsException {@code InternalServiceException} when an owning service cannot be read;
-     *                      nothing is changed then
      */
     public Map<String, AwsException> removeTags(List<String> resourceArns, List<String> tagKeys, String region) {
         rejectOtherRegion(resourceArns, region, "UntagResources");
         Map<String, AwsException> failures = new LinkedHashMap<>();
-        Map<String, TagHandler> owners = listedOwners(resourceArns, region);
+        Map<String, TagHandler> owners = listedOwners(resourceArns, region, failures);
         for (String arn : resourceArns) {
             TagHandler owner = owners.get(arn);
             if (owner != null) {
@@ -208,10 +209,13 @@ public class ResourceGroupsTaggingService implements Resettable {
         }
     }
 
-    // Providers are only read when some ARN has a handler, so a store-only request stays cheap.
-    private Map<String, TagHandler> listedOwners(List<String> resourceArns, String region) {
+    // Providers are only read when some ARN has a handler, so a store-only request stays cheap. When a
+    // provider failed, an unlisted ARN with a handler may be that provider's, so it fails instead.
+    private Map<String, TagHandler> listedOwners(List<String> resourceArns, String region,
+                                                 Map<String, AwsException> failures) {
         Map<String, TagHandler> owners = new HashMap<>();
         Set<String> listed = null;
+        boolean complete = true;
         for (String arn : resourceArns) {
             TagHandler handler = ownerHandler(arn);
             if (handler == null) {
@@ -220,7 +224,9 @@ public class ResourceGroupsTaggingService implements Resettable {
             if (listed == null) {
                 String accountId = regionResolver != null ? regionResolver.getAccountId() : null;
                 listed = new HashSet<>();
-                for (ExplorerResource resource : providerResources(true)) {
+                ProviderScan scan = providerResources();
+                complete = scan.complete();
+                for (ExplorerResource resource : scan.resources()) {
                     String listedArn = withoutWildcard(resource.arn());
                     String resourceRegion = providerRegion(listedArn, resource.region());
                     if (resourceRegion != null && resourceRegion.equals(region)
@@ -232,6 +238,9 @@ public class ResourceGroupsTaggingService implements Resettable {
             // A wildcard ARN always reaches its handler, which rejects it as AWS does, listed or not.
             if (arn.endsWith(WILDCARD_SUFFIX) || listed.contains(arn)) {
                 owners.put(arn, handler);
+            } else if (!complete) {
+                failures.put(arn, new AwsException("InternalServiceException",
+                        "An owning service could not be read. Retry the request.", 500));
             }
         }
         return owners;
@@ -363,7 +372,7 @@ public class ResourceGroupsTaggingService implements Resettable {
                 byArn.computeIfAbsent(arn, ViewEntry::of).mapping().getTags().putAll(stored.getTags());
             }
         }
-        for (ExplorerResource resource : providerResources(false)) {
+        for (ExplorerResource resource : providerResources().resources()) {
             String arn = withoutWildcard(resource.arn());
             String resourceRegion = providerRegion(arn, resource.region());
             // A global resource, or one owned in another region, hides any store copy of its ARN too.
@@ -385,10 +394,13 @@ public class ResourceGroupsTaggingService implements Resettable {
         return new ArrayList<>(byArn.values());
     }
 
+    private record ProviderScan(List<ExplorerResource> resources, boolean complete) {}
+
     // Tags are copied inside the try so a live tag map that changes mid-copy skips only its provider,
-    // unless strict: a write then fails rather than guess the owner of a resource it cannot see.
-    private List<ExplorerResource> providerResources(boolean strict) {
+    // and the scan is then not complete.
+    private ProviderScan providerResources() {
         List<ExplorerResource> resources = new ArrayList<>();
+        boolean complete = true;
         for (ResourceProvider provider : providers) {
             try {
                 List<ExplorerResource> copies = new ArrayList<>();
@@ -401,13 +413,10 @@ public class ResourceGroupsTaggingService implements Resettable {
             } catch (RuntimeException e) {
                 LOG.warnv(e, "ResourceProvider {0} failed to supply resources; excluding it from tag discovery",
                         provider.getClass().getSimpleName());
-                if (strict) {
-                    throw new AwsException("InternalServiceException",
-                            "An owning service could not be read. Retry the request.", 500);
-                }
+                complete = false;
             }
         }
-        return resources;
+        return new ProviderScan(resources, complete);
     }
 
     // Region and account come from the ARN (arn:<partition>:svc:region:acct:resource), and a string
