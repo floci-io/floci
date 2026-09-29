@@ -95,6 +95,52 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     }
 
     @Test
+    void copySourceReadHonorsSignedPrincipalGlobalCondition() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-global-source-" + suffix;
+        String destBucket = "copy-global-dest-" + suffix;
+        String userName = "copy-global-user-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putObjectAsRoot(sourceBucket, "source.txt", "copy source");
+
+        UserCredentials caller = createUser(userName);
+        putUserPolicy(userName, "ConditionalSourceRead", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/*",
+                   "Condition":{"Bool":{"aws:PrincipalIsAWSService":"false"}}},
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%2$s/*"}
+                ]} """.formatted(sourceBucket, destBucket));
+
+        given()
+                .filter(caller.signer())
+        .when()
+                .get("/" + sourceBucket + "/source.txt")
+        .then()
+                .statusCode(200);
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/source.txt")
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(200);
+
+        String uploadId = initiateMultipartUploadAsRoot(destBucket, "multipart.txt");
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/source.txt")
+                .queryParam("uploadId", uploadId)
+                .queryParam("partNumber", 1)
+        .when()
+                .put("/" + destBucket + "/multipart.txt")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
     void copyObjectSucceedsWhenSourceBucketPolicyAllowsCaller() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String sourceBucket = "copy-resource-allow-source-" + suffix;

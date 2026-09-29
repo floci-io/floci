@@ -726,22 +726,24 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
             }
 
-            Map<String, List<String>> effectiveContext = conditionContext;
             ResourcePolicyDecision effectiveDecision = resourcePolicyDecision;
             String effectiveOwnerAccountId = resourceOwnerAccountId;
+            List<String> policyDocs = null;
             if (effectiveDecision == null) {
                 List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies = resolveResourcePolicies(
                         credentialScope, resource);
                 effectiveOwnerAccountId = resourcePolicies.isEmpty()
                         ? null : resourcePolicies.getFirst().ownerAccountId();
-                List<String> policyDocs = resourcePolicies.stream()
+                policyDocs = resourcePolicies.stream()
                         .map(ResourcePolicyProvider.ResourcePolicy::policyDocument)
                         .filter(doc -> doc != null && !doc.isBlank())
                         .toList();
-                String region = requestContext.getRegion() == null
-                        ? config.defaultRegion() : requestContext.getRegion();
-                effectiveContext = IamConditionContextResolver.withGlobalContext(
-                        conditionContext, resource, region, accountId, effectiveOwnerAccountId);
+            }
+            String region = requestContext.getRegion() == null
+                    ? config.defaultRegion() : requestContext.getRegion();
+            Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
+                    conditionContext, resource, region, accountId, effectiveOwnerAccountId);
+            if (effectiveDecision == null) {
                 effectiveDecision = evaluator.evaluateResourcePolicy(
                         policyDocs.isEmpty() ? null : policyDocs,
                         caller.principalArn(), action, resource, effectiveContext);
