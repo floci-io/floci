@@ -12,6 +12,7 @@ import software.amazon.awssdk.services.iam.model.CreateRoleRequest;
 import software.amazon.awssdk.services.iam.model.CreateSamlProviderRequest;
 import software.amazon.awssdk.services.iam.model.CreateSamlProviderResponse;
 import software.amazon.awssdk.services.iam.model.DeleteRoleRequest;
+import software.amazon.awssdk.services.iam.model.NoSuchEntityException;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.*;
 import org.w3c.dom.Document;
@@ -120,7 +121,8 @@ class StsTest {
         if (iam != null && roleName != null) {
             try {
                 iam.deleteRole(DeleteRoleRequest.builder().roleName(roleName).build());
-            } catch (Exception ignored) {
+            } catch (NoSuchEntityException ignored) {
+                // Safe to ignore if the role was already cleaned up or never created.
             }
         }
     }

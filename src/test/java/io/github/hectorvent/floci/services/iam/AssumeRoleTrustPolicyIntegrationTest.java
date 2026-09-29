@@ -61,6 +61,24 @@ class AssumeRoleTrustPolicyIntegrationTest {
     }
 
     @Test
+    void permittedCallerCanAssumeRoleUsingPartitionCorrectArn() {
+        String role = "trust-partition-" + UUID.randomUUID().toString().substring(0, 8);
+        createRoleInB(role);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "AssumeRole")
+            .formParam("RoleArn", "arn:aws-cn:iam::" + ACCOUNT_B + ":role/" + role)
+            .formParam("RoleSessionName", "s")
+            .header("Authorization", auth(ACCOUNT_A, "sts"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId", startsWith("ASIA"))
+            .body("AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn",
+                    containsString("arn:aws-cn:sts::" + ACCOUNT_B + ":assumed-role/" + role + "/s"));
+    }
+
+    @Test
     void unauthorizedCallerIsDenied() {
         String role = "trust-deny-" + UUID.randomUUID().toString().substring(0, 8);
         createRoleInB(role);

@@ -33,14 +33,22 @@ class TestSTSAssumeRole:
                     RoleName=role,
                     AssumeRolePolicyDocument=trust_policy,
                 )
-            except ClientError:
-                pass
+            except ClientError as e:
+                if e.response.get("Error", {}).get("Code") == "EntityAlreadyExists":
+                    # Safe to ignore if the role already exists from a prior test run.
+                    pass
+                else:
+                    raise
         yield
         for role in roles:
             try:
                 iam_client.delete_role(RoleName=role)
-            except ClientError:
-                pass
+            except ClientError as e:
+                if e.response.get("Error", {}).get("Code") == "NoSuchEntity":
+                    # Safe to ignore if the role was already cleaned up or never created.
+                    pass
+                else:
+                    raise
 
     def test_assume_role(self, sts_client):
         """Test AssumeRole returns temporary credentials."""

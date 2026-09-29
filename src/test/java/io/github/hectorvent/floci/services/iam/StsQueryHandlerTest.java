@@ -18,6 +18,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -115,6 +116,65 @@ class StsQueryHandlerTest {
 
         assertEquals(403, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("<Code>AccessDenied</Code>"));
+    }
+
+    @Test
+    void assumeRoleAllowsPartitionCorrectRoleArn() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setPath("/");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        StsQueryHandler handler = newHandler(role);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws-cn:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Arn>arn:aws-cn:sts::000000000000:assumed-role/TestRole/test-session</Arn>"),
+                "AssumedRoleUser Arn must retain the caller's partition");
+    }
+
+    @Test
+    void assumeRoleAllowsGovCloudPartitionRoleArn() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setPath("/");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        StsQueryHandler handler = newHandler(role);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws-us-gov:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Arn>arn:aws-us-gov:sts::000000000000:assumed-role/TestRole/test-session</Arn>"),
+                "AssumedRoleUser Arn must retain GovCloud partition");
+    }
+
+    @Test
+    void roleArnMatchesValidatesPartitionsAndPaths() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setPath("/team/");
+        role.setArn("arn:aws:iam::000000000000:role/team/TestRole");
+
+        assertTrue(StsQueryHandler.roleArnMatches("arn:aws:iam::000000000000:role/team/TestRole", role));
+        assertTrue(StsQueryHandler.roleArnMatches("arn:aws-cn:iam::000000000000:role/team/TestRole", role));
+        assertTrue(StsQueryHandler.roleArnMatches("arn:aws-us-gov:iam::000000000000:role/team/TestRole", role));
+
+        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:iam::000000000000:role/other/TestRole", role));
+        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:iam::111111111111:role/team/TestRole", role));
+        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:iam:us-east-1:000000000000:role/team/TestRole", role));
+        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:s3:::bucket", role));
+        assertFalse(StsQueryHandler.roleArnMatches("not-an-arn", role));
+        assertFalse(StsQueryHandler.roleArnMatches(null, role));
     }
 
     @ParameterizedTest

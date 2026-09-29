@@ -32,16 +32,20 @@ describe('STS', () => {
           AssumeRolePolicyDocument: trustPolicy,
         })
       );
-    } catch {
-      // ignore if already exists
+    } catch (err: unknown) {
+      if ((err as { name?: string })?.name !== 'EntityAlreadyExistsException') {
+        throw err;
+      }
     }
   });
 
   afterAll(async () => {
     try {
       await iam.send(new DeleteRoleCommand({ RoleName: roleName }));
-    } catch {
-      // ignore
+    } catch (err: unknown) {
+      if ((err as { name?: string })?.name !== 'NoSuchEntityException') {
+        throw err;
+      }
     }
   });
 

@@ -124,7 +124,11 @@ public class StsQueryHandler {
             return trustDenied;
         }
 
-        String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
+        String partition = AwsArnUtils.isArn(roleArn)
+                ? AwsArnUtils.parse(roleArn).partition()
+                : regionResolver.getPartition();
+        String assumedRoleArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
+                "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
         // Register session so IAM enforcement can resolve the role's policies, RDS/ElastiCache
@@ -160,8 +164,7 @@ public class StsQueryHandler {
                         auth == null ? null : accountResolver.extractAccessKeyId(auth))
                 .orElse(AwsArnUtils.Arn.of("iam", "", callerAccount, "root").toString());
         boolean permitted = role.isPresent()
-                && roleArn != null
-                && roleArn.equals(role.get().getArn())
+                && roleArnMatches(roleArn, role.get())
                 && (!enforcement
                     || trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, callerAccount));
         if (permitted) {
@@ -170,6 +173,33 @@ public class StsQueryHandler {
         return AwsQueryResponse.error("AccessDenied",
                 "User: " + callerArn + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
                 AwsNamespaces.STS, 403);
+    }
+
+    static boolean roleArnMatches(String requestedRoleArn, IamRole role) {
+        if (requestedRoleArn == null || role == null || !AwsArnUtils.isArn(requestedRoleArn)) {
+            return false;
+        }
+        AwsArnUtils.Arn requested = AwsArnUtils.parse(requestedRoleArn);
+        if (!"iam".equals(requested.service())
+                || !requested.partition().matches(AwsArnUtils.PARTITION_REGEX)) {
+            return false;
+        }
+        String storedArn = role.getArn();
+        if (storedArn != null && AwsArnUtils.isArn(storedArn)) {
+            AwsArnUtils.Arn stored = AwsArnUtils.parse(storedArn);
+            return requested.accountId().equals(stored.accountId())
+                    && requested.region().equals(stored.region())
+                    && requested.resource().equals(stored.resource());
+        }
+        String path = role.getPath() != null ? role.getPath() : "/";
+        if (!path.startsWith("/")) {
+            path = "/" + path;
+        }
+        if (!path.endsWith("/")) {
+            path = path + "/";
+        }
+        String expectedResource = "role" + path + role.getRoleName();
+        return requested.region().isEmpty() && requested.resource().equals(expectedResource);
     }
 
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
