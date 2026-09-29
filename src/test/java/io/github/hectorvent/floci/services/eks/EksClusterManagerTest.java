@@ -511,7 +511,35 @@ class EksClusterManagerTest {
             verify(portAllocator, never()).release(6441);
             verify(dockerClient).stopContainerCmd("cid-old");
             verify(lifecycleManager, Mockito.times(2))
-                    .removeIfExistsStrict("floci-eks-demo-capacity-backup");
+                    .removeIfExistsStrict("floci-eks-demo.capacity-backup");
+        }
+
+        @Test
+        void capacityBackupDoesNotCollideWithAnotherClusterName() {
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenReturn(new ContainerInfo("cid-new", Map.of()));
+            Cluster cluster = cluster();
+            cluster.setName("foo");
+            cluster.setDockerName("floci-eks-foo");
+            cluster.setContainerId("cid-foo");
+            cluster.setHostPort(6441);
+            cluster.setNodeInstanceType("t3.medium");
+            Cluster other = cluster();
+            other.setName("foo-capacity-backup");
+            other.setDockerName("floci-eks-foo-capacity-backup");
+            other.setContainerId("cid-other");
+
+            assertTrue(manager.restartForNodeCapacity(cluster, "m5.large"));
+            manager.stopCluster(cluster);
+
+            assertTrue(other.getName().matches(EksService.CLUSTER_NAME_REGEX));
+            assertFalse("foo.capacity-backup".matches(EksService.CLUSTER_NAME_REGEX));
+            assertEquals("floci-eks-foo-capacity-backup", manager.clusterResourceName(other));
+            verify(lifecycleManager, Mockito.times(3))
+                    .removeIfExistsStrict("floci-eks-foo.capacity-backup");
+            verify(lifecycleManager, never()).removeIfExistsStrict(other.getDockerName());
+            verify(lifecycleManager, never()).stopAndRemove("cid-other", null);
         }
 
         @Test
@@ -546,7 +574,7 @@ class EksClusterManagerTest {
                     .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
             stubFreshStart("cid-new", 6440);
             Mockito.doNothing().doThrow(new IllegalStateException("Docker cleanup failed"))
-                    .when(lifecycleManager).removeIfExistsStrict("floci-eks-demo-capacity-backup");
+                    .when(lifecycleManager).removeIfExistsStrict("floci-eks-demo.capacity-backup");
 
             Cluster cluster = cluster();
             manager.restoreCluster(cluster);
@@ -620,7 +648,7 @@ class EksClusterManagerTest {
             cluster.setDockerName("floci-eks-demo");
             cluster.setContainerId("cid-new");
             Mockito.doThrow(new IllegalStateException("Docker cleanup failed"))
-                    .when(lifecycleManager).removeIfExistsStrict("floci-eks-demo-capacity-backup");
+                    .when(lifecycleManager).removeIfExistsStrict("floci-eks-demo.capacity-backup");
 
             assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
 

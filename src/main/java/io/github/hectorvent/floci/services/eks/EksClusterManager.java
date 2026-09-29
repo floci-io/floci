@@ -712,7 +712,7 @@ public class EksClusterManager
     }
 
     private static String capacityBackupName(Cluster cluster) {
-        return cluster.getDockerName() + "-capacity-backup";
+        return cluster.getDockerName() + ".capacity-backup";
     }
 
     /**

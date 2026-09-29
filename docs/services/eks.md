@@ -417,7 +417,8 @@ container until the replacement starts and restarts it if replacement fails. Thi
 containers started before resource limits were available. If Docker cannot remove the stopped
 backup after a successful replacement, the new node keeps running and cluster deletion retries
 the backup cleanup after stopping the live node. If cleanup still fails, deletion reports the
-error and can be retried before the data volume is removed.
+error and can be retried before the data volume is removed. Backup container names end in
+`.capacity-backup`, which cannot match an EKS cluster name.
 
 #### Cluster node provider ID and topology labels
 
