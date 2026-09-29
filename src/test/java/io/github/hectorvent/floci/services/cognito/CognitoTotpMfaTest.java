@@ -107,6 +107,41 @@ class CognitoTotpMfaTest {
     }
 
     @Test
+    void disabledUserCannotCompleteMfaSetupChallenge() {
+        String loginSession = (String) passwordLogin().get("Session");
+        Map<String, Object> association = service.associateSoftwareToken(null, loginSession);
+        String code = CognitoTotp.code((String) association.get("SecretCode"), clock.instant());
+        String verifiedSession = (String) service.verifySoftwareToken(null,
+                (String) association.get("Session"), code).get("Session");
+
+        service.adminDisableUser(pool.getId(), USERNAME);
+
+        AwsException disabled = assertThrows(AwsException.class,
+                () -> service.respondToAuthChallenge(client.getClientId(), "MFA_SETUP", verifiedSession,
+                        Map.of("USERNAME", USERNAME)));
+        assertEquals("UserNotConfirmedException", disabled.getErrorCode());
+    }
+
+    @Test
+    void disabledUserCannotCompleteSoftwareTokenChallenge() {
+        String loginSession = (String) passwordLogin().get("Session");
+        Map<String, Object> association = service.associateSoftwareToken(null, loginSession);
+        String code = CognitoTotp.code((String) association.get("SecretCode"), clock.instant());
+        String verifiedSession = (String) service.verifySoftwareToken(null,
+                (String) association.get("Session"), code).get("Session");
+        service.respondToAuthChallenge(client.getClientId(), "MFA_SETUP", verifiedSession,
+                Map.of("USERNAME", USERNAME));
+        String challengeSession = (String) passwordLogin().get("Session");
+
+        service.adminDisableUser(pool.getId(), USERNAME);
+
+        AwsException disabled = assertThrows(AwsException.class,
+                () -> service.respondToAuthChallenge(client.getClientId(), "SOFTWARE_TOKEN_MFA", challengeSession,
+                        Map.of("USERNAME", USERNAME, "SOFTWARE_TOKEN_MFA_CODE", code)));
+        assertEquals("UserNotConfirmedException", disabled.getErrorCode());
+    }
+
+    @Test
     void setupSessionExpiresAndCannotBeUsedByAnotherClient() {
         String session = (String) passwordLogin().get("Session");
         UserPoolClient other = service.createUserPoolClient(pool.getId(), "other", false, false, List.of(), List.of());

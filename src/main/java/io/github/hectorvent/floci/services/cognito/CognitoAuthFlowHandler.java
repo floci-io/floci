@@ -391,6 +391,7 @@ final class CognitoAuthFlowHandler {
         }
         validateSecretHash(client, responses, username);
         CognitoUser user = service.adminGetUser(pool.getId(), username);
+        requireSignInEligible(user);
         if (phase == TotpPhase.VERIFIED) {
             if (!state.secret().equals(user.getSoftwareTokenMfaSecret())) {
                 throw new AwsException("NotAuthorizedException", "Software token is not verified", 400);
