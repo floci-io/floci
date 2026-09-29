@@ -1498,6 +1498,36 @@ class LambdaServiceTest {
                 service.listEventSourceMappings(null, "arn:aws-eusc:sqs:eusc-de-east-1:000000000000:q"));
     }
 
+    // Catches: FunctionName pattern missing "." in the name characters, so a dotted name is rejected.
+    @Test
+    void listEventSourceMappingsAcceptsDottedFunctionName() {
+        assertNotRejectedByListEsmPattern("my.func");
+    }
+
+    // Catches: FunctionName pattern missing the optional eusc- region prefix.
+    @Test
+    void listEventSourceMappingsAcceptsEuscRegionFunctionArn() {
+        assertEquals(List.of(), service.listEventSourceMappings(
+                "arn:aws-eusc:lambda:eusc-de-east-1:000000000000:function:my-func"));
+    }
+
+    // Catches: FunctionName pattern missing the $LATEST.PUBLISHED qualifier.
+    @Test
+    void listEventSourceMappingsAcceptsLatestPublishedQualifier() {
+        assertNotRejectedByListEsmPattern(
+                "arn:aws:lambda:us-east-1:000000000000:function:my-func:$LATEST.PUBLISHED");
+    }
+
+    // LambdaArnUtils.resolve still rejects dotted names and $LATEST.PUBLISHED downstream, so only the
+    // ListEventSourceMappings pattern check (anchored with ^) is asserted here.
+    private void assertNotRejectedByListEsmPattern(String functionName) {
+        try {
+            service.listEventSourceMappings(functionName);
+        } catch (AwsException e) {
+            assertFalse(e.getMessage().contains("pattern: ^(arn:"), e.getMessage());
+        }
+    }
+
     // Catches: LayerVersionArn pattern missing the AWS-managed awslayer alternative, so a valid
     // AWS-managed layer ARN is rejected as a ValidationException.
     @Test
