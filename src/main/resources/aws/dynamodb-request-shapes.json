@@ -1,5 +1,8 @@
 {
-  "source": "botocore 1.43.98 dynamodb 2012-08-10",
+  "_source": {
+    "generator": "tools/aws/regen_dynamodb_shapes.py",
+    "botocore": "botocore 1.43.98 (installed package)"
+  },
   "operations": {
     "BatchExecuteStatement": "BatchExecuteStatementInput",
     "BatchGetItem": "BatchGetItemInput",

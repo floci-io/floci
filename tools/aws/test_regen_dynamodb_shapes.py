@@ -34,7 +34,7 @@ MODEL = {
 def test_keeps_only_input_shapes_and_their_types():
     doc = r.build(MODEL, "botocore test")
 
-    assert doc["source"] == "botocore test"
+    assert doc["_source"] == {"generator": "tools/aws/regen_dynamodb_shapes.py", "botocore": "botocore test"}
     assert doc["operations"] == {"DescribeLimits": "DescribeLimitsInput", "Scan": "ScanInput"}
     assert "ScanOutput" not in doc["shapes"]
     assert "Integer" not in doc["shapes"]
@@ -43,6 +43,25 @@ def test_keeps_only_input_shapes_and_their_types():
     assert doc["shapes"]["TableName"] == {"type": "string"}
     assert doc["shapes"]["AttributeNameList"] == {"type": "list", "member": "AttributeName"}
     assert doc["shapes"]["Key"] == {"type": "map", "value": "AttributeValue"}
+
+
+def test_check_ignores_provenance(tmp_path, monkeypatch):
+    output = tmp_path / "shapes.json"
+    output.write_text(r.render(r.build(MODEL, "botocore 0.0.1 (local/aws/botocore)")), encoding="utf-8")
+    monkeypatch.setattr(r, "resolve_botocore_data", lambda explicit: (tmp_path, "--botocore-data /elsewhere"))
+    monkeypatch.setattr(r, "load_model", lambda data: MODEL)
+
+    assert r.main(["--check", "--output", str(output)]) == 0
+
+
+def test_check_reports_changed_shapes(tmp_path, monkeypatch):
+    output = tmp_path / "shapes.json"
+    changed = {**MODEL, "shapes": {**MODEL["shapes"], "TableName": {"type": "integer"}}}
+    output.write_text(r.render(r.build(changed, "botocore test")), encoding="utf-8")
+    monkeypatch.setattr(r, "resolve_botocore_data", lambda explicit: (tmp_path, "botocore test"))
+    monkeypatch.setattr(r, "load_model", lambda data: MODEL)
+
+    assert r.main(["--check", "--output", str(output)]) == 1
 
 
 def test_output_is_stable():

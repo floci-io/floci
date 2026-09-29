@@ -24,7 +24,7 @@ import json
 import sys
 from pathlib import Path
 
-from regen_partitions import resolve_botocore_data
+from regen_partitions import resolve_botocore_data, strip_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = REPO_ROOT / "src/main/resources/aws/dynamodb-request-shapes.json"
@@ -42,7 +42,7 @@ def load_model(data: Path) -> dict:
     raise SystemExit(f"error: {plain} not found")
 
 
-def build(model: dict, source: str) -> dict:
+def build(model: dict, provenance: str) -> dict:
     shapes = model["shapes"]
     kept: dict[str, dict] = {}
 
@@ -71,7 +71,10 @@ def build(model: dict, source: str) -> dict:
             keep(operation["input"]["shape"])
 
     return {
-        "source": source,
+        "_source": {
+            "generator": "tools/aws/regen_dynamodb_shapes.py",
+            "botocore": provenance,
+        },
         "operations": operations,
         "shapes": dict(sorted(kept.items())),
     }
@@ -89,11 +92,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     data, provenance = resolve_botocore_data(args.botocore_data)
-    fresh = render(build(load_model(data), f"{provenance.split(' (')[0]} dynamodb 2012-08-10"))
+    fresh = render(build(load_model(data), provenance))
 
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""
-        if current != fresh:
+        if strip_source(current) != strip_source(fresh):
             print(f"{args.output} is stale (generated from {provenance}).", file=sys.stderr)
             return 1
         return 0
