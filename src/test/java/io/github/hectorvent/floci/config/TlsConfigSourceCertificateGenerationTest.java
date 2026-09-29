@@ -292,7 +292,7 @@ class TlsConfigSourceCertificateGenerationTest {
      */
     @Test
     void testCertificateCoversMultiLabelRegionalEndpointsWhenSpoofEnabled() throws Exception {
-        // Catches: a missing SAN for execute-api, dkr.ecr, lambda-url or s3.dualstack hosts
+        // Catches: a missing SAN for execute-api, dkr.ecr, s3-control or s3.dualstack hosts
         System.setProperty("floci.dns.spoof-aws-endpoints", "true");
 
         new TlsConfigSource();
@@ -304,8 +304,40 @@ class TlsConfigSourceCertificateGenerationTest {
             "Certificate SANs should cover ECR dkr.ecr endpoints");
         assertTrue(sans.contains("*.s3.dualstack.us-east-1.amazonaws.com"),
             "Certificate SANs should cover dualstack virtual-hosted S3 endpoints");
-        assertTrue(sans.contains("*.lambda-url.us-east-1.amazonaws.com"),
-            "Certificate SANs should cover Lambda function URL endpoints");
+        assertTrue(sans.contains("*.s3-control.us-east-1.amazonaws.com"),
+            "Certificate SANs should cover S3 Control <account>.s3-control endpoints");
+    }
+
+    @Test
+    void testCertificateDoesNotClaimLambdaUrlUnderAmazonaws() throws Exception {
+        // Catches: a lambda-url SAN under the amazonaws suffix, where Lambda function URLs do not live
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+
+        new TlsConfigSource();
+
+        List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-server.crt"));
+        assertFalse(sans.contains("*.lambda-url.us-east-1.amazonaws.com"),
+            "Function URLs are <url-id>.lambda-url.<region>.on.aws, never under the partition suffix");
+    }
+
+    @Test
+    void testCertificateUsesEachRegionsOwnPartitionSuffix() throws Exception {
+        // Catches: cn-* regions named under amazonaws.com and non-commercial partition suffixes uncovered
+        System.setProperty("floci.dns.spoof-aws-endpoints", "true");
+
+        new TlsConfigSource();
+
+        List<String> sans = extractSansFromCertificate(tempDir.resolve("tls/floci-server.crt"));
+        assertTrue(sans.contains("*.amazonaws.com.cn"), "China global endpoints");
+        assertTrue(sans.contains("*.cn-north-1.amazonaws.com.cn"), "China regional endpoints");
+        assertTrue(sans.contains("*.execute-api.cn-north-1.amazonaws.com.cn"), "China multi-label endpoints");
+        assertTrue(sans.contains("*.s3-website-cn-north-1.amazonaws.com.cn"), "China hyphenated S3 endpoints");
+        assertTrue(sans.contains("*.us-iso-east-1.c2s.ic.gov"), "ISO regional endpoints");
+        assertTrue(sans.contains("*.amazonaws.eu"), "EUSC global endpoints");
+        assertFalse(sans.contains("*.cn-north-1.amazonaws.com"),
+            "cn-north-1 has no endpoints under the commercial suffix");
+        assertFalse(sans.contains("*.us-east-1.amazonaws.com.cn"),
+            "us-east-1 has no endpoints under the China suffix");
     }
 
     /**

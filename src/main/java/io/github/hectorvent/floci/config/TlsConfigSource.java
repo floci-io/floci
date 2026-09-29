@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
@@ -234,9 +236,24 @@ public class TlsConfigSource implements ConfigSource {
         return sans;
     }
 
+    /**
+     * The suffixes floci.dns.spoof-aws-endpoints intercepts, shared by the embedded DNS server and
+     * the certificate SANs: every partition's DNS and dual-stack suffix. Each covers the suffix
+     * itself and its subdomains at any depth, so explicit SDK endpoints like
+     * {@code sts.us-east-1.<suffix>} resolve to Floci instead of real AWS.
+     */
+    public static Set<String> awsEndpointSuffixes() {
+        Set<String> result = new LinkedHashSet<>();
+        for (AwsPartition partition : AwsPartitions.all()) {
+            result.add(partition.dnsSuffix());
+            result.add(partition.dualStackDnsSuffix());
+        }
+        return result;
+    }
+
     /** Service infixes that AWS virtual-hosts with an extra resource-id label before the region. */
     private static final List<String> MULTI_LABEL_REGIONAL_SERVICE_INFIXES = List.of(
-            "execute-api", "dkr.ecr", "lambda-url", "s3.dualstack", "s3-website",
+            "execute-api", "dkr.ecr", "s3-control", "s3.dualstack", "s3-website",
             "s3-fips", "s3-fips.dualstack");
 
     /**
@@ -248,8 +265,7 @@ public class TlsConfigSource implements ConfigSource {
     private static final List<String> HYPHEN_JOINED_REGIONAL_S3_PREFIXES = List.of("s3", "s3-website");
 
     /** Regionless S3 transfer-acceleration endpoints, with and without dualstack. */
-    private static final List<String> REGIONLESS_S3_SANS =
-            List.of("*.s3-accelerate.amazonaws.com", "*.s3-accelerate.dualstack.amazonaws.com");
+    private static final List<String> REGIONLESS_S3_INFIXES = List.of("s3-accelerate", "s3-accelerate.dualstack");
 
     /**
      * SANs covering AWS endpoint hostnames spoofed by the embedded DNS server.
@@ -266,7 +282,7 @@ public class TlsConfigSource implements ConfigSource {
      * contributes an extra label before the service name:
      * {@code <api-id>.execute-api.<region>.amazonaws.com},
      * {@code <account>.dkr.ecr.<region>.amazonaws.com},
-     * {@code <url-id>.lambda-url.<region>.amazonaws.com}, and
+     * {@code <account>.s3-control.<region>.amazonaws.com}, and
      * {@code <bucket>.s3.dualstack.<region>.amazonaws.com}. Each needs its own
      * {@code *.<infix>.<region>.amazonaws.com} SAN.
      *
@@ -277,26 +293,40 @@ public class TlsConfigSource implements ConfigSource {
      * {@code <bucket>.s3-accelerate.dualstack.amazonaws.com}). The set follows
      * {@code S3VirtualHostFilter#isS3QualifierTail}, which documents every S3 endpoint form Floci
      * itself routes; keep the two in sync so the SAN list does not drift from what gets spoofed.
+     *
+     * <p>The suffix is never fixed: global names use every partition's DNS suffix from
+     * {@link AwsPartitions#all()}, and each region's names use {@link AwsRegions#dnsSuffixFor}, so
+     * {@code cn-north-1} is named under the China suffix and never under the commercial one. Lambda
+     * function URLs ({@code <url-id>.lambda-url.<region>.on.aws}) live outside the partition suffix
+     * and are not intercepted, so they get no SAN.
      */
     private List<String> awsSpoofSans() {
         if (!spoofAwsEndpointsVisibleToTls()) {
             return List.of();
         }
-        List<String> sans = new ArrayList<>(List.of("*.amazonaws.com", "*.s3.amazonaws.com"));
-        sans.addAll(REGIONLESS_S3_SANS);
+        List<String> sans = new ArrayList<>();
+        for (String suffix : awsEndpointSuffixes()) {
+            sans.add("*." + suffix);
+            sans.add("*.s3." + suffix);
+            for (String infix : REGIONLESS_S3_INFIXES) {
+                sans.add("*." + infix + "." + suffix);
+            }
+        }
         for (String region : AwsRegions.KNOWN_IDS.stream().sorted().toList()) {
+            String suffix = AwsRegions.dnsSuffixFor(region);
             // A wildcard matches exactly one label (RFC 6125 6.4.3), so the two broad
             // wildcards miss virtual-hosted addressing, where the bucket adds a label:
-            // my-bucket.s3.amazonaws.com and my-bucket.s3.<region>.amazonaws.com. The DNS
+            // my-bucket.s3.<suffix> and my-bucket.s3.<region>.<suffix>. The DNS
             // spoof does route those, so without these the handshake fails on a hostname
             // mismatch rather than the request reaching Floci.
-            sans.add("*." + region + ".amazonaws.com");
-            sans.add("*.s3." + region + ".amazonaws.com");
+            sans.add("*." + region + "." + suffix);
+            sans.add("*.s3." + region + "." + suffix);
+            sans.add("*." + region + "." + AwsPartitions.forRegionOrCommercial(region).dualStackDnsSuffix());
             for (String infix : MULTI_LABEL_REGIONAL_SERVICE_INFIXES) {
-                sans.add("*." + infix + "." + region + ".amazonaws.com");
+                sans.add("*." + infix + "." + region + "." + suffix);
             }
             for (String prefix : HYPHEN_JOINED_REGIONAL_S3_PREFIXES) {
-                sans.add("*." + prefix + "-" + region + ".amazonaws.com");
+                sans.add("*." + prefix + "-" + region + "." + suffix);
             }
         }
         return sans;
