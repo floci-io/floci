@@ -707,6 +707,17 @@ public class LambdaService implements ResourceProvider {
         String s3Bucket = (String) request.get("S3Bucket");
         String s3Key = (String) request.get("S3Key");
 
+        // RevisionId optimistic locking
+        if (request.containsKey("RevisionId")) {
+            String incomingRevision = (String) request.get("RevisionId");
+            if (incomingRevision != null && !incomingRevision.equals(fn.getRevisionId())) {
+                throw new AwsException("PreconditionFailedException",
+                        "The Revision Id provided does not match the latest Revision Id. "
+                        + "Call the GetFunction or the GetFunctionConfiguration API to retrieve "
+                        + "the latest Revision Id for your resource.", 412);
+            }
+        }
+
         if (zipFileBase64 != null) {
             fn.setS3Bucket(null);
             fn.setS3Key(null);
