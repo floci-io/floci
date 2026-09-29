@@ -2441,13 +2441,7 @@ public class AslExecutor {
      */
     private void sleepOrTimeOutExecution(long pauseNanos, long executionDeadlineNanos)
             throws InterruptedException {
-        long remainingNanos = executionDeadlineNanos - System.nanoTime();
-        if (pauseNanos < remainingNanos) {
-            sleeper.sleep(pauseNanos);
-            return;
-        }
-        sleeper.sleep(Math.max(remainingNanos, 0));
-        throw new ExecutionTimedOutException();
+        sleepOrTimeOutTask(pauseNanos, executionDeadlineNanos, Long.MAX_VALUE);
     }
 
     /**
