@@ -72,7 +72,7 @@ class DynamoDbFgacEnforcementIntegrationTest {
         .when()
                 .post("/")
         .then()
-                .statusCode(403)
+                .statusCode(400)
                 .body(containsString("AccessDeniedException"));
     }
 
@@ -101,7 +101,7 @@ class DynamoDbFgacEnforcementIntegrationTest {
         .when()
                 .post("/")
         .then()
-                .statusCode(403)
+                .statusCode(400)
                 .body(containsString("AccessDeniedException"));
     }
 
@@ -151,7 +151,7 @@ class DynamoDbFgacEnforcementIntegrationTest {
         .when()
                 .post("/")
         .then()
-                .statusCode(403)
+                .statusCode(400)
                 .body(containsString("AccessDeniedException"));
     }
 

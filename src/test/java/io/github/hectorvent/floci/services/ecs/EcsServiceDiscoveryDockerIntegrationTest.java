@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ecs;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapService;
 import io.github.hectorvent.floci.services.cloudmap.model.Operation;
 import io.github.hectorvent.floci.services.cloudmap.model.Service;
@@ -103,9 +104,15 @@ class EcsServiceDiscoveryDockerIntegrationTest {
             assertEquals("RUNNING", task.getLastStatus(), "the container must be up: "
                     + task.getStoppedReason());
             assertNotNull(task.getPrivateIpAddress(), "an awsvpc task must carry its ENI address");
+            List<String> containerAddresses = containerAddresses(task);
 
-            assertEquals(List.of(task.getPrivateIpAddress()), cloudMapService.resolveDnsName(dnsName),
+            List<String> resolved = cloudMapService.resolveDnsName(dnsName);
+            assertEquals(1, resolved.size(),
                     "starting the task must register it, so the Cloud Map name resolves to it");
+            assertTrue(containerAddresses.contains(resolved.getFirst()),
+                    "the name must resolve to an address the container holds, " + containerAddresses
+                            + ", not to the ENI address " + task.getPrivateIpAddress()
+                            + " that no peer can connect to");
 
             // Updating the registry moves the running task to the replacement. Scaling to zero
             // keeps the reconciler from replacing it between the stop and the final assertions.
@@ -120,7 +127,7 @@ class EcsServiceDiscoveryDockerIntegrationTest {
             ecsService.updateService(update, REGION);
             assertTrue(cloudMapService.listInstances(cloudMapSvc.getId()).isEmpty(),
                     "updating the registry must remove the old Cloud Map instance");
-            assertEquals(List.of(task.getPrivateIpAddress()),
+            assertEquals(resolved,
                     cloudMapService.resolveDnsName("replacement." + namespaceName),
                     "updating the registry must register the running task in the new service");
             ecsService.stopTask(clusterName, taskArn, "service discovery test", REGION);
@@ -138,6 +145,16 @@ class EcsServiceDiscoveryDockerIntegrationTest {
             }
             ecsService.deleteService(clusterName, ECS_SERVICE_NAME, true, REGION);
         }
+    }
+
+    /** Every address the task container holds on a Docker network, i.e. where a peer reaches it. */
+    private List<String> containerAddresses(EcsTask task) {
+        String dockerId = task.getContainers().getFirst().getDockerId();
+        return dockerClient.inspectContainerCmd(dockerId).exec()
+                .getNetworkSettings().getNetworks().values().stream()
+                .map(ContainerNetwork::getIpAddress)
+                .filter(address -> address != null && !address.isBlank())
+                .toList();
     }
 
     private CreateServiceRequest createServiceRequest(String clusterName, TaskDefinition taskDef,

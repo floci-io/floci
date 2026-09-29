@@ -1916,13 +1916,40 @@ public class EcsContainerManager {
         if (!containerDetector.isRunningInContainer()) {
             return "127.0.0.1";
         }
+        return dockerNetworkAddress(container).orElse("127.0.0.1");
+    }
+
+    /**
+     * The address another task container reaches this one at: its IP on the Docker network it
+     * joined, whether Floci itself runs natively or in Docker. A task in a security-group
+     * protected namespace has no network of its own, so the namespace holder's address is the one
+     * it answers on.
+     *
+     * <p>This is deliberately not the task ENI address. ECS containers never join the subnet's
+     * VPC network, so the ENI address is control-plane state that no peer can connect to.
+     *
+     * @return the address, or empty when the container has not started or Docker cannot say
+     */
+    public Optional<String> resolvePeerAddress(Container container) {
+        if (container == null || container.getDockerId() == null || container.getDockerId().isBlank()) {
+            return Optional.empty();
+        }
+        return dockerNetworkAddress(container);
+    }
+
+    private Optional<String> dockerNetworkAddress(Container container) {
         String dockerId = container.getDockerId();
         if (dockerId == null || dockerId.isBlank()) {
-            return "127.0.0.1";
+            return Optional.empty();
         }
         try {
-            var inspect = lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
-            var networks = inspect.getNetworkSettings().getNetworks();
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
+            String networkMode = inspect.getHostConfig() == null ? null : inspect.getHostConfig().getNetworkMode();
+            if (networkMode != null && networkMode.startsWith("container:")) {
+                inspect = lifecycleManager.getDockerClient()
+                        .inspectContainerCmd(networkMode.substring("container:".length())).exec();
+            }
+            Map<String, ContainerNetwork> networks = inspect.getNetworkSettings().getNetworks();
 
             // A container can be on multiple networks; getNetworks() is unordered.
             // Pick an IP that the Floci/ELBv2 process can actually route to:
@@ -1932,26 +1959,26 @@ public class EcsContainerManager {
             // 3. otherwise the first non-blank IP.
             String configured = config.services().ecs().dockerNetwork().orElse(null);
             if (configured != null && !configured.isBlank()) {
-                var net = networks.get(configured);
+                ContainerNetwork net = networks.get(configured);
                 if (net != null && isUsableIp(net.getIpAddress())) {
-                    return net.getIpAddress();
+                    return Optional.of(net.getIpAddress());
                 }
             }
-            for (var entry : networks.entrySet()) {
+            for (Map.Entry<String, ContainerNetwork> entry : networks.entrySet()) {
                 if (!isDefaultDockerNetwork(entry.getKey())
                         && isUsableIp(entry.getValue().getIpAddress())) {
-                    return entry.getValue().getIpAddress();
+                    return Optional.of(entry.getValue().getIpAddress());
                 }
             }
-            for (var net : networks.values()) {
+            for (ContainerNetwork net : networks.values()) {
                 if (isUsableIp(net.getIpAddress())) {
-                    return net.getIpAddress();
+                    return Optional.of(net.getIpAddress());
                 }
             }
         } catch (Exception e) {
             LOG.warnv("Could not resolve container IP for {0}: {1}", dockerId, e.getMessage());
         }
-        return "127.0.0.1";
+        return Optional.empty();
     }
 
     private static boolean isUsableIp(String ip) {

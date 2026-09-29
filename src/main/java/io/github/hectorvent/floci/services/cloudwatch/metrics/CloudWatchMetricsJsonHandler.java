@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.cloudwatch.metricstreams.CloudWatchMe
 import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStream;
 import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStreamFilter;
 import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStreamStatisticsConfiguration;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.AlarmMetricDataQuery;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
@@ -156,7 +157,13 @@ public class CloudWatchMetricsJsonHandler {
         alarm.setMetricName(request.path("MetricName").asText(null));
         alarm.setNamespace(request.path("Namespace").asText(null));
         alarm.setStatistic(request.path("Statistic").asText(null));
-        alarm.setPeriod(request.path("Period").asInt(60));
+        JsonNode metrics = request.path("Metrics");
+        if (metrics.isArray()) {
+            for (JsonNode query : metrics) {
+                alarm.getMetrics().add(objectMapper.convertValue(query, AlarmMetricDataQuery.class));
+            }
+        }
+        alarm.setPeriod(alarm.getMetrics().isEmpty() ? request.path("Period").asInt(60) : null);
         alarm.setUnit(request.path("Unit").asText(null));
         alarm.setEvaluationPeriods(request.path("EvaluationPeriods").asInt(1));
         alarm.setDatapointsToAlarm(request.hasNonNull("DatapointsToAlarm")
@@ -214,17 +221,31 @@ public class CloudWatchMetricsJsonHandler {
             a.getOkActions().forEach(okActions::add);
             ArrayNode insufficientDataActions = node.putArray("InsufficientDataActions");
             a.getInsufficientDataActions().forEach(insufficientDataActions::add);
-            if (a.getMetricName() != null) node.put("MetricName", a.getMetricName());
-            if (a.getNamespace() != null) node.put("Namespace", a.getNamespace());
-            if (a.getStatistic() != null) node.put("Statistic", a.getStatistic());
-            ArrayNode dimensions = node.putArray("Dimensions");
-            a.getDimensions().forEach(d -> {
-                ObjectNode dimNode = dimensions.addObject();
-                dimNode.put("Name", d.name());
-                dimNode.put("Value", d.value());
-            });
-            node.put("Period", a.getPeriod());
-            if (a.getUnit() != null) node.put("Unit", a.getUnit());
+            if (!a.getMetrics().isEmpty()) {
+                node.set("Metrics", objectMapper.valueToTree(a.getMetrics()));
+            } else {
+                if (a.getMetricName() != null) {
+                    node.put("MetricName", a.getMetricName());
+                }
+                if (a.getNamespace() != null) {
+                    node.put("Namespace", a.getNamespace());
+                }
+                if (a.getStatistic() != null) {
+                    node.put("Statistic", a.getStatistic());
+                }
+                ArrayNode dimensions = node.putArray("Dimensions");
+                a.getDimensions().forEach(d -> {
+                    ObjectNode dimNode = dimensions.addObject();
+                    dimNode.put("Name", d.name());
+                    dimNode.put("Value", d.value());
+                });
+                if (a.getPeriod() != null) {
+                    node.put("Period", a.getPeriod());
+                }
+                if (a.getUnit() != null) {
+                    node.put("Unit", a.getUnit());
+                }
+            }
             node.put("EvaluationPeriods", a.getEvaluationPeriods());
             if (a.getDatapointsToAlarm() != null) {
                 node.put("DatapointsToAlarm", a.getDatapointsToAlarm());

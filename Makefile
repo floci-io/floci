@@ -12,6 +12,8 @@
 #
 # AWS partition data: src/main/resources/aws/partitions.json is generated from botocore's
 # published partition metadata (plus two CDK region rules) by tools/aws/regen_partitions.py.
+# src/main/resources/aws/dynamodb-request-shapes.json is generated from botocore's DynamoDB
+# model by tools/aws/regen_dynamodb_shapes.py.
 
 PYTHON ?= python3
 
@@ -175,8 +177,9 @@ partition-test: ## Run the partition tooling's unit tests
 aws-data-sync: ## Regenerate src/main/resources/aws/*.json from botocore, the CDK and Terraform (commit the result)
 	$(PYTHON) tools/aws/regen_partitions.py
 	$(PYTHON) tools/aws/regen_region_facts.py
+	$(PYTHON) tools/aws/regen_dynamodb_shapes.py
 
-aws-data-check: ## CI gate: the vendored partition data must match a fresh generation
+aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 	@$(PYTHON) tools/aws/regen_partitions.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/partitions.json is out of date."; \
@@ -189,8 +192,14 @@ aws-data-check: ## CI gate: the vendored partition data must match a fresh gener
 		echo "       Run 'make aws-data-sync' with local/aws checked out and commit the result."; \
 		exit 1; \
 	}
+	@$(PYTHON) tools/aws/regen_dynamodb_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/dynamodb-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
 
-aws-data-test: ## Run the partition-data generator's unit tests
+aws-data-test: ## Run the AWS data generators' unit tests
 	$(PYTHON) -m pytest tools/aws -q
 
 iam-namespaces-sync: ## Regenerate src/main/resources/aws/iam-service-namespaces.json from AWS (commit the result)

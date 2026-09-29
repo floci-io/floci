@@ -349,4 +349,90 @@ class KinesisEventSourcePollerTest {
         verify(esmStore, never()).saveForAccount(eq(ACCOUNT), any());
         assertNull(esm.getShardSequenceNumbers().get(SHARD));
     }
+
+    private static InvokeResult batchItemFailures(String json) {
+        InvokeResult result = new InvokeResult();
+        result.setPayload(json.getBytes(StandardCharsets.UTF_8));
+        return result;
+    }
+
+    private EventSourceMapping reportingEsm() {
+        EventSourceMapping esm = esm();
+        esm.setFunctionResponseTypes(List.of("ReportBatchItemFailures"));
+        return esm;
+    }
+
+    @Test
+    void reportedFailureCheckpointsBeforeTheLowestFailedRecord() {
+        stubFunction();
+        stubStreamWith(List.of(record("s1", "p1", "{}"), record("s2", "p2", "{}"), record("s3", "p3", "{}")));
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(
+                batchItemFailures("{\"batchItemFailures\":[{\"itemIdentifier\":\"s3\"},{\"itemIdentifier\":\"s2\"}]}"));
+        EventSourceMapping esm = reportingEsm();
+
+        poller.pollAndInvoke(esm);
+
+        verify(esmStore, timeout(2000)).saveForAccount(eq(ACCOUNT), any());
+        assertEquals("s1", esm.getShardSequenceNumbers().get(SHARD));
+    }
+
+    @Test
+    void reportedFailureOnTheFirstRecordRetriesTheWholeBatch() {
+        stubFunction();
+        stubStreamWith(List.of(record("s1", "p1", "{}"), record("s2", "p2", "{}")));
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(
+                batchItemFailures("{\"batchItemFailures\":[{\"itemIdentifier\":\"s1\"}]}"));
+        EventSourceMapping esm = reportingEsm();
+
+        poller.pollAndInvoke(esm);
+        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse));
+        awaitPollCompletedViaSecondFetch(esm);
+
+        verify(esmStore, never()).saveForAccount(eq(ACCOUNT), any());
+        assertNull(esm.getShardSequenceNumbers().get(SHARD));
+    }
+
+    @Test
+    void unknownItemIdentifierRetriesTheWholeBatch() {
+        stubFunction();
+        stubStreamWith(List.of(record("s1", "p1", "{}"), record("s2", "p2", "{}")));
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(
+                batchItemFailures("{\"batchItemFailures\":[{\"itemIdentifier\":\"nope\"}]}"));
+        EventSourceMapping esm = reportingEsm();
+
+        poller.pollAndInvoke(esm);
+        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse));
+        awaitPollCompletedViaSecondFetch(esm);
+
+        verify(esmStore, never()).saveForAccount(eq(ACCOUNT), any());
+        assertNull(esm.getShardSequenceNumbers().get(SHARD));
+    }
+
+    @Test
+    void emptyBatchItemFailuresCheckpointsTheWholeBatch() {
+        stubFunction();
+        stubStreamWith(List.of(record("s1", "p1", "{}"), record("s2", "p2", "{}")));
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse)))
+                .thenReturn(batchItemFailures("{\"batchItemFailures\":[]}"));
+        EventSourceMapping esm = reportingEsm();
+
+        poller.pollAndInvoke(esm);
+
+        verify(esmStore, timeout(2000)).saveForAccount(eq(ACCOUNT), any());
+        assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD));
+    }
+
+    @Test
+    void batchItemFailuresAreIgnoredWithoutReportBatchItemFailures() {
+        stubFunction();
+        stubStreamWith(List.of(record("s1", "p1", "{}"), record("s2", "p2", "{}")));
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(
+                batchItemFailures("{\"batchItemFailures\":[{\"itemIdentifier\":\"s1\"}]}"));
+        EventSourceMapping esm = esm();
+
+        poller.pollAndInvoke(esm);
+
+        verify(esmStore, timeout(2000)).saveForAccount(eq(ACCOUNT), any());
+        assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD));
+    }
 }

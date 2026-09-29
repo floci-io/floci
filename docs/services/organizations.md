@@ -25,7 +25,7 @@ AWS_ACCESS_KEY_ID=<new-account-id> AWS_SECRET_ACCESS_KEY=x \
 ## Management account vs member accounts
 
 Authorization mirrors AWS. Every mutating action is restricted to the **management account**
-— the account that called `CreateOrganization` — and returns `AccessDeniedException` otherwise.
+that called `CreateOrganization`, and returns HTTP 400 `AccessDeniedException` otherwise.
 Member accounts can read the organization they belong to (`DescribeOrganization`, `ListRoots`,
 `ListParents`, `DescribeAccount`, `DescribePolicy`), act on handshakes addressed to them, and
 call `LeaveOrganization`. An account in no organization gets

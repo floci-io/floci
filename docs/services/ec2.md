@@ -862,6 +862,11 @@ Limits worth knowing before reading a passing test as evidence:
 Set `FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=false` to go back to synthesised private addresses
 and the shared default bridge. It is also off whenever `mock` is on.
 
+Synthesised addresses come from the subnet's own CIDR block, skipping the first four addresses
+and the last one as AWS reserves them, and skipping every address a persisted instance, network
+interface or NAT gateway in the subnet still holds, so a restart does not hand one out twice. A
+subnet with no free address left fails the request with `InsufficientFreeAddressesInSubnet`.
+
 ## Requirements
 
 EC2 requires the Docker socket to be accessible (same as Lambda, ECS, and other container services):

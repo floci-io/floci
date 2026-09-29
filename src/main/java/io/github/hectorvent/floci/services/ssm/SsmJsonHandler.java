@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ssm;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.ssm.model.Command;
@@ -40,20 +41,23 @@ public class SsmJsonHandler {
     private final SsmService ssmService;
     private final SsmCommandService commandService;
     private final ObjectMapper objectMapper;
+    private final IamEnforcementFilter iamEnforcementFilter;
 
     @Inject
-    public SsmJsonHandler(SsmService ssmService, SsmCommandService commandService, ObjectMapper objectMapper) {
+    public SsmJsonHandler(SsmService ssmService, SsmCommandService commandService, ObjectMapper objectMapper,
+                          IamEnforcementFilter iamEnforcementFilter) {
         this.ssmService = ssmService;
         this.commandService = commandService;
         this.objectMapper = objectMapper;
+        this.iamEnforcementFilter = iamEnforcementFilter;
     }
 
-    public Response handle(String action, JsonNode request, String region) {
+    public Response handle(String action, JsonNode request, String region, String authorization) {
         return switch (action) {
             // Parameter Store
             case "PutParameter" -> handlePutParameter(request, region);
-            case "GetParameter" -> handleGetParameter(request, region);
-            case "GetParameters" -> handleGetParameters(request, region);
+            case "GetParameter" -> handleGetParameter(request, region, authorization);
+            case "GetParameters" -> handleGetParameters(request, region, authorization);
             case "GetParametersByPath" -> handleGetParametersByPath(request, region);
             case "DeleteParameter" -> handleDeleteParameter(request, region);
             case "DeleteParameters" -> handleDeleteParameters(request, region);
@@ -127,20 +131,26 @@ public class SsmJsonHandler {
         return Response.ok(new PutParameterResponse(version)).build();
     }
 
-    private Response handleGetParameter(JsonNode request, String region) {
+    private Response handleGetParameter(JsonNode request, String region, String authorization) {
         String name = request.path("Name").asText();
-        Parameter param = ssmService.getParameter(name, region);
+        boolean withDecryption = request.path("WithDecryption").asBoolean(false);
+        authorizeSecretReads(List.of(name), withDecryption, region, authorization);
+        Parameter param = ssmService.getParameter(name, withDecryption, region);
+        authorizeSecretValues(List.of(param), authorization);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Parameter", parameterToNode(param));
         return Response.ok(response).build();
     }
 
-    private Response handleGetParameters(JsonNode request, String region) {
+    private Response handleGetParameters(JsonNode request, String region, String authorization) {
         List<String> names = new ArrayList<>();
         request.path("Names").forEach(n -> names.add(n.asText()));
+        boolean withDecryption = request.path("WithDecryption").asBoolean(false);
+        authorizeSecretReads(names, withDecryption, region, authorization);
 
-        List<Parameter> params = ssmService.getParameters(names, region);
+        List<Parameter> params = ssmService.getParameters(names, withDecryption, region);
+        authorizeSecretValues(params, authorization);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
@@ -151,6 +161,46 @@ public class SsmJsonHandler {
         response.set("InvalidParameters", invalidParameterNames(names,
                 params.stream().map(p -> p.getName() + (p.getSelector() == null ? "" : p.getSelector())).toList()));
         return Response.ok(response).build();
+    }
+
+    /**
+     * AWS reads a reference with the caller's own {@code secretsmanager:GetSecretValue}, checked
+     * before the secret is looked up, and reports a refusal as a failed dependency call that fails
+     * the whole request.
+     */
+    private void authorizeSecretReads(List<String> names, boolean withDecryption, String region,
+                                      String authorization) {
+        if (!withDecryption) {
+            return;
+        }
+        for (String name : names) {
+            String secretArn = name.startsWith(SsmService.SECRET_REFERENCE_PREFIX)
+                    ? ssmService.secretReferenceArn(name, region) : null;
+            if (secretArn != null) {
+                authorizeSecretRead(authorization, secretArn);
+            }
+        }
+    }
+
+    /**
+     * Checks the secret each value came from, which differs from the one checked before the read
+     * when the secret was replaced in between.
+     */
+    private void authorizeSecretValues(List<Parameter> params, String authorization) {
+        for (Parameter param : params) {
+            if (param.getName().startsWith(SsmService.SECRET_REFERENCE_PREFIX)) {
+                authorizeSecretRead(authorization, param.getArn());
+            }
+        }
+    }
+
+    private void authorizeSecretRead(String authorization, String secretArn) {
+        try {
+            iamEnforcementFilter.authorizeAdditionalResource(authorization, "secretsmanager:GetSecretValue", secretArn);
+        } catch (AwsException denied) {
+            throw new AwsException("ValidationException",
+                    "An error occurred while calling one AWS dependency service.", 400);
+        }
     }
 
     private Response handleGetParametersByPath(JsonNode request, String region) {
@@ -1025,14 +1075,21 @@ public class SsmJsonHandler {
     private ObjectNode parameterToNode(Parameter p) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Name", p.getName());
-        node.put("Value", p.getValue());
+        if (p.getValue() != null) {
+            node.put("Value", p.getValue());
+        }
         node.put("Type", p.getType());
         node.put("Version", p.getVersion());
         node.put("LastModifiedDate", p.getLastModifiedDate().toEpochMilli() / 1000.0);
         node.put("ARN", p.getArn());
-        node.put("DataType", p.getDataType());
+        if (p.getDataType() != null) {
+            node.put("DataType", p.getDataType());
+        }
         if (p.getSelector() != null) {
             node.put("Selector", p.getSelector());
+        }
+        if (p.getSourceResult() != null) {
+            node.put("SourceResult", p.getSourceResult());
         }
         return node;
     }

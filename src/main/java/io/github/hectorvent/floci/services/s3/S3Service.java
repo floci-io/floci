@@ -1503,15 +1503,47 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public S3Object deleteObject(String bucketName, String key, String versionId, boolean bypassGovernance) {
+        return deleteObject(bucketName, key, versionId, bypassGovernance, null);
+    }
+
+    /**
+     * Deletes an object, first checking an {@code If-Match} precondition when one is given.
+     *
+     * <p>As on S3, the precondition is evaluated against the current version of the key even
+     * when {@code versionId} addresses an older one: a missing key, or a current delete marker,
+     * answers {@code NoSuchKey}, and an ETag that does not match answers {@code 412}.
+     */
+    public S3Object deleteObject(String bucketName, String key, String versionId, boolean bypassGovernance,
+                                 String ifMatch) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
 
         // The bucket monitor serializes this against PutObject's annotation cleanup and the
         // annotation subresource writes, which hold the same monitor (storeObjectInternal
-        // already runs under it via storeObject).
+        // already runs under it via storeObject). The precondition is checked under it too,
+        // so a concurrent overwrite cannot land between the check and the delete.
         synchronized (bucket) {
+            checkDeletePrecondition(bucketName, key, ifMatch);
             return deleteObjectLocked(bucket, bucketName, key, versionId, bypassGovernance);
+        }
+    }
+
+    // A current delete marker answers 404 NoSuchKey, the same as a missing key. That is deliberate:
+    // the S3 conditional-deletes guide says "If the latest version of the object is a delete marker,
+    // the object doesn't exist and the DeleteObject API will fail and return a 412 Precondition
+    // Failed response", but real S3 (general purpose bucket, ap-southeast-2, measured 2026-09-07)
+    // answered 404 NoSuchKey for If-Match: * over a current delete marker. Follow the measurement.
+    private void checkDeletePrecondition(String bucketName, String key, String ifMatch) {
+        if (ifMatch == null) {
+            return;
+        }
+        S3Object current = objectStore.get(objectKey(bucketName, key)).orElse(null);
+        if (current == null || current.isDeleteMarker()) {
+            throw new AwsException("NoSuchKey", "The specified key does not exist.", 404);
+        }
+        if (!eTagMatches(ifMatch, current.getETag())) {
+            throw new S3PreconditionFailedException("If-Match");
         }
     }
 
@@ -2028,7 +2060,8 @@ public class S3Service implements Resettable, ResourceProvider {
         List<DeleteError> errors = new ArrayList<>();
         for (XmlParser.KeyVersion entry : entries) {
             try {
-                S3Object result = deleteObject(bucketName, entry.key(), entry.versionId(), bypassGovernance);
+                S3Object result = deleteObject(bucketName, entry.key(), entry.versionId(), bypassGovernance,
+                        entry.eTag());
                 if (result != null && result.isDeleteMarker()) {
                     deleted.add(new DeleteResult(entry.key(), entry.versionId(), true, result.getVersionId()));
                 } else {

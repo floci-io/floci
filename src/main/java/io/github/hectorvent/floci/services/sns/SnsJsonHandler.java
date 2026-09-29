@@ -44,6 +44,8 @@ public class SnsJsonHandler {
             case "ListTopics" -> handleListTopics(request, region);
             case "GetTopicAttributes" -> handleGetTopicAttributes(request, region);
             case "SetTopicAttributes" -> handleSetTopicAttributes(request, region);
+            case "SetSMSAttributes" -> handleSetSmsAttributes(request, region);
+            case "GetSMSAttributes" -> handleGetSmsAttributes(request, region);
             case "Subscribe" -> handleSubscribe(request, region);
             case "Unsubscribe" -> handleUnsubscribe(request, region);
             case "ListSubscriptions" -> handleListSubscriptions(request, region);
@@ -123,6 +125,31 @@ public class SnsJsonHandler {
         String attributeValue = request.path("AttributeValue").asText(null);
         snsService.setTopicAttributes(topicArn, attributeName, attributeValue, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleSetSmsAttributes(JsonNode request, String region) {
+        Map<String, String> attributes = jsonNodeToMap(request.path("attributes"));
+        if (attributes.isEmpty()) {
+            throw new AwsException("InvalidParameter", "SMS attributes are required.", 400);
+        }
+        snsService.setSmsAttributes(attributes, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetSmsAttributes(JsonNode request, String region) {
+        List<String> names = new ArrayList<>();
+        JsonNode requested = request.path("attributes");
+        if (requested.isArray()) {
+            for (JsonNode name : requested) {
+                names.add(name.asText());
+            }
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode attributes = response.putObject("attributes");
+        for (Map.Entry<String, String> entry : snsService.getSmsAttributes(names, region).entrySet()) {
+            attributes.put(entry.getKey(), entry.getValue());
+        }
+        return Response.ok(response).build();
     }
 
     private Response handleSubscribe(JsonNode request, String region) {

@@ -31,6 +31,7 @@ The deprecated `ExecuteSql` operation is recognized at `POST /ExecuteSql` and re
 ## Compatibility Notes
 
 - `resourceArn` and `secretArn` are required on Data API requests. `resourceArn` must identify an existing local RDS cluster or instance.
+- Resolving a cluster ARN retries missing active member relays even if the cluster backend is already running. A failed member relay does not block SQL through the healthy cluster backend and is retried on a subsequent request. Healthy relays are not rebound and stopped members remain stopped. See [recoverable RDS backend startup failures](rds.md#recoverable-backend-startup-failures).
 - `database` is optional when the resolved RDS resource has a database name; otherwise it must be provided. Transactional `ExecuteStatement` requests must use the same database as the active transaction when `database` is present.
 - Transaction requests validate `resourceArn` against the active transaction resource. Floci resolves accepted ARN aliases to the local resource before comparing transaction identity.
 - MySQL, MariaDB, and PostgreSQL resources are supported. Aurora PostgreSQL resources resolve to the same PostgreSQL execution path.

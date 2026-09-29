@@ -221,6 +221,24 @@ class XmlParserTest {
     }
 
     @Test
+    void extractDeleteObjectEntriesKeepsEachObjectsETag() {
+        String xml = """
+                <Delete>
+                  <Object><Key>a.txt</Key><ETag>"abc"</ETag></Object>
+                  <Object><Key>b.txt</Key><VersionId>v2</VersionId></Object>
+                  <Object><Key>c.txt</Key><ETag>*</ETag></Object>
+                </Delete>
+                """;
+
+        List<XmlParser.KeyVersion> entries = XmlParser.extractDeleteObjectEntries(xml);
+
+        assertEquals(List.of(
+                new XmlParser.KeyVersion("a.txt", null, "\"abc\""),
+                new XmlParser.KeyVersion("b.txt", "v2", null),
+                new XmlParser.KeyVersion("c.txt", null, "*")), entries);
+    }
+
+    @Test
     void extractDeleteObjectEntriesVersionIdIsOptional() {
         String xml = """
                 <Delete>

@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -22,6 +23,8 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
+import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
+import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataProxy;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -64,6 +67,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -85,6 +89,8 @@ public class EksClusterManager
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
+    static final String DEFAULT_NODE_INSTANCE_TYPE = "m5.large";
+    private static final String NODE_CAPACITY_LABEL = "io.floci.eks.node-capacity";
 
     private static final String WEBHOOK_CONFIG_DIR = "/etc";
     private static final String WEBHOOK_CONFIG_FILE = "token-webhook.yaml";
@@ -140,6 +146,7 @@ public class EksClusterManager
     private final EksOidcService oidcService;
     private final FlociCertificateAuthority certificateAuthority;
     private final ContainerLogStreamer logStreamer;
+    private final Ec2InstanceTypeCatalog instanceTypeCatalog = new Ec2InstanceTypeCatalog();
     private final Map<String, ClusterNodeRecord> clusterNodeInstances = new ConcurrentHashMap<>();
     private final Map<String, Closeable> clusterLogHandles = new ConcurrentHashMap<>();
     private final List<Consumer<Instance>> nodeRegistrationListeners = new CopyOnWriteArrayList<>();
@@ -373,6 +380,10 @@ public class EksClusterManager
      * {@link #isReady(Cluster)} returns true and {@link #finalizeCluster(Cluster)} is called.
      */
     public void startCluster(Cluster cluster) {
+        startCluster(cluster, null);
+    }
+
+    private void startCluster(Cluster cluster, Integer retainedPort) {
         String image = resolveClusterImage(cluster);
         if (cluster.getDockerName() == null) {
             cluster.setDockerName(accountQualifiedName(cluster));
@@ -383,7 +394,7 @@ public class EksClusterManager
                 cluster.getName(), image);
 
         // Allocate host port for the k3s API server
-        int hostPort = portAllocator.allocate(
+        int hostPort = retainedPort != null ? retainedPort : portAllocator.allocate(
                 config.services().eks().apiServerBasePort(),
                 config.services().eks().apiServerMaxPort());
 
@@ -413,6 +424,11 @@ public class EksClusterManager
 
         List<String> serverArgs = buildServerArgs(config.services().eks().disableCni(), serviceCidr, clusterCidr);
 
+        EksNodeCapacity.Limits nodeLimits = resolveNodeCapacity(cluster);
+        if (nodeLimits != null) {
+            nodeLimits.addKubeletArgs(serverArgs);
+        }
+
         try {
             String providerId = deriveClusterNodeProviderId(cluster);
             serverArgs.add("--kubelet-arg=provider-id=" + providerId);
@@ -436,6 +452,9 @@ public class EksClusterManager
         // The account label comes from the cluster record when set (restore runs with no request
         // context); regionResolver is the fallback for the create path.
         String labelAccountId = resolveClusterAccountId(cluster);
+        Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
+                "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
+        labels.put(NODE_CAPACITY_LABEL, capacityLabel(cluster, nodeLimits));
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
@@ -444,8 +463,16 @@ public class EksClusterManager
                 .withDockerNetwork(config.services().eks().dockerNetwork())
                 .withPrivileged(true)
                 .withLogRotation()
-                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
+                .withLabels(labels);
+
+        if (nodeLimits != null) {
+            if (nodeLimits.memoryBytes() > 0) {
+                specBuilder.withMemoryBytes(nodeLimits.memoryBytes());
+            }
+            if (nodeLimits.vcpus() > 0) {
+                specBuilder.withCpuUnits(nodeLimits.vcpus() * 1024);
+            }
+        }
 
         if (config.services().eks().embeddedDns()) {
             specBuilder.withEmbeddedDns();
@@ -572,25 +599,38 @@ public class EksClusterManager
             return;
         }
 
+        String desiredCapacity = capacityLabel(cluster, resolveNodeCapacity(cluster));
+        Map<String, String> existingLabels = existing.get().getLabels();
+        boolean capacityChanged = existingLabels == null
+                || !desiredCapacity.equals(existingLabels.get(NODE_CAPACITY_LABEL));
+        if (!adoptSurvivingCluster(cluster, existing.get().getId())) {
+            startCluster(cluster);
+            return;
+        }
+        if (capacityChanged) {
+            replaceClusterContainer(cluster, null);
+        }
+    }
+
+    private boolean adoptSurvivingCluster(Cluster cluster, String containerId) {
         if (config.services().eks().irsaSigningKey() && oidcService != null) {
-            reinjectSigningKeys(existing.get().getId(), cluster);
+            reinjectSigningKeys(containerId, cluster);
         }
 
         ContainerInfo info;
         try {
-            info = lifecycleManager.adopt(existing.get().getId(), List.of(K3S_API_SERVER_PORT));
+            info = lifecycleManager.adopt(containerId, List.of(K3S_API_SERVER_PORT));
         } catch (Exception e) {
             LOG.warnv("Could not adopt surviving k3s container {0} for EKS cluster {1} ({2}); recreating it",
-                    containerName, cluster.getName(), e.getMessage());
-            startCluster(cluster);
-            return;
+                    cluster.getDockerName(), cluster.getName(), e.getMessage());
+            return false;
         }
 
         var publishedPort = info.publishedHostPort(K3S_API_SERVER_PORT);
         if (publishedPort.isEmpty()) {
-            LOG.warnv("Surviving k3s container {0} publishes no API server port; recreating it", containerName);
-            startCluster(cluster);
-            return;
+            LOG.warnv("Surviving k3s container {0} publishes no API server port; recreating it",
+                    cluster.getDockerName());
+            return false;
         }
 
         int hostPort = publishedPort.getAsInt();
@@ -598,7 +638,7 @@ public class EksClusterManager
         portAllocator.markReserved(hostPort);
         cluster.setContainerId(info.containerId());
         cluster.setHostPort(hostPort);
-        applyEndpoints(cluster, containerName, hostPort, info);
+        applyEndpoints(cluster, cluster.getDockerName(), hostPort, info);
         registerClusterNodeInstance(cluster, info.containerId());
         configureLinkLocalMetadataEndpoint(cluster, info.containerId());
         configurePodIdentityRelay(cluster, info.containerId());
@@ -608,6 +648,74 @@ public class EksClusterManager
 
         LOG.infov("Adopted surviving k3s container {0} for EKS cluster {1} on port {2} (internal: {3})",
                 info.containerId(), cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
+        return true;
+    }
+
+    /** Keep the old container stopped but recoverable until its replacement has started. */
+    private boolean replaceClusterContainer(Cluster cluster, String previousType) {
+        String oldId = cluster.getContainerId();
+        int oldPort = cluster.getHostPort();
+        String containerName = cluster.getDockerName();
+        String backupName = capacityBackupName(cluster);
+        DockerClient docker = lifecycleManager.getDockerClient();
+        try {
+            lifecycleManager.removeIfExistsStrict(backupName);
+        } catch (RuntimeException cleanup) {
+            LOG.warnv("Could not clear prior EKS capacity backup for cluster {0}: {1}; keeping current node",
+                    cluster.getName(), cleanup.getMessage());
+            restorePreviousNodeType(cluster, previousType);
+            return false;
+        }
+        boolean renamed = false;
+        try {
+            docker.renameContainerCmd(oldId).withName(backupName).exec();
+            renamed = true;
+            docker.stopContainerCmd(oldId).exec();
+            unregisterMetadataEndpoint(cluster);
+            closeQuietly(clusterLogHandles.remove(clusterResourceName(cluster)));
+            cluster.setContainerId(null);
+            startCluster(cluster, oldPort);
+            LOG.infov("Replaced EKS cluster {0} to apply current node capacity limits", cluster.getName());
+        } catch (RuntimeException replacement) {
+            LOG.warnv("Could not replace EKS cluster {0} for node capacity: {1}; restoring surviving node",
+                    cluster.getName(), replacement.getMessage());
+            restorePreviousNodeType(cluster, previousType);
+            if (!renamed) {
+                return false;
+            }
+            try {
+                lifecycleManager.removeIfExistsStrict(containerName);
+                docker.renameContainerCmd(oldId).withName(containerName).exec();
+                if (!adoptSurvivingCluster(cluster, oldId)) {
+                    throw new IllegalStateException("Could not adopt previous EKS container " + oldId);
+                }
+            } catch (RuntimeException rollback) {
+                throw new IllegalStateException("Could not restore EKS cluster " + cluster.getName()
+                        + " after node capacity replacement failed", rollback);
+            }
+            return false;
+        }
+        try {
+            lifecycleManager.removeIfExistsStrict(backupName);
+        } catch (RuntimeException cleanup) {
+            LOG.warnv("EKS cluster {0} replacement is running, but its stopped capacity backup"
+                    + " could not be removed: {1}; cluster deletion will retry",
+                    cluster.getName(), cleanup.getMessage());
+        }
+        return true;
+    }
+
+    private static void restorePreviousNodeType(Cluster cluster, String previousType) {
+        if (previousType != null) {
+            cluster.setNodeInstanceType(previousType);
+        }
+    }
+
+    private String capacityBackupName(Cluster cluster) {
+        // The marker must precede the account qualifier: no account ID can be capacity-backup,
+        // and no cluster name can contain a dot. A suffix can collide with another account's node.
+        return ContainerStorageHelper.resourceName(config, "eks", null,
+                "capacity-backup." + accountQualifiedClusterName(cluster));
     }
 
     /**
@@ -705,8 +813,86 @@ public class EksClusterManager
             return;
         }
         lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
+        if (cluster.getDockerName() != null) {
+            // A failed backup cleanup must not leave the live node running. Keep the cluster
+            // record so explicit deletion can be retried once Docker accepts the removal.
+            lifecycleManager.removeIfExistsStrict(capacityBackupName(cluster));
+        }
         ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, clusterResourceName(cluster));
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
+    }
+
+    String selectNodeInstanceType(String requestedType) {
+        if (instanceTypeCatalog.find(requestedType).isPresent()) {
+            return requestedType;
+        }
+        LOG.warnv("EKS node instance type {0} is absent from the EC2 catalog; using {1}",
+                requestedType, DEFAULT_NODE_INSTANCE_TYPE);
+        return DEFAULT_NODE_INSTANCE_TYPE;
+    }
+
+    private EksNodeCapacity.Limits resolveNodeCapacity(Cluster cluster) {
+        try {
+            Info host = lifecycleManager.getDockerClient().infoCmd().exec();
+            CatalogInstanceType type = instanceTypeCatalog.find(nodeInstanceType(cluster)).orElseThrow();
+            EksNodeCapacity.Limits limits = EksNodeCapacity.calculate(type, host.getMemTotal(), host.getNCPU(),
+                    config.services().eks().maxMemoryMib(), config.services().eks().maxVcpus());
+            if (limits == null) {
+                EksNodeCapacity.Limits configured = explicitCeilingWithoutHostInfo(cluster);
+                if (configured != null) {
+                    return configured;
+                }
+                LOG.warnv("EKS cluster {0} cannot fit node type {1} and its kubelet reservations"
+                        + " within the Docker host; starting without resource limits",
+                        cluster.getName(), type.instanceType);
+            } else if (limits.reducedReservations()) {
+                LOG.warnv("EKS cluster {0} memory ceiling reduces kubelet memory reservations below"
+                        + " the EKS AMI defaults", cluster.getName());
+            }
+            return limits;
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0} Docker host capacity unavailable: {1}",
+                    cluster.getName(), e.getMessage());
+            return explicitCeilingWithoutHostInfo(cluster);
+        }
+    }
+
+    private EksNodeCapacity.Limits explicitCeilingWithoutHostInfo(Cluster cluster) {
+        int maxMemoryMib = config.services().eks().maxMemoryMib();
+        int maxVcpus = config.services().eks().maxVcpus();
+        if (maxMemoryMib <= 0 && maxVcpus <= 0) {
+            return null;
+        }
+        int vcpus = instanceTypeCatalog.find(nodeInstanceType(cluster))
+                .map(type -> maxVcpus > 0 ? Math.min(type.vcpu, maxVcpus) : 0)
+                .orElse(maxVcpus);
+        LOG.warnv("Applying explicit EKS cluster {0} ceiling without kubelet reservations"
+                + " because Docker host capacity is unavailable", cluster.getName());
+        return EksNodeCapacity.explicitCeilingWithoutHostInfo(maxMemoryMib, vcpus);
+    }
+
+    private static String capacityLabel(Cluster cluster, EksNodeCapacity.Limits limits) {
+        if (limits == null) {
+            return nodeInstanceType(cluster) + ":unbounded";
+        }
+        return nodeInstanceType(cluster) + ":" + limits.memoryBytes() + ":" + limits.vcpus()
+                + ":" + limits.systemMemoryMib() + ":" + limits.kubeMemoryMib()
+                + ":" + limits.evictionMemoryMib() + ":" + limits.systemCpuMilli()
+                + ":" + limits.kubeCpuMilli() + ":" + limits.reducedReservations()
+                + ":" + limits.kubeletArgsEnabled();
+    }
+
+    static String nodeInstanceType(Cluster cluster) {
+        return cluster != null && cluster.getNodeInstanceType() != null
+                ? cluster.getNodeInstanceType() : DEFAULT_NODE_INSTANCE_TYPE;
+    }
+
+    /** Recreate the shared node with its named data volume intact, restoring its old type on failure. */
+    boolean restartForNodeCapacity(Cluster cluster, String previousType) {
+        if (cluster.getContainerId() == null) {
+            return true;
+        }
+        return replaceClusterContainer(cluster, previousType);
     }
 
     /**
@@ -854,7 +1040,7 @@ public class EksClusterManager
         return dockerClient
                 .execStartCmd(execCreate.getId())
                 .exec(logStreamer.execLogCallbackForAccount(
-                        accountId, logGroup, logStream, region, "eks-audit:" + clusterName));
+                        accountId, logGroup, logStream, region, "eks-audit:" + clusterName, false));
     }
 
     Closeable getLogHandle(Cluster cluster) {
@@ -889,10 +1075,13 @@ public class EksClusterManager
      * default-account name.
      */
     private String accountQualifiedName(Cluster cluster) {
+        return ContainerStorageHelper.resourceName(config, "eks", null, accountQualifiedClusterName(cluster));
+    }
+
+    private String accountQualifiedClusterName(Cluster cluster) {
         String accountId = cluster.getAccountId();
         boolean defaultAccount = accountId == null || accountId.equals(config.defaultAccountId());
-        return ContainerStorageHelper.resourceName(config, "eks", null,
-                defaultAccount ? cluster.getName() : accountId + "." + cluster.getName());
+        return defaultAccount ? cluster.getName() : accountId + "." + cluster.getName();
     }
 
     /**
@@ -2071,7 +2260,7 @@ public class EksClusterManager
 
         inst.setInstanceId(instanceId);
         inst.setImageId("ami-eks-k3s");
-        inst.setInstanceType("m5.large");
+        inst.setInstanceType(nodeInstanceType(cluster));
         inst.setPlacement(new Placement(az));
         inst.setRegion(safeRegion);
         inst.setState(InstanceState.running());

@@ -101,6 +101,7 @@ public final class ContainerExec {
         dockerClient.execStartCmd(execId).exec(callback);
 
         try {
+            // docker-java closes the attach stream on completion, timeout, or interruption.
             if (!callback.awaitCompletion(timeoutSeconds, TimeUnit.SECONDS)) {
                 return new Result(-1, "", "Timed out after " + timeoutSeconds + "s", true);
             }

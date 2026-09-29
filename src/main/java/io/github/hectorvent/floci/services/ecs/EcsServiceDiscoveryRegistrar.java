@@ -246,9 +246,12 @@ public class EcsServiceDiscoveryRegistrar {
     }
 
     /**
-     * Builds the instance attributes AWS records for an ECS-registered instance. The address is
-     * the task's own ENI address in awsvpc mode, and otherwise the container's address on the
-     * Docker network, which is the one another container on that network can reach.
+     * Builds the instance attributes AWS records for an ECS-registered instance. On AWS the
+     * address of an awsvpc task is its ENI address, because that is where the task answers. In
+     * Floci the ENI address belongs to no network the task's containers joined, so an awsvpc task
+     * registers the address its container actually holds, and falls back to the ENI address only
+     * when no running container can say what it holds. A bridge-mode task has no ENI and is
+     * registered at the container's host address, as before.
      *
      * <p>The metadata attributes alongside it are the ones the ECS service discovery
      * documentation lists, so a caller can filter a {@code DiscoverInstances} response by them
@@ -259,7 +262,10 @@ public class EcsServiceDiscoveryRegistrar {
                                                    Map<String, Object> registry, String region) {
         Container container = containerFor(task, string(registry, "containerName"));
         String address = task.getPrivateIpAddress();
-        if ((address == null || address.isBlank()) && container != null) {
+        boolean awsvpc = address != null && !address.isBlank();
+        if (awsvpc) {
+            address = containerManager.resolvePeerAddress(container).orElse(address);
+        } else if (container != null) {
             address = containerManager.resolveContainerHost(container);
         }
         if (address == null || address.isBlank()) {
@@ -268,7 +274,7 @@ public class EcsServiceDiscoveryRegistrar {
 
         Map<String, String> attributes = new LinkedHashMap<>();
         attributes.put("AWS_INSTANCE_IPV4", address);
-        Integer port = instancePort(container, registry);
+        Integer port = instancePort(container, registry, awsvpc);
         if (port != null) {
             attributes.put("AWS_INSTANCE_PORT", String.valueOf(port));
         }
@@ -316,19 +322,20 @@ public class EcsServiceDiscoveryRegistrar {
     }
 
     /**
-     * The port an SRV record would carry. An explicit {@code port} wins, as it does on AWS;
-     * otherwise the host port the selected container's {@code containerPort} was published on,
-     * so a bridge-mode task advertises the port that is reachable rather than the one inside the
-     * container. A {@code containerPort} with no matching binding falls back to itself, which is
-     * the awsvpc case where the two are always equal.
+     * The port an SRV record would carry. An explicit {@code port} wins, as it does on AWS.
+     * An awsvpc task is registered at its container's own address, where it listens on the
+     * {@code containerPort} itself, even when Floci also published that port on a dynamic host
+     * port. A bridge-mode task is registered at the host, so it advertises the host port its
+     * {@code containerPort} was published on, falling back to the {@code containerPort} when
+     * there is no matching binding.
      */
-    private Integer instancePort(Container container, Map<String, Object> registry) {
+    private Integer instancePort(Container container, Map<String, Object> registry, boolean awsvpc) {
         Integer port = integer(registry, "port");
         if (port != null) {
             return port;
         }
         Integer containerPort = integer(registry, "containerPort");
-        if (container == null || containerPort == null || container.getNetworkBindings() == null) {
+        if (awsvpc || container == null || containerPort == null || container.getNetworkBindings() == null) {
             return containerPort;
         }
         return container.getNetworkBindings().stream()

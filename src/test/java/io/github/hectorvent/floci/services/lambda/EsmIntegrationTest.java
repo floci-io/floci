@@ -1661,4 +1661,80 @@ class EsmIntegrationTest {
 
         given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
     }
+
+    @Test
+    @Order(88)
+    void updateEventSourceMappingSetsAndClearsFunctionResponseTypes() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s", "BatchSize": 2 }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(202)
+            .body("FunctionResponseTypes", empty())
+        .extract().path("UUID");
+
+        given().contentType("application/json")
+            .body("{ \"FunctionResponseTypes\": [\"ReportBatchItemFailures\"] }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
+
+        given()
+        .when().get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(200)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
+
+        // An update that omits the member leaves it unchanged
+        given().contentType("application/json").body("{ \"BatchSize\": 3 }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
+
+        given().contentType("application/json").body("{ \"FunctionResponseTypes\": [\"Bogus\"] }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+
+        given()
+        .when().get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(200)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
+
+        // A null member is absent, and a scalar is a serialization error that changes nothing
+        given().contentType("application/json").body("{ \"FunctionResponseTypes\": null }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
+
+        given().contentType("application/json").body("{ \"FunctionResponseTypes\": \"ReportBatchItemFailures\" }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+
+        // A request that fails on a later member applies none of its members
+        given().contentType("application/json")
+            .body("{ \"FunctionResponseTypes\": [], \"BatchSize\": 5, \"Topics\": [] }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(400);
+
+        given()
+        .when().get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(200)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"))
+            .body("BatchSize", equalTo(3));
+
+        given().contentType("application/json").body("{ \"FunctionResponseTypes\": [] }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202)
+            .body("FunctionResponseTypes", empty());
+
+        given()
+        .when().get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(200)
+            .body("FunctionResponseTypes", empty());
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
 }

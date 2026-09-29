@@ -111,6 +111,24 @@ aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-ker
 aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id
 ```
 
+## Secrets Manager References
+
+`GetParameter` and `GetParameters` answer `/aws/reference/secretsmanager/<secret-id>` from
+Secrets Manager, so an application, an ECS task secret or a CodeBuild `parameter-store`
+variable can read a secret through Parameter Store.
+The answer is a `SecureString` with the secret's value and ARN and `Version` 0, and
+`SourceResult` carries the Secrets Manager `GetSecretValue` result as a JSON string, without
+`secretBinary` for a binary secret. A
+`:<version-id>` or `:<staging-label>` suffix, such as `:AWSPREVIOUS`, selects a version and is
+echoed as `Selector`. As on AWS, `WithDecryption` must be true, and a missing secret is
+`ParameterNotFound`; `GetParameters` lists a reference it cannot answer in `InvalidParameters`.
+With IAM enforcement on, the caller also needs `secretsmanager:GetSecretValue` on the secret,
+and a refusal fails the whole call with a `ValidationException`, as it does on AWS.
+
+```bash
+aws ssm get-parameter --name /aws/reference/secretsmanager/my-app/api-key --with-decryption
+```
+
 ## Parameter Types
 
 All AWS parameter types are accepted: `String`, `StringList`, `SecureString`.

@@ -550,11 +550,16 @@ environment:
 Policy evaluation follows the standard AWS precedence:
 
 1. If [SCP enforcement](#service-control-policies-scps) is active, the action must be allowed at **every** organization level (root, OUs on the path, account) and explicitly denied at none — otherwise the request is denied before identity policies are consulted
-2. An explicit **Deny** in any identity, session, or boundary policy → request is denied (HTTP 403 `AccessDeniedException`)
+2. An explicit **Deny** in any identity, session, or boundary policy denies the request
 3. An explicit **Allow** in an identity policy creates the base grant
 4. If a session policy is present, it must also explicitly allow the request
 5. If a permission boundary is present, it must also explicitly allow the request
-6. No matching effective allow → implicit deny (HTTP 403)
+6. No matching effective allow results in an implicit deny
+
+IAM authorization denials return HTTP 400 `AccessDeniedException` for AWS JSON 1.0/1.1
+requests. REST-JSON requests return HTTP 403 `AccessDeniedException`; AWS Query and S3
+requests retain HTTP 403 XML `AccessDenied` responses. The routed protocol determines
+the status, not just the request's content type.
 
 ### Resource-based policies
 
@@ -631,8 +636,11 @@ account key carries no identity policies of its own.
 
 #### Supported Condition Operators:
 - `StringEquals`, `StringNotEquals`, `StringEqualsIgnoreCase`, `StringNotEqualsIgnoreCase`
-- `StringLike`, `StringNotLike`
-- `ArnEquals`, `ArnLike`, `ArnNotEquals`, `ArnNotLike`
+- `StringLike`, `StringNotLike`: case-sensitive glob matching with `*` and `?`.
+- `ArnEquals`, `ArnLike`, `ArnNotEquals`, `ArnNotLike`: case-sensitive glob matching
+  of each of the six ARN components independently. Wildcards cannot cross the first five
+  colon separators; colons within the resource component are retained. `ArnEquals` and
+  `ArnLike` behave identically, as do their negated forms.
 - `NumericEquals`, `NumericNotEquals`, `NumericLessThan`, `NumericGreaterThan` (and Equals variants)
 - `DateEquals`, `DateNotEquals`, `DateLessThan`, `DateGreaterThan` (and Equals variants)
 - `Bool`, `IpAddress`, `NotIpAddress`, `Null`

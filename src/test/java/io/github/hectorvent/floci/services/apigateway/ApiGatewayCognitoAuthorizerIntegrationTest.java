@@ -9,6 +9,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -98,6 +100,112 @@ class ApiGatewayCognitoAuthorizerIntegrationTest {
         } finally {
             given().when().delete("/restapis/" + apiId).then().statusCode(202);
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", ", \"providerARNs\": null"})
+    void mergingPartialCognitoAuthorizerKeepsRetainedMethodAuthorized(String providerArnsField)
+            throws Exception {
+        UserPool pool = cognitoService.createUserPool(Map.of("PoolName", "merge-pool"), "us-east-1");
+        String accessToken = (String) issueTokens(pool).get("AccessToken");
+        String apiId = given().contentType(ContentType.JSON)
+                .body(Map.of("name", "cognito-merge-test"))
+                .post("/restapis").then().statusCode(201).extract().path("id");
+        try {
+            String rootId = given().get("/restapis/" + apiId + "/resources")
+                    .then().statusCode(200).extract().path("item[0].id");
+            String securedId = createResource(apiId, rootId, "secured");
+            String authorizerId = createAuthorizer(apiId, "Guard", pool.getArn());
+            configureMethod(apiId, securedId, authorizerId, "COGNITO_USER_POOLS", List.of());
+            given().contentType(ContentType.JSON).body(Map.of("stageName", "before"))
+                    .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
+            String beforePath = "/execute-api/" + apiId + "/before/secured";
+            given().header("X-Id-Token", "Bearer " + accessToken)
+                    .get(beforePath).then().statusCode(200);
+
+            given().contentType(ContentType.JSON).queryParam("mode", "merge")
+                    .body(partialCognitoSpec(providerArnsField))
+                    .put("/restapis/" + apiId).then().statusCode(200);
+            given().contentType(ContentType.JSON).body(Map.of("stageName", "after"))
+                    .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
+
+            String actualAuthorizerId = given().get("/restapis/" + apiId + "/authorizers/" + authorizerId)
+                    .then().statusCode(200).extract().path("id");
+            assertEquals(authorizerId, actualAuthorizerId);
+            given().header("X-Id-Token", "Bearer " + accessToken)
+                    .get("/execute-api/" + apiId + "/after/secured").then().statusCode(200);
+            List<String> retainedArns = given().get("/restapis/" + apiId + "/authorizers/" + authorizerId)
+                    .then().statusCode(200).extract().path("providerARNs");
+            assertEquals(List.of(pool.getArn()), retainedArns);
+        } finally {
+            given().delete("/restapis/" + apiId).then().statusCode(202);
+        }
+    }
+
+    @Test
+    void explicitCognitoPoolListsReplacePriorPools() throws Exception {
+        UserPool oldPool = cognitoService.createUserPool(Map.of("PoolName", "old-merge-pool"), "us-east-1");
+        UserPool newPool = cognitoService.createUserPool(Map.of("PoolName", "new-merge-pool"), "us-east-1");
+        String oldToken = (String) issueTokens(oldPool).get("AccessToken");
+        String newToken = (String) issueTokens(newPool).get("AccessToken");
+        String apiId = given().contentType(ContentType.JSON)
+                .body(Map.of("name", "cognito-pool-replacement-test"))
+                .post("/restapis").then().statusCode(201).extract().path("id");
+        try {
+            String rootId = given().get("/restapis/" + apiId + "/resources")
+                    .then().statusCode(200).extract().path("item[0].id");
+            String securedId = createResource(apiId, rootId, "secured");
+            String authorizerId = createAuthorizer(apiId, "Guard", oldPool.getArn());
+            configureMethod(apiId, securedId, authorizerId, "COGNITO_USER_POOLS", List.of());
+            given().contentType(ContentType.JSON).body(Map.of("stageName", "before"))
+                    .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
+            given().header("X-Id-Token", "Bearer " + oldToken)
+                    .get("/execute-api/" + apiId + "/before/secured").then().statusCode(200);
+
+            String newArns = MAPPER.writeValueAsString(List.of(newPool.getArn()));
+            given().contentType(ContentType.JSON).queryParam("mode", "merge")
+                    .body(partialCognitoSpec(", \"providerARNs\": " + newArns))
+                    .put("/restapis/" + apiId).then().statusCode(200);
+            given().contentType(ContentType.JSON).body(Map.of("stageName", "new-pool"))
+                    .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
+            given().header("X-Id-Token", "Bearer " + oldToken)
+                    .get("/execute-api/" + apiId + "/new-pool/secured").then().statusCode(401);
+            given().header("X-Id-Token", "Bearer " + newToken)
+                    .get("/execute-api/" + apiId + "/new-pool/secured").then().statusCode(200);
+            List<String> replacementArns = given().get("/restapis/" + apiId + "/authorizers/" + authorizerId)
+                    .then().statusCode(200).extract().path("providerARNs");
+            assertEquals(List.of(newPool.getArn()), replacementArns);
+
+            given().contentType(ContentType.JSON).queryParam("mode", "merge")
+                    .body(partialCognitoSpec(", \"providerARNs\": []"))
+                    .put("/restapis/" + apiId).then().statusCode(200);
+            given().contentType(ContentType.JSON).body(Map.of("stageName", "empty-pools"))
+                    .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
+            given().header("X-Id-Token", "Bearer " + newToken)
+                    .get("/execute-api/" + apiId + "/empty-pools/secured").then().statusCode(401);
+        } finally {
+            given().delete("/restapis/" + apiId).then().statusCode(202);
+        }
+    }
+
+    private static String partialCognitoSpec(String providerArnsField) {
+        return """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "Partial Cognito", "version": "2"},
+                  "components": {"securitySchemes": {
+                    "Guard": {
+                      "type": "apiKey", "name": "X-Id-Token", "in": "header",
+                      "x-amazon-apigateway-authorizer": {
+                        "type": "cognito_user_pools"%s
+                      }
+                    }
+                  }},
+                  "paths": {"/added": {"get": {
+                    "x-amazon-apigateway-integration": {"type": "MOCK"}
+                  }}}
+                }
+                """.formatted(providerArnsField);
     }
 
     private Map<String, Object> issueTokens(UserPool pool) {

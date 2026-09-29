@@ -6,8 +6,8 @@ name: Partition Literals
 # partition regexes in src/main/java against the checked-in per-file baseline: a
 # literal in a new file fails, growth in an existing file fails, and a drop fails until
 # the baseline is regenerated so the remaining count stays exact. The second job checks
-# that the vendored partition data (src/main/resources/aws/partitions.json) still matches
-# what tools/aws/regen_partitions.py produces from the pinned botocore release. Python-only,
+# that the vendored AWS data (src/main/resources/aws/*.json) still matches what tools/aws/
+# produces from the pinned botocore release. Python-only,
 # so both are fast and independent of the Java build job.
 
 on:

@@ -236,7 +236,8 @@ public class OrganizationsTest {
                         .isEqualTo(organization.id());
                 assertThatThrownBy(() -> invitedClient.createOrganizationalUnit(r -> r
                         .parentId(root.id()).name("Nope")))
-                        .isInstanceOf(AccessDeniedException.class);
+                        .isInstanceOfSatisfying(AccessDeniedException.class,
+                                error -> assertThat(error.statusCode()).isEqualTo(400));
 
                 assertThat(client.listHandshakesForOrganization().handshakes())
                         .extracting(Handshake::id).contains(invitation.id());

@@ -647,6 +647,8 @@ floci:
     eks:
       enabled: true
       mock: false
+      max-memory-mib: 0        # optional k3s container memory ceiling; 0 follows the node type
+      max-vcpus: 0             # optional k3s container CPU ceiling; 0 follows the node type
       provider: k3s
       default-image: "rancher/k3s:latest"
       # image-template: "myregistry.io/k3s:v%s" # optional custom image format template taking cluster version

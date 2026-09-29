@@ -26,6 +26,8 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -196,7 +198,38 @@ class IamEnforcementFilterTest {
         verify(actionRegistry).resolve(eq("dynamodb"), eq(containerRequest));
         ArgumentCaptor<Response> denied = ArgumentCaptor.captor();
         verify(containerRequest).abortWith(denied.capture());
-        assertEquals(403, denied.getValue().getStatus());
+        assertEquals(400, denied.getValue().getStatus());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "AWS_JSON_1_0, application/json, 400",
+            "AWS_JSON_1_1, application/json, 400",
+            "REST, application/x-amz-json-1.1, 403"
+    })
+    void denialStatusUsesTheClaimedProtocolRatherThanContentType(WireProtocol protocol, String contentType,
+                                                               int expectedStatus) {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260629/us-east-1/dynamodb/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getMediaType()).thenReturn(MediaType.valueOf(contentType));
+        stubClaim(containerRequest, protocol, dynamoDbDescriptor());
+        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
+        when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:PutItem");
+        when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), eq("dynamodb:PutItem"), any(), any()))
+                .thenReturn(IamPolicyEvaluator.Decision.DENY);
+
+        newFilter().filter(containerRequest);
+
+        ArgumentCaptor<Response> denied = ArgumentCaptor.captor();
+        verify(containerRequest).abortWith(denied.capture());
+        assertEquals(expectedStatus, denied.getValue().getStatus());
+        assertEquals(MediaType.APPLICATION_JSON_TYPE, denied.getValue().getMediaType());
+        assertTrue(entityString(denied.getValue()).contains("\"__type\":\"AccessDeniedException\""));
+        assertTrue(entityString(denied.getValue()).contains("User is not authorized to perform: dynamodb:PutItem"));
     }
 
     @Test
@@ -1398,9 +1431,10 @@ class IamEnforcementFilterTest {
     void jsonProtocolGetsJsonErrorResponse() {
         // DynamoDB / Cognito / Kinesis / ... — JSON 1.0/1.1, JSON error response.
         Response r = IamEnforcementFilter.accessDeniedResponse(
-                "dynamodb:PutItem", "dynamodb", MediaType.valueOf("application/x-amz-json-1.0"));
+                "dynamodb:PutItem", "dynamodb", MediaType.valueOf("application/x-amz-json-1.0"),
+                null, WireProtocol.AWS_JSON_1_0);
 
-        assertEquals(403, r.getStatus());
+        assertEquals(400, r.getStatus());
         assertEquals(MediaType.APPLICATION_JSON_TYPE, r.getMediaType());
         String body = entityString(r);
         assertTrue(body.contains("\"__type\":\"AccessDeniedException\""), body);

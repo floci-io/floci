@@ -153,9 +153,9 @@ public class AslExecutor {
     }
 
     private static final Logger LOG = Logger.getLogger(AslExecutor.class);
-    // How long a Task waits for its token when the state declares no TimeoutSeconds. AWS lets it
-    // run for a year; the emulator would rather free the worker thread.
-    private static final int DEFAULT_TASK_TOKEN_TIMEOUT_SECONDS = 300;
+    // How long a Task waits for its token, or for a .sync job to end, when the state declares no
+    // TimeoutSeconds. AWS lets it run for a year; the emulator would rather free the worker thread.
+    private static final int DEFAULT_TASK_TIMEOUT_SECONDS = 300;
 
     /**
      * AWS ends an execution once its history reaches this many events. The count is neither reset
@@ -173,9 +173,9 @@ public class AslExecutor {
     private static final int INLINE_MAP_MAX_CONCURRENCY = 40;
     private static final int DISTRIBUTED_MAP_MAX_CONCURRENCY = 10_000;
 
-    // ecs:runTask.sync polling — wait up to ~60s for the task to reach STOPPED.
-    private static final int ECS_SYNC_POLL_ATTEMPTS = 600;
-    private static final long ECS_SYNC_POLL_INTERVAL_MS = 100;
+    // How often a .sync integration (ecs:runTask, states:startExecution) re-reads the job it waits
+    // on. The wait itself is bounded by the Task's TimeoutSeconds and the execution's budget.
+    private static final long SYNC_POLL_INTERVAL_MS = 100;
 
     // AWS caps the string input of States.Base64Encode/Base64Decode/Hash at 10,000 characters
     // (measured here in Unicode code points).
@@ -532,6 +532,9 @@ public class AslExecutor {
         } catch (ExecutionTimedOutException e) {
             timeOutExecution(exec, chain);
             onUpdate.accept(exec, history);
+        } catch (ExecutionAbortedException e) {
+            // StopExecution already wrote ABORTED and sealed the history; the worker only stops.
+            onUpdate.accept(exec, history);
         } catch (Exception e) {
             LOG.warnv("ASL execution failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
             // This path previously set only the status, leaving error and cause null forever on an
@@ -797,6 +800,9 @@ public class AslExecutor {
         var tokenFuture = needsToken ? sfnService.get().registerPendingToken(taskToken) : null;
         var profile = taskEventProfile(resource, isActivity);
         JsonNode taskResult;
+        // Read before the scheduled event is built, so a large input or a slow history callback
+        // does not extend the Task's own TimeoutSeconds.
+        long taskDeadlineNanos = taskDeadlineNanos(stateDef);
         try {
             addTaskScheduledEvent(chain, profile, stateDef, effectiveInput, sm);
             addTaskStartedEvent(chain, profile);
@@ -804,9 +810,12 @@ public class AslExecutor {
                 taskResult = mockedInvocation != null
                         ? mockedTaskResult(mockedInvocation.steps(), stateName, mockedInvocation.responseIndex())
                         : invokeResource(effectiveResource, effectiveInput, sm, taskToken,
-                                executionDeadlineNanos, jsonata ? null : stateDef.path("Parameters"));
+                                context.path("Execution").path("Id").asText(null),
+                                executionDeadlineNanos, taskDeadlineNanos,
+                                jsonata ? null : stateDef.path("Parameters"));
                 if (tokenFuture != null) {
-                    taskResult = awaitToken(tokenFuture, stateDef, taskToken, executionDeadlineNanos);
+                    taskResult = awaitToken(tokenFuture, stateDef, taskToken, executionDeadlineNanos,
+                            taskDeadlineNanos);
                 }
             } catch (ExecutionTimedOutException e) {
                 // The state machine's TimeoutSeconds budget ran out while this task was waiting. AWS
@@ -816,6 +825,10 @@ public class AslExecutor {
                 throw e;
             } catch (TaskTimedOutException e) {
                 addTaskTimedOutEvent(chain, profile);
+                throw e;
+            } catch (ExecutionAbortedException e) {
+                // StopExecution ended the execution while this task waited on its job. The history
+                // was sealed by the abort; nothing more is written about the state.
                 throw e;
             } catch (InterruptedException e) {
                 // The task of a branch that was cut. AWS records nothing for it.
@@ -900,13 +913,8 @@ public class AslExecutor {
      * schedule time, so there is no later instant to anchor on here.
      */
     private JsonNode awaitToken(CompletableFuture<JsonNode> future, JsonNode stateDef, String taskToken,
-                                long executionDeadlineNanos) throws Exception {
-        int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
-        if (timeoutSeconds <= 0) {
-            timeoutSeconds = DEFAULT_TASK_TOKEN_TIMEOUT_SECONDS;
-        }
+                                long executionDeadlineNanos, long timeoutDeadlineNanos) throws Exception {
         int heartbeatSeconds = stateDef.path("HeartbeatSeconds").asInt(0);
-        long timeoutDeadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
         try {
             while (true) {
                 long wakeAtNanos = Math.min(executionDeadlineNanos, Math.min(timeoutDeadlineNanos,
@@ -943,6 +951,19 @@ public class AslExecutor {
         } finally {
             sfnService.get().discardPendingToken(taskToken);
         }
+    }
+
+    /**
+     * The instant a Task's own {@code TimeoutSeconds} runs out, counted from now: the bound on a
+     * task-token wait and on a {@code .sync} job wait alike. A state that declares none gets the
+     * emulator's default rather than the year AWS allows.
+     */
+    private long taskDeadlineNanos(JsonNode stateDef) {
+        int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
+        if (timeoutSeconds <= 0) {
+            timeoutSeconds = DEFAULT_TASK_TIMEOUT_SECONDS;
+        }
+        return System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
     }
 
     /**
@@ -1041,7 +1062,8 @@ public class AslExecutor {
     }
 
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
-                                    long executionDeadlineNanos, JsonNode rawParameters) throws Exception {
+                                    String executionArn, long executionDeadlineNanos, long taskDeadlineNanos,
+                                    JsonNode rawParameters) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
         String functionRef = null;
@@ -1190,7 +1212,7 @@ public class AslExecutor {
                     ? ".waitForTaskToken"
                     : integration.suffix();
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeEcsRunTask(mode, input, region, executionDeadlineNanos);
+            return invokeEcsRunTask(mode, input, region, executionArn, executionDeadlineNanos, taskDeadlineNanos);
         }
 
         // AWS SDK service integrations: Step Functions
@@ -1215,7 +1237,8 @@ public class AslExecutor {
         if (integration.isAnySuffix("states", "startExecution")) {
             String mode = integration.suffix();
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeNestedStateMachine(mode, input, region, executionDeadlineNanos, rawParameters);
+            return invokeNestedStateMachine(mode, input, region, executionArn, executionDeadlineNanos,
+                    taskDeadlineNanos, rawParameters);
         }
 
         throw new FailStateException("States.TaskFailed", "Unsupported resource: " + resource);
@@ -1632,8 +1655,9 @@ public class AslExecutor {
         return envelope;
     }
 
-    private JsonNode invokeNestedStateMachine(String mode, JsonNode input, String region,
-                                              long executionDeadlineNanos, JsonNode rawParameters) throws Exception {
+    private JsonNode invokeNestedStateMachine(String mode, JsonNode input, String region, String executionArn,
+                                              long executionDeadlineNanos, long taskDeadlineNanos,
+                                              JsonNode rawParameters) throws Exception {
         String smArn = input.path("StateMachineArn").asText(null);
         if (smArn == null || smArn.isBlank()) {
             throw new FailStateException("States.TaskFailed",
@@ -1679,10 +1703,23 @@ public class AslExecutor {
             return result;
         }
 
-        // .sync or .sync:2 — poll until terminal, or until the parent execution's TimeoutSeconds
-        // budget runs out, which ends the parent as TIMED_OUT and leaves the child running.
-        for (int i = 0; i < 600; i++) {
-            sleepOrTimeOutExecution(TimeUnit.MILLISECONDS.toNanos(100), executionDeadlineNanos);
+        // .sync or .sync:2 polls until terminal, or until one of the two clocks runs out: the parent
+        // execution's TimeoutSeconds budget ends the parent as TIMED_OUT and leaves the child running;
+        // the Task's own TimeoutSeconds fails the state with States.Timeout and aborts the child, the
+        // way AWS does (measured: child ABORTED, no error, the cause below). A StopExecution on the
+        // parent ends the wait the same way, so a stopped execution does not keep a polling worker.
+        while (true) {
+            try {
+                sleepOrTimeOutTask(TimeUnit.MILLISECONDS.toNanos(SYNC_POLL_INTERVAL_MS),
+                        executionDeadlineNanos, taskDeadlineNanos);
+            } catch (TaskTimedOutException e) {
+                abortChildExecution(execArn, executionArn);
+                throw e;
+            }
+            if (abortedByCaller(executionArn)) {
+                abortChildExecution(execArn, executionArn);
+                throw new ExecutionAbortedException();
+            }
             io.github.hectorvent.floci.services.stepfunctions.model.Execution current =
                     sfnService.get().describeExecution(execArn);
             String status = current.getStatus();
@@ -1717,8 +1754,6 @@ public class AslExecutor {
                     current.getCause() != null ? current.getCause()
                             : "Nested execution ended with status: " + status);
         }
-        throw new FailStateException("States.TaskFailed",
-                "Nested execution timed out: " + execArn);
     }
 
     /**
@@ -1732,8 +1767,8 @@ public class AslExecutor {
      *             STOPPED, or ".waitForTaskToken" to launch and let the token future carry the result
      *             (both ".sync" and ".waitForTaskToken" fail the state on a placement failure).
      */
-    private JsonNode invokeEcsRunTask(String mode, JsonNode input, String region,
-                                      long executionDeadlineNanos) throws Exception {
+    private JsonNode invokeEcsRunTask(String mode, JsonNode input, String region, String executionArn,
+                                      long executionDeadlineNanos, long taskDeadlineNanos) throws Exception {
         String taskDefinition = input.path("TaskDefinition").asText(null);
         if (taskDefinition == null || taskDefinition.isBlank()) {
             throw new FailStateException("States.TaskFailed",
@@ -1802,11 +1837,24 @@ public class AslExecutor {
 
         // .sync — wait until every launched task reaches STOPPED, then surface success or failure.
         // All tasks must be polled (not just the first): with Count > 1, a failure in any task must
-        // fail the state, otherwise tasks beyond the first would run unmonitored.
+        // fail the state, otherwise tasks beyond the first would run unmonitored. The wait is bounded
+        // by the Task's TimeoutSeconds and by the execution's budget, never by a poll count of its own.
+        // The Task's clock also stops the tasks it launched, the way AWS does (measured: the ECS task
+        // reads stopCode UserInitiated with the cause below), and so does a StopExecution on the
+        // execution, which otherwise would leave this worker polling until a clock ran out.
         List<String> taskArns = launched.stream().map(EcsTask::getTaskArn).toList();
-        for (int i = 0; i < ECS_SYNC_POLL_ATTEMPTS; i++) {
-            sleepOrTimeOutExecution(TimeUnit.MILLISECONDS.toNanos(ECS_SYNC_POLL_INTERVAL_MS),
-                    executionDeadlineNanos);
+        while (true) {
+            try {
+                sleepOrTimeOutTask(TimeUnit.MILLISECONDS.toNanos(SYNC_POLL_INTERVAL_MS),
+                        executionDeadlineNanos, taskDeadlineNanos);
+            } catch (TaskTimedOutException e) {
+                stopEcsTasks(cluster, taskArns, executionArn, region);
+                throw e;
+            }
+            if (abortedByCaller(executionArn)) {
+                stopEcsTasks(cluster, taskArns, executionArn, region);
+                throw new ExecutionAbortedException();
+            }
             List<EcsTask> described = ecsService.describeTasks(cluster, taskArns, region);
             boolean allStopped = described.size() == taskArns.size()
                     && described.stream().allMatch(t -> "STOPPED".equals(t.getLastStatus()));
@@ -1831,8 +1879,38 @@ public class AslExecutor {
             }
             return arr;
         }
-        throw new FailStateException("States.Timeout",
-                "ecs:runTask.sync timed out waiting for tasks to stop: " + taskArns);
+    }
+
+    /**
+     * The reason AWS writes on a job it stops because the {@code .sync} Task waiting on it ran out
+     * of its {@code TimeoutSeconds}: verbatim, as the ECS task's {@code stoppedReason} and the child
+     * execution's {@code cause}.
+     */
+    private static String syncAbortCause(String executionArn) {
+        return "The Task state in AWS Step Functions execution [" + executionArn
+                + "] which was managing this resource was aborted";
+    }
+
+    /** Best effort, like AWS: a task that is already gone does not change the timeout being reported. */
+    private void stopEcsTasks(String cluster, List<String> taskArns, String executionArn, String region) {
+        for (String taskArn : taskArns) {
+            try {
+                ecsService.stopTask(cluster, taskArn, syncAbortCause(executionArn), region);
+            } catch (RuntimeException e) {
+                LOG.warnv("ecs:runTask.sync timed out but the task {0} could not be stopped: {1}",
+                        taskArn, e.getMessage());
+            }
+        }
+    }
+
+    /** Best effort, like AWS: a child that already ended does not change the timeout being reported. */
+    private void abortChildExecution(String childExecutionArn, String executionArn) {
+        try {
+            sfnService.get().stopExecution(childExecutionArn, syncAbortCause(executionArn), null);
+        } catch (RuntimeException e) {
+            LOG.warnv("states:startExecution.sync timed out but the child {0} could not be stopped: {1}",
+                    childExecutionArn, e.getMessage());
+        }
     }
 
     /** A failure cause if the ECS task did not complete cleanly (non-zero exit or no container ran), or null on success. */
@@ -2363,13 +2441,29 @@ public class AslExecutor {
      */
     private void sleepOrTimeOutExecution(long pauseNanos, long executionDeadlineNanos)
             throws InterruptedException {
-        long remainingNanos = executionDeadlineNanos - System.nanoTime();
+        sleepOrTimeOutTask(pauseNanos, executionDeadlineNanos, Long.MAX_VALUE);
+    }
+
+    /**
+     * One poll interval of a {@code .sync} job wait, under the same two clocks {@link #awaitToken}
+     * parks on. The execution's budget is read first: when it is the clock that ran out, the
+     * execution ends TIMED_OUT and the Task's own timeout never applies; otherwise the Task's
+     * {@code TimeoutSeconds} ends the state as {@code States.Timeout} with no cause.
+     */
+    private void sleepOrTimeOutTask(long pauseNanos, long executionDeadlineNanos, long taskDeadlineNanos)
+            throws InterruptedException {
+        long remainingNanos = Math.min(executionDeadlineNanos, taskDeadlineNanos) - System.nanoTime();
         if (pauseNanos < remainingNanos) {
             sleeper.sleep(pauseNanos);
             return;
         }
         sleeper.sleep(Math.max(remainingNanos, 0));
-        throw new ExecutionTimedOutException();
+        // The execution's budget wins when it is the clock that was parked on, and also when a late
+        // wake finds it spent: the execution ends TIMED_OUT and the Task's own timeout never applies.
+        if (executionDeadlineNanos <= taskDeadlineNanos || System.nanoTime() >= executionDeadlineNanos) {
+            throw new ExecutionTimedOutException();
+        }
+        throw new TaskTimedOutException("States.Timeout");
     }
 
     private StateResult executeSucceedState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
@@ -5391,6 +5485,24 @@ public class AslExecutor {
         }
     }
 
+    /**
+     * The same read for a wait that has only the execution's ARN: a {@code .sync} poll loop. An
+     * execution the store no longer holds is treated as stopped, since nothing is waiting for the
+     * result either way.
+     */
+    private boolean abortedByCaller(String executionArn) {
+        if (executionArn == null) {
+            return false;
+        }
+        try {
+            return abortedByCaller(sfnService.get().describeExecution(executionArn));
+        } catch (AwsException e) {
+            LOG.warnv("Execution {0} vanished while a .sync task was waiting on its job; ending the wait ({1})",
+                    executionArn, e.getMessage());
+            return true;
+        }
+    }
+
     private StateResult handleCatch(JsonNode stateDef, JsonNode input, FailStateException failure,
                                     boolean jsonata, JsonNode context, ObjectNode variables) throws Exception {
         JsonNode catchers = stateDef.path("Catch");
@@ -5490,6 +5602,17 @@ public class AslExecutor {
     static class ExecutionTimedOutException extends RuntimeException {
         ExecutionTimedOutException() {
             super("States.Timeout");
+        }
+    }
+
+    /**
+     * Thrown when a wait finds that StopExecution has already ended the execution. Not a
+     * {@link FailStateException}: no Catch sees it, no Retry re-runs the state, and nothing is
+     * written, because the abort sealed the history and ABORTED is the status that stands.
+     */
+    static class ExecutionAbortedException extends RuntimeException {
+        ExecutionAbortedException() {
+            super("Execution aborted by StopExecution");
         }
     }
 

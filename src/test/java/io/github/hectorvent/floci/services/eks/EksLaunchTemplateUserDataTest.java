@@ -343,6 +343,52 @@ class EksLaunchTemplateUserDataTest {
     }
 
     @Test
+    void laterGroupWaitsForFirstBootstrapBeforeBecomingActive() throws InterruptedException {
+        String script = "#!/bin/bash\nexit 1\n";
+        String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+        String ltId = createLaunchTemplate("lt-pending-first", encoded);
+        CountDownLatch enteredExecution = new CountDownLatch(1);
+        CountDownLatch releaseExecution = new CountDownLatch(1);
+        when(clusterManager.executeUserData(any(Cluster.class), eq("ng-1"), eq(encoded)))
+                .thenAnswer(invocation -> {
+                    enteredExecution.countDown();
+                    assertTrue(releaseExecution.await(5, TimeUnit.SECONDS));
+                    return UserDataPipeline.ExecutionResult.failed(1L, 1, 1, "bootstrap failed");
+                });
+
+        CreateNodeGroupRequest firstRequest = nodeGroupRequest("ng-1");
+        firstRequest.setLaunchTemplate(Map.of("id", ltId));
+        AtomicReference<Nodegroup> firstResult = new AtomicReference<>();
+        Thread first = new Thread(() -> firstResult.set(eksService.createNodeGroup(CLUSTER_NAME, firstRequest)));
+        first.start();
+        try {
+            assertTrue(enteredExecution.await(5, TimeUnit.SECONDS));
+            assertEquals(NodegroupStatus.CREATING,
+                    eksService.describeNodeGroup(CLUSTER_NAME, "ng-1").getStatus());
+
+            AtomicReference<Nodegroup> secondResult = new AtomicReference<>();
+            Thread second = new Thread(() -> secondResult.set(
+                    eksService.createNodeGroup(CLUSTER_NAME, nodeGroupRequest("ng-2"))));
+            second.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (!eksService.listNodeGroups(CLUSTER_NAME).contains("ng-2")
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(10);
+            }
+            assertEquals(NodegroupStatus.CREATING,
+                    eksService.describeNodeGroup(CLUSTER_NAME, "ng-2").getStatus());
+
+            releaseExecution.countDown();
+            first.join(5000);
+            second.join(5000);
+            assertEquals(NodegroupStatus.CREATE_FAILED, firstResult.get().getStatus());
+            assertEquals(NodegroupStatus.ACTIVE, secondResult.get().getStatus());
+        } finally {
+            releaseExecution.countDown();
+        }
+    }
+
+    @Test
     void unstubbedClusterManagerDoesNotThrowNpe() {
         String script = "#!/bin/bash\necho 'unstubbed'\n";
         String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));

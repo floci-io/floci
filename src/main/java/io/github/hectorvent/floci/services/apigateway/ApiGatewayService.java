@@ -959,8 +959,15 @@ public class ApiGatewayService implements ResourceProvider {
 
     public Authorizer createAuthorizer(String region, String apiId, Map<String, Object> request) {
         getRestApi(region, apiId);
+        Authorizer authorizer = saveAuthorizer(region, apiId, shortId(6), request);
+        LOG.infov("Created authorizer {0} for API {1}", authorizer.getId(), apiId);
+        return authorizer;
+    }
+
+    private Authorizer saveAuthorizer(String region, String apiId, String authorizerId,
+                                      Map<String, Object> request) {
         Authorizer authorizer = new Authorizer();
-        authorizer.setId(shortId(6));
+        authorizer.setId(authorizerId);
         authorizer.setName((String) request.get("name"));
         authorizer.setType((String) request.get("type"));
         authorizer.setAuthorizerUri((String) request.get("authorizerUri"));
@@ -978,7 +985,6 @@ public class ApiGatewayService implements ResourceProvider {
         }
 
         authorizerStore.put(authorizerKey(region, apiId, authorizer.getId()), authorizer);
-        LOG.infov("Created authorizer {0} for API {1}", authorizer.getId(), apiId);
         return authorizer;
     }
 
@@ -1760,14 +1766,20 @@ public class ApiGatewayService implements ResourceProvider {
 
     public RequestValidator createRequestValidator(String region, String apiId, Map<String, Object> request) {
         getRestApi(region, apiId);
+        RequestValidator validator = saveRequestValidator(region, apiId, shortId(6), request);
+        LOG.infov("Created request validator {0} for API {1}", validator.getId(), apiId);
+        return validator;
+    }
+
+    private RequestValidator saveRequestValidator(String region, String apiId, String validatorId,
+                                                  Map<String, Object> request) {
         RequestValidator validator = new RequestValidator();
-        validator.setId(shortId(6));
+        validator.setId(validatorId);
         validator.setName((String) request.get("name"));
         validator.setValidateRequestBody(Boolean.TRUE.equals(request.get("validateRequestBody")));
         validator.setValidateRequestParameters(Boolean.TRUE.equals(request.get("validateRequestParameters")));
 
         requestValidatorStore.put(requestValidatorKey(region, apiId, validator.getId()), validator);
-        LOG.infov("Created request validator {0} for API {1}", validator.getId(), apiId);
         return validator;
     }
 
@@ -2786,25 +2798,30 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     public RestApi putRestApi(String region, String apiId, String mode, String specBody, boolean failOnWarnings) {
-        // Note: mode=merge is accepted but treated as overwrite (merge semantics not yet implemented)
         getRestApi(region, apiId);
+        if (mode != null && !"merge".equals(mode) && !"overwrite".equals(mode)) {
+            // AWS PutRestApi accepts only merge (the default) and overwrite; reject anything
+            // else before parsing or mutating so a typo cannot take the destructive overwrite path.
+            throw new AwsException("BadRequestException",
+                    "Invalid mode specified. Valid modes are 'merge' and 'overwrite'.", 400);
+        }
         ParsedOpenApi parsed = parseOpenApiSpec(specBody, failOnWarnings);
         RestApiSnapshot snapshot = snapshotRestApi(region, apiId);
         try {
-            RestApi api = overwriteRestApi(region, apiId, parsed.openAPI());
+            RestApi api = mode == null || "merge".equals(mode)
+                    ? updateRestApiFromOpenApi(region, apiId, parsed.openAPI())
+                    : overwriteRestApi(region, apiId, parsed.openAPI());
             api.setWarnings(parsed.warnings());
             apiStore.put(apiKey(region, apiId), api);
             return api;
         } catch (RuntimeException e) {
-            // A failed PutRestApi leaves the API as it was; the overwrite has already cleared it by now.
+            // A failed PutRestApi leaves the API as it was, including changes made during import.
             restoreRestApi(region, apiId, snapshot);
             throw e;
         }
     }
 
     private RestApi overwriteRestApi(String region, String apiId, OpenAPI openAPI) {
-        RestApi api = getRestApi(region, apiId);
-
         // Delete all non-root resources
         List<ApiGatewayResource> existing = getResources(region, apiId);
         for (ApiGatewayResource r : existing) {
@@ -2827,7 +2844,11 @@ public class ApiGatewayService implements ResourceProvider {
         authorizerStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(authorizerStore::delete);
         gatewayResponseStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(gatewayResponseStore::delete);
 
-        // Update API metadata from spec
+        return updateRestApiFromOpenApi(region, apiId, openAPI);
+    }
+
+    private RestApi updateRestApiFromOpenApi(String region, String apiId, OpenAPI openAPI) {
+        RestApi api = getRestApi(region, apiId);
         if (openAPI.getInfo() != null) {
             if (openAPI.getInfo().getTitle() != null) api.setName(openAPI.getInfo().getTitle());
             if (openAPI.getInfo().getDescription() != null) api.setDescription(openAPI.getInfo().getDescription());
@@ -3124,6 +3145,12 @@ public class ApiGatewayService implements ResourceProvider {
 
         // Import x-amazon-apigateway-request-validators as RequestValidators
         Map<String, String> validatorNameToId = new HashMap<>();
+        for (RequestValidator validator : getRequestValidators(region, apiId)) {
+            if (validator.getName() != null) {
+                validatorNameToId.putIfAbsent(validator.getName(), validator.getId());
+            }
+        }
+        String defaultValidatorId = null;
         Map<String, Object> topExtensions = openAPI.getExtensions();
         if (topExtensions != null) {
             Map<String, Object> validators = (Map<String, Object>) topExtensions
@@ -3138,26 +3165,40 @@ public class ApiGatewayService implements ResourceProvider {
                             Boolean.TRUE.equals(validatorDef.get("validateRequestBody")));
                     valReq.put("validateRequestParameters",
                             Boolean.TRUE.equals(validatorDef.get("validateRequestParameters")));
-                    RequestValidator rv = createRequestValidator(region, apiId, valReq);
+                    String existingId = validatorNameToId.get(validatorName);
+                    RequestValidator rv = existingId == null
+                            ? createRequestValidator(region, apiId, valReq)
+                            : saveRequestValidator(region, apiId, existingId, valReq);
                     validatorNameToId.put(validatorName, rv.getId());
                 }
             }
 
             // API-level default validator
             String defaultValidator = (String) topExtensions.get("x-amazon-apigateway-request-validator");
-            if (defaultValidator != null && validatorNameToId.containsKey(defaultValidator)) {
-                validatorNameToId.put("__default__", validatorNameToId.get(defaultValidator));
+            if (defaultValidator != null) {
+                defaultValidatorId = validatorNameToId.get(defaultValidator);
             }
 
             importGatewayResponses(region, apiId, topExtensions.get("x-amazon-apigateway-gateway-responses"));
         }
 
-        // Import security schemes: create an Authorizer for each x-amazon-apigateway-authorizer scheme
+        // Import security schemes: upsert an Authorizer for each x-amazon-apigateway-authorizer scheme
         // and record how each scheme name maps to a method authorizationType, so per-operation/root
         // `security` requirements can be applied to methods below. Without this, imported APIs with a
         // Lambda authorizer land as authorizationType=NONE and are silently open at runtime.
         Map<String, String> schemeToAuthorizerId = new HashMap<>();
         Map<String, String> schemeToAuthType = new HashMap<>();
+        Map<String, String> authorizerNameToId = new HashMap<>();
+        for (Authorizer authorizer : getAuthorizers(region, apiId)) {
+            if (authorizer.getName() != null) {
+                authorizerNameToId.putIfAbsent(authorizer.getName(), authorizer.getId());
+                String methodType = methodAuthorizationType(authorizer.getType());
+                if (methodType != null) {
+                    schemeToAuthType.putIfAbsent(authorizer.getName(), methodType);
+                    schemeToAuthorizerId.putIfAbsent(authorizer.getName(), authorizer.getId());
+                }
+            }
+        }
         if (openAPI.getComponents() != null && openAPI.getComponents().getSecuritySchemes() != null) {
             for (var schemeEntry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
                 String schemeName = schemeEntry.getKey();
@@ -3168,7 +3209,24 @@ public class ApiGatewayService implements ResourceProvider {
                     String t = importedAuthorizerType(authDef, schemeName); // token | request | cognito_user_pools
                     Map<String, Object> req = new HashMap<>();
                     req.put("name", schemeName);
-                    req.put("authorizerUri", importedAuthorizerUri(authDef, schemeName));
+                    String authorizerUri = importedAuthorizerUri(authDef, schemeName);
+                    String existingId = authorizerNameToId.get(schemeName);
+                    Authorizer existing = existingId == null ? null : getAuthorizer(region, apiId, existingId);
+                    if (existing != null && "COGNITO_USER_POOLS".equals(existing.getType())
+                            && ("token".equals(t) || "request".equals(t))
+                            && (authorizerUri == null || authorizerUri.isBlank())) {
+                        throw new AwsException("BadRequestException",
+                                "Lambda authorizer " + schemeName
+                                        + " must specify authorizerUri when replacing a Cognito authorizer.",
+                                400);
+                    }
+                    if (authorizerUri == null && existing != null
+                            && ("token".equals(t) || "request".equals(t))) {
+                        if ("TOKEN".equals(existing.getType()) || "REQUEST".equals(existing.getType())) {
+                            authorizerUri = existing.getAuthorizerUri();
+                        }
+                    }
+                    req.put("authorizerUri", authorizerUri);
                     req.put("authorizerResultTtlInSeconds", importedAuthorizerTtl(authDef, schemeName));
                     String identitySource = resolveImportedIdentitySource(scheme, authDef, t, schemeName);
                     if (identitySource != null) {
@@ -3178,6 +3236,10 @@ public class ApiGatewayService implements ResourceProvider {
                         req.put("type", "COGNITO_USER_POOLS");
                         // Cognito user-pool authorizers carry the pool ARNs in the authorizer extension.
                         List<String> providerArns = importedProviderArns(authDef, schemeName);
+                        if (providerArns == null && existing != null
+                                && "COGNITO_USER_POOLS".equals(existing.getType())) {
+                            providerArns = existing.getProviderARNs();
+                        }
                         if (providerArns != null) {
                             req.put("providerARNs", providerArns);
                         }
@@ -3186,12 +3248,25 @@ public class ApiGatewayService implements ResourceProvider {
                         req.put("type", t == null ? "TOKEN" : t.toUpperCase());
                         schemeToAuthType.put(schemeName, "CUSTOM");
                     }
-                    Authorizer created = createAuthorizer(region, apiId, req);
+                    Authorizer created = existingId == null
+                            ? createAuthorizer(region, apiId, req)
+                            : saveAuthorizer(region, apiId, existingId, req);
+                    authorizerNameToId.put(schemeName, created.getId());
                     schemeToAuthorizerId.put(schemeName, created.getId());
+                    if (existing != null) {
+                        String oldMethodType = methodAuthorizationType(existing.getType());
+                        String newMethodType = schemeToAuthType.get(schemeName);
+                        if (oldMethodType != null && !oldMethodType.equals(newMethodType)) {
+                            alignRetainedAuthorizerMethods(region, apiId, existingId,
+                                    oldMethodType, newMethodType);
+                        }
+                    }
                 } else if ("awsSigv4".equalsIgnoreCase(authtype)) {
                     schemeToAuthType.put(schemeName, "AWS_IAM");
+                    schemeToAuthorizerId.remove(schemeName);
                 } else {
                     schemeToAuthType.put(schemeName, "NONE"); // plain apiKey scheme
+                    schemeToAuthorizerId.remove(schemeName);
                 }
             }
         }
@@ -3204,9 +3279,11 @@ public class ApiGatewayService implements ResourceProvider {
                 .filter(r -> "/".equals(r.getPath())).findFirst().orElse(null);
         if (rootResource == null) return;
 
-        // Map of full path → resource ID for creating nested resources
+        // Reuse existing paths when importing into an API; overwrite has already removed them.
         Map<String, String> pathToResourceId = new HashMap<>();
-        pathToResourceId.put("/", rootResource.getId());
+        for (ApiGatewayResource resource : resources) {
+            pathToResourceId.put(resource.getPath(), resource.getId());
+        }
 
         for (Map.Entry<String, PathItem> pathEntry : openAPI.getPaths().entrySet()) {
             String path = pathEntry.getKey();
@@ -3222,7 +3299,7 @@ public class ApiGatewayService implements ResourceProvider {
                     String httpMethod = opEntry.getKey().name().toUpperCase();
                     try {
                         applyOperation(region, apiId, resourceId, httpMethod, opEntry.getValue(), openAPI,
-                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId, defaultValidatorId);
                     } catch (AwsException e) {
                         if (PARAMETER_NAME_ERROR.equals(e.getMessage())) {
                             throw importParameterNameFailure(httpMethod, path, e);
@@ -3243,7 +3320,7 @@ public class ApiGatewayService implements ResourceProvider {
                     Operation anyOperation = parseAnyMethodOperation(path, anyMethodExt);
                     try {
                         applyOperation(region, apiId, resourceId, "ANY", anyOperation, openAPI,
-                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId, defaultValidatorId);
                     } catch (AwsException e) {
                         if (PARAMETER_NAME_ERROR.equals(e.getMessage())) {
                             throw importParameterNameFailure("ANY", path, e);
@@ -3251,6 +3328,30 @@ public class ApiGatewayService implements ResourceProvider {
                         throw e;
                     }
                 }
+            }
+        }
+    }
+
+    private static String methodAuthorizationType(String authorizerType) {
+        if ("TOKEN".equals(authorizerType) || "REQUEST".equals(authorizerType)) {
+            return "CUSTOM";
+        }
+        return "COGNITO_USER_POOLS".equals(authorizerType) ? "COGNITO_USER_POOLS" : null;
+    }
+
+    private void alignRetainedAuthorizerMethods(String region, String apiId, String authorizerId,
+                                                 String oldType, String newType) {
+        for (ApiGatewayResource resource : getResources(region, apiId)) {
+            boolean changed = false;
+            for (MethodConfig method : resource.getResourceMethods().values()) {
+                if (authorizerId.equals(method.getAuthorizerId())
+                        && oldType.equals(method.getAuthorizationType())) {
+                    method.setAuthorizationType(newType);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                resourceStore.put(resourceKey(region, apiId, resource.getId()), resource);
             }
         }
     }
@@ -3280,7 +3381,8 @@ public class ApiGatewayService implements ResourceProvider {
 
     private void applyOperation(String region, String apiId, String resourceId, String httpMethod,
             Operation operation, OpenAPI openAPI, Map<String, String> schemeToAuthorizerId,
-            Map<String, String> schemeToAuthType, Map<String, String> validatorNameToId) {
+            Map<String, String> schemeToAuthType, Map<String, String> validatorNameToId,
+            String defaultValidatorId) {
         // Create the method
         Map<String, Object> methodRequest = new HashMap<>();
         // Apply the operation's (or the API root's) security requirement, resolving the scheme
@@ -3363,8 +3465,8 @@ public class ApiGatewayService implements ResourceProvider {
         }
         if (opValidator != null && validatorNameToId.containsKey(opValidator)) {
             methodRequest.put("requestValidatorId", validatorNameToId.get(opValidator));
-        } else if (validatorNameToId.containsKey("__default__")) {
-            methodRequest.put("requestValidatorId", validatorNameToId.get("__default__"));
+        } else if (defaultValidatorId != null) {
+            methodRequest.put("requestValidatorId", defaultValidatorId);
         }
 
         putMethod(region, apiId, resourceId, httpMethod, methodRequest);

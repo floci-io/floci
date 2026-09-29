@@ -968,10 +968,10 @@ public class IamPolicyEvaluator {
             case "StringNotEquals"           -> !ctxValue.equals(condValue);
             case "StringEqualsIgnoreCase"    -> ctxValue.equalsIgnoreCase(condValue);
             case "StringNotEqualsIgnoreCase" -> !ctxValue.equalsIgnoreCase(condValue);
-            case "StringLike"                -> globMatches(condValue, ctxValue);
-            case "StringNotLike"             -> !globMatches(condValue, ctxValue);
-            case "ArnEquals", "ArnLike"      -> globMatches(condValue, ctxValue);
-            case "ArnNotEquals", "ArnNotLike"-> !globMatches(condValue, ctxValue);
+            case "StringLike"                -> caseSensitiveGlobMatches(condValue, ctxValue);
+            case "StringNotLike"             -> !caseSensitiveGlobMatches(condValue, ctxValue);
+            case "ArnEquals", "ArnLike"      -> matchesArnCondition(condValue, ctxValue);
+            case "ArnNotEquals", "ArnNotLike"-> !matchesArnCondition(condValue, ctxValue);
             case "Bool"                      -> Boolean.parseBoolean(condValue) == Boolean.parseBoolean(ctxValue);
             case "NumericEquals"             -> compareNumeric(ctxValue, condValue) == 0;
             case "NumericNotEquals"          -> compareNumeric(ctxValue, condValue) != 0;
@@ -1051,6 +1051,28 @@ public class IamPolicyEvaluator {
             return false;
         }
         return globMatchesHelper(pattern.toLowerCase(), value.toLowerCase(), 0, 0);
+    }
+
+    private static boolean caseSensitiveGlobMatches(String pattern, String value) {
+        return pattern != null && value != null && globMatchesHelper(pattern, value, 0, 0);
+    }
+
+    private static boolean matchesArnCondition(String pattern, String value) {
+        if (pattern == null || value == null) {
+            return false;
+        }
+        // The resource component may itself contain colons (for example Lambda qualifiers).
+        String[] patternComponents = pattern.split(":", 6);
+        String[] valueComponents = value.split(":", 6);
+        if (patternComponents.length != 6 || valueComponents.length != 6) {
+            return false;
+        }
+        for (int i = 0; i < patternComponents.length; i++) {
+            if (!caseSensitiveGlobMatches(patternComponents[i], valueComponents[i])) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean globMatchesHelper(String pat, String val, int pi, int vi) {

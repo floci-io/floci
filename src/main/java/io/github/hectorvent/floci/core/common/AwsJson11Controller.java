@@ -305,7 +305,8 @@ public class AwsJson11Controller {
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = switch (serviceKey) {
-                case "ssm" -> ssmJsonHandler.handle(action, request, region);
+                case "ssm" -> ssmJsonHandler.handle(
+                        action, request, region, httpHeaders.getHeaderString("Authorization"));
                 case "events" -> eventBridgeHandler.handle(action, request, region);
                 case "servicediscovery" -> cloudMapHandler.handle(action, request, region);
                 case "elasticmapreduce" -> emrHandler.handle(action, request, region);

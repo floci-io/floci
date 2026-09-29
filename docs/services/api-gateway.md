@@ -54,9 +54,21 @@ duplicate override IDs.
 
 `ImportRestApi` and `PutRestApi` return parser warnings in the REST API's `warnings` array.
 Set the lowercase query parameter `failonwarnings=true` (SDK: `failOnWarnings`) to reject
-a warning-bearing definition with `BadRequestException` before creating or overwriting
+a warning-bearing definition with `BadRequestException` before creating or changing
 the API. The default is `false`. A successful import with no warnings clears any prior
 warnings; malformed definitions and fatal import errors remain errors in either mode.
+
+`PutRestApi` defaults to `mode=merge`. Merge keeps paths, methods, models, authorizers,
+request validators, and gateway responses omitted from the incoming definition. An incoming
+method replaces the complete existing method at the same path and HTTP verb, including its
+integration and responses. Use `mode=overwrite` to clear those API definitions before import.
+During merge, a method can reference a retained Lambda or Cognito authorizer even when the
+incoming security schemes omit it. A same-name Lambda authorizer keeps its existing URI when
+the incoming definition provides no new URI. If a same-name authorizer changes between Lambda
+and Cognito, retained methods that reference it use the new authorization type. An explicit
+operation-level `security: []` leaves that method without authorization.
+For a same-name Cognito authorizer, merge also keeps its existing pool ARNs when the incoming
+definition provides no new `providerARNs`; an explicit list replaces them, including `[]`.
 
 ### Supported Operations
 
@@ -180,6 +192,12 @@ Rejections are `403`, and never reach the integration:
 A verified caller reaches the integration as `requestContext.identity.{accessKey, accountId, caller,
 user, userArn}` on a REST proxy event, and as `requestContext.authorizer.iam` on an HTTP API 2.0
 event.
+
+As on AWS, a REST (v1) `AWS_PROXY` or `HTTP_PROXY` integration never receives the caller's
+`Authorization` header when the method is `AWS_IAM`, and on any method the header is dropped if it
+carries a SigV4 signature. `X-Amz-Date`, `X-Amz-Security-Token` and every other header still pass
+through, and a `Bearer` token on a method without `AWS_IAM` reaches the integration unchanged.
+HTTP API (v2) integrations receive `Authorization` as the caller sent it.
 
 Sign with any access key the emulator has issued (`CreateAccessKey`, or the temporary credentials
 from `AssumeRole`), or with the well-known local-dev `test`/`test` pair that Floci accepts across

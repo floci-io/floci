@@ -84,6 +84,7 @@ import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnection;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionStateReason;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo;
+import io.github.hectorvent.floci.services.ec2.net.Cidr4;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -101,8 +102,10 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -116,7 +119,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.regex.Pattern;
@@ -137,6 +139,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
+    private static final long SYNTHETIC_FIRST_OFFSET = 10;
+    private static final String SYNTHETIC_FALLBACK_CIDR = "172.31.0.0/24";
     private static final String DEFAULT_ROOT_VOLUME_TYPE = "gp3";
     private static final Set<String> VALID_VOLUME_TYPES =
             Set.of("standard", "io1", "io2", "gp2", "sc1", "st1", "gp3");
@@ -239,8 +243,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private final StorageBackend<String, List<Tag>> tags;
     private final StorageBackend<String, CapacityReservation> capacityReservations;
     private final Set<String> seededAccountRegions = ConcurrentHashMap.newKeySet();
-    // subnetId → counter for IP assignment (runtime-only, not persisted)
-    private final Map<String, AtomicInteger> subnetIpCounters = new ConcurrentHashMap<>();
+    // region::subnetId → offset the next synthesised address is tried at. Only an ordering hint:
+    // restart forgets it, and privateIpsInUse is what keeps addresses from being handed out twice.
+    private final Map<String, Long> subnetIpCursors = new HashMap<>();
+    // Held from a synthesised address being chosen until the resource holding it is persisted, so
+    // a concurrent allocation, which reads persisted resources to see what is taken, cannot pick
+    // the same address in between. Taken after imageRegistryLock where a caller holds both.
+    private final Object privateIpAllocationLock = new Object();
 
     /**
      * Null in the hermetic unit tests, which reach the constructors that do not take it; CDI always
@@ -2968,111 +2977,114 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             if (dryRun) {
                 throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
             }
-            for (int i = 0; i < count; i++) {
-                String instanceId = "i-" + randomHex(17);
-                String privateIp = suppliedEni != null
-                        ? suppliedEni.getPrivateIpAddress()
-                        : assignPrivateIp(region, finalSubnetId);
+            synchronized (privateIpAllocationLock) {
+                List<String> privateIps = allocateLaunchAddresses(region, finalSubnetId, suppliedEni, count);
+                for (int i = 0; i < count; i++) {
+                    String instanceId = "i-" + randomHex(17);
+                    String privateIp = privateIps.get(i);
 
-                Instance inst = new Instance();
-                inst.setInstanceId(instanceId);
-                inst.setImageId(imageId);
-                inst.setState(InstanceState.pending());
-                inst.setInstanceType(effectiveInstanceType);
-                inst.setPlacement(new Placement(az));
-                inst.setSubnetId(finalSubnetId);
-                inst.setVpcId(vpcId);
-                // AWS precedence (#1984): the launch-time AssociatePublicIpAddress
-                // override wins in both directions; the subnet's MapPublicIpOnLaunch
-                // attribute is only the default when the launch does not specify it.
-                inst.setAssociatePublicIp(associatePublicIp != null
-                        ? associatePublicIp
-                        : subnet != null && subnet.isMapPublicIpOnLaunch());
-                inst.setPrivateIpAddress(privateIp);
-                inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
-                inst.setKeyName(keyName);
-                inst.setSecurityGroups(new ArrayList<>(sgIdentifiers));
-                inst.setArchitecture(architecture);
-                inst.setLaunchTime(Instant.now());
-                inst.setAmiLaunchIndex(i);
-                inst.setClientToken(clientToken);
-                inst.setRegion(region);
-                inst.setUserData(userData);
-                inst.setEncodedUserData(encodedUserData);
-                inst.setIamInstanceProfileArn(iamInstanceProfileArn);
-                if (iamInstanceProfileArn != null) {
-                    inst.setIamInstanceProfileAssociationTime(inst.getLaunchTime());
-                }
-                inst.setMetadataOptions(LaunchTemplateData.MetadataOptions.merge(launchMetadataOptions, null));
-                inst.setCreditSpecificationCpuCredits(
-                        acquiredCpuCredits(effectiveInstanceType, creditSpecificationCpuCredits));
-                if (instanceTags != null && !instanceTags.isEmpty()) {
-                    inst.setTags(new ArrayList<>(instanceTags));
-                    tags.put(instanceId, new ArrayList<>(instanceTags));
-                }
+                    Instance inst = new Instance();
+                    inst.setInstanceId(instanceId);
+                    inst.setImageId(imageId);
+                    inst.setState(InstanceState.pending());
+                    inst.setInstanceType(effectiveInstanceType);
+                    inst.setPlacement(new Placement(az));
+                    inst.setSubnetId(finalSubnetId);
+                    inst.setVpcId(vpcId);
+                    // AWS precedence (#1984): the launch-time AssociatePublicIpAddress
+                    // override wins in both directions; the subnet's MapPublicIpOnLaunch
+                    // attribute is only the default when the launch does not specify it.
+                    inst.setAssociatePublicIp(associatePublicIp != null
+                            ? associatePublicIp
+                            : subnet != null && subnet.isMapPublicIpOnLaunch());
+                    inst.setPrivateIpAddress(privateIp);
+                    inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
+                    inst.setKeyName(keyName);
+                    inst.setSecurityGroups(new ArrayList<>(sgIdentifiers));
+                    inst.setArchitecture(architecture);
+                    inst.setLaunchTime(Instant.now());
+                    inst.setAmiLaunchIndex(i);
+                    inst.setClientToken(clientToken);
+                    inst.setRegion(region);
+                    inst.setUserData(userData);
+                    inst.setEncodedUserData(encodedUserData);
+                    inst.setIamInstanceProfileArn(iamInstanceProfileArn);
+                    if (iamInstanceProfileArn != null) {
+                        inst.setIamInstanceProfileAssociationTime(inst.getLaunchTime());
+                    }
+                    inst.setMetadataOptions(LaunchTemplateData.MetadataOptions.merge(launchMetadataOptions, null));
+                    inst.setCreditSpecificationCpuCredits(
+                            acquiredCpuCredits(effectiveInstanceType, creditSpecificationCpuCredits));
+                    if (instanceTags != null && !instanceTags.isEmpty()) {
+                        inst.setTags(new ArrayList<>(instanceTags));
+                        tags.put(instanceId, new ArrayList<>(instanceTags));
+                    }
 
-                // Network interface, either the caller-supplied standalone ENI (override-default-eni,
-                // floci-kt9) or a freshly-minted implicit primary interface.
-                InstanceNetworkInterface eni = new InstanceNetworkInterface();
-                eni.setNetworkInterfaceId(suppliedEni != null ? suppliedEni.getNetworkInterfaceId() : "eni-" + randomHex(17));
-                eni.setSubnetId(finalSubnetId);
-                eni.setVpcId(vpcId);
-                eni.setOwnerId(callerAccountId());
-                eni.setDescription(suppliedEni != null ? suppliedEni.getDescription() : null);
-                eni.setMacAddress(suppliedEni != null ? suppliedEni.getMacAddress() : null);
-                eni.setPrivateIpAddress(privateIp);
-                eni.setPrivateDnsName(inst.getPrivateDnsName());
-                eni.setGroups(new ArrayList<>(sgIdentifiers));
-                eni.setAttachmentId("eni-attach-" + randomHex(17));
-                eni.setDeviceIndex(suppliedEni != null ? networkInterfaceDeviceIndex : 0);
-                if (inst.getLaunchTime() != null) {
-                    eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
-                }
-                inst.getNetworkInterfaces().add(eni);
-                if (suppliedEni != null) {
-                    // The standalone record stays authoritative rather than being folded into the
-                    // instance: AWS defaults deleteOnTermination to false for an interface the caller
-                    // created and handed to a launch, so it outlives the instance and returns to
-                    // "available" on termination instead of vanishing with it. Double-counting is
-                    // avoided in describeNetworkInterfaces, which skips the instance-side copy of any
-                    // id the standalone store owns.
-                    NetworkInterfaceAttachment launchAttachment = new NetworkInterfaceAttachment();
-                    launchAttachment.setAttachmentId(eni.getAttachmentId());
-                    launchAttachment.setDeviceIndex(eni.getDeviceIndex());
-                    launchAttachment.setStatus("attached");
-                    launchAttachment.setInstanceId(instanceId);
-                    launchAttachment.setInstanceOwnerId(callerAccountId());
-                    launchAttachment.setAttachTime(eni.getAttachTime());
-                    launchAttachment.setDeleteOnTermination(false);
-                    suppliedEni.setAttachment(launchAttachment);
-                    suppliedEni.setStatus("in-use");
-                    networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
-                }
+                    // Network interface, either the caller-supplied standalone ENI (override-default-eni,
+                    // floci-kt9) or a freshly-minted implicit primary interface.
+                    InstanceNetworkInterface eni = new InstanceNetworkInterface();
+                    eni.setNetworkInterfaceId(suppliedEni != null
+                            ? suppliedEni.getNetworkInterfaceId()
+                            : "eni-" + randomHex(17));
+                    eni.setSubnetId(finalSubnetId);
+                    eni.setVpcId(vpcId);
+                    eni.setOwnerId(callerAccountId());
+                    eni.setDescription(suppliedEni != null ? suppliedEni.getDescription() : null);
+                    eni.setMacAddress(suppliedEni != null ? suppliedEni.getMacAddress() : null);
+                    eni.setPrivateIpAddress(privateIp);
+                    eni.setPrivateDnsName(inst.getPrivateDnsName());
+                    eni.setGroups(new ArrayList<>(sgIdentifiers));
+                    eni.setAttachmentId("eni-attach-" + randomHex(17));
+                    eni.setDeviceIndex(suppliedEni != null ? networkInterfaceDeviceIndex : 0);
+                    if (inst.getLaunchTime() != null) {
+                        eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
+                    }
+                    inst.getNetworkInterfaces().add(eni);
+                    if (suppliedEni != null) {
+                        // The standalone record stays authoritative rather than being folded into the
+                        // instance: AWS defaults deleteOnTermination to false for an interface the caller
+                        // created and handed to a launch, so it outlives the instance and returns to
+                        // "available" on termination instead of vanishing with it. Double-counting is
+                        // avoided in describeNetworkInterfaces, which skips the instance-side copy of any
+                        // id the standalone store owns.
+                        NetworkInterfaceAttachment launchAttachment = new NetworkInterfaceAttachment();
+                        launchAttachment.setAttachmentId(eni.getAttachmentId());
+                        launchAttachment.setDeviceIndex(eni.getDeviceIndex());
+                        launchAttachment.setStatus("attached");
+                        launchAttachment.setInstanceId(instanceId);
+                        launchAttachment.setInstanceOwnerId(callerAccountId());
+                        launchAttachment.setAttachTime(eni.getAttachTime());
+                        launchAttachment.setDeleteOnTermination(false);
+                        suppliedEni.setAttachment(launchAttachment);
+                        suppliedEni.setStatus("in-use");
+                        networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
+                    }
 
-                // Root EBS volume
-                String rootVolId = "vol-" + randomHex(17);
-                inst.setRootVolumeId(rootVolId);
-                Volume rootVol = new Volume();
-                rootVol.setVolumeId(rootVolId);
-                rootVol.setAvailabilityZone(az);
-                rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
-                rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
-                rootVol.setState("in-use");
-                rootVol.setRegion(region);
-                rootVol.setCreateTime(Instant.now());
-                VolumeAttachment att = new VolumeAttachment();
-                att.setVolumeId(rootVolId);
-                att.setInstanceId(instanceId);
-                att.setDevice(inst.getRootDeviceName());
-                att.setState("attached");
-                att.setDeleteOnTermination(true);
-                att.setAttachTime(Instant.now());
-                rootVol.getAttachments().add(att);
-                volumes.put(key(region, rootVolId), rootVol);
+                    // Root EBS volume
+                    String rootVolId = "vol-" + randomHex(17);
+                    inst.setRootVolumeId(rootVolId);
+                    Volume rootVol = new Volume();
+                    rootVol.setVolumeId(rootVolId);
+                    rootVol.setAvailabilityZone(az);
+                    rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
+                    rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
+                    rootVol.setState("in-use");
+                    rootVol.setRegion(region);
+                    rootVol.setCreateTime(Instant.now());
+                    VolumeAttachment att = new VolumeAttachment();
+                    att.setVolumeId(rootVolId);
+                    att.setInstanceId(instanceId);
+                    att.setDevice(inst.getRootDeviceName());
+                    att.setState("attached");
+                    att.setDeleteOnTermination(true);
+                    att.setAttachTime(Instant.now());
+                    rootVol.getAttachments().add(att);
+                    volumes.put(key(region, rootVolId), rootVol);
 
-                instances.put(key(region, instanceId), inst);
-                launched.add(inst);
-                reservation.getInstances().add(inst);
+                    instances.put(key(region, instanceId), inst);
+                    launched.add(inst);
+                    reservation.getInstances().add(inst);
+                }
             }
         }
 
@@ -3302,7 +3314,44 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         "The availability zone '" + availabilityZone + "' has no subnet in this region.", 400));
     }
 
+    /**
+     * Every private address a launch needs, allocated before any of its instances is stored, so
+     * a subnet without room for the whole launch fails it without leaving the instances that did
+     * fit behind. Callers must hold {@link #privateIpAllocationLock}.
+     */
+    private List<String> allocateLaunchAddresses(String region, String subnetId, NetworkInterface suppliedEni,
+                                                 int count) {
+        List<String> addresses = new ArrayList<>(count);
+        if (suppliedEni != null) {
+            for (int i = 0; i < count; i++) {
+                addresses.add(suppliedEni.getPrivateIpAddress());
+            }
+            return addresses;
+        }
+        try {
+            for (int i = 0; i < count; i++) {
+                addresses.add(assignPrivateIp(region, subnetId, addresses));
+            }
+        } catch (AwsException e) {
+            if (vpcNetworkManager != null) {
+                for (String address : addresses) {
+                    vpcNetworkManager.releasePrivateIp(region, subnetId, address);
+                }
+            }
+            throw e;
+        }
+        return addresses;
+    }
+
     private String assignPrivateIp(String region, String subnetId) {
+        return assignPrivateIp(region, subnetId, List.of());
+    }
+
+    /**
+     * @param pending addresses already handed out to resources that are not stored yet, which the
+     *                synthesised fallback must not hand out again
+     */
+    private String assignPrivateIp(String region, String subnetId, Collection<String> pending) {
         // A Docker-backed subnet allocates the real thing: an address on the network the
         // instance's container will actually hold. Only when there is no such network does
         // this fall back to the synthesised address below, which nothing can connect to.
@@ -3315,17 +3364,88 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (subnetId == null) {
             return "172.31.0." + (10 + new Random().nextInt(200));
         }
-        AtomicInteger counter = subnetIpCounters.computeIfAbsent(region + "::" + subnetId, k -> new AtomicInteger(10));
-        int offset = counter.getAndIncrement();
-        Subnet subnet = subnets.get(key(region, subnetId)).orElse(null);
-        if (subnet == null) {
-            return "172.31.0." + offset;
+        Cidr4 cidr = subnets.get(key(region, subnetId))
+                .flatMap(subnet -> Cidr4.parse(subnet.getCidrBlock()))
+                .or(() -> Cidr4.parse(SYNTHETIC_FALLBACK_CIDR))
+                .orElseThrow();
+        // AWS reserves the first four addresses of a subnet and its last one.
+        long first = 4;
+        long last = cidr.size() - 2;
+        if (last < first) {
+            throw insufficientFreeAddresses(subnetId);
         }
-        // Parse base IP from CIDR
-        String cidr = subnet.getCidrBlock();
-        String baseIp = cidr.split("/")[0];
-        String[] parts = baseIp.split("\\.");
-        return parts[0] + "." + parts[1] + "." + parts[2] + "." + offset;
+        String cursorKey = key(region, subnetId);
+        synchronized (privateIpAllocationLock) {
+            // The addresses persisted resources already hold, so a restart, which forgets the
+            // cursor, never hands out an address that is still in use.
+            Set<String> inUse = privateIpsInUse(region, subnetId);
+            inUse.addAll(pending);
+            long start = Math.clamp(subnetIpCursors.getOrDefault(cursorKey, SYNTHETIC_FIRST_OFFSET), first, last);
+            long span = last - first + 1;
+            for (long step = 0; step < span; step++) {
+                long offset = first + (start - first + step) % span;
+                String address = cidr.addressAt(offset).orElseThrow();
+                if (!inUse.contains(address)) {
+                    subnetIpCursors.put(cursorKey, offset + 1);
+                    return address;
+                }
+            }
+        }
+        throw insufficientFreeAddresses(subnetId);
+    }
+
+    private static AwsException insufficientFreeAddresses(String subnetId) {
+        return new AwsException("InsufficientFreeAddressesInSubnet",
+                "There are not enough free addresses in subnet '" + subnetId + "' to satisfy the requested number of instances.",
+                400);
+    }
+
+    /** Every private address a live instance, network interface or NAT gateway holds in the subnet. */
+    private Set<String> privateIpsInUse(String region, String subnetId) {
+        String regionPrefix = region + "::";
+        Set<String> inUse = new HashSet<>();
+        for (NetworkInterface ni : networkInterfaces.scan(k -> k.startsWith(regionPrefix))) {
+            if (!subnetId.equals(ni.getSubnetId())) {
+                continue;
+            }
+            addIfSet(inUse, ni.getPrivateIpAddress());
+            for (NetworkInterfacePrivateIpAddress ip : nullToEmpty(ni.getPrivateIpAddresses())) {
+                addIfSet(inUse, ip.getPrivateIpAddress());
+            }
+        }
+        for (Instance instance : instances.scan(k -> k.startsWith(regionPrefix))) {
+            String state = instance.getState() == null ? null : instance.getState().getName();
+            if ("terminated".equals(state)) {
+                continue;
+            }
+            if (subnetId.equals(instance.getSubnetId())) {
+                addIfSet(inUse, instance.getPrivateIpAddress());
+            }
+            for (InstanceNetworkInterface ni : nullToEmpty(instance.getNetworkInterfaces())) {
+                if (subnetId.equals(ni.getSubnetId())) {
+                    addIfSet(inUse, ni.getPrivateIpAddress());
+                }
+            }
+        }
+        for (NatGateway natGateway : natGateways.scan(k -> k.startsWith(regionPrefix))) {
+            if (!subnetId.equals(natGateway.getSubnetId()) || "deleted".equals(natGateway.getState())) {
+                continue;
+            }
+            for (NatGatewayAddress address : nullToEmpty(natGateway.getNatGatewayAddresses())) {
+                addIfSet(inUse, address.getPrivateIp());
+            }
+        }
+        return inUse;
+    }
+
+    private static <T> List<T> nullToEmpty(List<T> list) {
+        return list == null ? List.of() : list;
+    }
+
+    private static void addIfSet(Set<String> addresses, String address) {
+        if (address != null && !address.isBlank()) {
+            addresses.add(address);
+        }
     }
 
     public List<Reservation> describeInstances(String region, List<String> instanceIds, Map<String, List<String>> filters) {
@@ -7973,12 +8093,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         natGateway.setConnectivityType(connectivityType != null && !connectivityType.isBlank() ? connectivityType : "public");
         natGateway.setCreateTime(Instant.now());
         natGateway.setRegion(region);
-        natGateway.getNatGatewayAddresses().add(natGatewayAddress(region, subnetId, allocationId));
-        if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
-            natGateway.setTags(new ArrayList<>(natGatewayTags));
-            tags.put(natGateway.getNatGatewayId(), new ArrayList<>(natGatewayTags));
+        synchronized (privateIpAllocationLock) {
+            natGateway.getNatGatewayAddresses().add(natGatewayAddress(region, subnetId, allocationId));
+            if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
+                natGateway.setTags(new ArrayList<>(natGatewayTags));
+                tags.put(natGateway.getNatGatewayId(), new ArrayList<>(natGatewayTags));
+            }
+            natGateways.put(key(region, natGateway.getNatGatewayId()), natGateway);
         }
-        natGateways.put(key(region, natGateway.getNatGatewayId()), natGateway);
         return natGateway;
     }
 
@@ -9199,49 +9321,51 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
         }
 
-        String eniId = "eni-" + randomHex(17);
-        String primaryIp = (privateIpAddress != null && !privateIpAddress.isBlank())
-                ? privateIpAddress : assignPrivateIp(region, subnetId);
-        String primaryDns = "ip-" + primaryIp.replace('.', '-') + ".ec2.internal";
+        synchronized (privateIpAllocationLock) {
+            String eniId = "eni-" + randomHex(17);
+            String primaryIp = (privateIpAddress != null && !privateIpAddress.isBlank())
+                    ? privateIpAddress : assignPrivateIp(region, subnetId);
+            String primaryDns = "ip-" + primaryIp.replace('.', '-') + ".ec2.internal";
 
-        NetworkInterface ni = new NetworkInterface();
-        ni.setNetworkInterfaceId(eniId);
-        ni.setSubnetId(subnetId);
-        ni.setVpcId(subnet.getVpcId());
-        ni.setAvailabilityZone(subnet.getAvailabilityZone());
-        ni.setDescription(description);
-        ni.setOwnerId(callerAccountId());
-        ni.setStatus("available");
-        ni.setMacAddress(randomMac());
-        ni.setPrivateIpAddress(primaryIp);
-        ni.setPrivateDnsName(primaryDns);
-        ni.setGroups(sgIdentifiers);
-        if (tagList != null) {
-            ni.getTagSet().addAll(tagList);
-        }
-
-        List<NetworkInterfacePrivateIpAddress> ipList = new ArrayList<>();
-        NetworkInterfacePrivateIpAddress primary = new NetworkInterfacePrivateIpAddress();
-        primary.setPrivateIpAddress(primaryIp);
-        primary.setPrivateDnsName(primaryDns);
-        primary.setPrimary(true);
-        ipList.add(primary);
-        if (privateIpAddresses != null) {
-            for (String extra : privateIpAddresses) {
-                if (extra == null || extra.isBlank() || extra.equals(primaryIp)) {
-                    continue;
-                }
-                NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
-                secondary.setPrivateIpAddress(extra);
-                secondary.setPrivateDnsName("ip-" + extra.replace('.', '-') + ".ec2.internal");
-                secondary.setPrimary(false);
-                ipList.add(secondary);
+            NetworkInterface ni = new NetworkInterface();
+            ni.setNetworkInterfaceId(eniId);
+            ni.setSubnetId(subnetId);
+            ni.setVpcId(subnet.getVpcId());
+            ni.setAvailabilityZone(subnet.getAvailabilityZone());
+            ni.setDescription(description);
+            ni.setOwnerId(callerAccountId());
+            ni.setStatus("available");
+            ni.setMacAddress(randomMac());
+            ni.setPrivateIpAddress(primaryIp);
+            ni.setPrivateDnsName(primaryDns);
+            ni.setGroups(sgIdentifiers);
+            if (tagList != null) {
+                ni.getTagSet().addAll(tagList);
             }
-        }
-        ni.setPrivateIpAddresses(ipList);
 
-        networkInterfaces.put(key(region, eniId), ni);
-        return ni;
+            List<NetworkInterfacePrivateIpAddress> ipList = new ArrayList<>();
+            NetworkInterfacePrivateIpAddress primary = new NetworkInterfacePrivateIpAddress();
+            primary.setPrivateIpAddress(primaryIp);
+            primary.setPrivateDnsName(primaryDns);
+            primary.setPrimary(true);
+            ipList.add(primary);
+            if (privateIpAddresses != null) {
+                for (String extra : privateIpAddresses) {
+                    if (extra == null || extra.isBlank() || extra.equals(primaryIp)) {
+                        continue;
+                    }
+                    NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
+                    secondary.setPrivateIpAddress(extra);
+                    secondary.setPrivateDnsName("ip-" + extra.replace('.', '-') + ".ec2.internal");
+                    secondary.setPrimary(false);
+                    ipList.add(secondary);
+                }
+            }
+            ni.setPrivateIpAddresses(ipList);
+
+            networkInterfaces.put(key(region, eniId), ni);
+            return ni;
+        }
     }
 
     /**
