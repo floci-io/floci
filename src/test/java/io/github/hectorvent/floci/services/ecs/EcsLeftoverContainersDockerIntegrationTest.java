@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -40,7 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EcsLeftoverContainersDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
-    private static final String BUSYBOX_IMAGE = "public.ecr.aws/docker/library/busybox:latest";
+    private static final String BUSYBOX_IMAGE = TestImages.BUSYBOX;
 
     @Inject
     EcsService ecsService;
