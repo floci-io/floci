@@ -1212,7 +1212,105 @@ class CloudFormationIntegrationTest {
             .body("TagList.find { it.Key == 'ext' }.Value", equalTo("x"));
     }
 
+    @Test
+    void updateStack_ssmParameterInvalidTagKeyFailsBeforeWritingANewVersion() {
+        String stackName = "cfn-ssm-invalid-tag-stack";
+        String parameterName = "/cfn/ssm-invalid-tag-param";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", ssmParameterTemplate(parameterName, ""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", ssmParameterTemplate(parameterName, "v2", """
+                ,
+                    "Tags": {"a,b": "x"}"""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        awaitStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {"Name": "%s"}
+                """.formatted(parameterName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Value", equalTo("v"))
+            .body("Parameter.Version", equalTo(1));
+    }
+
+    @Test
+    void updateStack_lambdaInvalidTagKeyFailsBeforeChangingTheFunction() {
+        String stackName = "cfn-lambda-invalid-tag-stack";
+        String functionName = "cfn-lambda-invalid-tag-func";
+        String template = """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role",
+                    "Description": "%s"%s
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(functionName, "before", ""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(functionName, "after", """
+                ,
+                    "Tags": [{"Key": "a,b", "Value": "x"}]"""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        awaitStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + functionName)
+        .then()
+            .statusCode(200)
+            .body("Configuration.Description", equalTo("before"));
+    }
+
     private static String ssmParameterTemplate(String parameterName, String tagsProperty) {
+        return ssmParameterTemplate(parameterName, "v", tagsProperty);
+    }
+
+    private static String ssmParameterTemplate(String parameterName, String value, String tagsProperty) {
         return """
             {
               "Resources": {
@@ -1221,12 +1319,12 @@ class CloudFormationIntegrationTest {
                   "Properties": {
                     "Name": "%s",
                     "Type": "String",
-                    "Value": "v"%s
+                    "Value": "%s"%s
                   }
                 }
               }
             }
-            """.formatted(parameterName, tagsProperty);
+            """.formatted(parameterName, value, tagsProperty);
     }
 
     private static void createSsmParameterStackWithOutOfTemplateTag(String stackName, String parameterName) {

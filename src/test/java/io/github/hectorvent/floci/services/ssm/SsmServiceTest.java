@@ -185,6 +185,21 @@ class SsmServiceTest {
     }
 
     @Test
+    void addTagsToResource_keyLengthCountsCodePoints() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/tags/code-points", "v", "String", null, false, region);
+        String letter = new String(Character.toChars(0x20000));
+
+        ssmService.addTagsToResource("/tags/code-points", Map.of(letter.repeat(128), "x"), region);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.addTagsToResource("/tags/code-points", Map.of(letter.repeat(129), "x"), region));
+
+        assertEquals(Map.of(letter.repeat(128), "x"), ssmService.listTagsForResource("/tags/code-points", region));
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 128", ex.getMessage());
+    }
+
+    @Test
     void putParameter_invalidTagKeyIsRejectedAndTheParameterIsNotCreated() {
         String region = "eu-west-1";
         AwsException ex = assertThrows(AwsException.class, () ->

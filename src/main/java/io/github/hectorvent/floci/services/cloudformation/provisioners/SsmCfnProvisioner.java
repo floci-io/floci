@@ -42,8 +42,9 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         if (type == null) {
             type = "String";
         }
-        ssmService.putParameter(name, value, type, null, true, ctx.region());
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        SsmService.validateTagKeys(tags);
+        ssmService.putParameter(name, value, type, null, true, ctx.region());
         reconcileTags(name, r.getAttributes().get(SSM_TEMPLATE_TAG_KEYS_ATTR), tags, ctx.region());
         r.setPhysicalId(name);
         r.getAttributes().put("Name", name);

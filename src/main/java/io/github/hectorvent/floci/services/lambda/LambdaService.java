@@ -3159,12 +3159,13 @@ public class LambdaService implements ResourceProvider {
      * The key constraint AWS checks before any lookup. AWS renders the whole map in the message, so
      * {@code toString()} gives its {@code {key=value}} form.
      */
-    private static void validateTagKeys(Map<String, String> tags) {
+    public static void validateTagKeys(Map<String, String> tags) {
         if (tags == null) {
             return;
         }
         for (String key : tags.keySet()) {
-            if (key.isEmpty() || key.length() > MAX_TAG_KEY_LENGTH || !TAG_KEY_PATTERN.matcher(key).matches()) {
+            if (key.isEmpty() || key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH
+                    || !TAG_KEY_PATTERN.matcher(key).matches()) {
                 throw new AwsException("ValidationException", "1 validation error detected: Value '" + tags
                         + "' at 'tags' failed to satisfy constraint: Map keys must satisfy constraint: [Member"
                         + " must have length less than or equal to " + MAX_TAG_KEY_LENGTH + ", Member must have"

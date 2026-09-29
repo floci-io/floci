@@ -611,7 +611,7 @@ public class SsmService implements ResourceProvider {
      * The key constraint AWS checks before any lookup, naming the offending key by its 1-based
      * position in the request's {@code Tags} list.
      */
-    private static void validateTagKeys(Map<String, String> tags) {
+    public static void validateTagKeys(Map<String, String> tags) {
         if (tags == null) {
             return;
         }
@@ -621,7 +621,7 @@ public class SsmService implements ResourceProvider {
             String constraint;
             if (key.isEmpty()) {
                 constraint = "Member must have length greater than or equal to 1";
-            } else if (key.length() > MAX_TAG_KEY_LENGTH) {
+            } else if (key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH) {
                 constraint = "Member must have length less than or equal to " + MAX_TAG_KEY_LENGTH;
             } else if (!TAG_KEY_PATTERN.matcher(key).matches()) {
                 constraint = "Member must satisfy regular expression pattern: " + TAG_KEY_REGEX;

@@ -368,6 +368,19 @@ class LambdaServiceTest {
     }
 
     @Test
+    void tagResource_keyLengthCountsCodePoints() {
+        LambdaFunction fn = service.createFunction(REGION, baseRequest("tag-code-points-fn"));
+        String letter = new String(Character.toChars(0x20000));
+
+        service.tagResource(fn.getFunctionArn(), Map.of(letter.repeat(128), "x"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.tagResource(fn.getFunctionArn(), Map.of(letter.repeat(129), "x")));
+
+        assertEquals(Map.of(letter.repeat(128), "x"), service.listTags(fn.getFunctionArn()));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
     void tagResource_validKeyIsApplied() {
         LambdaFunction fn = service.createFunction(REGION, baseRequest("tag-valid-fn"));
 

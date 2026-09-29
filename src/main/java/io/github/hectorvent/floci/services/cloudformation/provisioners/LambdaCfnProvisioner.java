@@ -260,6 +260,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
 
         createRequest.putAll(configRequest);
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        LambdaService.validateTagKeys(tags);
         if (!tags.isEmpty()) {
             createRequest.put("Tags", tags);
         }
