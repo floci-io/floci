@@ -72,6 +72,7 @@ public class SnsService implements Resettable, ResourceProvider {
     private static final Set<String> SMS_ATTRIBUTE_NAMES = Set.of("MonthlySpendLimit",
             "DeliveryStatusIAMRole", "DeliveryStatusSuccessSamplingRate", "DefaultSenderID",
             "DefaultSMSType", "UsageReportS3Bucket");
+    private static final Pattern SMS_SENDER_ID = Pattern.compile("(?=.*[A-Za-z])[A-Za-z0-9]{1,11}");
     /** Includes the original send and two immediate retries for local SQS fan-out. */
     private static final int SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS = 3;
     private static final String SUBSCRIPTION_REDRIVE_POLICY = "RedrivePolicy";
@@ -281,6 +282,9 @@ public class SnsService implements Resettable, ResourceProvider {
             if ("DefaultSMSType".equals(name)
                     && !"Promotional".equals(value) && !"Transactional".equals(value)) {
                 throw new AwsException("InvalidParameter", "Invalid DefaultSMSType: " + value, 400);
+            }
+            if ("DefaultSenderID".equals(name) && !SMS_SENDER_ID.matcher(value).matches()) {
+                throw new AwsException("InvalidParameter", "Invalid DefaultSenderID: " + value, 400);
             }
             if ("MonthlySpendLimit".equals(name)) {
                 try {

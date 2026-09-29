@@ -38,8 +38,9 @@
 | `ListEndpointsByPlatformApplication` | List endpoints under a platform app |
 
 SMS preferences are stored per account and region. `GetSMSAttributes` can select individual
-names; omitting the list returns all configured preferences. Setting an empty value clears
-that preference. SMS delivery remains mocked, so these settings do not generate delivery
+names; omitting the list returns all configured preferences. In Floci, setting an empty value
+clears that preference; this reset behavior has not been verified against AWS. SMS delivery
+remains mocked, so these settings do not generate delivery
 reports or CloudWatch delivery logs.
 
 ## Configuration

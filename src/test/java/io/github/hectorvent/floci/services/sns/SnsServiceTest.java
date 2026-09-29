@@ -92,7 +92,17 @@ class SnsServiceTest {
                 Map.of("DefaultSMSType", "Bulk"), REGION));
         assertThrows(AwsException.class, () -> snsService.setSmsAttributes(
                 Map.of("DeliveryStatusSuccessSamplingRate", "101"), REGION));
+        assertThrows(AwsException.class, () -> snsService.setSmsAttributes(
+                Map.of("DefaultSenderID", "12345678901"), REGION));
+        assertThrows(AwsException.class, () -> snsService.setSmsAttributes(
+                Map.of("DefaultSenderID", "TooLongSender"), REGION));
+        assertThrows(AwsException.class, () -> snsService.setSmsAttributes(
+                Map.of("DefaultSenderID", "Brand-Name"), REGION));
         assertEquals(Map.of("DefaultSMSType", "Promotional"),
+                snsService.getSmsAttributes(List.of(), REGION));
+
+        snsService.setSmsAttributes(Map.of("DefaultSenderID", "Brand123"), REGION);
+        assertEquals(Map.of("DefaultSMSType", "Promotional", "DefaultSenderID", "Brand123"),
                 snsService.getSmsAttributes(List.of(), REGION));
     }
 

@@ -1322,13 +1322,23 @@ class SnsIntegrationTest {
 
         given()
             .contentType(SNS_CONTENT_TYPE)
+            .header("X-Amz-Target", "SNS_20100331.SetSMSAttributes")
+            .body("{\"attributes\":{\"DefaultSMSType\":\"Promotional\",\"DefaultSenderID\":\"Brand123\"}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(SNS_CONTENT_TYPE)
             .header("X-Amz-Target", "SNS_20100331.GetSMSAttributes")
             .body("{}")
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("attributes.DefaultSMSType", equalTo("Transactional"))
+            .body("attributes.DefaultSMSType", equalTo("Promotional"))
+            .body("attributes.DefaultSenderID", equalTo("Brand123"))
             .body("attributes.MonthlySpendLimit", equalTo("10"));
     }
 }
