@@ -69,4 +69,32 @@ class S3BucketErrorResponseIntegrationTest {
                 .body(containsString("<Code>NoSuchBucket</Code>"))
                 .body(containsString("<BucketName>" + bucket + "</BucketName>"));
     }
+
+    @Test
+    void multipartPreconditionErrorRetainsCondition() {
+        String bucket = "error-response-multipart-bucket";
+        String key = "key";
+        given().when().put("/" + bucket).then().statusCode(200);
+        String eTag = given().body("existing").when().put("/" + bucket + "/" + key)
+                .then().statusCode(200).extract().header("ETag");
+        String uploadId = given().when().post("/" + bucket + "/" + key + "?uploads")
+                .then().statusCode(200).extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        String completeXml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber>"
+                + "<ETag>unused</ETag></Part></CompleteMultipartUpload>";
+
+        given().header("If-Match", "wrong-etag").body(completeXml)
+                .when().post("/" + bucket + "/" + key + "?uploadId=" + uploadId)
+                .then().statusCode(412)
+                .body(containsString("<Code>PreconditionFailed</Code>"))
+                .body(containsString("<Condition>If-Match</Condition>"))
+                .body(not(containsString("<BucketName>")));
+        given().header("If-None-Match", eTag).body(completeXml)
+                .when().post("/" + bucket + "/" + key + "?uploadId=" + uploadId)
+                .then().statusCode(412)
+                .body(containsString("<Condition>If-None-Match</Condition>"));
+
+        given().when().delete("/" + bucket + "/" + key + "?uploadId=" + uploadId).then().statusCode(204);
+        given().when().delete("/" + bucket + "/" + key).then().statusCode(204);
+        given().when().delete("/" + bucket).then().statusCode(204);
+    }
 }

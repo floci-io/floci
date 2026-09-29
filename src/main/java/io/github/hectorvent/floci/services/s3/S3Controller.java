@@ -3274,8 +3274,7 @@ public class S3Controller {
     }
 
     private Response preconditionFailedResponse(String condition) {
-        return xmlErrorResponse(new AwsException("PreconditionFailed",
-                S3PreconditionFailedException.MESSAGE, 412), condition);
+        return xmlErrorResponse(new S3PreconditionFailedException(condition));
     }
 
     private boolean eTagMatches(String headerValue, String eTag) {
