@@ -47,6 +47,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -1281,6 +1282,7 @@ public class LambdaService implements ResourceProvider {
         esm.setSelfManagedEventSource(selfManagedEventSource);
         esm.setTopics(topics);
         esm.setSourceAccessConfigurations(sourceAccessConfigurations);
+        esm.setTags(requestTags(request));
         esm.setLastModified(System.currentTimeMillis());
 
         if (eventSourceArn != null && eventSourceArn.contains(":dynamodb:")) {
@@ -2215,6 +2217,25 @@ public class LambdaService implements ResourceProvider {
                 environment.get("Variables"), "Environment.Variables");
     }
 
+    /**
+     * The request's {@code Tags} member as a string-to-string map, or {@code null} when it is
+     * absent. A non-object member or a non-string tag value is a {@code SerializationException}.
+     */
+    static Map<String, String> requestTags(Map<String, Object> request) {
+        Map<String, Object> requested = structureMember(request, "Tags");
+        if (requested == null) {
+            return null;
+        }
+        Map<String, String> tags = new HashMap<>();
+        for (Map.Entry<String, Object> entry : requested.entrySet()) {
+            if (!(entry.getValue() instanceof String value)) {
+                throw new AwsException("SerializationException", "Tags values must be strings", 400);
+            }
+            tags.put(entry.getKey(), value);
+        }
+        return tags;
+    }
+
     private static void validateEventSourceMappingStructures(Map<String, Object> request) {
         structureMember(request, "ScalingConfig");
         Map<String, Object> destinationConfig = structureMember(request, "DestinationConfig");
@@ -3107,20 +3128,36 @@ public class LambdaService implements ResourceProvider {
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTags(String functionArn) {
+        EventSourceMapping esm = taggedEventSourceMapping(functionArn);
+        if (esm != null) {
+            return esm.getTags();
+        }
         TagTarget target = resolveTagTarget(functionArn);
         LambdaFunction fn = getFunction(target.region, target.name);
         return fn.getTags() != null ? fn.getTags() : Map.of();
     }
 
     public void tagResource(String functionArn, Map<String, String> tags) {
+        EventSourceMapping esm = taggedEventSourceMapping(functionArn);
+        if (esm != null) {
+            esm.getTags().putAll(tags);
+            esmStore.save(esm);
+            return;
+        }
         TagTarget target = resolveTagTarget(functionArn);
         LambdaFunction fn = getFunction(target.region, target.name);
-        if (fn.getTags() == null) fn.setTags(new java.util.HashMap<>());
+        if (fn.getTags() == null) fn.setTags(new HashMap<>());
         fn.getTags().putAll(tags);
         functionStore.save(target.region, fn);
     }
 
     public void untagResource(String functionArn, List<String> tagKeys) {
+        EventSourceMapping esm = taggedEventSourceMapping(functionArn);
+        if (esm != null) {
+            tagKeys.forEach(esm.getTags()::remove);
+            esmStore.save(esm);
+            return;
+        }
         TagTarget target = resolveTagTarget(functionArn);
         LambdaFunction fn = getFunction(target.region, target.name);
         if (fn.getTags() != null) {
@@ -3130,6 +3167,33 @@ public class LambdaService implements ResourceProvider {
     }
 
     private record TagTarget(String region, String name) {}
+
+    /**
+     * The mapping named by an {@code event-source-mapping:} tag-endpoint ARN, or {@code null}
+     * when the ARN names some other resource. An ARN in another partition, region or account
+     * than the mapping's is reported as missing, as AWS does.
+     */
+    private EventSourceMapping taggedEventSourceMapping(String resourceArn) {
+        if (resourceArn == null || !resourceArn.startsWith("arn:")) {
+            return null;
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceArn);
+        } catch (IllegalArgumentException ignored) {
+            // Not a well-formed ARN, so not a mapping ARN; resolveTagTarget reports the error.
+            return null;
+        }
+        String uuid = LambdaArnUtils.eventSourceMappingUuid(arn);
+        if (uuid == null) {
+            return null;
+        }
+        return esmStore.get(uuid)
+                .filter(esm -> resourceArn.equals(LambdaArnUtils.eventSourceMappingArn(
+                        esm.getRegion(), esm.getAccountId(), esm.getUuid())))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The resource you requested does not exist.", 404));
+    }
 
     /**
      * Resolves a tag-endpoint ARN to a (region, shortName) pair. The Lambda

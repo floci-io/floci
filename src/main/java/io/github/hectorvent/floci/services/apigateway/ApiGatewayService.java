@@ -7,6 +7,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -64,6 +67,9 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class ApiGatewayService {
+
+    /** The only partition where API Gateway offers edge-optimized APIs and custom domain names. */
+    private static final Set<String> EDGE_OPTIMIZED_PARTITIONS = Set.of("aws");
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -1886,6 +1892,7 @@ public class ApiGatewayService {
             // neither regional nor edge-optimized, which nothing here could route or describe.
             throw new AwsException("BadRequestException", "Invalid value for endpoint type: " + endpointType, 400);
         }
+        requireEndpointTypeAvailable(endpointType, region);
 
         CustomDomain domain = new CustomDomain();
         domain.setDomainName(domainName);
@@ -1894,8 +1901,8 @@ public class ApiGatewayService {
         domain.setRegionalCertificateName((String) request.get("regionalCertificateName"));
         domain.setRegionalCertificateArn((String) request.get("regionalCertificateArn"));
         domain.setRegionalDomainName(domainName + ".regional.local");
-        domain.setRegionalHostedZoneId("Z2FDTNDATAQYL2");
-        applyEndpointType(domain, endpointType);
+        domain.setRegionalHostedZoneId("Z2FDTNDATAQYL2"); // partition-literal: no published per-region source for the regional zone
+        applyEndpointType(domain, endpointType, region);
         domain.setSecurityPolicy((String) request.getOrDefault("securityPolicy", "TLS_1_2"));
         // Nothing is provisioned behind the domain, so it is usable as soon as it exists.
         domain.setDomainNameStatus("AVAILABLE");
@@ -1922,12 +1929,26 @@ public class ApiGatewayService {
     }
 
     /**
-     * An edge-optimized domain fronts a CloudFront distribution, and a DNS alias points at the
-     * distribution's name in the fixed CloudFront hosted zone AWS documents for every region. A
-     * regional domain has none, so a move to {@code REGIONAL} drops the distribution again while a
-     * move to {@code EDGE} puts one in front of the domain, as the migration does on AWS.
+     * Edge-optimized APIs and domains exist only in the commercial partition: GovCloud and the
+     * ISO partitions have no CloudFront, and China has CloudFront but no edge-optimized API Gateway
+     * (https://docs.amazonaws.cn/en_us/aws/latest/userguide/api-gateway.html). No source shows
+     * AWS's message for the refusal, so the wording is Floci's own.
      */
-    private void applyEndpointType(CustomDomain domain, String endpointType) {
+    private static void requireEndpointTypeAvailable(String endpointType, String region) {
+        AwsPartition partition = AwsPartitions.forRegionOrCommercial(region);
+        if ("EDGE".equals(endpointType) && !EDGE_OPTIMIZED_PARTITIONS.contains(partition.id())) {
+            throw new AwsException("BadRequestException",
+                    "Endpoint type EDGE is not available in partition " + partition.id() + ".", 400);
+        }
+    }
+
+    /**
+     * An edge-optimized domain fronts a CloudFront distribution, and a DNS alias points at the
+     * distribution's name in the CloudFront hosted zone of its partition. A regional domain has
+     * none, so a move to {@code REGIONAL} drops the distribution again while a move to {@code EDGE}
+     * puts one in front of the domain, as the migration does on AWS.
+     */
+    private void applyEndpointType(CustomDomain domain, String endpointType, String region) {
         domain.setEndpointConfigurationType(endpointType);
         if (!"EDGE".equals(endpointType)) {
             domain.setDistributionDomainName(null);
@@ -1936,7 +1957,8 @@ public class ApiGatewayService {
             domain.setDistributionDomainName(
                     "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 13) + "."
                             + config.services().cloudfront().domainSuffix());
-            domain.setDistributionHostedZoneId("Z2FDTNDATAQYW2");
+            domain.setDistributionHostedZoneId(AwsRegionFacts.cloudFrontHostedZoneId(
+                    AwsPartitions.forRegionOrCommercial(region).id()).orElse(null));
         }
     }
 
@@ -2050,12 +2072,17 @@ public class ApiGatewayService {
                 throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
             }
         }
+        // Only a change of type is held to the partition: an EDGE domain stored before the rule
+        // existed must still take certificate or security-policy updates.
+        if (!Objects.equals(newEndpointConfigurationType, domain.getEndpointConfigurationType())) {
+            requireEndpointTypeAvailable(newEndpointConfigurationType, region);
+        }
         domain.setCertificateName(newCertificateName);
         domain.setCertificateArn(newCertificateArn);
         domain.setRegionalCertificateName(newRegionalCertificateName);
         domain.setRegionalCertificateArn(newRegionalCertificateArn);
         domain.setSecurityPolicy(newSecurityPolicy);
-        applyEndpointType(domain, newEndpointConfigurationType);
+        applyEndpointType(domain, newEndpointConfigurationType, region);
         domainStore.put(domainKey, domain);
         return domain;
     }

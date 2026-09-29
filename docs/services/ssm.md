@@ -10,8 +10,8 @@
 | Action | Description |
 |---|---|
 | `PutParameter` | Create or update a parameter |
-| `GetParameter` | Get a single parameter by name |
-| `GetParameters` | Get multiple parameters by name |
+| `GetParameter` | Get a single parameter by name, optionally `name:version` or `name:label` |
+| `GetParameters` | Get multiple parameters by name, with the same `name:version` and `name:label` selectors |
 | `GetParametersByPath` | Get all parameters under a path prefix |
 | `DeleteParameter` | Delete a parameter |
 | `DeleteParameters` | Delete multiple parameters |

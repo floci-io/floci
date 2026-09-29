@@ -43,9 +43,9 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `GetFunctionUrlConfig` | Read function URL config |
 | `UpdateFunctionUrlConfig` | Update function URL config |
 | `DeleteFunctionUrlConfig` | Delete function URL config |
-| `ListTags` | List tags on a function |
-| `TagResource` | Tag a function |
-| `UntagResource` | Untag a function |
+| `ListTags` | List tags on a function or event source mapping |
+| `TagResource` | Tag a function or event source mapping |
+| `UntagResource` | Untag a function or event source mapping |
 | `PutFunctionConcurrency` | Set reserved concurrent executions |
 | `GetFunctionConcurrency` | Get reserved concurrent executions |
 | `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
@@ -59,6 +59,15 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
 provisions it from a stack. Asynchronous invocations apply its retry, event age, destination settings,
 and dead-letter queue configurations (`DeadLetterConfig`).
+
+### Reserved Concurrency
+
+Unqualified `GetFunction` reads include `Concurrency.ReservedConcurrentExecutions` when a reservation
+is set, including an explicit zero. Qualified reads omit `Concurrency`, whether `$LATEST`, a published
+version, or an alias is supplied through `Qualifier` or embedded in the function name or ARN.
+Use `GetFunctionConcurrency` to read the function-wide reservation separately.
+Deleting the reservation with `DeleteFunctionConcurrency` removes the `Concurrency` member from
+subsequent unqualified `GetFunction` responses.
 
 ### Asynchronous Invocation Retries and Dead-Letter Queues
 
@@ -351,7 +360,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default function memory (MB) |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default function timeout (seconds) |
 | `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` | `12000` | First port in the Lambda Runtime API range |
-| `FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT` | `12499` | Last port in the Lambda Runtime API range. One port is held per running container, so the range width caps concurrent executions |
+| `FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT` | `12499` | Last port in the Lambda Runtime API range. One port is held per running container, so the range width caps concurrent executions. Each running container also holds two Docker connections, so a wider range needs a matching `FLOCI_DOCKER_MAX_CONNECTIONS` |
 | `FLOCI_SERVICES_LAMBDA_CODE_PATH` | `./data/lambda-code` | Directory where Lambda ZIP files are stored |
 | `FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS` | `1000` | Event-source mapping poll interval (milliseconds) |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` | `300` | Idle container shutdown timeout (seconds) |

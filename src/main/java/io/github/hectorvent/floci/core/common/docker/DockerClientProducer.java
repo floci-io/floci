@@ -396,12 +396,25 @@ public class DockerClientProducer {
         return System.getProperty("os.name", "").toLowerCase().contains("win");
     }
 
+    /**
+     * Rejects a pool size below 1 with a message naming the setting, instead of leaving the
+     * connection pool to reject it with a generic error.
+     */
+    static int validateMaxConnections(int maxConnections) {
+        if (maxConnections < 1) {
+            throw new IllegalArgumentException("floci.docker.max-connections (FLOCI_DOCKER_MAX_CONNECTIONS) "
+                    + "must be at least 1, got: " + maxConnections);
+        }
+        return maxConnections;
+    }
+
     @Produces
     @ApplicationScoped
     public DockerClient dockerClient() {
+        int maxConnections = validateMaxConnections(config.docker().maxConnections());
         ResolvedDockerConnection connection = resolveDockerConnection(config.docker(), System::getenv);
         String dockerHost = connection.host();
-        LOG.infov("Creating DockerClient for host: {0}", dockerHost);
+        LOG.infov("Creating DockerClient for host: {0} (max connections: {1})", dockerHost, maxConnections);
 
         // createDefaultConfigBuilder() reads DOCKER_HOST directly from System.getenv() and passes
         // it to withDockerHost(), which calls URI.create() immediately. If DOCKER_HOST is set
@@ -430,7 +443,7 @@ public class DockerClientProducer {
 
         ApacheDockerHttpClient httpClient = new ApacheDockerHttpClient.Builder()
                 .dockerHost(clientConfig.getDockerHost())
-                .maxConnections(100)
+                .maxConnections(maxConnections)
                 .connectionTimeout(Duration.ofSeconds(30))
                 .responseTimeout(Duration.ofMinutes(5))
                 .build();

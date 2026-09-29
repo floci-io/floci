@@ -37,11 +37,13 @@ import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.EcsTaskAddress;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.ListTasksRequest;
 import io.github.hectorvent.floci.services.ecs.model.ManagedAgent;
+import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
@@ -116,6 +118,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
     private volatile ScheduledExecutorService reconciler = newReconciler();
     private final Object reconcilerLock = new Object();
+    // False until a previous run's task containers are confirmed gone; no task starts before.
+    private volatile boolean leftoverContainersRemoved = true;
+    private volatile boolean leftoverContainersBlockReported;
 
     // region::clusterName → EcsCluster
     private Map<String, EcsCluster> clusters = new ConcurrentHashMap<>();
@@ -218,7 +223,31 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     @PostConstruct
     void init() {
         initializeStorage();
+        releasePreviousRunLeftovers();
         scheduleReconciliation(reconciler);
+    }
+
+    /**
+     * Clears what the tasks of a previous run left behind, before the scheduler starts their
+     * replacements. Task state is memory-only, so a restarted Floci knows no task, yet a run that
+     * ended without a graceful shutdown leaves its task containers serving, and even a graceful one
+     * leaves their load balancer targets and Cloud Map instances registered. Left alone, each
+     * service would serve from its replacements and a task nothing manages, and a dead task's
+     * target would follow its address to whichever container Docker hands it to next. Only what
+     * the registrars recorded registering is released, never a target or instance registered by
+     * hand. A container Docker would not remove is retried by {@link #leftoverContainersCleared()}
+     * before each task launch, and no task starts until it is gone.
+     */
+    void releasePreviousRunLeftovers() {
+        if (dockerMode) {
+            leftoverContainersRemoved = containerManager.removeLeftoverContainers();
+        }
+        if (lbRegistrar != null) {
+            lbRegistrar.releaseRecordedTargets();
+        }
+        if (discoveryRegistrar != null) {
+            discoveryRegistrar.releaseRecordedInstances();
+        }
     }
 
     private void scheduleReconciliation(ScheduledExecutorService scheduler) {
@@ -1308,6 +1337,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
             if (dockerMode) {
                 try {
+                    if (!leftoverContainersCleared()) {
+                        throw new IllegalStateException(
+                                "the containers a previous run of Floci left on the Docker daemon could not be removed yet");
+                    }
                     task.setPullStartedAt(Instant.now());
                     EcsTaskHandle handle = containerManager.startTask(task, taskDef, containerOverrides, region);
                     task.setPullStoppedAt(Instant.now());
@@ -1321,6 +1354,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                         if (!stopRequested) {
                             registerTaskWithLoadBalancers(task, cluster, region);
                             registerTaskForServiceDiscovery(task, cluster, region);
+                            evictStaleRegistrationsAt(task, region);
                         }
                         if (eventPublisher != null) {
                             eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
@@ -1790,6 +1824,102 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (svc != null && discoveryRegistrar.hasRegistries(svc)) {
             discoveryRegistrar.registerTask(task, svc, region);
         }
+    }
+
+    /**
+     * Removes the load balancer targets and Cloud Map instances that point at a freshly-started
+     * task's addresses but that no ECS task recorded, from every target group and Cloud Map service
+     * an ECS service in the region names. Docker hands a dead container's address to the next
+     * container it starts, so a registration its task never released, as one made by a Floci
+     * version that kept no record, would otherwise route another service's traffic to this task.
+     * Runs for every task, not only a service's: any container can take the address.
+     */
+    private void evictStaleRegistrationsAt(EcsTask task, String region) {
+        Set<String> targetGroupArns = new LinkedHashSet<>();
+        Set<String> cloudMapServiceIds = new LinkedHashSet<>();
+        for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
+            EcsServiceModel svc = entry.getValue();
+            if (!region.equals(extractRegionFromServiceKey(entry.getKey())) || "INACTIVE".equals(svc.getStatus())) {
+                continue;
+            }
+            for (EcsLoadBalancer lb : svc.getLoadBalancers()) {
+                if (lb.getTargetGroupArn() != null && !lb.getTargetGroupArn().isBlank()) {
+                    targetGroupArns.add(lb.getTargetGroupArn());
+                }
+            }
+            if (discoveryRegistrar != null) {
+                cloudMapServiceIds.addAll(discoveryRegistrar.cloudMapServiceIds(svc));
+            }
+        }
+        if (targetGroupArns.isEmpty() && cloudMapServiceIds.isEmpty()) {
+            return;
+        }
+        if (lbRegistrar != null && !targetGroupArns.isEmpty()) {
+            lbRegistrar.evictUnrecordedTargets(task, targetGroupArns, targetAddresses(task), region);
+        }
+        if (discoveryRegistrar != null && !cloudMapServiceIds.isEmpty()) {
+            discoveryRegistrar.evictUnrecordedInstances(task, cloudMapServiceIds, instanceAddresses(task, region),
+                    region);
+        }
+    }
+
+    /**
+     * The address and port pairs at which a load balancer target reaches a running task: each
+     * container's address, on the ports its bindings declare. The ENI address is not among them,
+     * since ECS registers no target at it and it is unique only within its VPC, and a target on a
+     * port the task does not serve sends it nothing.
+     */
+    private Set<EcsTaskAddress> targetAddresses(EcsTask task) {
+        Set<EcsTaskAddress> addresses = new LinkedHashSet<>();
+        if (task.getContainers() == null) {
+            return addresses;
+        }
+        for (Container container : task.getContainers()) {
+            String host = containerManager.resolveContainerHost(container);
+            if (host == null || host.isBlank() || container.getNetworkBindings() == null) {
+                continue;
+            }
+            for (NetworkBinding binding : container.getNetworkBindings()) {
+                addresses.add(new EcsTaskAddress(host, binding.hostPort()));
+                if (!EcsTaskAddress.isLoopback(host)) {
+                    addresses.add(new EcsTaskAddress(host, binding.containerPort()));
+                }
+            }
+        }
+        return addresses;
+    }
+
+    /**
+     * The addresses at which a Cloud Map instance resolves to a running task: its ENI address,
+     * within the task's VPC only, and each container's address on Docker, on any port since a
+     * DNS answer carries none. A loopback address counts only on the task's host ports.
+     */
+    private Set<EcsTaskAddress> instanceAddresses(EcsTask task, String region) {
+        Set<EcsTaskAddress> addresses = new LinkedHashSet<>();
+        String eniAddress = task.getPrivateIpAddress();
+        if (eniAddress != null && !eniAddress.isBlank() && !EcsTaskAddress.isLoopback(eniAddress)) {
+            String vpcId = containerManager.taskVpcId(task, region);
+            if (vpcId != null) {
+                addresses.add(new EcsTaskAddress(eniAddress, null, vpcId));
+            }
+        }
+        if (task.getContainers() == null) {
+            return addresses;
+        }
+        for (Container container : task.getContainers()) {
+            String host = containerManager.resolveContainerHost(container);
+            if (host == null || host.isBlank()) {
+                continue;
+            }
+            if (!EcsTaskAddress.isLoopback(host)) {
+                addresses.add(new EcsTaskAddress(host, null));
+            } else if (container.getNetworkBindings() != null) {
+                for (NetworkBinding binding : container.getNetworkBindings()) {
+                    addresses.add(EcsTaskAddress.of(host, binding.hostPort()));
+                }
+            }
+        }
+        return addresses;
     }
 
     /**
@@ -3949,6 +4079,29 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /**
+     * Whether a task may start: true once the containers a previous run left behind are gone,
+     * retrying the sweep otherwise. It runs before every task launch, RunTask and StartTask
+     * included, and the service scheduler asks it before planning one, so a service it blocks
+     * creates no failed task on every tick. Nothing retries it while no task is due, so an
+     * unreachable Docker daemon costs nothing then, and a blocked launch is reported once.
+     */
+    private boolean leftoverContainersCleared() {
+        if (leftoverContainersRemoved) {
+            return true;
+        }
+        leftoverContainersRemoved = containerManager.removeLeftoverContainers();
+        if (leftoverContainersRemoved) {
+            LOG.info("The containers a previous ECS run left behind are gone; starting service tasks");
+        } else {
+            LOG.log(leftoverContainersBlockReported ? Logger.Level.DEBUG : Logger.Level.WARN,
+                    "Not starting ECS tasks while a previous run's containers remain;"
+                            + " retrying before each task launch");
+            leftoverContainersBlockReported = true;
+        }
+        return leftoverContainersRemoved;
+    }
+
     private Set<String> reconcilableAccountIds() {
         Set<String> accountIds = new LinkedHashSet<>();
         accountIds.add(regionResolver.getAccountId());
@@ -4236,6 +4389,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (covered.contains(ci.getContainerInstanceArn())) {
                 continue;
             }
+            if (!leftoverContainersCleared()) {
+                break;
+            }
             try {
                 EcsTask launched = launchServiceTask(cluster, svc, LaunchType.EC2,
                         ci.getContainerInstanceArn(), region);
@@ -4373,6 +4529,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         if (current < svc.getDesiredCount()) {
+            if (!leftoverContainersCleared()) {
+                return;
+            }
             int toStart = svc.getDesiredCount() - (int) current;
             for (int i = 0; i < toStart; i++) {
                 try {

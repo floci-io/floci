@@ -1,11 +1,9 @@
 package io.github.hectorvent.floci.services.eks;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.ContainerNetwork;
-import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -14,6 +12,7 @@ import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource;
 import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
@@ -73,7 +72,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -1787,7 +1785,7 @@ public class EksClusterManager
                 metadataServer.reconcileContainerAddresses(containerIps.allIps(), nodeInstance);
             }
 
-            ContainerExecResult install = execInContainerForResult(containerId,
+            ContainerExec.Result install = execInContainerForResult(containerId,
                     Ec2MetadataProxy.installCommand(), 180);
             if (install.exitCode() != 0) {
                 LOG.warnv("Could not install IMDS proxy dependencies for EKS cluster {0}: {1}",
@@ -1798,7 +1796,7 @@ public class EksClusterManager
             String flociHost = dockerHostResolver.resolve();
             int imdsPort = config.services().ec2().imdsPort();
 
-            ContainerExecResult start = execInContainerForResult(containerId,
+            ContainerExec.Result start = execInContainerForResult(containerId,
                     Ec2MetadataProxy.startCommand(flociHost, imdsPort), 30);
             if (start.exitCode() != 0) {
                 LOG.warnv("Could not start link-local IMDS proxy for EKS cluster {0}: {1}",
@@ -1822,7 +1820,7 @@ public class EksClusterManager
             return;
         }
         try {
-            ContainerExecResult install = execInContainerForResult(containerId,
+            ContainerExec.Result install = execInContainerForResult(containerId,
                     Ec2MetadataProxy.installCommand(), 180);
             if (install.exitCode() != 0) {
                 LOG.warnv("Could not install Pod Identity relay dependencies for EKS cluster {0}: {1}",
@@ -1833,7 +1831,7 @@ public class EksClusterManager
             String flociHost = dockerHostResolver.resolve();
             int flociPort = config.port();
 
-            ContainerExecResult start = execInContainerForResult(containerId,
+            ContainerExec.Result start = execInContainerForResult(containerId,
                     Ec2MetadataProxy.podIdentityStartCommand(flociHost, flociPort), 30);
             if (start.exitCode() != 0) {
                 LOG.warnv("Could not start link-local Pod Identity relay for EKS cluster {0}: {1}",
@@ -1859,7 +1857,7 @@ public class EksClusterManager
             String[] routingCmd = EksPodNetworkRouting.buildRoutingCommand(
                     EksPodNetworkRouting.DEFAULT_POD_CIDR,
                     endpoints);
-            ContainerExecResult routing = execInContainerForResult(containerId, routingCmd, 15);
+            ContainerExec.Result routing = execInContainerForResult(containerId, routingCmd, 15);
             if (routing.exitCode() != 0) {
                 LOG.warnv("Could not configure link-local pod network routing for EKS cluster {0}: {1}",
                         cluster.getName(), routing.summary());
@@ -1918,7 +1916,7 @@ public class EksClusterManager
                     programmedClusterRoutes.put(clusterKey, desiredDests);
                     return;
                 }
-                ContainerExecResult result = execInContainerForResult(containerId, cmd.get(), 30);
+                ContainerExec.Result result = execInContainerForResult(containerId, cmd.get(), 30);
                 if (result.exitCode() != 0) {
                     LOG.warnv("Could not program VPC routes for EKS cluster {0}: {1}",
                             cluster.getName(), result.summary());
@@ -2164,38 +2162,8 @@ public class EksClusterManager
         return record != null ? record.instance() : null;
     }
 
-    ContainerExecResult execInContainerForResult(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
-        DockerClient dockerClient = lifecycleManager.getDockerClient();
-        ExecCreateCmdResponse exec = dockerClient
-                .execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec();
-
-        StringBuilder output = new StringBuilder();
-        boolean completed = dockerClient.execStartCmd(exec.getId())
-                .exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onNext(Frame frame) {
-                        if (frame != null && frame.getPayload() != null) {
-                            output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
-                        }
-                    }
-                })
-                .awaitCompletion(timeoutSeconds, TimeUnit.SECONDS);
-
-        if (!completed) {
-            return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s");
-        }
-        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-        return new ContainerExecResult(exitCode != null ? exitCode : -1, output.toString());
-    }
-
-    record ContainerExecResult(long exitCode, String output) {
-        String summary() {
-            return output == null || output.isBlank() ? "(no output)" : output.trim();
-        }
+    ContainerExec.Result execInContainerForResult(String containerId, String[] cmd, int timeoutSeconds) {
+        return ContainerExec.runMerged(lifecycleManager.getDockerClient(), containerId, cmd, timeoutSeconds);
     }
 
     /**
@@ -2231,11 +2199,7 @@ public class EksClusterManager
 
 
     private String execInContainer(String containerId, String[] cmd) throws Exception {
-        ContainerExecResult result = execInContainerForResult(containerId, cmd, 10);
-        if (result.exitCode() == -1 && result.output().startsWith("Timed out")) {
-            throw new RuntimeException("exec timed out in container " + containerId);
-        }
-        return result.output();
+        return execInContainerForResult(containerId, cmd, 10).throwIfTimedOut(containerId).stdout();
     }
 
     private String extractYamlField(String yaml, String fieldName) {

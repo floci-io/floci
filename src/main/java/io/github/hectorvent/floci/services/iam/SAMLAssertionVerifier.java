@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
@@ -130,7 +131,7 @@ final class SAMLAssertionVerifier {
                 }
                 String recipient = confirmationData.getAttribute("Recipient");
                 Instant confirmationExpiry = instant(confirmationData.getAttribute("NotOnOrAfter"));
-                if ("https://signin.aws.amazon.com/saml".equals(recipient)
+                if (expectedRecipient(provider).equals(recipient)
                         && confirmationExpiry != null && now.isBefore(confirmationExpiry)) {
                     validBearer = true;
                     break;
@@ -238,4 +239,17 @@ final class SAMLAssertionVerifier {
         }
     }
 
+    /**
+     * The console sign-on URL a bearer assertion must name, in the provider's partition. The CDK
+     * publishes none for {@code aws-iso-e}, {@code aws-iso-f} and {@code aws-eusc}; there the
+     * commercial URL is kept, as every partition used before the per-partition table, rather than
+     * refusing every assertion.
+     */
+    // Package-private for unit testing.
+    static String expectedRecipient(SAMLProvider provider) {
+        String partition = AwsArnUtils.parse(provider.getArn()).partition();
+        return AwsRegionFacts.samlSignOnUrl(partition)
+                .or(() -> AwsRegionFacts.samlSignOnUrl("aws"))
+                .orElseThrow();
+    }
 }

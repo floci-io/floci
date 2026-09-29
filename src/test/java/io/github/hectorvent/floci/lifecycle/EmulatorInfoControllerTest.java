@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbBackendSelector;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -16,6 +17,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -40,6 +42,7 @@ class EmulatorInfoControllerTest {
     @Mock private Instance<ContainerTeardown> containerTeardowns;
     @Mock private FlociCertificateAuthority certificateAuthority;
     @Mock private EmulatorConfig config;
+    @Mock private DynamoDbBackendSelector dynamoDbBackendSelector;
     @Mock private ContainerTeardown sageMakerTeardown;
     @Mock private ContainerTeardown batchTeardown;
     @Mock private Resettable resettable;
@@ -49,7 +52,17 @@ class EmulatorInfoControllerTest {
     @BeforeEach
     void setUp() {
         controller = new EmulatorInfoController(serviceRegistry, initLifecycleState, storageFactory,
-                resettables, containerTeardowns, certificateAuthority, config);
+                resettables, containerTeardowns, certificateAuthority, config, dynamoDbBackendSelector);
+    }
+
+    @Test
+    @DisplayName("Should report the selected DynamoDB backend in info")
+    void info_reportsTheSelectedDynamoDbBackend() {
+        when(dynamoDbBackendSelector.selected()).thenReturn("local");
+
+        Map<?, ?> info = (Map<?, ?>) controller.info().getEntity();
+
+        assertEquals("local", info.get("dynamodb_backend"));
     }
 
     @Test

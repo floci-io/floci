@@ -4,9 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -177,14 +177,14 @@ public class LambdaEventSourceMappingCfnProvisioner implements CfnResourceProvis
                             "Updating SelfManagedEventSource requires resource replacement, which is not supported.", 400);
                 }
             }
-            lambdaService.updateEventSourceMapping(uuid, req);
-            String esmArn = AwsArnUtils.Arn.of("lambda", ctx.region(), ctx.accountId(), "event-source-mapping:" + uuid).toString();
+            EventSourceMapping updated = lambdaService.updateEventSourceMapping(uuid, req);
+            String esmArn = LambdaArnUtils.eventSourceMappingArn(updated.getRegion(), updated.getAccountId(), uuid);
             r.setPhysicalId(uuid);
             r.getAttributes().put("Id", uuid);
             r.getAttributes().put("EventSourceMappingArn", esmArn);
         } else {
-            var esm = lambdaService.createEventSourceMapping(ctx.region(), req);
-            String esmArn = AwsArnUtils.Arn.of("lambda", ctx.region(), ctx.accountId(), "event-source-mapping:" + esm.getUuid()).toString();
+            EventSourceMapping esm = lambdaService.createEventSourceMapping(ctx.region(), req);
+            String esmArn = LambdaArnUtils.eventSourceMappingArn(esm.getRegion(), esm.getAccountId(), esm.getUuid());
             r.setPhysicalId(esm.getUuid());
             r.getAttributes().put("Id", esm.getUuid());
             r.getAttributes().put("EventSourceMappingArn", esmArn);

@@ -22,10 +22,12 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
@@ -33,6 +35,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -581,6 +584,19 @@ public class CodeArtifactService implements Resettable {
         }
 
         Map<String, PackageAsset> assets = new LinkedHashMap<>(pv.getAssets());
+        // AWS's own docs ("Overwriting package assets" in CodeArtifact's packages overview): a
+        // republish of an asset name that already exists is only rejected when the new content
+        // actually differs from what's already there; byte-identical content succeeds because the
+        // operation is idempotent, e.g. a client retrying after a dropped response. The in-memory
+        // PackageAsset.content field is @JsonIgnore and not reliable after a reload from persisted
+        // storage, so the real existing bytes have to come from the asset store, the same place
+        // getPackageVersionAsset reads them from. A genuinely missing backing file (metadata says
+        // the asset exists but its bytes don't, e.g. a partial restore) reads the same as "nothing
+        // to conflict with" rather than a hard failure, so a republish can still repair it.
+        if (assets.containsKey(assetName) && !existingAssetMatchesOrIsMissing(owner, key, assetName, assetContent)) {
+            throw conflict("Asset '" + assetName + "' already exists for package version '" + version
+                    + "' of package '" + packageName + "' with different content.", assetName, "asset");
+        }
         if (!assets.containsKey(assetName) && assets.size() >= MAX_ASSETS_PER_PACKAGE_VERSION) {
             throw new AwsException("ServiceQuotaExceededException",
                     "A package version can have a maximum of " + MAX_ASSETS_PER_PACKAGE_VERSION + " assets.", 402,
@@ -968,6 +984,43 @@ public class CodeArtifactService implements Resettable {
         Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
         try {
             return Files.readAllBytes(filePath);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read CodeArtifact asset file: " + filePath, e);
+        }
+    }
+
+    /**
+     * {@code true} when the asset's backing bytes are genuinely missing (e.g. a partial restore
+     * left the metadata but not the file, so there is nothing to conflict with) or match
+     * {@code newContent}; {@code false} only on a real mismatch. Deliberately never materializes
+     * the existing file as a second full byte array: {@code newContent} is already fully resident
+     * (RESTEasy Reactive buffers the whole request body before this method ever runs), so loading a
+     * second full copy of a large existing asset just to compare it would double peak memory for a
+     * same-content retry. Also deliberately separate from {@link #readAssetContent}: a real
+     * download through {@code getPackageVersionAsset} needs a missing file to stay a hard failure,
+     * not silently read as "nothing published yet".
+     */
+    private boolean existingAssetMatchesOrIsMissing(String owner, String packageVersionKey, String assetName,
+                                                      byte[] newContent) {
+        if (inMemory) {
+            byte[] existing = memoryAssetStore.get(assetStoreKey(owner, packageVersionKey, assetName));
+            return existing == null || Arrays.equals(existing, newContent);
+        }
+        Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
+        try (InputStream in = Files.newInputStream(filePath)) {
+            byte[] buffer = new byte[8192];
+            int offset = 0;
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                if (offset + read > newContent.length || !Arrays.equals(buffer, 0, read,
+                        newContent, offset, offset + read)) {
+                    return false;
+                }
+                offset += read;
+            }
+            return offset == newContent.length;
+        } catch (NoSuchFileException e) {
+            return true;
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to read CodeArtifact asset file: " + filePath, e);
         }

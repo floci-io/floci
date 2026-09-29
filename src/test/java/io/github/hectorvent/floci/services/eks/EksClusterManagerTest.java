@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.eks.model.LogSetup;
 import io.github.hectorvent.floci.services.eks.model.Logging;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
+import io.github.hectorvent.floci.testutil.LogCapture;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -64,7 +65,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 
@@ -1044,7 +1044,7 @@ class EksClusterManagerTest {
             vpcConfig.setVpcId("vpc-12345678");
             cluster.setResourcesVpcConfig(vpcConfig);
 
-            List<LogRecord> logs = captureClusterManagerLogs(
+            List<LogRecord> logs = LogCapture.capture(EksClusterManager.class,
                     () -> manager.registerClusterNodeInstance(cluster, "container-unreachable"));
 
             assertTrue(manager.vpcForClient("172.17.0.2").isEmpty());
@@ -1055,35 +1055,6 @@ class EksClusterManagerTest {
                                     && String.valueOf(record.getMessage()).contains("Resolver rules will not apply")),
                     "the cluster must say why its rules stopped applying, got: "
                             + logs.stream().map(LogRecord::getMessage).toList());
-        }
-
-        private static List<LogRecord> captureClusterManagerLogs(Runnable action) {
-            java.util.logging.Logger julLogger =
-                    java.util.logging.Logger.getLogger(EksClusterManager.class.getName());
-            julLogger.setLevel(Level.ALL);
-            List<LogRecord> records = new ArrayList<>();
-            Handler handler = new Handler() {
-                @Override
-                public void publish(LogRecord record) {
-                    records.add(record);
-                }
-
-                @Override
-                public void flush() {
-                }
-
-                @Override
-                public void close() {
-                }
-            };
-            handler.setLevel(Level.ALL);
-            julLogger.addHandler(handler);
-            try {
-                action.run();
-            } finally {
-                julLogger.removeHandler(handler);
-            }
-            return records;
         }
 
         @Test

@@ -2061,12 +2061,15 @@ public class S3Controller {
     }
 
     /**
-     * S3's CreateBucket region rules, the same in every partition (moto's {@code aws_verified}
-     * matrix): every regional endpoint but {@code us-east-1} requires a constraint naming exactly
-     * its region and answers {@code IllegalLocationConstraintException} otherwise, including for a
-     * {@code us-east-1} constraint, so in a China or GovCloud deployment the constraint is de facto
-     * required; the {@code us-east-1} endpoint takes any constraint but its own, which is
-     * {@code InvalidLocationConstraint}.
+     * S3's CreateBucket region rules, the same in every partition: every regional endpoint but
+     * {@code us-east-1} requires a constraint naming exactly its region and answers
+     * {@code IllegalLocationConstraintException} otherwise, including for a {@code us-east-1}
+     * constraint, so in a China or GovCloud deployment the constraint is de facto required; the
+     * {@code us-east-1} endpoint takes any constraint but its own, which is
+     * {@code InvalidLocationConstraint}. The S3 model backs the us-east-1 rules on its own:
+     * {@code us-east-1} is the one region missing from the {@code BucketLocationConstraint} enum,
+     * and {@code GetBucketLocationOutput} gives buckets in {@code us-east-1} a null constraint. The
+     * exact error codes and messages come from moto's {@code aws_verified} CreateBucket tests.
      */
     static String bucketRegionForCreate(String locationConstraint, String endpointRegion) {
         boolean globalEndpoint = US_EAST_1.equals(endpointRegion);
@@ -2119,6 +2122,9 @@ public class S3Controller {
 
     private Response handleGetBucketTagging(String bucket) {
         Map<String, String> tags = s3Service.getBucketTagging(bucket);
+        if (tags.isEmpty()) {
+            throw new AwsException("NoSuchTagSet", "The TagSet does not exist", 404);
+        }
         return Response.ok(buildTaggingXml(tags)).type(MediaType.APPLICATION_XML).build();
     }
 

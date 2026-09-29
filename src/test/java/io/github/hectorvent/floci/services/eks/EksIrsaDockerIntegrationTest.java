@@ -1,9 +1,7 @@
 package io.github.hectorvent.floci.services.eks;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.ExecCreateCmdResponse;
-import com.github.dockerjava.api.model.Frame;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -15,11 +13,9 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -152,7 +148,7 @@ class EksIrsaDockerIntegrationTest {
         long saDeadline = System.currentTimeMillis() + 30000;
         boolean saReady = false;
         while (System.currentTimeMillis() < saDeadline) {
-            ExecResult saResult = execInContainerWithExitCode(containerId,
+            ContainerExec.Result saResult = execInContainerWithExitCode(containerId,
                     new String[]{"kubectl", "get", "serviceaccount", "default"});
             if (saResult.exitCode() == 0) {
                 saReady = true;
@@ -195,7 +191,7 @@ class EksIrsaDockerIntegrationTest {
         long podDeadline = System.currentTimeMillis() + 45000;
         boolean podRunning = false;
         while (System.currentTimeMillis() < podDeadline) {
-            ExecResult statusResult = execInContainerWithExitCode(containerId,
+            ContainerExec.Result statusResult = execInContainerWithExitCode(containerId,
                     new String[]{"kubectl", "get", "pod", "irsa-workload-pod", "-o", "jsonpath={.status.phase}"});
             if ("Running".equalsIgnoreCase(statusResult.stdout().trim())) {
                 podRunning = true;
@@ -207,20 +203,20 @@ class EksIrsaDockerIntegrationTest {
 
         // The pod is Running, so it was scheduled onto the node, which the kubelet
         // registered with its provider ID: the node is guaranteed to exist here.
-        ExecResult nodeResult = execInContainerWithExitCode(containerId,
+        ContainerExec.Result nodeResult = execInContainerWithExitCode(containerId,
                 new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[0].spec.providerID}"});
         assertEquals(0, nodeResult.exitCode(), "kubectl get nodes failed");
         assertEquals(eksClusterManager.deriveClusterNodeProviderId(cluster), nodeResult.stdout().trim(),
                 "Node providerID must match the derived AWS provider ID");
 
-        ExecResult zoneResult = execInContainerWithExitCode(containerId,
+        ContainerExec.Result zoneResult = execInContainerWithExitCode(containerId,
                 new String[]{"kubectl", "get", "nodes", "-o",
                         "jsonpath={.items[0].metadata.labels.topology\\.kubernetes\\.io/zone}"});
         assertEquals(0, zoneResult.exitCode(), "kubectl get nodes failed");
         assertEquals(eksClusterManager.deriveClusterNodeAvailabilityZone(cluster), zoneResult.stdout().trim(),
                 "Node topology zone label must match the derived availability zone");
 
-        ExecResult regionResult = execInContainerWithExitCode(containerId,
+        ContainerExec.Result regionResult = execInContainerWithExitCode(containerId,
                 new String[]{"kubectl", "get", "nodes", "-o",
                         "jsonpath={.items[0].metadata.labels.topology\\.kubernetes\\.io/region}"});
         assertEquals(0, regionResult.exitCode(), "kubectl get nodes failed");
@@ -362,42 +358,12 @@ class EksIrsaDockerIntegrationTest {
         }
     }
 
-    record ExecResult(long exitCode, String stdout, String stderr) {}
-
-    private ExecResult execInContainerWithExitCode(String containerId, String[] cmd) throws Exception {
-        ExecCreateCmdResponse exec = dockerClient.execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec();
-
-        StringBuilder stdout = new StringBuilder();
-        StringBuilder stderr = new StringBuilder();
-        boolean completed = dockerClient.execStartCmd(exec.getId())
-                .exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onNext(Frame frame) {
-                        if (frame != null && frame.getPayload() != null) {
-                            String text = new String(frame.getPayload(), StandardCharsets.UTF_8);
-                            if (frame.getStreamType() == com.github.dockerjava.api.model.StreamType.STDERR) {
-                                stderr.append(text);
-                            } else {
-                                stdout.append(text);
-                            }
-                        }
-                    }
-                })
-                .awaitCompletion(30, TimeUnit.SECONDS);
-
-        if (!completed) {
-            throw new RuntimeException("exec timed out in container " + containerId);
-        }
-        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-        return new ExecResult(exitCode != null ? exitCode : -1L, stdout.toString(), stderr.toString());
+    private ContainerExec.Result execInContainerWithExitCode(String containerId, String[] cmd) {
+        return ContainerExec.run(dockerClient, containerId, cmd, 30).throwIfTimedOut(containerId);
     }
 
     private String execInContainer(String containerId, String[] cmd) throws Exception {
-        ExecResult result = execInContainerWithExitCode(containerId, cmd);
+        ContainerExec.Result result = execInContainerWithExitCode(containerId, cmd);
         if (result.exitCode() != 0) {
             throw new RuntimeException("exec failed with code " + result.exitCode() + ": " + result.stderr());
         }

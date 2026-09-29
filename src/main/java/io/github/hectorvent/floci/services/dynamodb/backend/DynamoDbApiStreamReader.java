@@ -3,10 +3,8 @@ package io.github.hectorvent.floci.services.dynamodb.backend;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Api;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Call;
-import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Reply;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -78,22 +76,13 @@ public final class DynamoDbApiStreamReader implements DynamoDbStreamReader {
     }
 
     private JsonNode call(Stream stream, String action, ObjectNode body) {
-        Reply reply;
         try {
-            reply = operations.execute(new Call(stream.scope(), Api.DYNAMODB_STREAMS, action, body));
+            return operations.execute(new Call(stream.scope(), Api.DYNAMODB_STREAMS, action, body)).successBody();
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
-        JsonNode replyBody = reply.body() == null ? JSON.missingNode() : reply.body();
-        if (reply.status() >= 300) {
-            String type = text(replyBody, "__type");
-            String code = type == null ? "InternalServerError" : type.substring(type.lastIndexOf('#') + 1);
-            String message = text(replyBody, "message");
-            throw new AwsException(code, message != null ? message : text(replyBody, "Message"), reply.status());
-        }
-        return replyBody;
     }
 
     private static String text(JsonNode node, String field) {

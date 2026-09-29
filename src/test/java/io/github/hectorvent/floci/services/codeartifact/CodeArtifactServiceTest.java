@@ -850,6 +850,37 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void republishingAnUnfinishedAssetWithIdenticalContentSucceedsIdempotently() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "same-bytes".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "true", content);
+
+        PublishPackageVersionResult result = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "true", content);
+
+        assertEquals("Unfinished", result.packageVersion().getStatus());
+        assertEquals(1, result.packageVersion().getAssets().size());
+    }
+
+    @Test
+    void republishingAnUnfinishedAssetWithDifferentContentConflicts() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] first = "first-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] different = "different-bytes".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(first), "true", first);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", null, "my-pkg", "1.0.0", "a.txt", sha256Hex(different), "true", different));
+        assertEquals("ConflictException", e.getErrorCode());
+        assertEquals("a.txt", e.getExtendedData().get("resourceId"));
+        assertEquals("asset", e.getExtendedData().get("resourceType"));
+    }
+
+    @Test
     void publishingToAnAlreadyPublishedVersionConflicts() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());

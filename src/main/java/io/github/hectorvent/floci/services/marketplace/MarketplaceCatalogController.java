@@ -138,7 +138,7 @@ public class MarketplaceCatalogController {
     }
 
     private String region() {
-        return context.getRegion() == null ? "us-east-1" : context.getRegion();
+        return context.getRegion() == null ? "us-east-1" : context.getRegion(); // partition-literal: fallback to Marketplace's own region when the request carries none
     }
 
     private static Response ok(JsonNode node) {

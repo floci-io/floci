@@ -64,7 +64,7 @@ jobs:
         run: make partition-audit
 
   aws-data:
-    name: Vendored partition data in sync
+    name: Vendored AWS data in sync
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -83,3 +83,10 @@ jobs:
 
       - name: Check partitions.json against a fresh generation
         run: make aws-data-check
+
+      # Offline and hermetic, so it is safe on a job this broadly triggered. The online check
+      # that needs AWS lives in iam-namespace-drift.yml, which only runs when the vendored file
+      # or its generator changes, so an outage cannot fail an unrelated Java pull request.
+      - name: Check the vendored IAM namespace list is well-formed
+        run: make iam-namespaces-check
+

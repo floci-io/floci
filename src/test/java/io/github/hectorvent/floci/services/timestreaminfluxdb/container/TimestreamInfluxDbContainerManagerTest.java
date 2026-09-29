@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.timestreaminfluxdb.container;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExecStubs;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -15,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -163,5 +166,19 @@ class TimestreamInfluxDbContainerManagerTest {
                 "INFLUXD_INFLUXQL_MAX_SELECT_BUCKETS", "5",
                 "INFLUXD_STORAGE_CACHE_SNAPSHOT_WRITE_COLD_DURATION", "48h",
                 "INFLUXD_HTTP_WRITE_TIMEOUT", "250ms"), environment);
+    }
+
+    @Test
+    void aFailedInfluxBackupReportsTheExitCodeAndTheCommandsOutput() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, "influx-container-id", 1, "",
+                "Error: failed to connect");
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> manager.backup("influx-container-id", "backup-1"));
+
+        assertEquals("influx backup failed with exit code 1: Error: failed to connect", error.getMessage());
+        assertEquals(List.of(List.of("influx", "backup", "/tmp/floci-backup-backup-1")), commands);
     }
 }

@@ -1,12 +1,11 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.testing.S3EnforceAuthProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -21,7 +20,7 @@ import static org.hamcrest.Matchers.equalTo;
  * turns on.
  */
 @QuarkusTest
-@TestProfile(S3BlockPublicAccessEnforcementIntegrationTest.EnforcementProfile.class)
+@TestProfile(S3EnforceAuthProfile.class)
 class S3BlockPublicAccessEnforcementIntegrationTest {
 
     private static final S3RequestSigner OWNER = S3RequestSigner.signedAs("test", "test");
@@ -31,13 +30,6 @@ class S3BlockPublicAccessEnforcementIntegrationTest {
             "Principal":"*","Action":["s3:GetObject","s3:ListBucket"],
             "Resource":["arn:aws:s3:::%1$s","arn:aws:s3:::%1$s/*"]}]}
             """;
-
-    public static final class EnforcementProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.s3.enforce-auth", "true");
-        }
-    }
 
     @Test
     void anonymousGetSucceedsOnAPublicPolicyWithoutRestrictPublicBuckets() {
