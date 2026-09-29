@@ -20,6 +20,7 @@ final class HistoryChain {
     private final AtomicBoolean ended;
     private final HistoryChain parent;
     private volatile boolean abandoned;
+    private volatile String activeStateType;
     private long lastEventId;
     private long tailEventId;
 
@@ -68,9 +69,25 @@ final class HistoryChain {
         continueFrom(last);
     }
 
-    /** AWS records nothing of a branch it cut. */
+    /**
+     * Nothing more is recorded on a branch once it is cut. The state it was cut in is recorded by
+     * the Parallel that cut it, through {@link #publishBeside}.
+     */
     void abandon() {
         abandoned = true;
+    }
+
+    /** The type of the state this chain has entered and not yet exited, or null between states. */
+    String activeStateType() {
+        return activeStateType;
+    }
+
+    void enterState(String type) {
+        activeStateType = type;
+    }
+
+    void exitState() {
+        activeStateType = null;
     }
 
     private boolean isAbandoned() {
@@ -104,6 +121,22 @@ final class HistoryChain {
             return;
         }
         long id = append(type, tailEventId, details, true);
+        if (id > 0) {
+            tailEventId = id;
+        }
+    }
+
+    /**
+     * Chained to the last event rather than to the tail, and the last event stays where it is, so
+     * several events published this way all point at the same one. AWS records the
+     * {@code *StateAborted} event of each branch a failure cuts this way, before the Parallel's
+     * {@code ParallelStateFailed}, which points at that same event.
+     */
+    void publishBeside(String type, Map<String, Object> details) {
+        if (isAbandoned()) {
+            return;
+        }
+        long id = append(type, lastEventId, details, true);
         if (id > 0) {
             tailEventId = id;
         }

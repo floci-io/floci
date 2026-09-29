@@ -44,8 +44,8 @@ import static org.mockito.Mockito.when;
 /**
  * A {@code states:startExecution.sync} wait is bounded by the Task's {@code TimeoutSeconds}, the
  * way AWS bounds it, and no longer by a fixed poll count of its own. The timeout aborts the child,
- * a {@code Catch} on {@code States.Timeout} takes it, and a StopExecution on the parent ends the
- * wait and the child alike.
+ * a {@code Catch} on {@code States.Timeout} takes it, and the parent's own budget and a
+ * StopExecution on the parent each end the wait and abort the child alike.
  */
 class AslExecutorNestedSyncTimeoutTest {
 
@@ -123,6 +123,18 @@ class AslExecutorNestedSyncTimeoutTest {
     }
 
     @Test
+    void executionBudgetEndsTheParentTimedOutAndAbortsTheChild() {
+        when(sfnService.describeExecution(CHILD_ARN)).thenReturn(child("RUNNING"));
+
+        Execution execution = run(newExecutor(TimeUnit.NANOSECONDS::sleep), ".sync:2", 60, false, 1);
+
+        assertEquals("TIMED_OUT", execution.getStatus());
+        assertTrue(history.stream().noneMatch(event -> "TaskTimedOut".equals(event.getType())));
+        // Measured on AWS: the child is aborted on the parent's budget too, with the same cause.
+        verify(sfnService).stopExecution(eq(CHILD_ARN), eq(ABORT_CAUSE), isNull());
+    }
+
+    @Test
     void stopExecutionOnTheParentEndsTheWaitAndAbortsTheChild() {
         AtomicInteger parentReads = new AtomicInteger();
         when(sfnService.describeExecution(PARENT_ARN))
@@ -190,12 +202,21 @@ class AslExecutorNestedSyncTimeoutTest {
     }
 
     private Execution run(AslExecutor executor, String mode, int timeoutSeconds, boolean catchTimeout) {
+        return run(executor, mode, timeoutSeconds, catchTimeout, 0);
+    }
+
+    private Execution run(AslExecutor executor, String mode, int timeoutSeconds, boolean catchTimeout,
+                          int executionTimeoutSeconds) {
         String timeout = timeoutSeconds > 0 ? "\"TimeoutSeconds\": %d,".formatted(timeoutSeconds) : "";
         String catcher = catchTimeout
                 ? "\"Catch\": [{\"ErrorEquals\": [\"States.Timeout\"], \"Next\": \"Recover\"}],"
                 : "";
+        String budget = executionTimeoutSeconds > 0
+                ? "\"TimeoutSeconds\": %d,".formatted(executionTimeoutSeconds)
+                : "";
         String definition = """
                 {
+                  %s
                   "StartAt": "Child",
                   "States": {
                     "Child": {
@@ -209,7 +230,7 @@ class AslExecutorNestedSyncTimeoutTest {
                     "Recover": { "Type": "Pass", "End": true }
                   }
                 }
-                """.formatted(mode, timeout, catcher, CHILD_SM_ARN);
+                """.formatted(budget, mode, timeout, catcher, CHILD_SM_ARN);
 
         StateMachine stateMachine = new StateMachine();
         stateMachine.setName("parent");

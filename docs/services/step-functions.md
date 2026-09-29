@@ -80,7 +80,10 @@ the parent execution's history, as on AWS. A `Parallel` records `ParallelStateSt
 `MapIterationStarted`, `MapIterationSucceeded`, `MapIterationFailed`, `MapStateSucceeded` and
 `MapStateFailed`. A Distributed `Map` records `MapRunStarted`, `MapRunSucceeded` and
 `MapRunFailed` instead. Its items are child executions and publish nothing into the parent
-history. A `Task` whose failure ends its branch also records `TaskStateAborted`.
+history. A `Task` whose failure ends its branch also records `TaskStateAborted`. When a failure
+ends a `Parallel`, each other branch that is still inside a `Task` or a `Wait` records
+`TaskStateAborted` or `WaitStateAborted`, chained to the failing branch's last event and recorded
+before `ParallelStateFailed`.
 
 Branches and iterations run concurrently, so the order in which their events interleave differs
 from run to run. Each branch chains its own events through `previousEventId`, and that chain is
@@ -263,7 +266,8 @@ When the `Task`'s own clock fires, the job it was waiting on is stopped the way 
 ECS task reads `stopCode: UserInitiated`, the child execution reads `ABORTED` with no error, and
 both carry the cause `The Task state in AWS Step Functions execution [<arn>] which was managing
 this resource was aborted`. A `StopExecution` that lands while the state waits ends the wait and
-stops the job with the same cause. When the execution's budget fires instead, the job is left running.
+stops the job with the same cause, and so does the execution's budget, and a failure in another
+`Parallel` branch that cuts the branch the `Task` is in.
 
 One deviation. AWS starts the `TimeoutSeconds` clock when a worker picks the task up, the instant
 it emits `ActivityStarted`. Floci emits `ActivityStarted` at schedule time, so both clocks start
