@@ -134,8 +134,8 @@ class StsQueryHandlerTest {
 
         assertEquals(200, response.getStatus(), (String) response.getEntity());
         String body = (String) response.getEntity();
-        assertTrue(body.contains("<Arn>arn:aws-cn:sts::000000000000:assumed-role/TestRole/test-session</Arn>"),
-                "AssumedRoleUser Arn must retain the caller's partition");
+        assertTrue(body.contains("<Arn>arn:aws:sts::000000000000:assumed-role/TestRole/test-session</Arn>"),
+                "AssumedRoleUser Arn must use the stored role's partition");
     }
 
     @Test
@@ -154,8 +154,8 @@ class StsQueryHandlerTest {
 
         assertEquals(200, response.getStatus(), (String) response.getEntity());
         String body = (String) response.getEntity();
-        assertTrue(body.contains("<Arn>arn:aws-us-gov:sts::000000000000:assumed-role/TestRole/test-session</Arn>"),
-                "AssumedRoleUser Arn must retain GovCloud partition");
+        assertTrue(body.contains("<Arn>arn:aws:sts::000000000000:assumed-role/TestRole/test-session</Arn>"),
+                "AssumedRoleUser Arn must use the stored role's partition");
     }
 
     @Test

@@ -119,15 +119,14 @@ public class StsQueryHandler {
         String callerAccountId = regionResolver.getAccountId();
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
-        Response trustDenied = enforceTrustPolicy(roleArn, roleName, accountId);
-        if (trustDenied != null) {
-            return trustDenied;
+        AssumeRoleTrustOutcome trustOutcome = enforceTrustPolicy(roleArn, roleName, accountId);
+        if (trustOutcome.denial() != null) {
+            return trustOutcome.denial();
         }
 
-        String partition = AwsArnUtils.isArn(roleArn)
-                ? AwsArnUtils.parse(roleArn).partition()
-                : regionResolver.getPartition();
-        String assumedRoleArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
+        String sessionRoleArn = canonicalRoleArn(trustOutcome.role(), accountId, roleName);
+        AwsArnUtils.Arn parsedRoleArn = AwsArnUtils.parse(sessionRoleArn);
+        String assumedRoleArn = AwsArnUtils.Arn.global(parsedRoleArn.partition(), "sts", parsedRoleArn.accountId(),
                 "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
@@ -136,7 +135,7 @@ public class StsQueryHandler {
         // these temporary credentials to the assumed role's account.
         String sessionPolicy = getParam(params, "Policy");
         iamService.registerSession(
-                accessKeyId, secretKey, sessionToken, roleArn, expiration, sessionPolicy, callerAccountId,
+                accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, sessionPolicy, callerAccountId,
                 sessionName, assumedRoleId);
 
         String result = new XmlBuilder()
@@ -151,11 +150,10 @@ public class StsQueryHandler {
     }
 
     /**
-     * Denies AssumeRole when the target role does not exist, as AWS does. When IAM enforcement is
-     * enabled, also denies it if the role's trust policy does not permit the caller. Returns
-     * {@code null} to allow.
+     * Resolves the target role and evaluates its trust policy when IAM enforcement is enabled.
+     * Returns the role on success or the AWS error response on denial.
      */
-    private Response enforceTrustPolicy(String roleArn, String roleName, String roleAccountId) {
+    private AssumeRoleTrustOutcome enforceTrustPolicy(String roleArn, String roleName, String roleAccountId) {
         Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
         boolean enforcement = config.services().iam().enforcementEnabled();
         String auth = headers == null ? null : headers.getHeaderString("Authorization");
@@ -168,11 +166,38 @@ public class StsQueryHandler {
                 && (!enforcement
                     || trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, callerAccount));
         if (permitted) {
-            return null;
+            return AssumeRoleTrustOutcome.allow(role.get());
         }
-        return AwsQueryResponse.error("AccessDenied",
+        Response denial = AwsQueryResponse.error("AccessDenied",
                 "User: " + callerArn + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
                 AwsNamespaces.STS, 403);
+        return AssumeRoleTrustOutcome.deny(denial);
+    }
+
+    private String canonicalRoleArn(IamRole role, String accountId, String roleName) {
+        if (role.getArn() != null && AwsArnUtils.isArn(role.getArn())) {
+            return role.getArn();
+        }
+        String path = role.getPath() != null ? role.getPath() : "/";
+        if (!path.startsWith("/")) {
+            path = "/" + path;
+        }
+        if (!path.endsWith("/")) {
+            path = path + "/";
+        }
+        return AwsArnUtils.Arn.global(regionResolver.getPartition(), "iam", accountId,
+                "role" + path + roleName).toString();
+    }
+
+    private record AssumeRoleTrustOutcome(IamRole role, Response denial) {
+
+        static AssumeRoleTrustOutcome allow(IamRole role) {
+            return new AssumeRoleTrustOutcome(role, null);
+        }
+
+        static AssumeRoleTrustOutcome deny(Response denial) {
+            return new AssumeRoleTrustOutcome(null, denial);
+        }
     }
 
     static boolean roleArnMatches(String requestedRoleArn, IamRole role) {
@@ -259,16 +284,19 @@ public class StsQueryHandler {
             return outcome.denial();
         }
         VerifiedWebIdentity verified = outcome.verified();
+        IamRole role = outcome.role();
+        if (role == null) {
+            role = iamService.findRole(accountId, roleName).orElse(null);
+        }
 
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
-        String partition = AwsArnUtils.isArn(roleArn)
-                ? AwsArnUtils.parse(roleArn).partition()
-                : regionResolver.getPartition();
-        String assumedRoleArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
+        String sessionRoleArn = role == null ? roleArn : canonicalRoleArn(role, accountId, roleName);
+        AwsArnUtils.Arn parsedRoleArn = AwsArnUtils.parse(sessionRoleArn);
+        String assumedRoleArn = AwsArnUtils.Arn.global(parsedRoleArn.partition(), "sts", parsedRoleArn.accountId(),
                 "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
@@ -279,7 +307,7 @@ public class StsQueryHandler {
 
         String sessionPolicy = getParam(params, "Policy");
         iamService.registerSession(
-                accessKeyId, secretKey, sessionToken, roleArn, expiration, sessionPolicy, callerAccountId,
+                accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, sessionPolicy, callerAccountId,
                 sessionName, assumedRoleId);
 
         String result = new XmlBuilder()
@@ -299,17 +327,17 @@ public class StsQueryHandler {
     /** The claims of a token Floci issued and verified, used to fill the response accurately. */
     private record VerifiedWebIdentity(String issuer, String subject, String audience) {}
 
-    private record WebIdentityOutcome(VerifiedWebIdentity verified, Response denial) {
+    private record WebIdentityOutcome(VerifiedWebIdentity verified, IamRole role, Response denial) {
 
         static WebIdentityOutcome unverifiable() {
-            return new WebIdentityOutcome(null, null);
+            return new WebIdentityOutcome(null, null, null);
         }
-        static WebIdentityOutcome allow(VerifiedWebIdentity verified) {
-            return new WebIdentityOutcome(verified, null);
+        static WebIdentityOutcome allow(VerifiedWebIdentity verified, IamRole role) {
+            return new WebIdentityOutcome(verified, role, null);
         }
 
         static WebIdentityOutcome deny(Response denial) {
-            return new WebIdentityOutcome(null, denial);
+            return new WebIdentityOutcome(null, null, denial);
         }
     }
 
@@ -367,7 +395,7 @@ public class StsQueryHandler {
 
         // verify() already required the audience list to contain STS_AUDIENCE.
         return WebIdentityOutcome.allow(
-                new VerifiedWebIdentity(claims.issuer(), claims.subject(), STS_AUDIENCE));
+                new VerifiedWebIdentity(claims.issuer(), claims.subject(), STS_AUDIENCE), role.get());
     }
 
     private Response accessDenied(String roleArn) {
@@ -439,14 +467,13 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        String partition = AwsArnUtils.isArn(roleArn)
-                ? AwsArnUtils.parse(roleArn).partition()
-                : regionResolver.getPartition();
-        String assumedRoleArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
+        String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
+        AwsArnUtils.Arn parsedRoleArn = AwsArnUtils.parse(sessionRoleArn);
+        String assumedRoleArn = AwsArnUtils.Arn.global(parsedRoleArn.partition(), "sts", parsedRoleArn.accountId(),
                 "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
-        iamService.registerSession(accessKeyId, secretKey, sessionToken, roleArn, expiration, null,
+        iamService.registerSession(accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, null,
                 callerAccountId, sessionName, assumedRoleId);
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
