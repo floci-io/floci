@@ -84,6 +84,7 @@ public class S3Controller {
     private static final Set<String> BUCKET_NAME_ERROR_CODES = Set.of(
             "NoSuchBucket", "BucketNotEmpty", "BucketAlreadyOwnedByYou", "InvalidBucketName",
             "NoSuchTagSet", "NoSuchBucketPolicy", "NoSuchLifecycleConfiguration",
+            "NoSuchCORSConfiguration",
             "NoSuchPublicAccessBlockConfiguration", "NoSuchWebsiteConfiguration",
             "ObjectLockConfigurationNotFoundError", "OwnershipControlsNotFoundError",
             "ReplicationConfigurationNotFoundError");

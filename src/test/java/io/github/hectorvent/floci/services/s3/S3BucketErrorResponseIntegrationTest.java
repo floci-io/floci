@@ -46,6 +46,31 @@ class S3BucketErrorResponseIntegrationTest {
     }
 
     @Test
+    void missingCorsConfigurationIncludesBucketNameButMissingMetricsDoesNot() {
+        String bucket = "error-response-cors-bucket";
+        String corsXml = "<CORSConfiguration><CORSRule><AllowedOrigin>*</AllowedOrigin>"
+                + "<AllowedMethod>GET</AllowedMethod></CORSRule></CORSConfiguration>";
+        given().when().put("/" + bucket).then().statusCode(200);
+
+        given().when().get("/" + bucket + "?cors").then().statusCode(404)
+                .body(containsString("<Code>NoSuchCORSConfiguration</Code>"))
+                .body(containsString("<BucketName>" + bucket + "</BucketName>"));
+
+        given().contentType("application/xml").body(corsXml)
+                .when().put("/" + bucket + "?cors").then().statusCode(200);
+        given().when().delete("/" + bucket + "?cors").then().statusCode(204);
+        given().when().get("/" + bucket + "?cors").then().statusCode(404)
+                .body(containsString("<Code>NoSuchCORSConfiguration</Code>"))
+                .body(containsString("<BucketName>" + bucket + "</BucketName>"));
+
+        given().when().get("/" + bucket + "?metrics&id=absent").then().statusCode(404)
+                .body(containsString("<Code>NoSuchConfiguration</Code>"))
+                .body(not(containsString("<BucketName>")));
+
+        given().when().delete("/" + bucket).then().statusCode(204);
+    }
+
+    @Test
     void objectAndRequestErrorsDoNotIncludeBucketName() {
         String bucket = "error-response-object-bucket";
         given().when().put("/" + bucket).then().statusCode(200);
