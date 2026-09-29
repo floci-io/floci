@@ -638,6 +638,7 @@ public class EmbeddedDnsServer {
             try (java.net.DatagramSocket fwd = new java.net.DatagramSocket()) {
                 fwd.setSoTimeout(FORWARD_TIMEOUT_MS);
                 InetAddress addr = InetAddress.getByName(target.address());
+                fwd.connect(addr, target.port());
                 fwd.send(new DatagramPacket(query, query.length, addr, target.port()));
                 byte[] buf = new byte[MAX_DNS_UDP_RESPONSE];
                 DatagramPacket resp = new DatagramPacket(buf, buf.length);
