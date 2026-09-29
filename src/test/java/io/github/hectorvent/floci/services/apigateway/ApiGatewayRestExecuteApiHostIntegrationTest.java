@@ -190,6 +190,49 @@ class ApiGatewayRestExecuteApiHostIntegrationTest {
                 .then().statusCode(410);
     }
 
+    @Test
+    void websocketApiMappingKeepsConnectionManagementWithRestIdCollision() {
+        String apiId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"websocket-domain\",\"protocolType\":\"WEBSOCKET\","
+                        + "\"routeSelectionExpression\":\"$request.body.action\"}")
+                .when().post("/v2/apis")
+                .then().statusCode(201)
+                .extract().path("apiId");
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"stageName\":\"test\"}")
+                .when().post("/v2/apis/" + apiId + "/stages")
+                .then().statusCode(201);
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"domainName\":\"websocket.example.com\","
+                        + "\"domainNameConfigurations\":[{\"endpointType\":\"REGIONAL\"}]}")
+                .when().post("/v2/domainnames")
+                .then().statusCode(201);
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"apiId\":\"" + apiId + "\",\"stage\":\"test\"}")
+                .when().post("/v2/domainnames/websocket.example.com/apimappings")
+                .then().statusCode(201);
+
+        given()
+                .header("Host", "websocket.example.com.regional.local")
+                .when().get("/@connections/missing")
+                .then().statusCode(410);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"rest-id-collision\",\"tags\":{\"floci:override-id\":\"" + apiId + "\"}}")
+                .when().post("/restapis")
+                .then().statusCode(201)
+                .body("id", equalTo(apiId));
+        given()
+                .header("Host", "websocket.example.com.regional.local")
+                .when().get("/@connections/missing")
+                .then().statusCode(410);
+    }
+
     private static String resourceId(String apiId, String path) throws Exception {
         String resources = given()
                 .when().get("/restapis/" + apiId + "/resources")

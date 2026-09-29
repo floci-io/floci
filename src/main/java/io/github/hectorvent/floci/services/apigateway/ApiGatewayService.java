@@ -332,6 +332,10 @@ public class ApiGatewayService {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API id specified", 404));
     }
 
+    public boolean hasRestApi(String apiId) {
+        return apiStore.keys().stream().anyMatch(key -> key.endsWith("::" + apiId));
+    }
+
 
     public String resolveRestApiRegion(String preferredRegion, String apiId) {
         if (apiStore.get(apiKey(preferredRegion, apiId)).isPresent()) {
@@ -2123,11 +2127,17 @@ public class ApiGatewayService {
     }
 
     public BasePathMapping createBasePathMapping(String region, String domainName, Map<String, Object> request) {
+        return createBasePathMapping(region, domainName, request, "REST");
+    }
+
+    BasePathMapping createBasePathMapping(String region, String domainName,
+                                          Map<String, Object> request, String apiType) {
         String basePath = canonicalBasePath((String) request.get("basePath"));
         String apiId = (String) request.get("restApiId");
         String stage = (String) request.get("stage");
 
         BasePathMapping mapping = new BasePathMapping(basePath, apiId, stage);
+        mapping.setApiType(apiType);
         synchronized (domainNameLock) {
             getDomainName(region, domainName);
             String key = mappingKey(region, domainName, basePath);
