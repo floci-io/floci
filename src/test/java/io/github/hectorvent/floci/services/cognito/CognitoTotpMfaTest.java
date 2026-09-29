@@ -179,6 +179,76 @@ class CognitoTotpMfaTest {
     }
 
     @Test
+    void repeatedWrongSetupCodesInvalidatePendingSoftwareToken() throws Exception {
+        String loginSession = (String) passwordLogin().get("Session");
+        Map<String, Object> associated = service.associateSoftwareToken(null, loginSession);
+        String session = (String) associated.get("Session");
+        String code = CognitoTotp.code((String) associated.get("SecretCode"), clock.instant());
+        String wrongCode = code.equals("000000") ? "000001" : "000000";
+
+        for (int attempt = 0; attempt < CognitoTotp.MAX_FAILED_ATTEMPTS; attempt++) {
+            AwsException mismatch = assertThrows(AwsException.class,
+                    () -> service.verifySoftwareToken(null, session, wrongCode));
+            assertEquals("EnableSoftwareTokenMFAException", mismatch.getErrorCode());
+        }
+        CognitoUser pending = service.adminGetUser(pool.getId(), USERNAME);
+        ObjectMapper mapper = new ObjectMapper();
+        CognitoUser reloaded = mapper.readValue(mapper.writeValueAsBytes(pending), CognitoUser.class);
+        assertEquals(0, reloaded.getPendingSoftwareTokenMfaAttemptsRemaining());
+        assertEquals("EnableSoftwareTokenMFAException", assertThrows(AwsException.class,
+                () -> service.verifySoftwareToken(null, session, code)).getErrorCode());
+
+        Map<String, Object> replacement = service.associateSoftwareToken(null,
+                (String) passwordLogin().get("Session"));
+        String replacementCode = CognitoTotp.code((String) replacement.get("SecretCode"), clock.instant());
+        assertEquals("SUCCESS", service.verifySoftwareToken(null,
+                (String) replacement.get("Session"), replacementCode).get("Status"));
+    }
+
+    @Test
+    void accessTokenCannotRetryExhaustedSoftwareTokenAssociation() {
+        service.setUserPoolMfaConfig(pool.getId(), "OFF", null, false);
+        String accessToken = (String) ((Map<?, ?>) passwordLogin().get("AuthenticationResult")).get("AccessToken");
+        service.setUserPoolMfaConfig(pool.getId(), "ON", true, false);
+        Map<String, Object> associated = service.associateSoftwareToken(accessToken, null);
+        String code = CognitoTotp.code((String) associated.get("SecretCode"), clock.instant());
+        String wrongCode = code.equals("000000") ? "000001" : "000000";
+
+        for (int attempt = 0; attempt < CognitoTotp.MAX_FAILED_ATTEMPTS; attempt++) {
+            assertEquals("EnableSoftwareTokenMFAException", assertThrows(AwsException.class,
+                    () -> service.verifySoftwareToken(accessToken, null, wrongCode)).getErrorCode());
+        }
+        assertEquals("EnableSoftwareTokenMFAException", assertThrows(AwsException.class,
+                () -> service.verifySoftwareToken(accessToken, null, code)).getErrorCode());
+    }
+
+    @Test
+    void repeatedWrongSignInCodesInvalidateChallengeSession() {
+        Map<String, Object> associated = service.associateSoftwareToken(null,
+                (String) passwordLogin().get("Session"));
+        String code = CognitoTotp.code((String) associated.get("SecretCode"), clock.instant());
+        String verifiedSession = (String) service.verifySoftwareToken(null,
+                (String) associated.get("Session"), code).get("Session");
+        service.respondToAuthChallenge(client.getClientId(), "MFA_SETUP", verifiedSession,
+                Map.of("USERNAME", USERNAME));
+
+        String session = (String) passwordLogin().get("Session");
+        String wrongCode = code.equals("000000") ? "000001" : "000000";
+        for (int attempt = 0; attempt < CognitoTotp.MAX_FAILED_ATTEMPTS; attempt++) {
+            assertEquals("CodeMismatchException", assertThrows(AwsException.class,
+                    () -> service.respondToAuthChallenge(client.getClientId(), "SOFTWARE_TOKEN_MFA", session,
+                            Map.of("USERNAME", USERNAME, "SOFTWARE_TOKEN_MFA_CODE", wrongCode)))
+                    .getErrorCode());
+        }
+        assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                () -> service.respondToAuthChallenge(client.getClientId(), "SOFTWARE_TOKEN_MFA", session,
+                        Map.of("USERNAME", USERNAME, "SOFTWARE_TOKEN_MFA_CODE", code))).getErrorCode());
+        assertNotNull(service.respondToAuthChallenge(client.getClientId(), "SOFTWARE_TOKEN_MFA",
+                (String) passwordLogin().get("Session"),
+                Map.of("USERNAME", USERNAME, "SOFTWARE_TOKEN_MFA_CODE", code)).get("AuthenticationResult"));
+    }
+
+    @Test
     void accessTokenCanAssociateSoftwareTokenWithoutAnAuthSession() {
         service.setUserPoolMfaConfig(pool.getId(), "OFF", null, false);
         String accessToken = (String) ((Map<?, ?>) passwordLogin().get("AuthenticationResult")).get("AccessToken");

@@ -11,6 +11,8 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 final class CognitoTotp {
+    // Match verification-code emulation; AWS does not publish an exact attempt threshold.
+    static final int MAX_FAILED_ATTEMPTS = 5;
     private static final char[] BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".toCharArray();
     private static final SecureRandom RANDOM = new SecureRandom();
 

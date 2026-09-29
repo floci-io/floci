@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 /**
@@ -74,7 +75,8 @@ final class CognitoAuthFlowHandler {
 
     private record TotpSession(String userPoolId, String username, String clientId,
                                TotpPhase phase, Map<String, String> clientMetadata,
-                               String triggerSource, Instant expiresAt, String secret) {}
+                               String triggerSource, Instant expiresAt, String secret,
+                               AtomicInteger failedAttempts) {}
 
     /**
      * Correlates a USER_AUTH challenge response back to the InitiateAuth/RespondToAuthChallenge
@@ -366,7 +368,7 @@ final class CognitoAuthFlowHandler {
         purgeExpired(totpSessions, TotpSession::expiresAt);
         String token = buildSessionToken(poolId, username, clientId);
         totpSessions.put(token, new TotpSession(poolId, username, clientId, phase, metadata, triggerSource,
-                expiresAt, secret));
+                expiresAt, secret, new AtomicInteger()));
         return token;
     }
 
@@ -397,17 +399,22 @@ final class CognitoAuthFlowHandler {
         validateSecretHash(client, responses, username);
         CognitoUser user = service.adminGetUser(pool.getId(), username);
         requireSignInEligible(user);
-        if (phase == TotpPhase.VERIFIED) {
-            if (!state.secret().equals(user.getSoftwareTokenMfaSecret())) {
-                throw new AwsException("NotAuthorizedException", "Software token is not verified", 400);
+        synchronized (state) {
+            if (phase == TotpPhase.VERIFIED) {
+                if (!state.secret().equals(user.getSoftwareTokenMfaSecret())) {
+                    throw new AwsException("NotAuthorizedException", "Software token is not verified", 400);
+                }
+            } else if (!state.secret().equals(user.getSoftwareTokenMfaSecret())
+                    || !CognitoTotp.validCode(state.secret(),
+                    responses.get("SOFTWARE_TOKEN_MFA_CODE"), clock.instant())) {
+                if (state.failedAttempts().incrementAndGet() >= CognitoTotp.MAX_FAILED_ATTEMPTS) {
+                    totpSessions.remove(session, state);
+                }
+                throw new AwsException("CodeMismatchException", "Invalid verification code provided, please try again.", 400);
             }
-        } else if (!state.secret().equals(user.getSoftwareTokenMfaSecret())
-                || !CognitoTotp.validCode(state.secret(),
-                responses.get("SOFTWARE_TOKEN_MFA_CODE"), clock.instant())) {
-            throw new AwsException("CodeMismatchException", "Invalid verification code provided, please try again.", 400);
-        }
-        if (!totpSessions.remove(session, state)) {
-            throw new AwsException("NotAuthorizedException", "Session not found", 400);
+            if (!totpSessions.remove(session, state)) {
+                throw new AwsException("NotAuthorizedException", "Session not found", 400);
+            }
         }
         Map<String, String> metadata = clientMetadata != null && !clientMetadata.isEmpty()
                 ? clientMetadata : state.clientMetadata();

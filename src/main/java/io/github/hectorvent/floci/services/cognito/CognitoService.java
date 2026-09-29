@@ -2955,6 +2955,7 @@ public class CognitoService implements ResourceProvider {
         synchronized (userLock(poolId, username)) {
             CognitoUser user = adminGetUser(poolId, username);
             user.setPendingSoftwareTokenMfaSecret(secret);
+            user.setPendingSoftwareTokenMfaAttemptsRemaining(CognitoTotp.MAX_FAILED_ATTEMPTS);
             user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
             userStore.put(userKey(poolId, user.getUsername()), user);
         }
@@ -2971,11 +2972,19 @@ public class CognitoService implements ResourceProvider {
             if (expectedSecret != null && !expectedSecret.equals(pending)) {
                 throw new AwsException("NotAuthorizedException", "Software token association has changed", 400);
             }
+            Integer storedAttempts = user.getPendingSoftwareTokenMfaAttemptsRemaining();
+            int attemptsRemaining = storedAttempts == null ? CognitoTotp.MAX_FAILED_ATTEMPTS : storedAttempts;
+            if (attemptsRemaining <= 0) {
+                return false;
+            }
             if (!CognitoTotp.validCode(pending, code, now)) {
+                user.setPendingSoftwareTokenMfaAttemptsRemaining(attemptsRemaining - 1);
+                userStore.put(userKey(poolId, user.getUsername()), user);
                 return false;
             }
             user.setSoftwareTokenMfaSecret(pending);
             user.setPendingSoftwareTokenMfaSecret(null);
+            user.setPendingSoftwareTokenMfaAttemptsRemaining(null);
             user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
             userStore.put(userKey(poolId, user.getUsername()), user);
             return true;
