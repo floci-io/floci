@@ -174,8 +174,9 @@ public class ResourceGroupsTaggingService implements Resettable {
 
     /**
      * UntagResources from the tagging API, routed as {@link #applyTags} routes. The keys also
-     * leave the tagging store for every ARN, including one its owning service rejected, so a copy
-     * stored earlier can always be cleared.
+     * leave the tagging store for every ARN except one reported as unresolved or from another
+     * account, still including one its owning service rejected, so a copy stored earlier can
+     * always be cleared.
      *
      * @return the owning service's rejection per ARN, empty when every ARN was untagged; an ARN whose
      *         owner could not be read is reported as {@code InternalServiceException}, and one from
@@ -187,6 +188,7 @@ public class ResourceGroupsTaggingService implements Resettable {
         rejectOtherRegion(resourceArns, region, "UntagResources");
         Map<String, AwsException> failures = new LinkedHashMap<>();
         Map<String, TagHandler> owners = listedOwners(resourceArns, region, failures);
+        List<String> resolved = resourceArns.stream().filter(arn -> !failures.containsKey(arn)).toList();
         for (String arn : resourceArns) {
             TagHandler owner = owners.get(arn);
             if (owner != null) {
@@ -197,7 +199,7 @@ public class ResourceGroupsTaggingService implements Resettable {
                 }
             }
         }
-        untagResources(resourceArns, tagKeys, region);
+        untagResources(resolved, tagKeys, region);
         return failures;
     }
 

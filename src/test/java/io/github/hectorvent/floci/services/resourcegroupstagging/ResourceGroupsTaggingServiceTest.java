@@ -151,11 +151,13 @@ class ResourceGroupsTaggingServiceTest {
         assertTrue(service.getTagsForResource(REGION, foreignArn).isEmpty());
         assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, QUEUE_ARN));
 
+        service.tagResources(List.of(foreignArn), Map.of("k", "v"), REGION);
         Map<String, AwsException> untagFailures = service.removeTags(List.of(foreignArn), List.of("k"), REGION);
 
         assertEquals(Set.of(foreignArn), untagFailures.keySet());
         assertEquals("AccessDeniedException", untagFailures.get(foreignArn).getErrorCode());
         assertEquals(403, untagFailures.get(foreignArn).getHttpStatus());
+        assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, foreignArn));
     }
 
     @Test
@@ -243,7 +245,7 @@ class ResourceGroupsTaggingServiceTest {
         assertEquals("InternalServiceException", failures.get(QUEUE_ARN).getErrorCode());
         assertEquals(500, failures.get(QUEUE_ARN).getHttpStatus());
         assertTrue(handler.untagged.isEmpty());
-        assertTrue(service.getTagsForResource(REGION, QUEUE_ARN).isEmpty());
+        assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, QUEUE_ARN));
     }
 
     @Test

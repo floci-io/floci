@@ -64,8 +64,9 @@ AWS. Every other ARN, including
 one the owning service does not list such as an API Gateway deployment ARN,
 goes to the tagging store and the owning service is not called.
 `UntagResources` routes the same way, and also removes the keys from the
-tagging store for every ARN, including one the owning service rejects, so a
-copy stored earlier can always be cleared. When an owning service cannot be
+tagging store for every ARN, including one the owning service rejects but not
+one reported as unresolved or from another account, so a copy stored earlier
+can always be cleared. When an owning service cannot be
 read while routing, an ARN that has an owning service but that no service lists
 is reported in `FailedResourcesMap` with `InternalServiceException` (status
 500) and left unchanged, while ARNs a service lists still reach it. An ARN
