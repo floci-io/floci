@@ -145,7 +145,8 @@ public class ResourceGroupsTaggingService implements Resettable {
      * they can never recurse through their own handler.
      *
      * @return the owning service's rejection per ARN, empty when every ARN was tagged; an ARN whose
-     *         owner could not be read is reported as {@code InternalServiceException}
+     *         owner could not be read is reported as {@code InternalServiceException}, and one from
+     *         another account as {@code AccessDeniedException}
      * @throws AwsException {@code InvalidParameterException} when an ARN names another region;
      *                      nothing is tagged then
      */
@@ -177,7 +178,8 @@ public class ResourceGroupsTaggingService implements Resettable {
      * stored earlier can always be cleared.
      *
      * @return the owning service's rejection per ARN, empty when every ARN was untagged; an ARN whose
-     *         owner could not be read is reported as {@code InternalServiceException}
+     *         owner could not be read is reported as {@code InternalServiceException}, and one from
+     *         another account as {@code AccessDeniedException}
      * @throws AwsException {@code InvalidParameterException} when an ARN names another region;
      *                      nothing is untagged then
      */
@@ -214,15 +216,21 @@ public class ResourceGroupsTaggingService implements Resettable {
     private Map<String, TagHandler> listedOwners(List<String> resourceArns, String region,
                                                  Map<String, AwsException> failures) {
         Map<String, TagHandler> owners = new HashMap<>();
+        String accountId = regionResolver != null ? regionResolver.getAccountId() : null;
         Set<String> listed = null;
         boolean complete = true;
         for (String arn : resourceArns) {
+            // ponytail: AWS returns the owner's own error code per ARN; Floci uses AccessDeniedException 403 for all.
+            if (accountId != null && !AwsArnUtils.accountOrDefault(arn, accountId).equals(accountId)) {
+                failures.put(arn, new AwsException("AccessDeniedException",
+                        "The resource belongs to another account.", 403));
+                continue;
+            }
             TagHandler handler = ownerHandler(arn);
             if (handler == null) {
                 continue;
             }
             if (listed == null) {
-                String accountId = regionResolver != null ? regionResolver.getAccountId() : null;
                 listed = new HashSet<>();
                 ProviderScan scan = providerResources();
                 complete = scan.complete();

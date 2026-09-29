@@ -138,6 +138,27 @@ class ResourceGroupsTaggingServiceTest {
     }
 
     @Test
+    void otherAccountArnIsReportedAndNotStored() {
+        String foreignArn = "arn:aws:sqs:us-east-1:111111111111:q-foreign";
+        ResourceGroupsTaggingService service = service(List.of(), List.of());
+
+        Map<String, AwsException> tagFailures = service.applyTags(List.of(foreignArn, QUEUE_ARN),
+                Map.of("k", "v"), REGION);
+
+        assertEquals(Set.of(foreignArn), tagFailures.keySet());
+        assertEquals("AccessDeniedException", tagFailures.get(foreignArn).getErrorCode());
+        assertEquals(403, tagFailures.get(foreignArn).getHttpStatus());
+        assertTrue(service.getTagsForResource(REGION, foreignArn).isEmpty());
+        assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, QUEUE_ARN));
+
+        Map<String, AwsException> untagFailures = service.removeTags(List.of(foreignArn), List.of("k"), REGION);
+
+        assertEquals(Set.of(foreignArn), untagFailures.keySet());
+        assertEquals("AccessDeniedException", untagFailures.get(foreignArn).getErrorCode());
+        assertEquals(403, untagFailures.get(foreignArn).getHttpStatus());
+    }
+
+    @Test
     void providerResourceWithoutArnRegionUsesItsOwnRegion() {
         String bucketArn = "arn:aws:s3:::b";
         ResourceGroupsTaggingService service = service(List.of(provider(new ExplorerResource(

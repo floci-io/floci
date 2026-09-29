@@ -68,7 +68,11 @@ tagging store for every ARN, including one the owning service rejects, so a
 copy stored earlier can always be cleared. When an owning service cannot be
 read while routing, an ARN that has an owning service but that no service lists
 is reported in `FailedResourcesMap` with `InternalServiceException` (status
-500) and left unchanged, while ARNs a service lists still reach it.
+500) and left unchanged, while ARNs a service lists still reach it. An ARN
+from another account is reported in `FailedResourcesMap` with
+`AccessDeniedException` (status 403) and nothing is tagged; AWS also reports
+it per ARN, but with the owning service's own error, such as `InvalidAddress`
+for SQS or `ValidationException` for CloudWatch Logs.
 
 ## Filtering
 

@@ -609,6 +609,33 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     @Test
+    void taggingApiReportsAnotherAccountsArn() {
+        String name = "discovery-" + unique();
+        String foreignArn = "arn:aws:sqs:us-east-1:111111111111:" + name;
+        String queueUrl = sqs("CreateQueue", """
+                {"QueueName": "%s"}
+                """.formatted(name))
+            .then()
+            .statusCode(200)
+            .extract().path("QueueUrl");
+
+        tagging("TagResources", """
+                {"ResourceARNList": ["%s"], "Tags": {"added": "%s"}}
+                """.formatted(foreignArn, unique()))
+            .then()
+            .statusCode(200)
+            .body("FailedResourcesMap.size()", equalTo(1))
+            .body("FailedResourcesMap['%s'].ErrorCode".formatted(foreignArn), equalTo("AccessDeniedException"))
+            .body("FailedResourcesMap['%s'].StatusCode".formatted(foreignArn), equalTo(403));
+        sqsQueueTags(queueUrl)
+            .body("Tags", anEmptyMap());
+
+        sqs("DeleteQueue", """
+                {"QueueUrl": "%s"}
+                """.formatted(queueUrl)).then().statusCode(200);
+    }
+
+    @Test
     void taggingApiWritesReachTheLambdaFunction() {
         String name = "discovery-" + unique();
         String marker = unique();
