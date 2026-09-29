@@ -74,7 +74,7 @@ final class CognitoAuthFlowHandler {
 
     private record TotpSession(String userPoolId, String username, String clientId,
                                TotpPhase phase, Map<String, String> clientMetadata,
-                               Instant expiresAt, String secret) {}
+                               String triggerSource, Instant expiresAt, String secret) {}
 
     /**
      * Correlates a USER_AUTH challenge response back to the InitiateAuth/RespondToAuthChallenge
@@ -314,7 +314,7 @@ final class CognitoAuthFlowHandler {
         result.put("SecretCode", secret);
         if (state != null) {
             result.put("Session", issueTotpSession(state.userPoolId(), state.username(), state.clientId(),
-                    TotpPhase.ASSOCIATED, state.clientMetadata(), state.expiresAt(), secret));
+                    TotpPhase.ASSOCIATED, state.clientMetadata(), state.triggerSource(), state.expiresAt(), secret));
         }
         return result;
     }
@@ -346,7 +346,8 @@ final class CognitoAuthFlowHandler {
         if (state != null) {
             totpSessions.remove(session, state);
             result.put("Session", issueTotpSession(state.userPoolId(), state.username(), state.clientId(),
-                    TotpPhase.VERIFIED, state.clientMetadata(), state.expiresAt(), state.secret()));
+                    TotpPhase.VERIFIED, state.clientMetadata(), state.triggerSource(), state.expiresAt(),
+                    state.secret()));
         }
         return result;
     }
@@ -358,10 +359,12 @@ final class CognitoAuthFlowHandler {
     }
 
     private String issueTotpSession(String poolId, String username, String clientId, TotpPhase phase,
-                                    Map<String, String> metadata, Instant expiresAt, String secret) {
+                                    Map<String, String> metadata, String triggerSource, Instant expiresAt,
+                                    String secret) {
         purgeExpired(totpSessions, TotpSession::expiresAt);
         String token = buildSessionToken(poolId, username, clientId);
-        totpSessions.put(token, new TotpSession(poolId, username, clientId, phase, metadata, expiresAt, secret));
+        totpSessions.put(token, new TotpSession(poolId, username, clientId, phase, metadata, triggerSource,
+                expiresAt, secret));
         return token;
     }
 
@@ -406,7 +409,7 @@ final class CognitoAuthFlowHandler {
         }
         Map<String, String> metadata = clientMetadata != null && !clientMetadata.isEmpty()
                 ? clientMetadata : state.clientMetadata();
-        return authenticationResult(pool, client, user, "TokenGeneration_Authentication", metadata);
+        return authenticationResult(pool, client, user, state.triggerSource(), metadata);
     }
 
     private Map<String, Object> processChallenge(UserPool pool, UserPoolClient client, String challengeName,
@@ -1673,7 +1676,7 @@ final class CognitoAuthFlowHandler {
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", challengeName);
         result.put("Session", issueTotpSession(pool.getId(), user.getUsername(), client.getClientId(),
-                phase, clientMetadata == null ? Map.of() : Map.copyOf(clientMetadata),
+                phase, clientMetadata == null ? Map.of() : Map.copyOf(clientMetadata), triggerSource,
                 sessionExpiry(client, clock.instant()), user.getSoftwareTokenMfaSecret()));
         Map<String, String> parameters = new HashMap<>();
         parameters.put("USERNAME", user.getUsername());

@@ -492,6 +492,37 @@ class CognitoLambdaTriggersTest {
     // =========================================================================
 
     @Test
+    void newPasswordMfaSetupPreservesPreTokenGenerationSource() throws Exception {
+        MutableClock clock = new MutableClock();
+        service = serviceWithClock(clock);
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "Temp1234!");
+        service.setUserPoolMfaConfig(pool.getId(), "ON", true, false);
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of()));
+
+        Map<String, Object> login = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Temp1234!"));
+        assertEquals("NEW_PASSWORD_REQUIRED", login.get("ChallengeName"));
+        Map<String, Object> setup = service.respondToAuthChallenge(client.getClientId(),
+                "NEW_PASSWORD_REQUIRED", (String) login.get("Session"),
+                Map.of("USERNAME", "alice", "NEW_PASSWORD", "Perm1234!"));
+        assertEquals("MFA_SETUP", setup.get("ChallengeName"));
+        Map<String, Object> associated = service.associateSoftwareToken(null, (String) setup.get("Session"));
+        String code = CognitoTotp.code((String) associated.get("SecretCode"), clock.instant());
+        Map<String, Object> verified = service.verifySoftwareToken(null, (String) associated.get("Session"), code);
+        Map<String, Object> tokens = service.respondToAuthChallenge(client.getClientId(),
+                "MFA_SETUP", (String) verified.get("Session"), Map.of("USERNAME", "alice"));
+        assertNotNull(tokens.get("AuthenticationResult"));
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payload.capture(), any());
+        Map<String, Object> event = MAPPER.readValue(payload.getValue(), new TypeReference<>() {});
+        assertEquals("TokenGeneration_NewPasswordChallenge", event.get("triggerSource"));
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void preTokenGenerationAddsAndOverridesClaims() {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
