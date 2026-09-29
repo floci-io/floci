@@ -110,6 +110,20 @@ class IamServiceTest {
     }
 
     @Test
+    void resolveCallerArnPreservesPartitionFromRoleArn() {
+        String accessKeyId = "ASIACHINASESSION";
+        InMemoryStorage<String, SessionCredential> sessions = new InMemoryStorage<>();
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+        service.registerSession(accessKeyId, "secret", "token",
+                "arn:aws-cn:iam::123456789012:role/ChinaRole", Instant.now().plusSeconds(3600),
+                null, "123456789012", "china-session",
+                "AROAEXAMPLE:china-session");
+
+        assertEquals("arn:aws-cn:sts::123456789012:assumed-role/ChinaRole/china-session",
+                service.resolveCallerArn(accessKeyId).orElseThrow());
+    }
+
+    @Test
     void ec2SessionMarkerSurvivesPersistenceAndExpiredCredentialsCannotAuthenticate() throws Exception {
         SessionCredential expired = new SessionCredential("ASIAEXPIREDEC2", "secret", "token",
                 "arn:aws:iam::123456789012:role/worker", Instant.now().minusSeconds(1), null, "123456789012");

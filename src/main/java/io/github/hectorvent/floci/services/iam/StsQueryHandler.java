@@ -207,7 +207,7 @@ public class StsQueryHandler {
         String authorization = headers == null ? null : headers.getHeaderString("Authorization");
         String accessKeyId = authorization == null ? null : accountResolver.extractAccessKeyId(authorization);
         String arn = iamService.resolveCallerArn(accessKeyId)
-                .orElse(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
+                .orElse(AwsArnUtils.Arn.global(regionResolver.getPartition(), "iam", accountId, "root").toString());
         String userId = iamService.resolveCallerUserId(accessKeyId).orElse(accountId);
         String result = new XmlBuilder()
                 .elem("UserId", userId)
@@ -265,7 +265,11 @@ public class StsQueryHandler {
         String sessionToken = randomSecret(200);
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
-        String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
+        String partition = AwsArnUtils.isArn(roleArn)
+                ? AwsArnUtils.parse(roleArn).partition()
+                : regionResolver.getPartition();
+        String assumedRoleArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
+                "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
         String provider = verified != null ? verified.issuer()
@@ -435,7 +439,11 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
+        String partition = AwsArnUtils.isArn(roleArn)
+                ? AwsArnUtils.parse(roleArn).partition()
+                : regionResolver.getPartition();
+        String assumedRoleArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
+                "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
         iamService.registerSession(accessKeyId, secretKey, sessionToken, roleArn, expiration, null,

@@ -65,7 +65,7 @@ class AssumeRoleTrustPolicyIntegrationTest {
         String role = "trust-partition-" + UUID.randomUUID().toString().substring(0, 8);
         createRoleInB(role);
 
-        given()
+        String accessKeyId = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "AssumeRole")
             .formParam("RoleArn", "arn:aws-cn:iam::" + ACCOUNT_B + ":role/" + role)
@@ -75,6 +75,16 @@ class AssumeRoleTrustPolicyIntegrationTest {
         .then().statusCode(200)
             .body("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId", startsWith("ASIA"))
             .body("AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn",
+                    containsString("arn:aws-cn:sts::" + ACCOUNT_B + ":assumed-role/" + role + "/s"))
+            .extract().path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetCallerIdentity")
+            .header("Authorization", auth(accessKeyId, "sts"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn",
                     containsString("arn:aws-cn:sts::" + ACCOUNT_B + ":assumed-role/" + role + "/s"));
     }
 
