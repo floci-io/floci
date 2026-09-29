@@ -14,7 +14,7 @@ import static org.hamcrest.Matchers.startsWith;
 /**
  * Verifies that, with {@code iam.enforcement-enabled=true}, STS AssumeRole honors the target role's
  * trust policy: a caller the trust policy permits succeeds; one it does not is denied; and a role
- * Floci does not know about stays permissive (backward-compatible).
+ * that does not exist is denied.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)

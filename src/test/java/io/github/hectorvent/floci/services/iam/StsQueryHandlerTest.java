@@ -33,10 +33,13 @@ class StsQueryHandlerTest {
             Pattern.compile("<SessionToken>([^<]+)</SessionToken>");
 
     private static StsQueryHandler newHandler() {
-        return newHandler(Optional.of(new IamRole()));
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        return newHandler(role);
     }
 
-    private static StsQueryHandler newHandler(Optional<IamRole> role) {
+    private static StsQueryHandler newHandler(IamRole role) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iam = mock(EmulatorConfig.IamServiceConfig.class);
@@ -45,7 +48,7 @@ class StsQueryHandlerTest {
         when(iam.enforcementEnabled()).thenReturn(false);
 
         IamService iamService = mock(IamService.class);
-        when(iamService.findRole(anyString(), anyString())).thenReturn(role);
+        when(iamService.findRole(anyString(), anyString())).thenReturn(Optional.ofNullable(role));
 
         return new StsQueryHandler(
                 iamService,
@@ -85,9 +88,27 @@ class StsQueryHandlerTest {
 
     @Test
     void assumeRoleDeniesRoleThatDoesNotExist() {
-        StsQueryHandler handler = newHandler(Optional.empty());
+        StsQueryHandler handler = newHandler(null);
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/definitely-does-not-exist");
+        params.putSingle("RoleSessionName", "test-session");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(403, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>AccessDenied</Code>"));
+    }
+
+    @Test
+    void assumeRoleDeniesRoleWhenPathDiffers() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setPath("/team/");
+        role.setArn("arn:aws:iam::000000000000:role/team/TestRole");
+        StsQueryHandler handler = newHandler(role);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/other/TestRole");
         params.putSingle("RoleSessionName", "test-session");
 
         Response response = handler.handle("AssumeRole", params);

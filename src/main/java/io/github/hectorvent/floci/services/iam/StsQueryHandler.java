@@ -160,6 +160,8 @@ public class StsQueryHandler {
                         auth == null ? null : accountResolver.extractAccessKeyId(auth))
                 .orElse(AwsArnUtils.Arn.of("iam", "", callerAccount, "root").toString());
         boolean permitted = role.isPresent()
+                && roleArn != null
+                && roleArn.equals(role.get().getArn())
                 && (!enforcement
                     || trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, callerAccount));
         if (permitted) {
