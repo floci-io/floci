@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
+import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -46,6 +47,7 @@ class CodePipelineRetryRollbackTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private LambdaService lambdaService;
     private CodePipelineService service;
+    private S3Service s3;
 
     @BeforeEach
     void setUp() {
@@ -62,8 +64,14 @@ class CodePipelineRetryRollbackTest {
         lambdaService = mock(LambdaService.class);
         lambdaReturns(null);
 
+        s3 = s3Service;
         service = new CodePipelineService(new InMemoryStorageFactory(), mapper, mock(CodeBuildService.class),
                 mock(CodeDeployService.class), lambdaService, s3Service);
+    }
+
+    private CodePipelineService newService(StorageFactory storage, LambdaService lambda) {
+        return new CodePipelineService(storage, mapper, mock(CodeBuildService.class),
+                mock(CodeDeployService.class), lambda, s3);
     }
 
     @AfterEach
@@ -147,6 +155,66 @@ class CodePipelineRetryRollbackTest {
                         REGION, ACCOUNT));
         assertEquals("ValidationException", error.getErrorCode());
         assertEquals("Failed", getExecution("retry-mode-enum", executionId).path("status").asText());
+    }
+
+    // Catches: a ROLLBACK execution resumed after a restart re-running every stage, including the
+    // Build stage the rollback was meant to skip, because the stage filter lived only in memory.
+    @Test
+    void rollbackResumedAfterRestartRunsOnlySourceAndTargetStage() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        service.shutdown();
+        service = newService(storage, lambdaService);
+        createPipeline("restartable", sourceStage(), lambdaStage("Build"), lambdaStage("Deploy"));
+        String firstId = startExecution("restartable");
+        awaitStatus("restartable", firstId, "Succeeded");
+        String rollbackId = service.handle("RollbackStage", mapper.createObjectNode()
+                        .put("pipelineName", "restartable")
+                        .put("stageName", "Deploy")
+                        .put("targetPipelineExecutionId", firstId),
+                REGION, ACCOUNT).path("pipelineExecutionId").asText();
+        awaitStatus("restartable", rollbackId, "Succeeded");
+
+        // Crash mid-run: the persisted record says InProgress, and the process restarts.
+        for (CodePipelineExecution persisted : storage.executions().scanAllAccounts()) {
+            if (rollbackId.equals(persisted.getPipelineExecutionId())) {
+                persisted.setStatus("InProgress");
+            }
+        }
+        service.shutdown();
+        service = newService(storage, lambdaService);
+        service.resumePersistedExecutions();
+
+        awaitStatus("restartable", rollbackId, "Succeeded");
+        assertEquals(java.util.Set.of("Fetch", "Deploy"),
+                java.util.Set.copyOf(ranStages("restartable", rollbackId)));
+    }
+
+    // Catches: retrying a failed target stage of a ROLLBACK execution carrying on into the stages
+    // after it, which the rollback was meant to skip.
+    @Test
+    void retryingRollbackTargetStageDoesNotRunLaterStages() {
+        createPipeline("retry-rollback", sourceStage(), lambdaStage("Deploy"), lambdaStage("Notify"));
+        String firstId = startExecution("retry-rollback");
+        awaitStatus("retry-rollback", firstId, "Succeeded");
+        lambdaReturns("Unhandled");
+        String rollbackId = service.handle("RollbackStage", mapper.createObjectNode()
+                        .put("pipelineName", "retry-rollback")
+                        .put("stageName", "Deploy")
+                        .put("targetPipelineExecutionId", firstId),
+                REGION, ACCOUNT).path("pipelineExecutionId").asText();
+        awaitStatus("retry-rollback", rollbackId, "Failed");
+
+        lambdaReturns(null);
+        service.handle("RetryStageExecution", mapper.createObjectNode()
+                        .put("pipelineName", "retry-rollback")
+                        .put("pipelineExecutionId", rollbackId)
+                        .put("stageName", "Deploy")
+                        .put("retryMode", "FAILED_ACTIONS"),
+                REGION, ACCOUNT);
+
+        awaitStatus("retry-rollback", rollbackId, "Succeeded");
+        assertEquals(java.util.Set.of("Fetch", "Deploy"),
+                java.util.Set.copyOf(ranStages("retry-rollback", rollbackId)));
     }
 
     // ---------------------------------------------------------------- helpers
@@ -250,6 +318,27 @@ class CodePipelineRetryRollbackTest {
                 .filter(detail -> stageName.equals(detail.path("stageName").asText()))
                 .map(detail -> detail.path("status").asText())
                 .toList();
+    }
+
+    /** Hands every service the same backends, so a second service sees the first one's state. */
+    private static final class SharedStorageFactory extends StorageFactory {
+        private final Map<String, AccountAwareStorageBackend<?>> backends = new java.util.HashMap<>();
+
+        private SharedStorageFactory() {
+            super(null, null);
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                                                        TypeReference<Map<String, V>> typeReference) {
+            return (AccountAwareStorageBackend<V>) backends.computeIfAbsent(fileName,
+                    name -> AccountAwareStorageBackend.inMemory(ACCOUNT));
+        }
+
+        private AccountAwareStorageBackend<CodePipelineExecution> executions() {
+            return create("codepipeline", "codepipeline-executions.json", null);
+        }
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {

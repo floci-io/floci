@@ -37,6 +37,7 @@ public class CodePipelineExecution {
     private volatile boolean abandon;
     private volatile boolean artifactsReleased;
     private String rollbackTargetPipelineExecutionId;
+    private String rollbackStageName;
 
     public String getAccountId() {
         return accountId;
@@ -213,6 +214,14 @@ public class CodePipelineExecution {
 
     public void setArtifactsReleased(boolean artifactsReleased) {
         this.artifactsReleased = artifactsReleased;
+    }
+
+    public String getRollbackStageName() {
+        return rollbackStageName;
+    }
+
+    public void setRollbackStageName(String rollbackStageName) {
+        this.rollbackStageName = rollbackStageName;
     }
 
     public String getRollbackTargetPipelineExecutionId() {
