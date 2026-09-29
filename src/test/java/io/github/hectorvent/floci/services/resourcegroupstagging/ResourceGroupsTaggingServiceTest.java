@@ -9,9 +9,11 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.services.resourcegroupstagging.model.ResourceTagMapping;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.ConcurrentModificationException;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -355,6 +357,17 @@ class ResourceGroupsTaggingServiceTest {
         assertNull(keys.nextPaginationToken());
         assertTrue(values.items().isEmpty());
         assertNull(values.nextPaginationToken());
+    }
+
+    @Test
+    void negativeTokenReadsFromTheFirstPage() {
+        ResourceGroupsTaggingService service = service(List.of(), List.of());
+        service.tagResources(List.of(QUEUE_ARN), Map.of("a", "v"), REGION);
+        String negative = Base64.getEncoder().encodeToString("-1".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(1, service.getResources(List.of(), List.of(), List.of(), negative, 1, REGION).items().size());
+        assertEquals(1, service.getTagKeys(negative, 1, REGION).items().size());
+        assertEquals(1, service.getTagValues("a", negative, 1, REGION).items().size());
     }
 
     @Test

@@ -502,7 +502,7 @@ public class ResourceGroupsTaggingService implements Resettable {
     private static int decodePaginationToken(String token) {
         if (token == null || token.isBlank()) return 0;
         try {
-            return Integer.parseInt(new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8));
+            return Math.max(0, Integer.parseInt(new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8)));
         } catch (Exception e) {
             return 0;
         }
