@@ -773,6 +773,17 @@ public class LambdaService implements ResourceProvider {
         Map<String, Object> loggingConfig = structureMember(request, "LoggingConfig");
         Map<String, Object> imageConfig = structureMember(request, "ImageConfig");
 
+        // RevisionId optimistic locking must run before any field mutation
+        if (request.containsKey("RevisionId")) {
+            String incomingRevision = (String) request.get("RevisionId");
+            if (incomingRevision != null && !incomingRevision.equals(fn.getRevisionId())) {
+                throw new AwsException("PreconditionFailedException",
+                        "The Revision Id provided does not match the latest Revision Id. "
+                        + "Call the GetFunction or the GetFunctionConfiguration API to retrieve "
+                        + "the latest Revision Id for your resource.", 412);
+            }
+        }
+
         // Validated before any field mutation below, not inline where Layers is applied further
         // down - fn is the live object backing this store entry (InMemoryStorage#get returns the
         // same reference, not a copy), so validating this late would leave every
@@ -844,17 +855,6 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("Environment")) {
             if (environment != null && environment.containsKey("Variables")) {
                 fn.setEnvironment(environmentVariables != null ? environmentVariables : new java.util.HashMap<>());
-            }
-        }
-
-        // RevisionId optimistic locking
-        if (request.containsKey("RevisionId")) {
-            String incomingRevision = (String) request.get("RevisionId");
-            if (incomingRevision != null && !incomingRevision.equals(fn.getRevisionId())) {
-                throw new AwsException("PreconditionFailedException",
-                        "The Revision Id provided does not match the latest Revision Id. "
-                        + "Call the GetFunction or the GetFunctionConfiguration API to retrieve "
-                        + "the latest Revision Id for your resource.", 412);
             }
         }
 
