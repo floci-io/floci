@@ -27,12 +27,14 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -255,13 +257,19 @@ public class CloudMapService {
     }
 
     /**
-     * A DNS service keeps its DnsConfig when {@code dnsConfig} is null, since AWS cannot remove it;
-     * a null description or health check config clears it, as AWS UpdateService does.
+     * Only the TTLs of the existing DNS records can change, as on AWS: a DnsConfig with other record
+     * types, or for a service without one, is rejected. A null {@code dnsConfig} keeps the stored
+     * one, since AWS cannot remove it; a null description or health check config clears it, as AWS
+     * UpdateService does.
      */
     public void updateService(String id, String description, String dnsConfig, String healthCheckConfig) {
         Service service = requireService(id);
         if (dnsConfig != null) {
-            parseDnsConfig(dnsConfig);
+            Set<String> types = recordTypes(parseDnsConfig(dnsConfig));
+            if (service.getDnsConfig() == null || !types.equals(recordTypes(dnsConfigNode(service)))) {
+                throw new AwsException("InvalidInput",
+                        "The DNS record types of a service can't be updated.", 400);
+            }
             service.setDnsConfig(dnsConfig);
         }
         service.setDescription(description);
@@ -596,6 +604,14 @@ public class CloudMapService {
             }
         }
         return config;
+    }
+
+    private static Set<String> recordTypes(JsonNode dnsConfig) {
+        Set<String> types = new HashSet<>();
+        for (JsonNode record : dnsConfig.path("DnsRecords")) {
+            types.add(record.path("Type").asText().toUpperCase(Locale.ROOT));
+        }
+        return types;
     }
 
     /** Returns -1 when the service has no record of the requested type. */
