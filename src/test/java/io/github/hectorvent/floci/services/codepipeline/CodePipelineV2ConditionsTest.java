@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -192,6 +194,27 @@ class CodePipelineV2ConditionsTest {
         assertEquals(1, rules.size());
         assertEquals("Failed", rules.get(0).path("status").asText());
         assertEquals("VariableCheck MATCHES pattern or value exceeds 256 characters",
+                rules.get(0).path("output").path("executionResult").path("externalExecutionSummary").asText());
+    }
+
+    @Test
+    void variableCheckMatchesFailsARuleWhosePatternBacktracksCatastrophically() {
+        // Catches: a short but pathological MATCHES pattern spinning forever inside the run.
+        ObjectNode deploy = lambdaStage("Deploy");
+        addRule(deploy, "beforeEntry", "FAIL", "VariableCheck")
+                .put("Variable", "#{variables.env}").put("Value", "(a+)+\\1").put("Operator", "MATCHES");
+        createPipeline("matches-redos", sourceStage(), deploy);
+
+        ObjectNode start = mapper.createObjectNode().put("name", "matches-redos");
+        start.putArray("variables").addObject().put("name", "env").put("value", "a".repeat(30) + "!");
+        String executionId = service.handle("StartPipelineExecution", start, REGION, ACCOUNT)
+                .path("pipelineExecutionId").asText();
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+            awaitStatus("matches-redos", executionId, "Failed");
+        });
+        JsonNode rules = ruleExecutions("matches-redos");
+        assertEquals("Failed", rules.get(0).path("status").asText());
+        assertEquals("MATCHES pattern evaluation timed out",
                 rules.get(0).path("output").path("executionResult").path("externalExecutionSummary").asText());
     }
 

@@ -66,6 +66,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 import java.util.zip.Inflater;
 import java.util.zip.InflaterInputStream;
@@ -935,6 +936,8 @@ public class CodePipelineService {
         return started;
     }
 
+    private static final long RUN_FINISH_WAIT_NANOS = TimeUnit.SECONDS.toNanos(5);
+
     private ObjectNode overrideStageCondition(JsonNode request, String region, String account) {
         String pipelineName = text(request, "pipelineName");
         String stageName = text(request, "stageName");
@@ -949,28 +952,49 @@ public class CodePipelineService {
                 account, region, pipelineName, text(request, "pipelineExecutionId"));
         // A run that failed on this very condition resumes from the overridden stage, skipping the
         // stage's already-succeeded actions; admission shares the retry path's lock and run tracking.
-        Map<String, String> resumeStatuses = startLocks.withLock(lockKey(execution), () -> {
-            synchronized (execution) {
-                execution.getConditionOverrides().put(stageName + "/" + conditionType, true);
-            }
-            boolean failedOnThisCondition = "Failed".equals(execution.getStatus())
-                    && ("Condition " + conditionType + " failed in stage " + stageName + ".")
-                            .equals(execution.getStatusSummary())
-                    && !activeRuns.contains(runKey(execution));
-            if (!failedOnThisCondition) {
+        // The run marks itself Failed slightly before it leaves activeRuns; an override landing in that
+        // window waits (outside the lock, which finishExecutionRun needs) for the run to finish, so it
+        // resumes instead of storing a flag nothing will read.
+        String conditionFailedSummary = "Condition " + conditionType + " failed in stage " + stageName + ".";
+        boolean[] runStillFinishing = new boolean[1];
+        Map<String, String> resumed = null;
+        long finishDeadline = System.nanoTime() + RUN_FINISH_WAIT_NANOS;
+        do {
+            runStillFinishing[0] = false;
+            resumed = startLocks.withLock(lockKey(execution), () -> {
+                synchronized (execution) {
+                    execution.getConditionOverrides().put(stageName + "/" + conditionType, true);
+                }
+                boolean failedOnThisCondition = "Failed".equals(execution.getStatus())
+                        && conditionFailedSummary.equals(execution.getStatusSummary());
+                if (failedOnThisCondition && activeRuns.contains(runKey(execution))) {
+                    runStillFinishing[0] = true;
+                    return null;
+                }
+                if (!failedOnThisCondition) {
+                    putExecution(execution);
+                    return null;
+                }
+                execution.setStatus("InProgress");
+                execution.setStatusSummary("Condition " + conditionType + " overridden in stage "
+                        + stageName + ".");
+                execution.setStopRequested(false);
+                execution.setAbandon(false);
+                execution.setLastUpdateTime(now());
                 putExecution(execution);
-                return null;
+                activeRuns.add(runKey(execution));
+                return latestActionStatuses(execution, stageName);
+            });
+            if (runStillFinishing[0]) {
+                try {
+                    TimeUnit.MILLISECONDS.sleep(10);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
-            execution.setStatus("InProgress");
-            execution.setStatusSummary("Condition " + conditionType + " overridden in stage "
-                    + stageName + ".");
-            execution.setStopRequested(false);
-            execution.setAbandon(false);
-            execution.setLastUpdateTime(now());
-            putExecution(execution);
-            activeRuns.add(runKey(execution));
-            return latestActionStatuses(execution, stageName);
-        });
+        } while (runStillFinishing[0] && System.nanoTime() - finishDeadline < 0);
+        Map<String, String> resumeStatuses = resumed;
         if (resumeStatuses != null) {
             try {
                 executor.submit(() -> runRetriedStage(pipeline, execution, stage, "FAILED_ACTIONS",
@@ -999,7 +1023,13 @@ public class CodePipelineService {
                     && !executionFilter.equals(execution.getPipelineExecutionId())) {
                 continue;
             }
-            for (Map<String, Object> rule : execution.getRuleExecutions()) {
+            List<Map<String, Object>> ruleSnapshot = new ArrayList<>();
+            synchronized (execution) {
+                for (Map<String, Object> rule : execution.getRuleExecutions()) {
+                    ruleSnapshot.add(new LinkedHashMap<>(rule));
+                }
+            }
+            for (Map<String, Object> rule : ruleSnapshot) {
                 ObjectNode detail = mapper.createObjectNode();
                 detail.put("pipelineExecutionId", execution.getPipelineExecutionId());
                 detail.put("ruleExecutionId", Objects.toString(rule.get("ruleExecutionId"), null));
@@ -1468,10 +1498,12 @@ public class CodePipelineService {
             passed = false;
             summary = Objects.toString(e.getMessage(), "Rule evaluation failed");
         }
-        record.put("status", passed ? "Succeeded" : "Failed");
-        record.put("summary", summary);
-        record.put("lastUpdateTime", now());
-        putExecution(execution);
+        synchronized (execution) {
+            record.put("status", passed ? "Succeeded" : "Failed");
+            record.put("summary", summary);
+            record.put("lastUpdateTime", now());
+            putExecution(execution);
+        }
         return passed;
     }
 
@@ -1494,6 +1526,43 @@ public class CodePipelineService {
      * catastrophic regex backtracking on pipeline-declared input. */
     private static final int MAX_VARIABLE_CHECK_MATCH_LENGTH = 256;
 
+    private static final long MATCHES_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(1);
+
+    /** A regex subject whose {@code charAt} throws once the deadline passes, so a catastrophically
+     * backtracking pattern aborts instead of holding the run forever. */
+    private static final class DeadlineCharSequence implements CharSequence {
+        private final CharSequence delegate;
+        private final long deadlineNanos;
+
+        DeadlineCharSequence(CharSequence delegate, long deadlineNanos) {
+            this.delegate = delegate;
+            this.deadlineNanos = deadlineNanos;
+        }
+
+        @Override
+        public char charAt(int index) {
+            if (System.nanoTime() - deadlineNanos > 0) {
+                throw new IllegalStateException("MATCHES pattern evaluation timed out");
+            }
+            return delegate.charAt(index);
+        }
+
+        @Override
+        public int length() {
+            return delegate.length();
+        }
+
+        @Override
+        public CharSequence subSequence(int start, int end) {
+            return new DeadlineCharSequence(delegate.subSequence(start, end), deadlineNanos);
+        }
+
+        @Override
+        public String toString() {
+            return delegate.toString();
+        }
+    }
+
     private boolean variableCheckPasses(CodePipelineExecution execution, JsonNode rule) {
         JsonNode config = rule.path("configuration");
         String variable = resolveVariableReference(execution, config.path("Variable").asText(""));
@@ -1509,7 +1578,8 @@ public class CodePipelineService {
                             "VariableCheck MATCHES pattern or value exceeds "
                                     + MAX_VARIABLE_CHECK_MATCH_LENGTH + " characters", 400);
                 }
-                yield variable.matches(value);
+                yield Pattern.compile(value).matcher(new DeadlineCharSequence(variable,
+                        System.nanoTime() + MATCHES_TIMEOUT_NANOS)).matches();
             }
             default -> throw new AwsException("ValidationException",
                     "Unknown VariableCheck operator", 400);
@@ -2287,9 +2357,12 @@ public class CodePipelineService {
     }
 
     private void putExecution(CodePipelineExecution execution) {
-        executionStore.putForAccount(execution.getAccountId(),
-                executionKey(execution.getRegion(), execution.getPipelineName(),
-                        execution.getPipelineExecutionId()), execution);
+        // Serializing the execution walks its rule records, which evaluateRule mutates under this lock.
+        synchronized (execution) {
+            executionStore.putForAccount(execution.getAccountId(),
+                    executionKey(execution.getRegion(), execution.getPipelineName(),
+                            execution.getPipelineExecutionId()), execution);
+        }
     }
 
     private void storeItem(String account, String region, String type, String id,
