@@ -132,7 +132,7 @@ jobs:
           pgrep -af 'docker pull' | sed 's/^/still running: /' || true
           grep -E 'stale prefetch key|prefetch skipped' prefetch-images.log 2>/dev/null \
             | sed 's/^/::warning title=prefetch-images.sh::/' || true
-          grep -E 'prefetched public\.ecr\.aws/' prefetch-images.log 2>/dev/null \
+          grep -E '(prefetched|prefetch failed) public\.ecr\.aws/' prefetch-images.log 2>/dev/null \
             | grep -vE 'public\.ecr\.aws/lambda/' \
             | sed 's/^/::warning title=prefetch-images.sh::not a Lambda runtime, pull it from Docker Hub: /' || true
 
