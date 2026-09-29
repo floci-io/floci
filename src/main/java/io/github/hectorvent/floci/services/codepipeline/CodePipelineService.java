@@ -69,6 +69,14 @@ public class CodePipelineService {
     private static final long POLL_INTERVAL_MS = 100L;
     private static final String SOURCE_POLL_TYPE = "source-poll";
     private static final String MISSING_SOURCE_REVISION = "missing";
+    private static final long MAX_ARCHIVE_BYTES = 1L << 30;
+    private static final long MAX_UNCOMPRESSED_BYTES = 1L << 30;
+    private static final int MAX_ARCHIVE_ENTRIES = 100_000;
+
+    // Instance-level so tests can use tiny caps instead of building 1 GiB archives.
+    long maxArchiveBytes = MAX_ARCHIVE_BYTES;
+    long maxUncompressedBytes = MAX_UNCOMPRESSED_BYTES;
+    int maxEntries = MAX_ARCHIVE_ENTRIES;
 
     private final AccountAwareStorageBackend<CodePipelinePipeline> pipelineStore;
     private final AccountAwareStorageBackend<CodePipelineExecution> executionStore;
@@ -1431,6 +1439,9 @@ public class CodePipelineService {
         byte[] archive = fetchGitHubArchive(java.net.URI.create(
                 "https://codeload.github.com/" + repoOwner + "/" + repo
                         + "/zip/refs/heads/" + branch));
+        if (archive.length > maxArchiveBytes) {
+            throw archiveDownloadTooLarge();
+        }
         byte[] artifact = stripTopLevelDirectory(archive);
         for (JsonNode output : action.path("outputArtifacts")) {
             runtimeArtifacts.put(artifactKey(execution, output.path("name").asText()), artifact);
@@ -1468,17 +1479,33 @@ public class CodePipelineService {
                     .connectTimeout(java.time.Duration.ofSeconds(10))
                     .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
                     .build();
-            java.net.http.HttpResponse<byte[]> response = client.send(
+            java.net.http.HttpResponse<InputStream> response = client.send(
                     java.net.http.HttpRequest.newBuilder(uri)
                             .timeout(java.time.Duration.ofSeconds(30))
                             .GET().build(),
-                    java.net.http.HttpResponse.BodyHandlers.ofByteArray());
-            if (response.statusCode() != 200) {
-                throw new AwsException("ActionExecutionFailed",
-                        "GitHub source download returned HTTP " + response.statusCode()
-                                + " for " + uri, 400);
+                    java.net.http.HttpResponse.BodyHandlers.ofInputStream());
+            try (InputStream body = response.body()) {
+                if (response.statusCode() != 200) {
+                    throw new AwsException("ActionExecutionFailed",
+                            "GitHub source download returned HTTP " + response.statusCode()
+                                    + " for " + uri, 400);
+                }
+                if (response.headers().firstValueAsLong("Content-Length").orElse(0L) > maxArchiveBytes) {
+                    throw archiveDownloadTooLarge();
+                }
+                var buffer = new java.io.ByteArrayOutputStream();
+                byte[] chunk = new byte[8192];
+                long total = 0;
+                int n;
+                while ((n = body.read(chunk)) >= 0) {
+                    total += n;
+                    if (total > maxArchiveBytes) {
+                        throw archiveDownloadTooLarge();
+                    }
+                    buffer.write(chunk, 0, n);
+                }
+                return buffer.toByteArray();
             }
-            return response.body();
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
@@ -1487,24 +1514,41 @@ public class CodePipelineService {
         }
     }
 
+    private AwsException archiveDownloadTooLarge() {
+        return new AwsException("ActionExecutionFailed",
+                "GitHub source archive exceeds the maximum archive download size of "
+                        + maxArchiveBytes + " bytes", 400);
+    }
+
     /**
      * GitHub's codeload archives wrap the repo in a {@code <repo>-<branch>/} directory;
      * the real source artifact has the repo contents at the root.
      */
-    private static byte[] stripTopLevelDirectory(byte[] zip) {
+    private byte[] stripTopLevelDirectory(byte[] zip) {
         try {
             var baos = new java.io.ByteArrayOutputStream();
             try (var zipFile = ZipFile.builder()
                     .setSeekableByteChannel(new SeekableInMemoryByteChannel(zip)).get();
                  var zos = new ZipArchiveOutputStream(baos)) {
                 var entries = zipFile.getEntriesInPhysicalOrder();
+                int entryCount = 0;
+                long uncompressedTotal = 0;
                 while (entries.hasMoreElements()) {
                     ZipArchiveEntry entry = entries.nextElement();
+                    if (++entryCount > maxEntries) {
+                        throw new AwsException("ActionExecutionFailed",
+                                "GitHub source archive has more than the maximum of "
+                                        + maxEntries + " entries", 400);
+                    }
                     int slash = entry.getName().indexOf('/');
                     if (slash < 0 || slash == entry.getName().length() - 1) {
                         continue;
                     }
                     String stripped = entry.getName().substring(slash + 1);
+                    if (isEscapingPath(stripped)) {
+                        throw new AwsException("ActionExecutionFailed",
+                                "GitHub source archive contains an escaping entry: " + entry.getName(), 400);
+                    }
                     if (entry.isDirectory()) {
                         continue;
                     }
@@ -1517,16 +1561,75 @@ public class CodePipelineService {
                         copy.setUnixMode(entry.getUnixMode());
                     }
                     zos.putArchiveEntry(copy);
+                    boolean symlink = (entry.getUnixMode() & 0xF000) == 0xA000;
+                    var linkTarget = new java.io.ByteArrayOutputStream();
                     try (var in = openEntryStream(zipFile, entry)) {
-                        in.transferTo(zos);
+                        byte[] chunk = new byte[8192];
+                        int n;
+                        while ((n = in.read(chunk)) >= 0) {
+                            uncompressedTotal += n;
+                            if (uncompressedTotal > maxUncompressedBytes) {
+                                throw new AwsException("ActionExecutionFailed",
+                                        "GitHub source archive exceeds the maximum uncompressed size of "
+                                                + maxUncompressedBytes + " bytes", 400);
+                            }
+                            if (symlink) {
+                                linkTarget.write(chunk, 0, n);
+                            }
+                            zos.write(chunk, 0, n);
+                        }
+                    }
+                    if (symlink && isEscapingSymlink(stripped, linkTarget.toString(StandardCharsets.UTF_8))) {
+                        throw new AwsException("ActionExecutionFailed",
+                                "GitHub source archive contains an escaping symlink: " + entry.getName(), 400);
                     }
                     zos.closeArchiveEntry();
                 }
             }
             return baos.toByteArray();
+        } catch (AwsException e) {
+            throw e;
         } catch (Exception e) {
             throw new AwsException("ActionExecutionFailed",
                     "Could not repackage GitHub archive: " + e.getMessage(), 400);
+        }
+    }
+
+    private static boolean isEscapingPath(String name) {
+        if (name.startsWith("/") || name.startsWith("\\")) {
+            return true;
+        }
+        for (String segment : name.split("[/\\\\]")) {
+            if (segment.equals("..")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A symlink target is escaping if absolute or if, resolved against the link's directory, it leaves the root. */
+    private static boolean isEscapingSymlink(String linkName, String target) {
+        if (target.startsWith("/") || target.startsWith("\\")) {
+            return true;
+        }
+        java.nio.file.Path root = java.nio.file.Path.of("/root");
+        java.nio.file.Path linkDir = root.resolve(linkName).getParent();
+        return !linkDir.resolve(target).normalize().startsWith(root);
+    }
+
+    /** Ends the Inflater when the stream closes; InflaterInputStream leaves a caller-supplied one open. */
+    private static final class EndingInflaterInputStream extends InflaterInputStream {
+        private EndingInflaterInputStream(InputStream in) {
+            super(in, new Inflater(true));
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+                super.close();
+            } finally {
+                inf.end();
+            }
         }
     }
 
@@ -1541,7 +1644,7 @@ public class CodePipelineService {
         InputStream raw = zipFile.getRawInputStream(entry);
         return switch (entry.getMethod()) {
             case ZipEntry.STORED -> raw;
-            case ZipEntry.DEFLATED -> new InflaterInputStream(raw, new Inflater(true));
+            case ZipEntry.DEFLATED -> new EndingInflaterInputStream(raw);
             default -> throw new IOException(
                     "Unsupported zip compression method " + entry.getMethod() + " for entry " + entry.getName());
         };

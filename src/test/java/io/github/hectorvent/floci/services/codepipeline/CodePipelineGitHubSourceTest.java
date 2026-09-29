@@ -33,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
  * ThirdParty GitHub (version 1) source actions: the branch archive is fetched, repackaged with
@@ -160,6 +161,104 @@ class CodePipelineGitHubSourceTest {
             assertEquals("deflated payload ".repeat(50), read(artifact, "deflated.txt"));
             assertEquals(0755, artifact.getEntry("deflated.txt").getUnixMode());
         }
+    }
+
+    @Test
+    void failsWhenTheDownloadedArchiveExceedsTheSizeCap() throws Exception {
+        // Catches: an oversized archive accepted and repackaged in memory instead of failing the action
+        byte[] archive = zip(zos -> file(zos, "repo-main/big.bin", "x".repeat(4096), 0, ZipEntry.STORED));
+        service = serviceServing(archive);
+        service.maxArchiveBytes = 100;
+        createPipeline("github-big-download", "awslabs", "lza", "main");
+
+        awaitStatus("github-big-download", start("github-big-download"), "Failed");
+
+        assertFailureMessage("github-big-download", "maximum archive download size of 100 bytes");
+        verifyNoInteractions(s3Service);
+    }
+
+    @Test
+    void failsWhenUncompressedContentExceedsTheSizeCap() throws Exception {
+        // Catches: a zip bomb (small archive, huge inflated content) repackaged without a total-bytes bound
+        byte[] archive = zip(zos -> {
+            file(zos, "repo-main/a.txt", "a".repeat(600), 0, ZipEntry.DEFLATED);
+            file(zos, "repo-main/b.txt", "b".repeat(600), 0, ZipEntry.DEFLATED);
+        });
+        service = serviceServing(archive);
+        service.maxUncompressedBytes = 1000;
+        createPipeline("github-bomb", "awslabs", "lza", "main");
+
+        awaitStatus("github-bomb", start("github-bomb"), "Failed");
+
+        assertFailureMessage("github-bomb", "maximum uncompressed size of 1000 bytes");
+        verifyNoInteractions(s3Service);
+    }
+
+    @Test
+    void failsWhenTheArchiveHasTooManyEntries() throws Exception {
+        // Catches: an archive with an unbounded entry count repackaged instead of failing the action
+        byte[] archive = zip(zos -> {
+            file(zos, "repo-main/1.txt", "1", 0, ZipEntry.DEFLATED);
+            file(zos, "repo-main/2.txt", "2", 0, ZipEntry.DEFLATED);
+            file(zos, "repo-main/3.txt", "3", 0, ZipEntry.DEFLATED);
+        });
+        service = serviceServing(archive);
+        service.maxEntries = 2;
+        createPipeline("github-many", "awslabs", "lza", "main");
+
+        awaitStatus("github-many", start("github-many"), "Failed");
+
+        assertFailureMessage("github-many", "maximum of 2 entries");
+        verifyNoInteractions(s3Service);
+    }
+
+    @Test
+    void rejectsEntriesWithParentDirectorySegments() throws Exception {
+        // Catches: a ../ entry repackaged into the artifact so extraction writes outside the workspace
+        byte[] archive = zip(zos -> {
+            file(zos, "repo-main/ok.txt", "ok", 0, ZipEntry.DEFLATED);
+            file(zos, "repo-main/../../evil.txt", "evil", 0, ZipEntry.DEFLATED);
+        });
+        service = serviceServing(archive);
+        createPipeline("github-dotdot", "awslabs", "lza", "main");
+
+        awaitStatus("github-dotdot", start("github-dotdot"), "Failed");
+
+        assertFailureMessage("github-dotdot", "escaping entry");
+        verifyNoInteractions(s3Service);
+    }
+
+    @Test
+    void rejectsSymlinksResolvingOutsideTheRoot() throws Exception {
+        // Catches: a relative symlink climbing out of the root repackaged as-is
+        byte[] archive = zip(zos -> file(zos, "repo-main/a/link", "../../outside", 0120777, ZipEntry.DEFLATED));
+        service = serviceServing(archive);
+        createPipeline("github-link-out", "awslabs", "lza", "main");
+
+        awaitStatus("github-link-out", start("github-link-out"), "Failed");
+
+        assertFailureMessage("github-link-out", "escaping symlink");
+        verifyNoInteractions(s3Service);
+    }
+
+    @Test
+    void rejectsSymlinksWithAbsoluteTargets() throws Exception {
+        // Catches: an absolute symlink target (e.g. /etc/passwd) repackaged into the artifact
+        byte[] archive = zip(zos -> file(zos, "repo-main/link", "/etc/passwd", 0120777, ZipEntry.DEFLATED));
+        service = serviceServing(archive);
+        createPipeline("github-link-abs", "awslabs", "lza", "main");
+
+        awaitStatus("github-link-abs", start("github-link-abs"), "Failed");
+
+        assertFailureMessage("github-link-abs", "escaping symlink");
+        verifyNoInteractions(s3Service);
+    }
+
+    private void assertFailureMessage(String pipelineName, String expected) {
+        JsonNode actions = service.handle("ListActionExecutions",
+                mapper.createObjectNode().put("pipelineName", pipelineName), REGION, ACCOUNT)
+                .path("actionExecutionDetails");
+        assertTrue(actions.toString().contains(expected), actions.toString());
     }
 
     private CodePipelineService serviceServing(byte[] archive) {
