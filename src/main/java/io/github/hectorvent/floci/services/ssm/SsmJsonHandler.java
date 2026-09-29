@@ -180,7 +180,10 @@ public class SsmJsonHandler {
         }
     }
 
-    /** The value is read by name, so a secret replaced since the check is checked on its own ARN. */
+    /**
+     * Checks the secret each value came from, which differs from the one checked before the read
+     * when the secret was replaced in between.
+     */
     private void authorizeSecretValues(List<Parameter> params, String authorization) {
         for (Parameter param : params) {
             if (param.getName().startsWith(SsmService.SECRET_REFERENCE_PREFIX)) {
@@ -1082,6 +1085,9 @@ public class SsmJsonHandler {
         }
         if (p.getSelector() != null) {
             node.put("Selector", p.getSelector());
+        }
+        if (p.getSourceResult() != null) {
+            node.put("SourceResult", p.getSourceResult());
         }
         return node;
     }

@@ -10,9 +10,11 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.startsWith;
 
 /**
  * Parameter Store answers {@code /aws/reference/secretsmanager/<secret-id>} from Secrets Manager.
@@ -56,7 +58,10 @@ class SsmSecretsManagerReferenceIntegrationTest {
             .body("Parameter.ARN", equalTo(arn))
             .body("Parameter.LastModifiedDate", equalTo(created))
             .body("Parameter", not(hasKey("DataType")))
-            .body("Parameter", not(hasKey("Selector")));
+            .body("Parameter", not(hasKey("Selector")))
+            .body("Parameter.SourceResult", startsWith("{\"ARN\":\"" + arn + "\",\"name\":\"" + name + "\",\"versionId\":\""))
+            .body("Parameter.SourceResult", containsString(
+                    "\"secretString\":\"second-value\",\"versionStages\":[\"AWSCURRENT\"],\"createdDate\":\""));
     }
 
     @Test
@@ -110,7 +115,8 @@ class SsmSecretsManagerReferenceIntegrationTest {
         getParameter(PREFIX + name + ":AWSPREVIOUS", true).statusCode(200)
             .body("Parameter.Name", equalTo(PREFIX + name))
             .body("Parameter.Selector", equalTo(":AWSPREVIOUS"))
-            .body("Parameter.Value", equalTo("first-value"));
+            .body("Parameter.Value", equalTo("first-value"))
+            .body("Parameter.SourceResult", containsString("\"versionStages\":[\"AWSPREVIOUS\"]"));
         getParameter(PREFIX + name + ":" + firstVersion, true).statusCode(200)
             .body("Parameter.Selector", equalTo(":" + firstVersion))
             .body("Parameter.Value", equalTo("first-value"));

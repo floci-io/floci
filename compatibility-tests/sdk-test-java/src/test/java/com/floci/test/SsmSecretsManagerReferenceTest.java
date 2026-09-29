@@ -68,6 +68,8 @@ class SsmSecretsManagerReferenceTest {
         assertThat(parameter.value()).isEqualTo("s3cr3t");
         assertThat(parameter.type()).isEqualTo(ParameterType.SECURE_STRING);
         assertThat(parameter.arn()).isEqualTo(created.arn());
+        assertThat(parameter.sourceResult()).startsWith("{\"ARN\":\"" + created.arn() + "\"")
+                .contains("\"secretString\":\"s3cr3t\"");
         assertRefusedWithoutDecryption(name);
     }
 

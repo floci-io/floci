@@ -46,6 +46,10 @@ public class Parameter {
     @JsonIgnore
     private String selector;
 
+    // Only set on a Secrets Manager reference: AWS's GetSecretValue result as a JSON string.
+    @JsonIgnore
+    private String sourceResult;
+
     public Parameter() {}
 
     public Parameter(String name, String value, String type) {
@@ -85,4 +89,7 @@ public class Parameter {
 
     public String getSelector() { return selector; }
     public void setSelector(String selector) { this.selector = selector; }
+
+    public String getSourceResult() { return sourceResult; }
+    public void setSourceResult(String sourceResult) { this.sourceResult = sourceResult; }
 }

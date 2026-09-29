@@ -18,11 +18,16 @@ import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
 import io.github.hectorvent.floci.services.ssm.model.SsmAssociation;
 import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -37,6 +42,8 @@ public class SsmService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
     private static final String PUBLIC_PARAMETER_PREFIX = "/aws/service/";
+    private static final DateTimeFormatter SOURCE_RESULT_DATE =
+            DateTimeFormatter.ofPattern("MMM d, yyyy, h:mm:ss a", Locale.US).withZone(ZoneOffset.UTC);
     static final String SECRET_REFERENCE_PREFIX = "/aws/reference/secretsmanager/";
     // Label is a ParameterStringFilter key too, but only GetParametersByPath accepts it.
     private static final Set<String> DESCRIBE_PARAMETERS_FILTER_KEYS =
@@ -250,7 +257,7 @@ public class SsmService implements ResourceProvider {
      * exist, the ARN a GetSecretValue by that name is checked on, so a missing secret is refused too.
      */
     String secretReferenceArn(String name, String region) {
-        String secretId = name.substring(SECRET_REFERENCE_PREFIX.length()).split(":", 2)[0];
+        String secretId = SecretReferenceName.of(name).secretId();
         try {
             return secretsManager.describeSecret(secretId, region).getArn();
         } catch (AwsException expected) {
@@ -265,10 +272,9 @@ public class SsmService implements ResourceProvider {
      * missing slash and the "null" it prints for a name without a selector.
      */
     private Parameter secretReference(String name, boolean withDecryption, String region) {
-        String reference = name.substring(SECRET_REFERENCE_PREFIX.length());
-        int colon = reference.indexOf(':');
-        String secretId = colon < 0 ? reference : reference.substring(0, colon);
-        String selector = colon < 0 ? null : reference.substring(colon + 1);
+        SecretReferenceName reference = SecretReferenceName.of(name);
+        String secretId = reference.secretId();
+        String selector = reference.selector();
         if (selector != null && (selector.isEmpty() || selector.contains(":"))) {
             throw new AwsException("ValidationException", "Invalid parameter name. Please use correct syntax "
                     + "for referencing a version/label  <name>:<version/label>", 400);
@@ -301,7 +307,38 @@ public class SsmService implements ResourceProvider {
         parameter.setLastModifiedDate(version.getCreatedDate());
         parameter.setDataType(null);
         parameter.setSelector(selector == null ? null : ":" + selector);
+        parameter.setSourceResult(sourceResult(secret, version));
         return parameter;
+    }
+
+    /** The secret id and the version id or staging label after the first colon, if any. */
+    private record SecretReferenceName(String secretId, String selector) {
+        static SecretReferenceName of(String name) {
+            String reference = name.substring(SECRET_REFERENCE_PREFIX.length());
+            int colon = reference.indexOf(':');
+            return colon < 0 ? new SecretReferenceName(reference, null)
+                    : new SecretReferenceName(reference.substring(0, colon), reference.substring(colon + 1));
+        }
+    }
+
+    /**
+     * AWS's GetSecretValue result the way SSM serializes it: Gson's field names, order and default
+     * US date format in UTC, with null fields left out.
+     */
+    private static String sourceResult(Secret secret, SecretVersion version) {
+        ObjectNode result = JsonNodeFactory.instance.objectNode()
+                .put("ARN", secret.getArn())
+                .put("name", secret.getName())
+                .put("versionId", version.getVersionId());
+        if (version.getSecretString() != null) {
+            result.put("secretString", version.getSecretString());
+        }
+        // ponytail: AWS dumps a binary secret's ByteBuffer internals here; left out until a caller reads them.
+        if (version.getVersionStages() != null) {
+            ArrayNode stages = result.putArray("versionStages");
+            version.getVersionStages().forEach(stages::add);
+        }
+        return result.put("createdDate", SOURCE_RESULT_DATE.format(version.getCreatedDate())).toString();
     }
 
     /**

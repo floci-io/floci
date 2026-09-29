@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1215,6 +1216,30 @@ class SsmServiceTest {
         assertFilterError("InvalidFilterOption", filter("Path", "Equals", "/app"));
         assertFilterError("InvalidFilterValue", filter("Path", null, "app"));
         assertFilterError("InvalidFilterValue", new ParameterStringFilter("Type", null, List.of()));
+    }
+
+    @Test
+    void secretReferenceCarriesTheGetSecretValueResultAsAwsFormatsIt() {
+        String arn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app-AbCdEf";
+        Secret described = new Secret();
+        described.setArn(arn);
+        described.setName("app");
+        SecretVersion current = new SecretVersion();
+        current.setVersionId("4aa4a0d4-4321-4661-9288-c9e2aeffd37a");
+        current.setSecretString("{\"k\":\"v\"}");
+        current.setVersionStages(List.of("AWSCURRENT"));
+        current.setCreatedDate(Instant.parse("2026-09-28T16:47:31.824Z"));
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        when(secrets.describeSecret("app", "us-east-1")).thenReturn(described);
+        when(secrets.getSecretValue(arn, null, null, "us-east-1")).thenReturn(current);
+        SsmService service = new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), 5, new RegionResolver("us-east-1", "000000000000"), null, secrets);
+
+        assertEquals("{\"ARN\":\"" + arn + "\",\"name\":\"app\",\"versionId\":\"4aa4a0d4-4321-4661-9288-c9e2aeffd37a\","
+                        + "\"secretString\":\"{\\\"k\\\":\\\"v\\\"}\",\"versionStages\":[\"AWSCURRENT\"],"
+                        + "\"createdDate\":\"Sep 28, 2026, 4:47:31 PM\"}",
+                service.getParameter("/aws/reference/secretsmanager/app", true, "us-east-1").getSourceResult());
     }
 
     @Test
