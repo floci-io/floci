@@ -624,14 +624,14 @@ class EmbeddedDnsServerTest {
     void forwardToUpstreams_returnsResponseLargerThan512BytesIntact() throws Exception {
         // Regression guard: a 512-byte receive buffer silently truncated EDNS0 responses from
         // CDN-backed public hosts, corrupting the answer forwarded back to the Lambda container.
-        byte[] bigResponse = new byte[1500];
-        for (int i = 0; i < bigResponse.length; i++) {
+        byte[] query = buildQuery("business-api.tiktok.com", (short) 0x1234);
+        byte[] bigResponse = replyTo(query, 1500);
+        for (int i = query.length; i < bigResponse.length; i++) {
             bigResponse[i] = (byte) (i & 0xFF);
         }
 
         try (DatagramSocket responder = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
             startResponder(responder, bigResponse);
-            byte[] query = buildQuery("business-api.tiktok.com", (short) 0x1234);
 
             byte[] response = dns.forwardToUpstreams(
                     query, List.of("127.0.0.1"), responder.getLocalPort());
@@ -683,6 +683,13 @@ class EmbeddedDnsServerTest {
         return buf;
     }
 
+    /** A response to {@code query}: same txId and question, QR bit set, zero-padded to {@code length}. */
+    private byte[] replyTo(byte[] query, int length) {
+        byte[] reply = Arrays.copyOf(query, length);
+        reply[2] |= (byte) 0x80;
+        return reply;
+    }
+
     private byte[] buildQuery(String name, short txId) {
         byte[] encodedName = encodeName(name);
         // header(12) + name + type(2) + class(2)
@@ -701,10 +708,13 @@ class EmbeddedDnsServerTest {
 
     @Test
     void forwardToTargets_discardsSpoofedDatagramBeforeRealAnswer() throws Exception {
-        // Catches: returns spoofed payload {9, 9, 9} instead of real payload {1, 2, 3}
+        // Catches: a datagram from a port other than the queried target is relayed as the answer
         try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"));
              DatagramSocket spoof = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
             byte[] query = buildQuery("db.corp.internal", (short) 7);
+            byte[] realReply = replyTo(query, query.length);
+            byte[] spoofedReply = replyTo(query, query.length);
+            spoofedReply[spoofedReply.length - 1] = 9;
             DnsForwardingRule.Target target = new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort());
 
             Thread t = new Thread(() -> {
@@ -712,8 +722,8 @@ class EmbeddedDnsServerTest {
                     byte[] reqBuf = new byte[4096];
                     DatagramPacket req = new DatagramPacket(reqBuf, reqBuf.length);
                     real.receive(req);
-                    spoof.send(new DatagramPacket(new byte[] {9, 9, 9}, 3, req.getAddress(), req.getPort()));
-                    real.send(new DatagramPacket(new byte[] {1, 2, 3}, 3, req.getAddress(), req.getPort()));
+                    spoof.send(new DatagramPacket(spoofedReply, spoofedReply.length, req.getAddress(), req.getPort()));
+                    real.send(new DatagramPacket(realReply, realReply.length, req.getAddress(), req.getPort()));
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
@@ -722,7 +732,7 @@ class EmbeddedDnsServerTest {
             t.start();
 
             byte[] response = EmbeddedDnsServer.forwardToTargets(query, List.of(target));
-            assertArrayEquals(new byte[] {1, 2, 3}, response);
+            assertArrayEquals(realReply, response);
         }
     }
 }
