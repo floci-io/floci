@@ -17,6 +17,7 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
+import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -636,14 +637,25 @@ public class EmbeddedDnsServer {
         Exception last = null;
         for (DnsForwardingRule.Target target : targets) {
             try (java.net.DatagramSocket fwd = new java.net.DatagramSocket()) {
-                fwd.setSoTimeout(FORWARD_TIMEOUT_MS);
                 InetAddress addr = InetAddress.getByName(target.address());
                 fwd.connect(addr, target.port());
                 fwd.send(new DatagramPacket(query, query.length, addr, target.port()));
+                long deadline = System.nanoTime() + FORWARD_TIMEOUT_MS * 1_000_000L;
                 byte[] buf = new byte[MAX_DNS_UDP_RESPONSE];
                 DatagramPacket resp = new DatagramPacket(buf, buf.length);
-                fwd.receive(resp);
-                return Arrays.copyOf(resp.getData(), resp.getLength());
+                while (true) {
+                    long remainingNs = deadline - System.nanoTime();
+                    if (remainingNs <= 0) {
+                        throw new SocketTimeoutException("DNS forward timeout");
+                    }
+                    resp.setLength(buf.length);
+                    // setSoTimeout(0) means wait forever, so never let the rounding reach 0.
+                    fwd.setSoTimeout((int) Math.max(1, remainingNs / 1_000_000L));
+                    fwd.receive(resp);
+                    if (isValidResponse(query, resp.getData(), resp.getLength())) {
+                        return Arrays.copyOf(resp.getData(), resp.getLength());
+                    }
+                }
             } catch (Exception e) {
                 last = e;
                 LOG.debugv("DNS forward to {0} failed: {1}", target.address(), e.getMessage());
@@ -699,5 +711,35 @@ public class EmbeddedDnsServer {
             LOG.debugv("Could not read /etc/resolv.conf: {0}", e.getMessage());
         }
         return servers;
+    }
+
+    /**
+     * True when the datagram answers this query: same transaction ID, QR bit set, and the query's
+     * question section echoed back. Only the question is compared: clients usually append an EDNS
+     * OPT record to the query, and the answer section takes its place in the response.
+     */
+    private static boolean isValidResponse(byte[] query, byte[] response, int length) {
+        int questionEnd = questionEnd(query);
+        // Also stops the question comparison reading stale buffer bytes past a short datagram.
+        if (questionEnd < 0 || length < questionEnd) {
+            return false;
+        }
+        if (response[0] != query[0] || response[1] != query[1]) {
+            return false;
+        }
+        if ((response[2] & 0x80) == 0) {
+            return false;
+        }
+        return Arrays.equals(query, 12, questionEnd, response, 12, questionEnd);
+    }
+
+    /** End offset of the query's single question (name, type, class), or -1 if it is malformed. */
+    private static int questionEnd(byte[] query) {
+        int pos = 12;
+        while (pos < query.length && query[pos] != 0) {
+            pos += 1 + (query[pos] & 0xFF);
+        }
+        int end = pos + 1 + 4;
+        return end <= query.length ? end : -1;
     }
 }
