@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -131,7 +132,7 @@ class LambdaCfnProvisionerTest {
         provisioner.provision(r, props("my-fn", "team", "a", "env", "dev"), ctx());
 
         verify(lambda, never()).tagResource(any(), any());
-        assertEquals("env,team", r.getAttributes().get(TEMPLATE_TAG_KEYS_ATTR));
+        assertFalse(r.getAttributes().containsKey(TEMPLATE_TAG_KEYS_ATTR));
     }
 
     @Test

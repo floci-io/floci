@@ -111,13 +111,24 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         boolean replacement = lambdaRequiresReplacement(r, desired, existing);
 
         LambdaFunction func;
+        boolean adopted = false;
         if (existing == null || replacement) {
             if (replacement && desired.functionName().equals(r.getPhysicalId())) {
                 throw new AwsException("ValidationError",
                         "Cannot replace Lambda function " + r.getPhysicalId()
                                 + " without a new FunctionName", 400);
             }
-            func = createLambdaFunction(region, desired, !replacement);
+            try {
+                func = lambdaService.createFunction(region, desired.createRequest());
+            } catch (AwsException e) {
+                if (!replacement && ("ResourceConflictException".equals(e.getErrorCode())
+                        || (e.getMessage() != null && e.getMessage().contains("Function already exist")))) {
+                    func = lambdaService.getFunction(region, desired.functionName());
+                    adopted = true;
+                } else {
+                    throw e;
+                }
+            }
             if (replacement && r.getPhysicalId() != null) {
                 deleteReplacedLambda(region, r.getPhysicalId());
             }
@@ -135,9 +146,13 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put(LAMBDA_NAME_MODE_ATTR,
                 desired.explicitFunctionName() ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
         r.getAttributes().put(LAMBDA_PACKAGE_TYPE_ATTR, desired.packageType());
-        // Tag keys cannot contain a comma, so the sorted keys join losslessly.
-        r.getAttributes().put(LAMBDA_TEMPLATE_TAG_KEYS_ATTR,
-                String.join(",", new TreeSet<>(desired.tags().keySet())));
+        if (adopted) {
+            r.getAttributes().remove(LAMBDA_TEMPLATE_TAG_KEYS_ATTR);
+        } else {
+            // Tag keys cannot contain a comma, so the sorted keys join losslessly.
+            r.getAttributes().put(LAMBDA_TEMPLATE_TAG_KEYS_ATTR,
+                    String.join(",", new TreeSet<>(desired.tags().keySet())));
+        }
     }
 
     private LambdaDesiredState buildLambdaDesiredState(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -364,18 +379,6 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         }
         String existingPackageType = existing.getPackageType() != null ? existing.getPackageType() : "Zip";
         return !Objects.equals(existingPackageType, desired.packageType());
-    }
-
-    private LambdaFunction createLambdaFunction(String region, LambdaDesiredState desired, boolean allowAdopt) {
-        try {
-            return lambdaService.createFunction(region, desired.createRequest());
-        } catch (AwsException e) {
-            if (allowAdopt && ("ResourceConflictException".equals(e.getErrorCode())
-                    || (e.getMessage() != null && e.getMessage().contains("Function already exist")))) {
-                return lambdaService.getFunction(region, desired.functionName());
-            }
-            throw e;
-        }
     }
 
     private LambdaFunction updateLambdaFunction(String region,
