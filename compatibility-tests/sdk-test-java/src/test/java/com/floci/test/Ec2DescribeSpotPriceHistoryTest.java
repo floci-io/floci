@@ -9,7 +9,9 @@ import software.amazon.awssdk.services.ec2.model.Filter;
 import software.amazon.awssdk.services.ec2.model.InstanceType;
 import software.amazon.awssdk.services.ec2.model.SpotPrice;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -221,8 +223,8 @@ class Ec2DescribeSpotPriceHistoryTest {
     @Test
     void describeSpotPriceHistoryRejectsInvalidNextToken() {
         try (Ec2Client ec2 = TestFixtures.ec2Client()) {
-            String invalidToken = java.util.Base64.getEncoder().encodeToString(
-                    "{\"offset\":-1}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            String invalidToken = Base64.getEncoder().encodeToString(
+                    "{\"offset\":-1}".getBytes(StandardCharsets.UTF_8));
             Ec2Exception exception = assertThrows(Ec2Exception.class,
                     () -> ec2.describeSpotPriceHistory(DescribeSpotPriceHistoryRequest.builder()
                             .nextToken(invalidToken)
