@@ -77,6 +77,8 @@ class AslExecutorParallelCutTest {
             {"StartAt":"Nest","States":{"Nest":{"Type":"Task",
               "Resource":"arn:aws:states:::states:startExecution.sync:2",
               "Parameters":{"StateMachineArn":"%s"},"End":true}}}""".formatted(CHILD_SM_ARN);
+    private static final String PASS_BRANCH = """
+            {"StartAt":"Done","States":{"Done":{"Type":"Pass","End":true}}}""";
     private static final String LONG_WAIT_BRANCH = """
             {"StartAt":"Long","States":{"Long":{"Type":"Wait","Seconds":20,"End":true}}}""";
 
@@ -136,6 +138,17 @@ class AslExecutorParallelCutTest {
         assertEquals(failure, aborted.getPreviousEventId().longValue());
         assertTrue(eventsOfType("TaskStateAborted").isEmpty(), types().toString());
         assertTrue(aborted.getId() < eventOfType("ParallelStateFailed").getId());
+    }
+
+    @Test
+    void aBranchThatFinishedBeforeTheFailureRecordsNoAbortedState() {
+        // The failing branch's Pause really sleeps, so the Pass branch has long finished by then.
+        AslExecutor.Sleeper sleeper = nanos -> TimeUnit.MILLISECONDS.sleep(200);
+        Execution execution = run(parallel(FAILING_BRANCH, PASS_BRANCH), sleeper, 0);
+
+        assertEquals("FAILED", execution.getStatus());
+        assertTrue(types().contains("PassStateExited"), types().toString());
+        assertTrue(types().stream().noneMatch(type -> type.endsWith("StateAborted")), types().toString());
     }
 
     @Test
@@ -211,6 +224,10 @@ class AslExecutorParallelCutTest {
     }
 
     private Execution run(String parallelState, int waitingBranches, int executionTimeoutSeconds) {
+        return run(parallelState, sleeper(waitingBranches), executionTimeoutSeconds);
+    }
+
+    private Execution run(String parallelState, AslExecutor.Sleeper sleeper, int executionTimeoutSeconds) {
         String budget = executionTimeoutSeconds > 0
                 ? "\"TimeoutSeconds\":%d,".formatted(executionTimeoutSeconds)
                 : "";
@@ -229,7 +246,7 @@ class AslExecutorParallelCutTest {
         execution.setInput("{}");
 
         history = new ArrayList<>();
-        newExecutor(sleeper(waitingBranches)).executeSync(stateMachine, execution, history, (updated, events) -> { });
+        newExecutor(sleeper).executeSync(stateMachine, execution, history, (updated, events) -> { });
         return execution;
     }
 

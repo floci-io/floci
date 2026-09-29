@@ -2595,7 +2595,7 @@ public class AslExecutor {
             Thread.currentThread().interrupt();
             throw e;
         } catch (ExecutionException e) {
-            List<String> abortedEventTypes = cutAfterFailure(branchChains, futures, joined);
+            List<String> abortedEventTypes = cutAfterFailure(branchChains, futures);
             chain.continueFrom(branchChains.get(joined).lastEventId());
             if (e.getCause() instanceof FailStateException failure && !failure.isRuntimeError()) {
                 for (String abortedEventType : abortedEventTypes) {
@@ -2638,20 +2638,20 @@ public class AslExecutor {
     }
 
     /**
-     * Cuts every branch after branch {@code failed} failed, like {@link #abandon}, and returns one
-     * {@code *StateAborted} event type per other branch it cut inside a Task or a Wait: the two
-     * state types AWS was measured recording it for (a {@code .sync} Task waiting on its job, and a
-     * Wait). A branch between states, or inside any other state, gets no event. Each branch is read
-     * and cut in one step, so a state that exits before its cut is not reported, and one that is
-     * reported records no Exited event afterwards.
+     * Cuts every branch after one of them failed, like {@link #abandon}, and returns one
+     * {@code *StateAborted} event type per branch it cut inside a Task or a Wait: the two state
+     * types AWS was measured recording it for (a {@code .sync} Task waiting on its job, and a Wait).
+     * A branch between states, or inside any other state, gets no event. Each branch is read and cut
+     * in one step, so a state that exits before its cut is not reported, and one that is reported
+     * records no Exited event afterwards. The state alone decides: a branch that has finished, the
+     * failed one included, has left every state it entered, and reading its future as well would
+     * reopen the gap between the cut and that read.
      */
-    private static List<String> cutAfterFailure(List<HistoryChain> chains, List<? extends Future<?>> futures,
-                                                int failed) {
+    private static List<String> cutAfterFailure(List<HistoryChain> chains, List<? extends Future<?>> futures) {
         List<String> abortedEventTypes = new ArrayList<>();
-        for (int i = 0; i < chains.size(); i++) {
-            String stateType = chains.get(i).abandonInState();
-            if (i != failed && !futures.get(i).isDone()
-                    && ("Task".equals(stateType) || "Wait".equals(stateType))) {
+        for (HistoryChain branch : chains) {
+            String stateType = branch.abandonInState();
+            if ("Task".equals(stateType) || "Wait".equals(stateType)) {
                 abortedEventTypes.add(stateType + "StateAborted");
             }
         }
