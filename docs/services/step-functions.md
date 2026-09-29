@@ -428,6 +428,15 @@ integrations, and only the casing of the result tells them apart.
 SDK call itself succeeded, so the task result carries `Status`, `Error` and `Cause` and the parent
 decides what to do next.
 
+The two `.sync` modes fail the calling task with `States.TaskFailed` however the child ended
+(`FAILED`, `TIMED_OUT` or `ABORTED`) and whatever its own error was, `States.Timeout` included, so
+a `Catch` on the child's own error name never takes it. The cause is the child's `DescribeExecution`
+response as JSON, PascalCase with its keys in alphabetical order: `Cause` and `Error` when the
+child has them, then `ExecutionArn`, `Input`, `InputDetails`, `Name`, `RedriveCount`,
+`RedriveStatus`, `StartDate`, `StateMachineArn`, `Status` and `StopDate`, with dates in epoch
+milliseconds and no `Output`. A parent that needs the child's error reads it from there, for
+example with `States.StringToJson($.Cause)` after a `Catch`.
+
 A `Name` a Standard child already used fails the calling task with the child's collision error, named
 for the integration that raised it: `StepFunctions.ExecutionAlreadyExistsException` through
 `states:startExecution` in any of its modes, and `Sfn.ExecutionAlreadyExistsException` through
