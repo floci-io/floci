@@ -44,6 +44,16 @@ public class ParameterHistory {
         this.description = parameter.getDescription();
     }
 
+    public ParameterHistory(ParameterHistory other) {
+        this.name = other.name;
+        this.version = other.version;
+        this.value = other.value;
+        this.type = other.type;
+        this.lastModifiedDate = other.lastModifiedDate;
+        this.description = other.description;
+        this.labels = other.labels != null ? new ArrayList<>(other.labels) : new ArrayList<>();
+    }
+
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
 

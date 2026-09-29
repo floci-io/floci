@@ -1548,13 +1548,28 @@ public class ElastiCacheService implements ResourceProvider {
         return users.scan(k -> true);
     }
 
-    public ElastiCacheUser modifyUser(String userId, List<String> passwords, String engine) {
+    /**
+     * Applies a ModifyUser request. A non-null {@code authMode} switches the user's
+     * authentication and replaces its passwords with {@code passwords}; {@code accessString}
+     * replaces the access string and {@code appendAccessString} adds to it.
+     */
+    public ElastiCacheUser modifyUser(String userId, AuthMode authMode, List<String> passwords,
+                                      String accessString, String appendAccessString, String engine) {
         ElastiCacheUser user = getUser(userId);
         // Storage backends hand back the live stored object, so validate everything
         // before the first setter — a rejected request must not leave changes behind.
         String normalizedEngine = (engine == null || engine.isBlank()) ? null : normalizeEngine(engine);
-        if (passwords != null) {
-            user.setPasswords(passwords);
+        if (authMode != null) {
+            user.setAuthMode(authMode);
+            user.setPasswords(passwords != null ? passwords : List.of());
+        }
+        if (accessString != null) {
+            user.setAccessString(accessString);
+        } else if (appendAccessString != null) {
+            String current = user.getAccessString();
+            user.setAccessString(current == null || current.isBlank()
+                    ? appendAccessString
+                    : current + " " + appendAccessString);
         }
         if (normalizedEngine != null) {
             user.setEngine(normalizedEngine);

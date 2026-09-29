@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
@@ -54,7 +55,6 @@ import java.util.Set;
 import java.util.function.Consumer;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
@@ -1511,7 +1511,7 @@ public class Ec2ContainerManager {
             // Exit 1 means sshd is absent and there is nothing to start; exit 2 means sshd is
             // there but the client package did not land. Only the first is fatal - see
             // sshdInstallProbeCommand() for why the probe distinguishes them.
-            ContainerExecResult install = execInContainerForResult(containerId, sshdInstallProbeCommand(), 120);
+            ContainerExec.Result install = execInContainerForResult(containerId, sshdInstallProbeCommand(), 120);
             if (install.exitCode() == SSH_CLIENT_MISSING_EXIT_CODE) {
                 LOG.warnv("sshd is available on EC2 instance {0} but the OpenSSH client package is not:"
                         + " scp is missing, so provisioners that upload files over scp will fail: {1}",
@@ -1522,7 +1522,7 @@ public class Ec2ContainerManager {
                 return;
             }
             // Generate host keys
-            ContainerExecResult keygen = execInContainerForResult(containerId, new String[]{"ssh-keygen", "-A"}, 10);
+            ContainerExec.Result keygen = execInContainerForResult(containerId, new String[]{"ssh-keygen", "-A"}, 10);
             if (keygen.exitCode() != 0) {
                 LOG.warnv("Could not generate SSH host keys for EC2 instance {0}: {1}",
                         instanceId, keygen.summary());
@@ -1530,7 +1530,7 @@ public class Ec2ContainerManager {
             }
             // Modern OpenSSH refuses to start without its privilege-separation directory, and /run
             // is a fresh tmpfs in most container images, so /run/sshd genuinely isn't there yet.
-            ContainerExecResult mkdir = execInContainerForResult(containerId,
+            ContainerExec.Result mkdir = execInContainerForResult(containerId,
                     new String[]{"mkdir", "-p", "/run/sshd"}, 5);
             if (mkdir.exitCode() != 0) {
                 LOG.warnv("Could not create /run/sshd for EC2 instance {0}: {1}",
@@ -1540,7 +1540,7 @@ public class Ec2ContainerManager {
             // Start sshd without -D so it daemonizes itself and survives this exec session. Since sshd
             // requires execution with an absolute path, several paths are tried until it starts
             for (String sshdPath : ALLOWED_SSHD_PATHS) {
-                ContainerExecResult start = execInContainerForResult(containerId, new String[]{sshdPath}, 5);
+                ContainerExec.Result start = execInContainerForResult(containerId, new String[]{sshdPath}, 5);
                 if (start.exitCode() != 0) {
                     LOG.warnv("Could not start sshd using path {0} for EC2 instance {1}: {2}", sshdPath, instanceId, start.summary());
                     continue;
@@ -1677,14 +1677,14 @@ public class Ec2ContainerManager {
 
     private void configureLinkLocalMetadataEndpoint(String containerId, String instanceId, String flociHost, int imdsPort) {
         try {
-            ContainerExecResult install = execInContainerForResult(containerId, metadataProxyInstallCommand(), 180);
+            ContainerExec.Result install = execInContainerForResult(containerId, metadataProxyInstallCommand(), 180);
             if (install.exitCode() != 0) {
                 LOG.warnv("Could not install IMDS proxy dependencies for EC2 instance {0}: {1}",
                         instanceId, install.summary());
                 return;
             }
 
-            ContainerExecResult start = execInContainerForResult(containerId, metadataProxyStartCommand(flociHost, imdsPort), 30);
+            ContainerExec.Result start = execInContainerForResult(containerId, metadataProxyStartCommand(flociHost, imdsPort), 30);
             if (start.exitCode() != 0) {
                 LOG.warnv("Could not start link-local IMDS proxy for EC2 instance {0}: {1}",
                         instanceId, start.summary());
@@ -1697,44 +1697,25 @@ public class Ec2ContainerManager {
         }
     }
 
-    private void execInContainer(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
+    private void execInContainer(String containerId, String[] cmd, int timeoutSeconds) {
         execInContainerForResult(containerId, cmd, timeoutSeconds);
     }
 
-    private ContainerExecResult execInContainerForResult(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
-        String execId = dockerClient.execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec()
-                .getId();
-
-        CountDownLatch latch = new CountDownLatch(1);
+    private ContainerExec.Result execInContainerForResult(String containerId, String[] cmd, int timeoutSeconds) {
         BoundedOutput output = new BoundedOutput(UserDataPipeline.MAX_EXEC_OUTPUT_BYTES);
-        dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
-            @Override
-            public void onNext(Frame frame) {
-                if (frame.getPayload() != null) {
-                    try { output.write(frame.getPayload()); } catch (IOException ignored) {}
-                }
+        ContainerExec.Result result;
+        try {
+            result = ContainerExec.run(dockerClient, containerId, cmd, timeoutSeconds, output, output);
+        } catch (RuntimeException e) {
+            if (Thread.currentThread().isInterrupted()) {
+                throw e;
             }
-            @Override
-            public void onComplete() { latch.countDown(); }
-            @Override
-            public void onError(Throwable t) { latch.countDown(); }
-        });
-        boolean completed = latch.await(timeoutSeconds, TimeUnit.SECONDS);
-        if (!completed) {
-            return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s");
+            return new ContainerExec.Result(-1, "", Objects.requireNonNullElse(e.getMessage(), e.toString()), false);
         }
-        Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
-        return new ContainerExecResult(exitCode != null ? exitCode : -1, summarizeUserDataOutput(output));
-    }
-
-    record ContainerExecResult(long exitCode, String output) {
-        String summary() {
-            return output == null || output.isBlank() ? "(no output)" : output;
+        if (result.timedOut()) {
+            return result;
         }
+        return new ContainerExec.Result(result.exitCode(), summarizeUserDataOutput(output), "", false);
     }
 
     private String getContainerBridgeIp(String containerId) {

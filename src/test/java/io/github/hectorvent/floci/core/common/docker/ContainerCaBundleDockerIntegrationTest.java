@@ -7,6 +7,7 @@ import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -38,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @TestProfile(ContainerCaBundleDockerIntegrationTest.Profile.class)
 class ContainerCaBundleDockerIntegrationTest {
 
-    private static final String IMAGE = "public.ecr.aws/docker/library/python:3.12-alpine";
+    private static final String IMAGE = TestImages.PYTHON_ALPINE;
 
     @Inject
     DockerClient dockerClient;

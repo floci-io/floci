@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import org.junit.jupiter.api.AfterAll;
@@ -22,18 +23,11 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
-import java.io.ByteArrayOutputStream;
-import java.io.Closeable;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.model.Frame;
-import com.github.dockerjava.api.model.StreamType;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -157,7 +151,7 @@ class RdsContainerManagerPostgresTest {
         String[] cmd = {"psql", "-h", "127.0.0.1", "-U", user, "-d", dbName, "-c", "SELECT 1"};
         for (int i = 0; i < maxSeconds; i++) {
             try {
-                ExecResult result = exec(containerId, cmd, 5);
+                ContainerExec.Result result = exec(containerId, cmd, 5);
                 if (result.exitCode() == 0) {
                     return;
                 }
@@ -176,7 +170,7 @@ class RdsContainerManagerPostgresTest {
 
     private void execPsql(String containerId, String user, String db, String sql) throws Exception {
         String[] cmd = {"psql", "-v", "ON_ERROR_STOP=1", "-U", user, "-d", db, "-c", sql};
-        ExecResult result = exec(containerId, cmd, 30);
+        ContainerExec.Result result = exec(containerId, cmd, 30);
         if (result.exitCode() != 0) {
             throw new RuntimeException("psql exec failed (exit " + result.exitCode() + "): "
                     + result.stderr() + " | " + result.stdout());
@@ -185,7 +179,7 @@ class RdsContainerManagerPostgresTest {
 
     private String queryPsql(String containerId, String user, String db, String sql) throws Exception {
         String[] cmd = {"psql", "-v", "ON_ERROR_STOP=1", "-U", user, "-d", db, "-tAc", sql};
-        ExecResult result = exec(containerId, cmd, 30);
+        ContainerExec.Result result = exec(containerId, cmd, 30);
         if (result.exitCode() != 0) {
             throw new RuntimeException("psql query failed (exit " + result.exitCode() + "): "
                     + result.stderr() + " | " + result.stdout());
@@ -193,60 +187,8 @@ class RdsContainerManagerPostgresTest {
         return result.stdout();
     }
 
-    private ExecResult exec(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
-        String execId = dockerClient.execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec()
-                .getId();
-
-        CountDownLatch latch = new CountDownLatch(1);
-        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
-
-        Closeable callback = dockerClient.execStartCmd(execId)
-                .exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onNext(Frame frame) {
-                        if (frame.getPayload() != null) {
-                            try {
-                                if (frame.getStreamType() == StreamType.STDOUT) {
-                                    stdout.write(frame.getPayload());
-                                } else if (frame.getStreamType() == StreamType.STDERR) {
-                                    stderr.write(frame.getPayload());
-                                }
-                            } catch (IOException ignored) {
-                                // best effort
-                            }
-                        }
-                    }
-
-                    @Override
-                    public void onComplete() {
-                        latch.countDown();
-                    }
-
-                    @Override
-                    public void onError(Throwable t) {
-                        latch.countDown();
-                    }
-                });
-
-        try {
-            boolean completed = latch.await(timeoutSeconds, TimeUnit.SECONDS);
-            if (!completed) {
-                return new ExecResult(-1, stdout.toString(StandardCharsets.UTF_8),
-                        "Timed out after " + timeoutSeconds + "s");
-            }
-            Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
-            return new ExecResult(
-                    exitCode != null ? exitCode : -1,
-                    stdout.toString(StandardCharsets.UTF_8),
-                    stderr.toString(StandardCharsets.UTF_8));
-        } finally {
-            callback.close();
-        }
+    private ContainerExec.Result exec(String containerId, String[] cmd, int timeoutSeconds) {
+        return ContainerExec.run(dockerClient, containerId, cmd, timeoutSeconds);
     }
 
     private RdsContainerManager createManager() {
@@ -293,6 +235,4 @@ class RdsContainerManagerPostgresTest {
             // best effort
         }
     }
-
-    record ExecResult(long exitCode, String stdout, String stderr) {}
 }

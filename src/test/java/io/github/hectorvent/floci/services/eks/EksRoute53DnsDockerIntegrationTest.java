@@ -1,12 +1,9 @@
 package io.github.hectorvent.floci.services.eks;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.ExecCreateCmdResponse;
-import com.github.dockerjava.api.model.Frame;
-import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.services.route53.Route53Service;
@@ -23,13 +20,11 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -156,31 +151,11 @@ class EksRoute53DnsDockerIntegrationTest {
         }
     }
 
-    private String execInContainer(String containerId, String[] cmd) throws Exception {
-        ExecCreateCmdResponse exec = dockerClient.execCreateCmd(containerId)
-                .withCmd(cmd).withAttachStdout(true).withAttachStderr(true).exec();
-
-        StringBuilder stdout = new StringBuilder();
-        StringBuilder stderr = new StringBuilder();
-        boolean completed = dockerClient.execStartCmd(exec.getId())
-                .exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onNext(Frame frame) {
-                        if (frame != null && frame.getPayload() != null) {
-                            String text = new String(frame.getPayload(), StandardCharsets.UTF_8);
-                            (frame.getStreamType() == StreamType.STDERR ? stderr : stdout).append(text);
-                        }
-                    }
-                })
-                .awaitCompletion(30, TimeUnit.SECONDS);
-
-        if (!completed) {
-            throw new RuntimeException("exec timed out in container " + containerId);
+    private String execInContainer(String containerId, String[] cmd) {
+        ContainerExec.Result result = ContainerExec.run(dockerClient, containerId, cmd, 30).throwIfTimedOut(containerId);
+        if (result.exitCode() != 0) {
+            throw new RuntimeException("exec failed with code " + result.exitCode() + ": " + result.stderr());
         }
-        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-        if (exitCode == null || exitCode != 0) {
-            throw new RuntimeException("exec failed with code " + exitCode + ": " + stderr);
-        }
-        return stdout.toString();
+        return result.stdout();
     }
 }

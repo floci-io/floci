@@ -45,6 +45,12 @@ import java.util.stream.Stream;
 public class IamQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(IamQueryHandler.class);
+
+    /** {@code MaxItems} on the last-accessed readers: "defaults to 100", valid range 1 to 1000. */
+    private static final int DEFAULT_MAX_ITEMS = 100;
+    private static final int MAX_MAX_ITEMS = 1000;
+    /** {@code serviceNamespaceListType}: minimum 1 item, maximum 200. */
+    private static final int MAX_SERVICE_NAMESPACES = 200;
     private static final int MAX_TAG_LIST_MEMBERS = 50;
     private static final int MAX_TAG_KEY_LENGTH = 128;
     private static final int MAX_TAG_VALUE_LENGTH = 256;
@@ -1658,6 +1664,11 @@ public class IamQueryHandler {
             throw new AwsException("InvalidInput",
                     "The request must include at least one service namespace.", 400);
         }
+        if (namespaces.size() > MAX_SERVICE_NAMESPACES) {
+            throw new AwsException("ValidationError",
+                    "Value at 'serviceNamespaces' failed to satisfy constraint: Member must have "
+                            + "length less than or equal to " + MAX_SERVICE_NAMESPACES, 400);
+        }
         List<GrantingPolicy> candidates = policiesForIdentity(accountId, arn);
         // The response list carries one entry per requested namespace, so that is what a Marker
         // walks through.
@@ -1714,9 +1725,10 @@ public class IamQueryHandler {
         // Every input is validated before the bounds check, so a malformed request is rejected
         // rather than answered emptily just because the marker happens to sit past the end.
         int from = markerIndex(params);
-        // Validated only when actually supplied: an absent MaxItems means "no limit", which is not
-        // the same as a limit of zero, and an empty report would otherwise fail its own check.
-        int limit = items.size();
+        // An omitted MaxItems is not "no limit": the API reference states the count "defaults to
+        // 100" on both readers, so a report wider than that is truncated with a Marker exactly as
+        // it would be against AWS. Operations that model no MaxItems at all pass through whole.
+        int limit = maxItemsModeled ? DEFAULT_MAX_ITEMS : items.size();
         if (maxItemsModeled) {
             String raw = params.getFirst("MaxItems");
             if (raw != null && !raw.isBlank()) {
@@ -1726,10 +1738,11 @@ public class IamQueryHandler {
                     throw new AwsException("InvalidInput",
                             "The value " + raw + " at 'maxItems' is not a number.", 400);
                 }
-                if (limit < 1) {
+                if (limit < 1 || limit > MAX_MAX_ITEMS) {
                     throw new AwsException("ValidationError",
-                            "Value at 'maxItems' failed to satisfy constraint: "
-                                    + "Member must have value greater than or equal to 1", 400);
+                            "Value at 'maxItems' failed to satisfy constraint: Member must have "
+                                    + "value greater than or equal to 1 and less than or equal to "
+                                    + MAX_MAX_ITEMS, 400);
                 }
             }
         }
