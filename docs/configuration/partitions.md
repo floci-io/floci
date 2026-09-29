@@ -92,7 +92,9 @@ did before.
   are `com.amazonaws.<region>.<service>` everywhere, except the (region, service) pairs the CDK
   lists for China, ISO and EUSC, which reverse the DNS suffix (`cn.com.amazonaws.cn-north-1.lambda`).
   GovCloud keeps `com.amazonaws`. Gateway endpoints and their AWS-managed prefix lists (S3,
-  DynamoDB) are `com.amazonaws.<region>.<service>` in every partition.
+  DynamoDB) are `com.amazonaws.<region>.<service>` in every partition. S3 offers both kinds: where
+  the two names agree it is one service carrying both types, and in China it is listed twice, the
+  gateway `com.amazonaws.cn-north-1.s3` and the interface `cn.com.amazonaws.cn-north-1.s3`.
 - **Lambda runtime images** pull from ECR Public (`public.ecr.aws`), which exists only in the
   commercial partition; point `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI` at a mirror elsewhere.
 - **WAF `CLOUDFRONT` scope**: available only where CloudFront exists (`aws`, `aws-cn`), and its
@@ -101,7 +103,11 @@ did before.
 ## What does not change
 
 - **Service principals** are `<service>.amazonaws.com` in every partition; that is the rule
-  the AWS CDK applies today, and the older per-partition forms (`.amazonaws.com.cn`) are legacy.
+  the AWS CDK applies today, and everything Floci emits (generated trust policies, CloudTrail's
+  `eventSource`, service-linked role paths) uses it. The older per-partition forms the CDK
+  retired (`elasticmapreduce.amazonaws.com.cn`, `logs.<region>.amazonaws.com.cn`,
+  `config.c2s.ic.gov`) are still accepted wherever Floci matches a principal against a policy,
+  such as a role's trust policy, so a policy written in either form works.
 - **XML namespaces** and the S3 canned-ACL group URIs (`http://acs.amazonaws.com/groups/...`)
   are identifiers, not hosts.
 - **AWS managed policy ARNs** keep the literal `aws` account slot: `arn:aws-cn:iam::aws:policy/AdministratorAccess`.

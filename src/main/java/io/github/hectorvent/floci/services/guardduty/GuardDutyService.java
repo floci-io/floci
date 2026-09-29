@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -566,7 +567,8 @@ public class GuardDutyService {
 
     private static String serviceRoleArn(String region, String accountId) {
         return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
-                "role/aws-service-role/guardduty.amazonaws.com/AWSServiceRoleForAmazonGuardDuty").toString();
+                "role/aws-service-role/" + ServicePrincipals.of("guardduty") + "/AWSServiceRoleForAmazonGuardDuty")
+                .toString();
     }
 
     private static String isoTimestamp() {

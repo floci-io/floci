@@ -21,6 +21,29 @@ class AssumeRolePolicyEvaluatorTest {
     }
 
     @Test
+    void allowsAServicePrincipalInTheUniversalForm() {
+        assertTrue(evaluator.allowsService(
+                trust("{\"Service\":\"redshift.amazonaws.com\"}"), "redshift.amazonaws.com"));
+        assertFalse(evaluator.allowsService(
+                trust("{\"Service\":\"lambda.amazonaws.com\"}"), "redshift.amazonaws.com"));
+    }
+
+    @Test
+    void allowsAServicePrincipalWrittenInTheLegacyPartitionForm() {
+        // AWS still honours the per-partition forms it used before the universal rule, so a
+        // trust policy written in China or ISO spelling matches the universal principal.
+        assertTrue(evaluator.allowsService(
+                trust("{\"Service\":\"elasticmapreduce.amazonaws.com.cn\"}"), "elasticmapreduce.amazonaws.com"));
+        assertTrue(evaluator.allowsService(
+                trust("{\"Service\":[\"logs.cn-north-1.amazonaws.com.cn\",\"lambda.amazonaws.com\"]}"),
+                "logs.amazonaws.com"));
+        assertTrue(evaluator.allowsService(trust("{\"Service\":\"config.c2s.ic.gov\"}"), "config.amazonaws.com"));
+        // And the other way round: the check itself may arrive in a legacy spelling.
+        assertTrue(evaluator.allowsService(
+                trust("{\"Service\":\"redshift.amazonaws.com\"}"), "redshift.amazonaws.com.cn"));
+    }
+
+    @Test
     void allowsAccountRootPrincipal() {
         assertTrue(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws:iam::111111111111:root\"}"), CALLER_ARN, CALLER_ACCOUNT));

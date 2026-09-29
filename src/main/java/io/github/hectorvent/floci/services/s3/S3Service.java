@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -784,7 +785,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 bucketName,
                 key,
                 "Service",
-                "cloudfront.amazonaws.com",
+                ServicePrincipals.of("cloudfront"),
                 Map.of("AWS:SourceArn", distributionArn),
                 null);
     }

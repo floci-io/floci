@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.ssoadmin.SsoAdminService;
@@ -105,7 +106,8 @@ public class SsoPortalService {
         String secretAccessKey = random(SECRET_CHARACTERS, 40);
         String sessionToken = random(SECRET_CHARACTERS, 200);
         String roleArn = AwsArnUtils.Arn.of("iam", "", accountId,
-                "role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_" + roleName + "_floci").toString();
+                "role/aws-reserved/" + ServicePrincipals.of("sso") + "/AWSReservedSSO_" + roleName + "_floci")
+                .toString();
         iamService.registerSessionForAccount(accountId, accessKeyId, secretAccessKey, sessionToken,
                 roleArn, expiration, null);
         return new PortalRoleCredentials(accessKeyId, expiration.toEpochMilli(), secretAccessKey, sessionToken);

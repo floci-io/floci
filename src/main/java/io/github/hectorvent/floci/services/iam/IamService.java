@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -112,11 +113,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
     private static final String SERVICE_LINKED_ROLE_NAME_PREFIX = "AWSServiceRoleFor";
     private static final Map<String, String> SERVICE_LINKED_ROLE_NAMES = Map.of(
-            "autoscaling.amazonaws.com", "AutoScaling",
-            "cloud9.amazonaws.com", "AWSCloud9",
-            "ram.amazonaws.com", "ResourceAccessManager"
+            ServicePrincipals.of("autoscaling"), "AutoScaling",
+            ServicePrincipals.of("cloud9"), "AWSCloud9",
+            ServicePrincipals.of("ram"), "ResourceAccessManager"
     );
-    private static final String AMAZONAWS_DOMAIN = ".amazonaws.com";
     /** AWSServiceName as AWS constrains it: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern SERVICE_PRINCIPAL_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
     /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
@@ -751,7 +751,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public IamRole createServiceLinkedRole(String awsServiceName, String customSuffix, String description) {
         if (awsServiceName == null || !SERVICE_PRINCIPAL_PATTERN.matcher(awsServiceName).matches()) {
             throw new AwsException("InvalidInput",
-                    "AWSServiceName must be 1-128 characters matching [\\w+=,.@-], for example es.amazonaws.com.", 400);
+                    "AWSServiceName must be 1-128 characters matching [\\w+=,.@-], for example es.amazonaws.com.", 400); // partition-literal: AWS's own message text
         }
         if (customSuffix != null && !customSuffix.isEmpty()
                 && !CUSTOM_SUFFIX_PATTERN.matcher(customSuffix).matches()) {
@@ -819,14 +819,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * roles on AWS, and a config declaring both must not collide on one name here.
      */
     private static String derivedServiceName(String awsServiceName) {
-        String canonicalName = SERVICE_LINKED_ROLE_NAMES.get(awsServiceName);
+        // The principal may arrive in the partition form AWS accepted before the universal one
+        // (es.amazonaws.com.cn); the derived name is the same either way.
+        String canonicalName = SERVICE_LINKED_ROLE_NAMES.get(ServicePrincipals.canonical(awsServiceName));
         if (canonicalName != null) {
             return canonicalName;
         }
-        String core = awsServiceName == null ? "" : awsServiceName;
-        if (core.endsWith(AMAZONAWS_DOMAIN)) {
-            core = core.substring(0, core.length() - AMAZONAWS_DOMAIN.length());
-        }
+        String core = awsServiceName == null ? "" : ServicePrincipals.serviceName(awsServiceName);
         StringBuilder derived = new StringBuilder();
         for (String segment : core.split("[.-]")) {
             if (!segment.isEmpty()) {
@@ -835,7 +834,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         if (derived.isEmpty()) {
             throw new AwsException("InvalidInput",
-                    "The request must include a valid AWSServiceName, for example es.amazonaws.com.", 400);
+                    "The request must include a valid AWSServiceName, for example es.amazonaws.com.", 400); // partition-literal: AWS's own message text
         }
         return derived.toString();
     }

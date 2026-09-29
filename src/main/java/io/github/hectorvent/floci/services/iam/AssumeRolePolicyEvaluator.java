@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -301,12 +302,16 @@ public class AssumeRolePolicyEvaluator {
         if (service == null) {
             return false;
         }
+        // A policy may name the service in the universal form or the partition form AWS accepted
+        // before it (elasticmapreduce.amazonaws.com.cn); both sides are folded to the universal
+        // one so either matches, still exactly and case-sensitively.
+        String wanted = ServicePrincipals.canonical(servicePrincipal);
         if (service.isTextual()) {
-            return service.asText().equals(servicePrincipal);
+            return ServicePrincipals.canonical(service.asText()).equals(wanted);
         }
         if (service.isArray()) {
             for (JsonNode entry : service) {
-                if (entry.isTextual() && entry.asText().equals(servicePrincipal)) {
+                if (entry.isTextual() && ServicePrincipals.canonical(entry.asText()).equals(wanted)) {
                     return true;
                 }
             }
