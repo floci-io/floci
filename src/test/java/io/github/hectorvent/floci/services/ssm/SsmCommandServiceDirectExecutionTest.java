@@ -23,6 +23,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -415,7 +416,8 @@ class SsmCommandServiceDirectExecutionTest {
         // statusDetails disagreeing, which the fix satisfies by construction: statusDetails is now
         // computed from a local variable no other thread can touch, so the specific TOCTOU window
         // is closed regardless of scheduling, not merely made statistically unlikely to hit.
-        int instanceCount = 12;
+        // The barrier needs every instance in flight at once, so stay within the direct-execution pool.
+        int instanceCount = Math.min(12, SsmCommandService.DIRECT_EXECUTION_POOL_SIZE);
         int trials = 100;
         for (int trial = 0; trial < trials; trial++) {
             SsmDirectCommandExecutor executor = mock(SsmDirectCommandExecutor.class);
@@ -604,6 +606,56 @@ class SsmCommandServiceDirectExecutionTest {
         assertEquals(8_000, invocation.getStandardErrorContent().length());
         assertEquals("o".repeat(24_000), invocation.getStandardOutputContent());
         assertEquals("e".repeat(8_000), invocation.getStandardErrorContent());
+    }
+
+    @Test
+    void burstOfDirectExecutionsRunsWithBoundedConcurrencyAndAllComplete() throws Exception {
+        int instanceCount = Runtime.getRuntime().availableProcessors() * 4 + 16;
+        SsmDirectCommandExecutor executor = mock(SsmDirectCommandExecutor.class);
+        Instant start = Instant.parse("2026-06-07T00:00:00Z");
+        Instant end = Instant.parse("2026-06-07T00:00:01Z");
+        AtomicInteger started = new AtomicInteger();
+        CountDownLatch release = new CountDownLatch(1);
+        when(executor.supports(any(), any(), eq("AWS-RunShellScript"))).thenReturn(true);
+        when(executor.executeIfSupported(any(), any(), eq("AWS-RunShellScript"), any(), eq(60)))
+                .thenAnswer(invocation -> {
+                    started.incrementAndGet();
+                    assertTrue(release.await(10, TimeUnit.SECONDS), "test did not release executions in time");
+                    return Optional.of(new SsmDirectCommandExecutor.ExecutionResult(
+                            "Success", "done\n", "", 0, start, end));
+                });
+
+        SsmCommandService service = new SsmCommandService(
+                new InMemoryStorageFactory(), objectMapper, regionResolver, executor);
+
+        ObjectNode request = objectMapper.createObjectNode();
+        ArrayNode instanceIdsNode = request.putArray("InstanceIds");
+        for (int i = 0; i < instanceCount; i++) {
+            instanceIdsNode.add("i-burst-" + i);
+        }
+        request.put("DocumentName", "AWS-RunShellScript");
+        request.putObject("Parameters").putArray("commands").add("sleep 60");
+        request.put("TimeoutSeconds", 60);
+
+        Command command = service.sendCommand(request, "us-west-2");
+
+        for (int i = 0; i < 50 && started.get() == 0; i++) {
+            TimeUnit.MILLISECONDS.sleep(20);
+        }
+        // Give an unbounded executor time to start a thread for every target.
+        TimeUnit.MILLISECONDS.sleep(300);
+        assertTrue(started.get() > 0, "no direct execution started");
+        assertTrue(started.get() < instanceCount,
+                "every target got its own thread: " + started.get() + " of " + instanceCount + " ran at once");
+
+        release.countDown();
+        for (int i = 0; i < 250 && "InProgress".equals(
+                service.listCommands(command.getCommandId(), null, "us-west-2").getFirst().getStatus()); i++) {
+            TimeUnit.MILLISECONDS.sleep(20);
+        }
+        Command finished = service.listCommands(command.getCommandId(), null, "us-west-2").getFirst();
+        assertEquals("Success", finished.getStatus());
+        assertEquals(instanceCount, finished.getCompletedCount());
     }
 
     private static String waitForCommandStatus(SsmCommandService service, String commandId, String region) throws InterruptedException {

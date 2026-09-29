@@ -47,6 +47,9 @@ public class SsmCommandService implements Resettable {
     private static final int MIN_TIMEOUT_SECONDS = 30;
     static final int MAX_STDOUT_CHARS = 24000;
     static final int MAX_STDERR_CHARS = 8000;
+    // Each direct execution holds a thread for the whole container exec, up to TimeoutSeconds.
+    // A fixed pool caps how many run at once; the rest wait in the queue as Pending work would.
+    static final int DIRECT_EXECUTION_POOL_SIZE = Math.max(4, Runtime.getRuntime().availableProcessors());
 
     private final StorageBackend<String, InstanceInformation> instanceStore;
     private final StorageBackend<String, Command> commandStore;
@@ -73,7 +76,7 @@ public class SsmCommandService implements Resettable {
         this.objectMapper = objectMapper;
         this.regionResolver = regionResolver;
         this.directCommandExecutor = directCommandExecutor;
-        this.directExecutionExecutor = Executors.newCachedThreadPool(runnable -> {
+        this.directExecutionExecutor = Executors.newFixedThreadPool(DIRECT_EXECUTION_POOL_SIZE, runnable -> {
             Thread thread = new Thread(runnable, "floci-ssm-direct-execution");
             thread.setDaemon(true);
             return thread;
