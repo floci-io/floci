@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -15,7 +16,7 @@ class Ec2DescribeSpotPriceHistoryIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260908/us-east-1/ec2/aws4_request";
 
     private static ValidatableResponse describeSpotPriceHistory(String... params) {
-        io.restassured.specification.RequestSpecification request = given()
+        RequestSpecification request = given()
                 .formParam("Action", "DescribeSpotPriceHistory")
                 .header("Authorization", AUTH_HEADER);
         for (int i = 0; i < params.length; i += 2) {

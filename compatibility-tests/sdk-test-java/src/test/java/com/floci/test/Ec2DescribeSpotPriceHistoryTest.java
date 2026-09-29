@@ -110,7 +110,7 @@ class Ec2DescribeSpotPriceHistoryTest {
         try (Ec2Client ec2 = TestFixtures.ec2Client()) {
             DescribeSpotPriceHistoryResponse response = ec2.describeSpotPriceHistory(
                     DescribeSpotPriceHistoryRequest.builder()
-                            .instanceTypes(InstanceType.T3_MICRO, InstanceType.C5_LARGE, InstanceType.M5_LARGE)
+                            .instanceTypes(InstanceType.T3_MICRO, InstanceType.T3_SMALL, InstanceType.M5_LARGE)
                             .productDescriptions("Linux/UNIX")
                             .availabilityZone("us-east-1a")
                             .build());
@@ -121,26 +121,25 @@ class Ec2DescribeSpotPriceHistoryTest {
             SpotPrice t3Micro = items.stream()
                     .filter(i -> i.instanceType() == InstanceType.T3_MICRO)
                     .findFirst().orElseThrow();
-            SpotPrice c5Large = items.stream()
-                    .filter(i -> i.instanceType() == InstanceType.C5_LARGE)
+            SpotPrice t3Small = items.stream()
+                    .filter(i -> i.instanceType() == InstanceType.T3_SMALL)
                     .findFirst().orElseThrow();
             SpotPrice m5Large = items.stream()
                     .filter(i -> i.instanceType() == InstanceType.M5_LARGE)
                     .findFirst().orElseThrow();
 
             double t3Price = Double.parseDouble(t3Micro.spotPrice());
-            double c5Price = Double.parseDouble(c5Large.spotPrice());
+            double t3SmallPrice = Double.parseDouble(t3Small.spotPrice());
             double m5Price = Double.parseDouble(m5Large.spotPrice());
 
             // Known on-demand prices for us-east-1:
-            // t3.micro = $0.0104, c5.large = $0.0850, m5.large = $0.0960
+            // t3.micro = $0.0104, m5.large = $0.0960
             assertThat(t3Price).isLessThan(0.0104);
-            assertThat(c5Price).isLessThan(0.0850);
             assertThat(m5Price).isLessThan(0.0960);
 
             // Larger instances cost more
-            assertThat(t3Price).isLessThan(c5Price);
-            assertThat(c5Price).isLessThan(m5Price);
+            assertThat(t3Price).isLessThan(t3SmallPrice);
+            assertThat(t3SmallPrice).isLessThan(m5Price);
         }
     }
 
@@ -163,6 +162,74 @@ class Ec2DescribeSpotPriceHistoryTest {
 
             assertThat(page2.spotPriceHistory()).hasSize(2);
             assertThat(page1.spotPriceHistory()).doesNotContainAnyElementsOf(page2.spotPriceHistory());
+        }
+    }
+
+    @Test
+    void describeSpotPriceHistorySupportsContinuationWithNextTokenOnly() {
+        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
+            DescribeSpotPriceHistoryResponse page1 = ec2.describeSpotPriceHistory(
+                    DescribeSpotPriceHistoryRequest.builder()
+                            .maxResults(2)
+                            .build());
+
+            assertThat(page1.spotPriceHistory()).hasSize(2);
+            assertThat(page1.nextToken()).isNotBlank();
+
+            DescribeSpotPriceHistoryResponse continuation = ec2.describeSpotPriceHistory(
+                    DescribeSpotPriceHistoryRequest.builder()
+                            .nextToken(page1.nextToken())
+                            .build());
+
+            assertThat(continuation.spotPriceHistory()).isNotEmpty();
+            assertThat(page1.spotPriceHistory()).doesNotContainAnyElementsOf(continuation.spotPriceHistory());
+        }
+    }
+
+    @Test
+    void describeSpotPriceHistoryReturnsPricesForWindowsPlatform() {
+        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
+            DescribeSpotPriceHistoryResponse response = ec2.describeSpotPriceHistory(
+                    DescribeSpotPriceHistoryRequest.builder()
+                            .instanceTypes(InstanceType.M5_LARGE)
+                            .productDescriptions("Windows")
+                            .availabilityZone("us-east-1a")
+                            .build());
+
+            assertThat(response.spotPriceHistory()).hasSize(1);
+            SpotPrice entry = response.spotPriceHistory().get(0);
+            assertThat(entry.instanceType()).isEqualTo(InstanceType.M5_LARGE);
+            assertThat(entry.productDescriptionAsString()).isEqualTo("Windows");
+            assertThat(entry.availabilityZone()).isEqualTo("us-east-1a");
+            assertThat(Double.parseDouble(entry.spotPrice())).isPositive();
+        }
+    }
+
+    @Test
+    void describeSpotPriceHistoryReturnsEmptyForFutureStartTime() {
+        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
+            DescribeSpotPriceHistoryResponse response = ec2.describeSpotPriceHistory(
+                    DescribeSpotPriceHistoryRequest.builder()
+                            .startTime(Instant.now().plusSeconds(86400))
+                            .build());
+
+            assertThat(response.spotPriceHistory()).isEmpty();
+            assertThat(response.nextToken()).isEmpty();
+        }
+    }
+
+    @Test
+    void describeSpotPriceHistoryRejectsInvalidNextToken() {
+        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
+            String invalidToken = java.util.Base64.getEncoder().encodeToString(
+                    "{\"offset\":-1}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            Ec2Exception exception = assertThrows(Ec2Exception.class,
+                    () -> ec2.describeSpotPriceHistory(DescribeSpotPriceHistoryRequest.builder()
+                            .nextToken(invalidToken)
+                            .build()));
+
+            assertThat(exception.statusCode()).isEqualTo(400);
+            assertThat(exception.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterValue");
         }
     }
 

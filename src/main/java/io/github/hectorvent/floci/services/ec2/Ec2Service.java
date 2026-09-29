@@ -204,13 +204,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             "availability-zone", "availability-zone-id",
             "instance-type", "product-description",
             "spot-price", "timestamp");
-    private static final Set<String> VALID_PRODUCT_DESCRIPTIONS = Set.of(
+    private static final List<String> MODELLED_PRODUCT_DESCRIPTIONS = List.of(
             "Linux/UNIX", "Linux/UNIX (Amazon VPC)",
             "SUSE Linux", "SUSE Linux (Amazon VPC)",
             "Red Hat Enterprise Linux", "Red Hat Enterprise Linux (Amazon VPC)",
             "Windows", "Windows (Amazon VPC)");
-    private static final List<String> MODELLED_PRODUCT_DESCRIPTIONS = List.of(
-            "Linux/UNIX", "Linux/UNIX (Amazon VPC)");
+    private static final Set<String> VALID_PRODUCT_DESCRIPTIONS = new HashSet<>(MODELLED_PRODUCT_DESCRIPTIONS);
 
     private final String defaultAccountId;
     private final jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance;
@@ -9673,7 +9672,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             String json = new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8);
             int start = json.indexOf("\"offset\":") + 9;
             int end = json.indexOf('}', start);
-            return Integer.parseInt(json.substring(start, end));
+            int offset = Integer.parseInt(json.substring(start, end));
+            if (offset < 0) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid NextToken", 400);
+            }
+            return offset;
+        } catch (AwsException e) {
+            throw e;
         } catch (Exception e) {
             throw new AwsException("InvalidParameterValue",
                     "Invalid NextToken", 400);
@@ -9834,9 +9840,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         ensureDefaultResources(region);
         validateSpotPriceHistory(productDescriptions, availabilityZone, availabilityZoneId, startTime, endTime, filters);
 
+        Instant now = Instant.now();
+        if (startTime != null && startTime.isAfter(now)) {
+            return new SpotPriceHistoryResult(List.of(), null);
+        }
+
         Instant effectiveTimestamp = startTime != null
                 ? startTime
-                : (endTime != null ? endTime : Instant.now().truncatedTo(ChronoUnit.HOURS));
+                : (endTime != null ? endTime : now.truncatedTo(ChronoUnit.HOURS));
+
+        if (endTime != null && effectiveTimestamp.isAfter(endTime)) {
+            return new SpotPriceHistoryResult(List.of(), null);
+        }
 
         List<Map<String, String>> zones = describeAvailabilityZones(region);
         if (availabilityZone != null) {
@@ -9929,11 +9944,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .thenComparing(SpotPrice::availabilityZone)
                 .thenComparing(SpotPrice::productDescription));
 
-        if (maxResults > 0) {
+        if (maxResults > 0 || (nextToken != null && !nextToken.isEmpty())) {
             int offset = decodeToken(nextToken);
             int total = allEntries.size();
             int fromIndex = Math.min(offset, total);
-            int toIndex = Math.min(fromIndex + maxResults, total);
+            int pageSize = maxResults > 0 ? maxResults : 1000;
+            int toIndex = (int) Math.min((long) fromIndex + pageSize, total);
             List<SpotPrice> paged = allEntries.subList(fromIndex, toIndex);
             String newNextToken = toIndex < total ? encodeToken(toIndex) : null;
             return new SpotPriceHistoryResult(paged, newNextToken);
