@@ -15,6 +15,8 @@ import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.s3.S3Controller;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.core.http.HttpServerRequest;
+import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ResourceInfo;
@@ -99,6 +101,10 @@ class IamEnforcementFilterTest {
     }
 
     private IamEnforcementFilter newFilter() {
+        return newFilter(mock(CurrentVertxRequest.class));
+    }
+
+    private IamEnforcementFilter newFilter(CurrentVertxRequest currentVertxRequest) {
         @SuppressWarnings("unchecked")
         Instance<ScpProvider> scpProvider =
                 mock(Instance.class);
@@ -107,7 +113,7 @@ class IamEnforcementFilterTest {
                 config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
                 requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
-                mock(CurrentVertxRequest.class),
+                currentVertxRequest,
                 catalog, scpProvider, sessionAccountLookup);
     }
 
@@ -473,6 +479,91 @@ class IamEnforcementFilterTest {
 
         verify(containerRequest, never()).abortWith(any());
         verifyNoInteractions(evaluator);
+    }
+
+    @Test
+    void presignedCredentialCannotBypassAnUnmappedAction() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getMethod()).thenReturn("POST");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn(null);
+        when(iamService.presignedScope("ASIASCOPE"))
+                .thenReturn(Optional.of(new IamService.PresignedScope(
+                        "s3:GetObject", "arn:aws:s3:::bucket/key")));
+
+        newFilter().filter(containerRequest);
+
+        verify(containerRequest).abortWith(any());
+    }
+
+    @Test
+    void scopedPresignedRequestWithoutRoutingContextIsDenied() {
+        assertScopedPresignedRequestWithoutHttpRequestIsDenied(null);
+    }
+
+    @Test
+    void scopedPresignedRequestWithoutHttpRequestIsDenied() {
+        assertScopedPresignedRequestWithoutHttpRequestIsDenied(mock(RoutingContext.class));
+    }
+
+    @Test
+    void scopedPresignedRequestUsesWirePathForAbsoluteFormProxyTarget() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        CurrentVertxRequest currentVertxRequest = mock(CurrentVertxRequest.class);
+        RoutingContext routingContext = mock(RoutingContext.class);
+        HttpServerRequest httpRequest = mock(HttpServerRequest.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext("ASIASCOPE"))
+                .thenReturn(CallerContext.of(List.of("{\"Version\":\"2012-10-17\",\"Statement\":[]}")));
+        when(iamService.presignedScope("ASIASCOPE"))
+                .thenReturn(Optional.of(new IamService.PresignedScope(
+                        "s3:GetObject", "arn:aws:s3:::bucket//key")));
+        when(currentVertxRequest.getCurrent()).thenReturn(routingContext);
+        when(routingContext.request()).thenReturn(httpRequest);
+        when(httpRequest.uri()).thenReturn("https://proxy.example/bucket//key?X-Amz-Algorithm=AWS4-HMAC-SHA256");
+        when(httpRequest.path()).thenReturn("/bucket//key");
+        when(conditionContextResolver.resolveRemainingTargets("s3", "s3:GetObject", containerRequest))
+                .thenReturn(List.of());
+        when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), any(), any(), any()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+
+        newFilter(currentVertxRequest).filter(containerRequest);
+
+        verify(containerRequest, never()).abortWith(any());
+        verify(evaluator).evaluateResolvedResourcePolicy(any(), any(), any(),
+                eq("s3:GetObject"), eq("arn:aws:s3:::bucket//key"), any());
+    }
+
+    private void assertScopedPresignedRequestWithoutHttpRequestIsDenied(RoutingContext routingContext) {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        CurrentVertxRequest currentVertxRequest = mock(CurrentVertxRequest.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext("ASIASCOPE"))
+                .thenReturn(CallerContext.of(List.of("{\"Version\":\"2012-10-17\",\"Statement\":[]}")));
+        when(iamService.presignedScope("ASIASCOPE"))
+                .thenReturn(Optional.of(new IamService.PresignedScope(
+                        "s3:GetObject", "arn:aws:s3:::bucket/key")));
+        if (routingContext != null) {
+            when(currentVertxRequest.getCurrent()).thenReturn(routingContext);
+        }
+
+        newFilter(currentVertxRequest).filter(containerRequest);
+
+        ArgumentCaptor<Response> response = ArgumentCaptor.forClass(Response.class);
+        verify(containerRequest).abortWith(response.capture());
+        assertEquals(403, response.getValue().getStatus());
     }
 
     @Test

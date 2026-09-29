@@ -7,6 +7,8 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
@@ -189,6 +191,185 @@ class EmbeddedDnsServerTest {
 
     private static DnsAnswer answer(String... addresses) {
         return DnsAnswer.records(List.of(addresses), DnsAnswer.DEFAULT_TTL_SECONDS);
+    }
+
+    // ── planQuery: Route 53 Resolver rules ────────────────────────────────────
+
+    private static final String CLIENT = "172.31.0.9";
+    private static final String MY_IP = "172.31.0.2";
+    private static final String ACCOUNT = "000000000000";
+    private static final String REGION = "us-east-1";
+
+    @Test
+    void forwardingRuleMatchesOnlyItsDomainAndTheSubdomainsBeneathIt() {
+        DnsForwardingRule rule = forward("acme.example.com", "10.1.0.53");
+
+        assertTrue(rule.matches("acme.example.com"));
+        assertTrue(rule.matches("zenith.acme.example.com."));
+        assertFalse(rule.matches("example.com"));
+        assertFalse(rule.matches("nadir.example.com"));
+        assertFalse(rule.matches("notacme.example.com"));
+        assertEquals(3, rule.specificity());
+        assertTrue(forward(".", "10.1.0.53").matches("anything.example.com"));
+        assertEquals(0, forward(".", "10.1.0.53").specificity());
+    }
+
+    @Test
+    void planQuery_forwardsToTheTargetsOfARuleAssociatedWithTheQueryingVpc() {
+        EmbeddedDnsServer dns = withRules(List.of(),
+                rules("vpc-a", forward("corp.internal", "10.1.0.53")), clientVpc("vpc-a"));
+
+        EmbeddedDnsServer.QueryPlan plan = dns.planQuery("db.corp.internal", CLIENT, MY_IP, 1);
+
+        assertTrue(plan.answer().isEmpty());
+        assertEquals(List.of(new DnsForwardingRule.Target("10.1.0.53", 53)), plan.ruleTargets());
+    }
+
+    @Test
+    void planQuery_ignoresARuleThatIsNotAssociatedWithTheQueryingVpc() {
+        EmbeddedDnsServer dns = withRules(List.of(),
+                rules("vpc-other", forward("corp.internal", "10.1.0.53")), clientVpc("vpc-a"));
+
+        assertEquals(EmbeddedDnsServer.QueryPlan.UPSTREAM,
+                dns.planQuery("db.corp.internal", CLIENT, MY_IP, 1));
+    }
+
+    @Test
+    void planQuery_appliesNoRuleWhenNoSourceClaimsTheQueryAddress() {
+        EmbeddedDnsServer dns = withRules(List.of(),
+                rules("vpc-a", forward("corp.internal", "10.1.0.53")),
+                clientAddress -> Optional.empty());
+
+        assertEquals(EmbeddedDnsServer.QueryPlan.UPSTREAM,
+                dns.planQuery("db.corp.internal", CLIENT, MY_IP, 1));
+    }
+
+    @Test
+    void planQuery_appliesNoRuleWhenTheQueryOriginIsIncomplete() {
+        DnsForwardingRuleSource anyOrigin = (accountId, region, vpcId) ->
+                List.of(forward("corp.internal", "10.1.0.53"));
+
+        for (DnsClientVpcSource.ClientVpc partial : List.of(
+                new DnsClientVpcSource.ClientVpc(ACCOUNT, REGION, ""),
+                new DnsClientVpcSource.ClientVpc(ACCOUNT, "", "vpc-a"),
+                new DnsClientVpcSource.ClientVpc("", REGION, "vpc-a"))) {
+            EmbeddedDnsServer dns = withRules(List.of(), anyOrigin,
+                    clientAddress -> Optional.of(partial));
+
+            assertEquals(EmbeddedDnsServer.QueryPlan.UPSTREAM,
+                    dns.planQuery("db.corp.internal", CLIENT, MY_IP, 1), partial.toString());
+        }
+    }
+
+    @Test
+    void planQuery_appliesTheMoreSpecificOfTwoMatchingRules() {
+        EmbeddedDnsServer dns = withRules(List.of(),
+                rules("vpc-a", forward("corp.internal", "10.1.0.53"),
+                        forward("db.corp.internal", "10.2.0.53")),
+                clientVpc("vpc-a"));
+
+        assertEquals(List.of(new DnsForwardingRule.Target("10.2.0.53", 53)),
+                dns.planQuery("replica.db.corp.internal", CLIENT, MY_IP, 1).ruleTargets());
+        assertEquals(List.of(new DnsForwardingRule.Target("10.1.0.53", 53)),
+                dns.planQuery("web.corp.internal", CLIENT, MY_IP, 1).ruleTargets());
+    }
+
+    @Test
+    void planQuery_aSystemRuleCarvesASubdomainOutOfABroaderForwardRule() {
+        EmbeddedDnsServer dns = withRules(
+                List.of(source("acme.corp.internal", List.of("10.9.9.9"))),
+                rules("vpc-a", forward("corp.internal", "10.1.0.53"),
+                        DnsForwardingRule.system("acme.corp.internal")),
+                clientVpc("vpc-a"));
+
+        assertEquals(List.of("10.9.9.9"),
+                dns.planQuery("acme.corp.internal", CLIENT, MY_IP, 1).answer().orElseThrow().addresses());
+        assertEquals(List.of(new DnsForwardingRule.Target("10.1.0.53", 53)),
+                dns.planQuery("other.corp.internal", CLIENT, MY_IP, 1).ruleTargets());
+    }
+
+    @Test
+    void planQuery_aMatchingRuleTakesPrecedenceOverAPrivateHostedZoneRecord() {
+        EmbeddedDnsServer dns = withRules(
+                List.of(source("db.corp.internal", List.of("10.0.0.7"))),
+                rules("vpc-a", forward("corp.internal", "10.1.0.53")), clientVpc("vpc-a"));
+
+        EmbeddedDnsServer.QueryPlan plan = dns.planQuery("db.corp.internal", CLIENT, MY_IP, 1);
+
+        assertTrue(plan.answer().isEmpty(), "the rule decides the name, not the zone record");
+        assertEquals(List.of(new DnsForwardingRule.Target("10.1.0.53", 53)), plan.ruleTargets());
+    }
+
+    @Test
+    void planQuery_aPrivateHostedZoneRecordAnswersWhenNoRuleIsAssociated() {
+        EmbeddedDnsServer dns = withRules(
+                List.of(source("db.corp.internal", List.of("10.0.0.7"))),
+                rules("vpc-other", forward("corp.internal", "10.1.0.53")), clientVpc("vpc-a"));
+
+        assertEquals(List.of("10.0.0.7"),
+                dns.planQuery("db.corp.internal", CLIENT, MY_IP, 1).answer().orElseThrow().addresses());
+    }
+
+    @Test
+    void planQuery_aNameMatchingNoRuleStillGoesToTheUpstreamResolvers() {
+        EmbeddedDnsServer dns = withRules(
+                List.of(source("db.corp.internal", List.of("10.0.0.7"))),
+                rules("vpc-a", forward("corp.internal", "10.1.0.53")), clientVpc("vpc-a"));
+
+        assertEquals(EmbeddedDnsServer.QueryPlan.UPSTREAM, dns.planQuery("example.com", CLIENT, MY_IP, 1));
+    }
+
+    @Test
+    void planQuery_neverForwardsTheEmulatorsOwnNames() {
+        EmbeddedDnsServer dns = withRules(List.of(), rules("vpc-a", forward(".", "10.1.0.53")),
+                clientVpc("vpc-a"));
+
+        assertEquals(List.of(MY_IP),
+                dns.planQuery("bucket.localhost.floci.io", CLIENT, MY_IP, 1).answer().orElseThrow().addresses());
+        assertEquals(List.of("172.16.128.9"),
+                dns.planQuery("ip-172-16-128-9.ec2.internal", CLIENT, MY_IP, 1).answer().orElseThrow().addresses());
+        assertEquals(List.of(new DnsForwardingRule.Target("10.1.0.53", 53)),
+                dns.planQuery("example.com", CLIENT, MY_IP, 1).ruleTargets());
+    }
+
+    @Test
+    void planQuery_keepsResolvingWhenARuleSourceThrows() {
+        DnsForwardingRuleSource failing = (accountId, region, vpcId) -> {
+            throw new IllegalStateException("storage is down");
+        };
+        EmbeddedDnsServer dns = new EmbeddedDnsServer(List.of("localhost.floci.io"),
+                List.of(source("db.corp.internal", List.of("10.0.0.7"))),
+                List.of(failing), List.of(clientVpc("vpc-a")));
+
+        assertEquals(List.of("10.0.0.7"),
+                dns.planQuery("db.corp.internal", CLIENT, MY_IP, 1).answer().orElseThrow().addresses());
+    }
+
+    private static EmbeddedDnsServer withRules(List<DnsRecordSource> recordSources,
+                                               DnsForwardingRuleSource ruleSource,
+                                               DnsClientVpcSource clientVpcSource) {
+        return new EmbeddedDnsServer(List.of("localhost.floci.io"), recordSources,
+                List.of(ruleSource), List.of(clientVpcSource));
+    }
+
+    /** Returns the rules most specific first, as {@link DnsForwardingRuleSource} asks sources to. */
+    private static DnsForwardingRuleSource rules(String associatedVpcId, DnsForwardingRule... rules) {
+        List<DnsForwardingRule> ordered = Arrays.stream(rules)
+                .sorted(Comparator.comparingInt(DnsForwardingRule::specificity).reversed())
+                .toList();
+        return (accountId, region, vpcId) -> ACCOUNT.equals(accountId) && REGION.equals(region)
+                && associatedVpcId.equals(vpcId) ? ordered : List.of();
+    }
+
+    private static DnsClientVpcSource clientVpc(String vpcId) {
+        return clientAddress -> CLIENT.equals(clientAddress)
+                ? Optional.of(new DnsClientVpcSource.ClientVpc(ACCOUNT, REGION, vpcId))
+                : Optional.empty();
+    }
+
+    private static DnsForwardingRule forward(String domainName, String... targets) {
+        return DnsForwardingRule.forwardTo(domainName,
+                Arrays.stream(targets).map(DnsForwardingRule.Target::new).toList());
     }
 
     @Test
@@ -416,6 +597,15 @@ class EmbeddedDnsServerTest {
                     "response larger than 512 bytes must be forwarded without truncation");
             assertArrayEquals(bigResponse, response);
         }
+    }
+
+    @Test
+    void forwardToTargets_throwsWhenEveryTargetIsUnreachable() {
+        // Nothing listens on port 1 of the loopback, so every target fails and the caller decides
+        // what a failed rule means rather than silently getting an upstream answer.
+        assertThrows(Exception.class, () -> EmbeddedDnsServer.forwardToTargets(
+                buildQuery("db.corp.internal", (short) 8),
+                List.of(new DnsForwardingRule.Target("127.0.0.1", 1))));
     }
 
     /** Replies to the first datagram received with a fixed payload, on a daemon thread. */

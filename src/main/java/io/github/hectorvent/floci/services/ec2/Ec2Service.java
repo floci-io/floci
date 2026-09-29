@@ -1224,6 +1224,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
     }
 
+    /**
+     * The managed lists belong to the S3 and DynamoDB gateway endpoints, which are named
+     * {@code com.amazonaws.<region>.<service>} in every partition (the CDK's
+     * {@code GatewayVpcEndpointAwsService}); the reversed-suffix names apply to interface endpoints only.
+     */
     private List<ManagedPrefixList> awsManagedPrefixLists(String region) {
         return List.of(
                 awsManagedPrefixList(region, "pl-63a5400a", "com.amazonaws." + region + ".s3",

@@ -23,7 +23,7 @@ import java.util.Set;
 
 @ApplicationScoped
 public class MarketplaceDiscoveryService implements Resettable {
-    private static final Set<String> REGIONS = Set.of("us-east-1", "us-west-2", "eu-west-1");
+    private static final Set<String> REGIONS = Set.of("us-east-1", "us-west-2", "eu-west-1"); // partition-literal: AWS Marketplace is commercial-only and AWS pins its APIs to these regions
     private static final Set<String> FACET_TYPES = Set.of("AVERAGE_CUSTOMER_RATING", "CATEGORY", "PUBLISHER", "FULFILLMENT_OPTION_TYPE", "PRICING_MODEL", "PRICING_UNIT", "DEPLOYED_ON_AWS", "NUMBER_OF_PRODUCTS");
     private static final Set<String> SEARCH_FILTER_TYPES = Set.of("MIN_AVERAGE_CUSTOMER_RATING", "MAX_AVERAGE_CUSTOMER_RATING", "CATEGORY", "PUBLISHER", "FULFILLMENT_OPTION_TYPE", "PRICING_MODEL", "PRICING_UNIT", "DEPLOYED_ON_AWS", "NUMBER_OF_PRODUCTS");
     private final ObjectMapper mapper;
@@ -412,7 +412,7 @@ public class MarketplaceDiscoveryService implements Resettable {
         throw validation(f+" is required and must match [\\w-]+.");
     }return v;}
     private static void validateRegion(String region){if(!REGIONS.contains(region)){
-        throw validation("Marketplace Discovery is available only in us-east-1, us-west-2, and eu-west-1.");
+        throw validation("Marketplace Discovery is available only in us-east-1, us-west-2, and eu-west-1."); // partition-literal: AWS's message text
     }}
     private static AwsException validation(String m){return new AwsException("ValidationException",m,400);}
     private static AwsException notFound(String k,String id){return new AwsException("ResourceNotFoundException",k+" "+id+" was not found.",404);}

@@ -75,8 +75,7 @@ public class LambdaTagController {
         try {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
-            @SuppressWarnings("unchecked")
-            Map<String, String> tags = (Map<String, String>) request.get("Tags");
+            Map<String, String> tags = LambdaService.requestTags(request);
             if (tags == null) {
                 throw new AwsException("InvalidParameterValueException", "Tags is required", 400);
             }

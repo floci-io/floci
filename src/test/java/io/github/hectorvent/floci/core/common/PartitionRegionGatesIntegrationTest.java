@@ -9,6 +9,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
@@ -64,6 +66,40 @@ class PartitionRegionGatesIntegrationTest {
         }
     }
 
+    /**
+     * Edge-optimized domains exist only in the commercial partition: GovCloud has no CloudFront, and
+     * China has CloudFront but no edge-optimized API Gateway. A regional domain needs neither.
+     */
+    @Test
+    void edgeCustomDomainsAreRejectedOutsideTheCommercialPartition() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        for (String region : List.of("us-gov-west-1", "cn-north-1")) {
+            String partition = AwsRegions.partitionFor(region);
+            given()
+                .header("Authorization", PartitionMatrix.sigV4Auth(region, "apigateway"))
+                .contentType("application/json")
+                .body("{\"domainName\":\"edge-" + suffix + "." + region + ".example.com\","
+                        + "\"certificateArn\":\"arn:" + partition + ":acm:" + region + ":000000000000:certificate/edge\","
+                        + "\"endpointConfiguration\":{\"types\":[\"EDGE\"]}}")
+            .when().post("/domainnames")
+            .then().statusCode(400)
+                .body(containsString("not available in partition " + partition));
+        }
+
+        String regional = "regional-" + suffix + ".example.com";
+        given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-gov-west-1", "apigateway"))
+            .contentType("application/json")
+            .body("{\"domainName\":\"" + regional + "\","
+                    + "\"regionalCertificateArn\":\"arn:aws-us-gov:acm:us-gov-west-1:000000000000:certificate/regional\","
+                    + "\"endpointConfiguration\":{\"types\":[\"REGIONAL\"]}}")
+        .when().post("/domainnames")
+        .then().statusCode(201);
+        cleanup.register(() -> given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-gov-west-1", "apigateway"))
+        .when().delete("/domainnames/" + regional));
+    }
+
     @Test
     void cloudFrontScopeLivesInThePartitionsImplicitGlobalRegion() {
         String name = "cn-" + Long.toString(System.nanoTime(), 36);
@@ -79,6 +115,32 @@ class PartitionRegionGatesIntegrationTest {
             .body("{\"Name\":\"" + name + "\",\"Scope\":\"CLOUDFRONT\",\"Id\":\"" + id + "\",\"LockToken\":\"" + lockToken + "\"}")
         .when().post("/"));
         assertTrue(arn.startsWith("arn:aws-cn:wafv2:cn-northwest-1:000000000000:global/ipset/" + name + "/"), arn);
+    }
+
+    /**
+     * The AWS-managed prefix lists belong to the S3 and DynamoDB gateway endpoints, which keep
+     * {@code com.amazonaws} in every partition; only interface endpoint names take the reversed
+     * suffix China lists.
+     */
+    @Test
+    void gatewayPrefixListsKeepComAmazonawsWhileChinaInterfaceNamesReverseTheSuffix() {
+        List<String> names = given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("cn-north-1", "ec2"))
+            .formParam("Action", "DescribeManagedPrefixLists")
+            .formParam("Version", "2016-11-15")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getList("DescribeManagedPrefixListsResponse.prefixListSet.item.prefixListName");
+        assertTrue(names.contains("com.amazonaws.cn-north-1.s3"), names.toString());
+        assertTrue(names.contains("com.amazonaws.cn-north-1.dynamodb"), names.toString());
+
+        List<String> services = given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("cn-north-1", "ec2"))
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Version", "2016-11-15")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getList("DescribeVpcEndpointServicesResponse.serviceNameSet.item");
+        assertTrue(services.contains("cn.com.amazonaws.cn-north-1.lambda"), services.toString());
+        assertTrue(services.contains("com.amazonaws.cn-north-1.s3"), services.toString());
     }
 
     @Test

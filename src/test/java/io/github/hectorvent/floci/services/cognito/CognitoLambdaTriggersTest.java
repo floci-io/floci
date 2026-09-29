@@ -17,6 +17,8 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.ses.SesService;
+import io.github.hectorvent.floci.services.ses.model.EmailContent;
+import io.github.hectorvent.floci.services.ses.model.SendEmailRequest;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
@@ -45,7 +47,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -146,6 +147,18 @@ class CognitoLambdaTriggersTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static void assertVerificationEmail(SesService ses, String to, String subject, String body) {
+        ArgumentCaptor<SendEmailRequest> captor = ArgumentCaptor.forClass(SendEmailRequest.class);
+        verify(ses).sendEmail(captor.capture());
+        SendEmailRequest sent = captor.getValue();
+        assertEquals(SendEmailRequest.builder()
+                .source(sent.source())
+                .toAddresses(List.of(to))
+                .region("us-east-1")
+                .content(new EmailContent.Simple(subject, body, null, List.of()))
+                .build(), sent);
     }
 
     private static InvokeResult rawPayload(String payload) {
@@ -1396,12 +1409,7 @@ class CognitoLambdaTriggersTest {
 
         svc.signUp(client.getClientId(), "spike", "Spike@Test1", Map.of("email", "spike@example.com"));
 
-        verify(ses).sendEmail(
-                anyString(), eq(List.of("spike@example.com")),
-                eq(List.of()), eq(List.of()), eq(List.of()), isNull(),
-                eq("TRIGGER-FIRED"),
-                eq("TRIGGER-FIRED code=246962"),
-                any(), any(), eq(List.of()), eq(List.of()), any(), isNull(), anyString());
+        assertVerificationEmail(ses, "spike@example.com", "TRIGGER-FIRED", "TRIGGER-FIRED code=246962");
     }
 
     @Test
@@ -1453,12 +1461,8 @@ class CognitoLambdaTriggersTest {
         // SignUp must still succeed and deliver the default message when CustomMessage errors.
         svc.signUp(client.getClientId(), "spike", "Spike@Test1", Map.of("email", "spike@example.com"));
 
-        verify(ses).sendEmail(
-                anyString(), eq(List.of("spike@example.com")),
-                any(), any(), any(), isNull(),
-                eq("Your verification code"),
-                eq("Your verification code is 246962."),
-                any(), any(), any(), any(), any(), isNull(), anyString());
+        assertVerificationEmail(ses, "spike@example.com", "Your verification code",
+                "Your verification code is 246962.");
     }
 
     @Test
@@ -1477,12 +1481,8 @@ class CognitoLambdaTriggersTest {
         svc.signUp(client.getClientId(), "spike", "Spike@Test1", Map.of("email", "spike@example.com"));
 
         verify(lambdaService, never()).invoke(anyString(), anyString(), any(byte[].class), any());
-        verify(ses).sendEmail(
-                anyString(), eq(List.of("spike@example.com")),
-                any(), any(), any(), isNull(),
-                eq("Your verification code"),
-                eq("Your verification code is 246962."),
-                any(), any(), any(), any(), any(), isNull(), anyString());
+        assertVerificationEmail(ses, "spike@example.com", "Your verification code",
+                "Your verification code is 246962.");
     }
 
     @Test

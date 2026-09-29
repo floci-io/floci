@@ -437,3 +437,123 @@ jobs:
         # where the server log matters most.
         if: failure() || cancelled()
         run: docker logs floci
+
+  native-ec2-containers:
+    name: native arm64 / ec2-containers
+    needs: build-native
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    # The suites above run EC2 in mock mode, so no native test reached the Docker calls that only
+    # container-backed EC2 makes: building the security group helper image, committing an instance
+    # as an AMI and removing that image, and the VPC networks. An instance under security group
+    # enforcement lives in its helper's network rather than on a VPC network, so Floci runs twice,
+    # with enforcement on and then off. At the end it is killed and restarted, and must remove the
+    # VPC network the tests leave behind.
+    steps:
+      - name: Download native floci image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: floci-native-image-arm64
+          path: /tmp
+
+      - name: Load native floci image
+        run: gunzip -c /tmp/floci-native-image.tar.gz | docker load
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            compatibility-tests
+            .github/ci
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build test image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: compatibility-tests/sdk-test-java
+          load: true
+          tags: compat-sdk-test-java
+          cache-from: type=gha,scope=sdk-test-java
+
+      - name: Write helper scripts
+        run: |
+          mkdir -p test-results
+          docker network create compat-net
+          cat > start-floci.sh <<'SH'
+          docker run -d --name floci --network compat-net \
+            -p 4566:4566 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            --group-add "$(stat -c '%g' /var/run/docker.sock)" \
+            -e FLOCI_BASE_URL=http://floci:4566 \
+            -e FLOCI_SERVICES_DOCKER_NETWORK=compat-net \
+            -e FLOCI_HOSTNAME=floci \
+            "$@" floci:test-native
+          SH
+          cat > wait-floci.sh <<'SH'
+          health=starting
+          for _ in $(seq 1 60); do
+            health=$(docker inspect -f '{{.State.Health.Status}}' floci)
+            if [ "$health" = healthy ]; then
+              exit 0
+            fi
+            if [ "$health" = unhealthy ]; then
+              break
+            fi
+            sleep 1
+          done
+          echo "::error::floci did not report healthy (last status: $health)"
+          docker inspect -f '{{json .State.Health}}' floci
+          docker logs --tail 50 floci
+          exit 1
+          SH
+          cat > run-tests.sh <<'SH'
+          docker run --rm --network compat-net \
+            --dns "$(docker inspect -f '{{(index .NetworkSettings.Networks "compat-net").IPAddress}}' floci)" \
+            -e FLOCI_ENDPOINT=http://floci:4566 \
+            -e FLOCI_EC2_CONTAINERS="$1" \
+            -v "$(pwd)/test-results/$1:/results" \
+            --entrypoint bash \
+            compat-sdk-test-java -c 'status=0; mvn test -B -Dtest=Ec2ContainerTest -Dorg.slf4j.simpleLogger.defaultLogLevel=warn || status=$?; cp target/surefire-reports/TEST-*.xml /results/ 2>/dev/null || true; exit $status'
+          SH
+
+      - name: Run tests with security group enforcement
+        id: tests
+        run: |
+          bash start-floci.sh -e FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true
+          bash wait-floci.sh
+          bash run-tests.sh security-groups
+
+      - name: Run tests on VPC networks
+        run: |
+          docker rm -f floci
+          bash start-floci.sh
+          bash wait-floci.sh
+          bash run-tests.sh vpc-networks
+
+      - name: Restart floci and check the orphaned VPC network is removed
+        run: |
+          # Killed, not stopped, so the instance container stays attached to its VPC network.
+          docker kill floci
+          docker start floci
+          bash wait-floci.sh
+          # EC2 reconciles its networks when it first starts, which is on its first request.
+          curl -s -o /dev/null -X POST http://localhost:4566/ \
+            -H 'Authorization: AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/ec2/aws4_request, SignedHeaders=host, Signature=0' \
+            -d 'Action=DescribeVpcs&Version=2016-11-15'
+          docker logs floci 2>&1 | grep 'Reconciled orphaned VPC network'
+          left=$(docker network ls -q --filter label=floci_component=ec2-vpc)
+          if [ -n "$left" ]; then
+            echo "::error::VPC networks survived the restart: $left"
+            exit 1
+          fi
+
+      - name: Generate test summary
+        if: always() && steps.tests.outcome != 'skipped'
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2
+        with:
+          paths: test-results/*/*.xml
+
+      - name: Dump floci logs
+        if: failure() || cancelled()
+        run: docker logs floci

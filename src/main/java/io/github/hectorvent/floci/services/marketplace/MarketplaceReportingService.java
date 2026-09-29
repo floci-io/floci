@@ -47,7 +47,7 @@ public class MarketplaceReportingService {
         }
         String token = UUID.randomUUID().toString().replace("-", "");
         String dashboardName = dashboard.substring(dashboard.lastIndexOf('/') + 1);
-        String embedUrl = "https://us-east-1.quicksight.aws.amazon.com/sn/embed/share/accounts/"
+        String embedUrl = "https://us-east-1.quicksight.aws.amazon.com/sn/embed/share/accounts/" // partition-literal: Marketplace reporting dashboards embed from QuickSight in us-east-1
                 + accountId + "/dashboards/" + URLEncoder.encode(dashboardName, StandardCharsets.UTF_8)
                 + "?code=" + token;
         MarketplaceBuyerDashboard result = new MarketplaceBuyerDashboard(

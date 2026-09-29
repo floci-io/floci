@@ -27,7 +27,25 @@ public final class LambdaArnUtils {
     private static final Pattern ACCOUNT_PATTERN = Pattern.compile("\\d{12}");
     private static final Pattern QUALIFIER_PATTERN = Pattern.compile("\\$LATEST|[a-zA-Z0-9-_]+");
 
+    private static final String EVENT_SOURCE_MAPPING_PREFIX = "event-source-mapping:";
+
     private LambdaArnUtils() {}
+
+    /** {@code arn:<partition>:lambda:<region>:<account>:event-source-mapping:<uuid>}. */
+    public static String eventSourceMappingArn(String region, String accountId, String uuid) {
+        return AwsArnUtils.Arn.of("lambda", region, accountId, EVENT_SOURCE_MAPPING_PREFIX + uuid).toString();
+    }
+
+    /**
+     * The UUID of an event source mapping ARN, or {@code null} when {@code arn} names
+     * some other Lambda resource.
+     */
+    public static String eventSourceMappingUuid(AwsArnUtils.Arn arn) {
+        if (!"lambda".equals(arn.service()) || !arn.resource().startsWith(EVENT_SOURCE_MAPPING_PREFIX)) {
+            return null;
+        }
+        return arn.resource().substring(EVENT_SOURCE_MAPPING_PREFIX.length());
+    }
 
     /**
      * Resolved components of a Lambda function reference.

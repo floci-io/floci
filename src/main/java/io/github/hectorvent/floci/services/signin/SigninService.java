@@ -278,7 +278,7 @@ public class SigninService {
             long now = issuedAt.getEpochSecond();
             String header = encodeJson(Map.of("alg", "none", "typ", "JWT"));
             String payload = encodeJson(Map.of(
-                    "iss", "https://signin.amazonaws.com",
+                    "iss", "https://signin.amazonaws.com", // partition-literal: floci's own issuer; the console issuer has no published source
                     "sub", principalArn,
                     "aud", clientId,
                     "aws_account_id", accountId,

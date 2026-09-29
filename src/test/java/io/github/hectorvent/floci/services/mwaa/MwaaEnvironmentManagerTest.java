@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.mwaa;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
+import io.github.hectorvent.floci.core.common.docker.ContainerExecStubs;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -523,5 +525,20 @@ class MwaaEnvironmentManagerTest {
 
         Mockito.verify(lifecycleManager).stopAndRemove("airflow-container-id", null);
         Mockito.verify(lifecycleManager).stopAndRemove("db-container-id", null);
+    }
+
+    @Test
+    void runAirflowCliRunsTheCommandThroughAShellInTheAirflowContainer() throws Exception {
+        DockerClient dockerClient = Mockito.mock(DockerClient.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, "airflow-container-id", 2,
+                "dag1\n", "warning\n");
+
+        ContainerExec.Result result = manager.runAirflowCli("airflow-container-id", "dags list");
+
+        assertEquals(List.of(List.of("sh", "-c", "airflow dags list")), commands);
+        assertEquals(2, result.exitCode());
+        assertEquals("dag1\n", result.stdout());
+        assertEquals("warning\n", result.stderr());
     }
 }

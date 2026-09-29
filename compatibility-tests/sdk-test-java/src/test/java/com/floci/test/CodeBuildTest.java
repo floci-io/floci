@@ -46,7 +46,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class CodeBuildTest {
 
     private static final String CODEBUILD_TEST_IMAGE =
-            "public.ecr.aws/docker/library/busybox@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d";
+            "busybox@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d";
 
     static CodeBuildClient codebuild;
     static String reportGroupArn;

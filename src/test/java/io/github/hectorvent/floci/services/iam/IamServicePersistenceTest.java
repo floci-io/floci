@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -108,7 +109,61 @@ class IamServicePersistenceTest {
         assertTrue(restarted.findSecretKey(accessKeyId, "legacy-session-token").isEmpty());
     }
 
+    @Test
+    void expiredTemporarySessionsAreRemovedAfterRestart(@TempDir Path dir) {
+        Instant now = Instant.now();
+        IamService first = newService(dir);
+        first.registerSessionForAccount("000000000000", "ASIAEXPIREDPRESIGN", "expired-secret",
+                "expired-token", null, now.minusSeconds(1), null);
+        first.registerSessionForAccount("000000000000", "ASIAVALIDPRESIGN", "valid-secret",
+                "valid-token", null, now.plusSeconds(3600), null);
+
+        IamService restarted = newService(dir);
+        assertEquals(1, restarted.sweepExpiredSessions(now));
+        assertEquals(0, restarted.sweepExpiredSessions(now));
+        assertEquals("valid-secret", restarted.findSecretKey("ASIAVALIDPRESIGN", "valid-token").orElseThrow());
+
+        IamService subsequentRestart = newService(dir);
+        assertEquals(0, subsequentRestart.sweepExpiredSessions(now));
+    }
+
+    @Test
+    void expiredSessionsWithoutOriginAreRemovedFromTheirStoredAccounts(@TempDir Path dir) {
+        Instant now = Instant.now();
+        String foreignKey = "ASIAFOREIGNEXPIRED";
+        String legacyKey = "ASIALEGACYEXPIRED";
+        String validKey = "ASIAFOREIGNVALID";
+        StorageBackend<String, SessionCredential> raw = load(dir, "iam-sessions.json",
+                new TypeReference<Map<String, SessionCredential>>() {});
+        raw.put("111122223333/" + foreignKey,
+                new SessionCredential(foreignKey, "secret", "token", null, now.minusSeconds(1), null));
+        raw.put(legacyKey,
+                new SessionCredential(legacyKey, "secret", "token", null, now.minusSeconds(1), null));
+        raw.put("111122223333/" + validKey,
+                new SessionCredential(validKey, "secret", "token", null, now.plusSeconds(3600), null));
+
+        StorageBackend<String, SessionCredential> reloaded = load(dir, "iam-sessions.json",
+                new TypeReference<Map<String, SessionCredential>>() {});
+        IamService restarted = newService(dir,
+                new AccountAwareStorageBackend<>(reloaded, null, "000000000000"));
+        assertEquals(2, restarted.sweepExpiredSessions(now));
+        assertTrue(reloaded.get("111122223333/" + foreignKey).isEmpty());
+        assertTrue(reloaded.get(legacyKey).isEmpty());
+        assertTrue(reloaded.get("111122223333/" + validKey).isPresent());
+
+        StorageBackend<String, SessionCredential> subsequentReload = load(dir, "iam-sessions.json",
+                new TypeReference<Map<String, SessionCredential>>() {});
+        IamService subsequentRestart = newService(dir,
+                new AccountAwareStorageBackend<>(subsequentReload, null, "000000000000"));
+        assertEquals(0, subsequentRestart.sweepExpiredSessions(now));
+    }
+
     private IamService newService(Path dir) {
+        return newService(dir, load(dir, "iam-sessions.json",
+                new TypeReference<Map<String, SessionCredential>>() {}));
+    }
+
+    private IamService newService(Path dir, StorageBackend<String, SessionCredential> sessionStore) {
         return new IamService(
                 load(dir, "iam-users.json", new TypeReference<Map<String, IamUser>>() {}),
                 load(dir, "iam-groups.json", new TypeReference<Map<String, IamGroup>>() {}),
@@ -116,7 +171,7 @@ class IamServicePersistenceTest {
                 load(dir, "iam-policies.json", new TypeReference<Map<String, IamPolicy>>() {}),
                 load(dir, "iam-access-keys.json", new TypeReference<Map<String, AccessKey>>() {}),
                 load(dir, "iam-instance-profiles.json", new TypeReference<Map<String, InstanceProfile>>() {}),
-                load(dir, "iam-sessions.json", new TypeReference<Map<String, SessionCredential>>() {}),
+                sessionStore,
                 load(dir, "iam-account-aliases.json", new TypeReference<Map<String, String>>() {}),
                 load(dir, "iam-password-policy.json", new TypeReference<Map<String, AccountPasswordPolicy>>() {}),
                 load(dir, "iam-oidc-providers.json", new TypeReference<Map<String, OpenIDConnectProvider>>() {}),

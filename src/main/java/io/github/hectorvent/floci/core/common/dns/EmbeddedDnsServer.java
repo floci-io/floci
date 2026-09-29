@@ -21,10 +21,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.SequencedSet;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -38,6 +40,10 @@ import java.util.regex.Pattern;
  *
  * Also answers for any name a {@link DnsRecordSource} owns, which is how a service that holds
  * a private DNS zone (Cloud Map) gets real records rather than only API responses.
+ *
+ * A {@link DnsForwardingRuleSource} can steer a query away from all of that before it is
+ * resolved, which is how a Route 53 Resolver forwarding rule associated with the querying
+ * container's VPC sends matching names to the resolvers the rule names instead.
  *
  * All other queries are forwarded to the upstream resolvers read from /etc/resolv.conf
  * (Docker's embedded DNS at 127.0.0.11), falling back to the configured public resolvers
@@ -78,21 +84,35 @@ public class EmbeddedDnsServer {
     // Held as the Iterable a CDI Instance already is, so iterating resolves the beans lazily on
     // the packet path rather than at startup, where a source's storage must not be touched yet.
     private final Iterable<DnsRecordSource> recordSources;
+    private final Iterable<DnsForwardingRuleSource> forwardingRuleSources;
+    private final Iterable<DnsClientVpcSource> clientVpcSources;
 
     EmbeddedDnsServer(List<String> suffixes) {
         this(suffixes, List.of());
     }
 
     EmbeddedDnsServer(List<String> suffixes, Iterable<DnsRecordSource> recordSources) {
+        this(suffixes, recordSources, List.of(), List.of());
+    }
+
+    EmbeddedDnsServer(List<String> suffixes, Iterable<DnsRecordSource> recordSources,
+                      Iterable<DnsForwardingRuleSource> forwardingRuleSources,
+                      Iterable<DnsClientVpcSource> clientVpcSources) {
         this.suffixes.addAll(BUILTIN_SUFFIXES);
         this.suffixes.addAll(suffixes);
         this.recordSources = recordSources;
+        this.forwardingRuleSources = forwardingRuleSources;
+        this.clientVpcSources = clientVpcSources;
     }
 
     @Inject
     public EmbeddedDnsServer(EmulatorConfig config, ContainerDetector containerDetector, Vertx vertx,
-                             Instance<DnsRecordSource> recordSources) {
+                             Instance<DnsRecordSource> recordSources,
+                             Instance<DnsForwardingRuleSource> forwardingRuleSources,
+                             Instance<DnsClientVpcSource> clientVpcSources) {
         this.recordSources = recordSources;
+        this.forwardingRuleSources = forwardingRuleSources;
+        this.clientVpcSources = clientVpcSources;
         if (!containerDetector.isRunningInContainer()) {
             return;
         }
@@ -149,13 +169,18 @@ public class EmbeddedDnsServer {
             buf.getShort(); // qclass
             int questionEnd = buf.position();
 
-            vertx.<Optional<DnsAnswer>>executeBlocking(() -> resolveRecordWithOwnership(qname, myIp, qtype), false)
-                    .onSuccess(answer -> {
-                        if (answer.isEmpty()) {
-                            forwardAsync(vertx, socket, data, senderHost, senderPort);
+            vertx.<QueryPlan>executeBlocking(() -> planQuery(qname, senderHost, myIp, qtype), false)
+                    .onSuccess(plan -> {
+                        if (plan.answer().isEmpty()) {
+                            if (plan.ruleTargets().isEmpty()) {
+                                forwardAsync(vertx, socket, data, senderHost, senderPort);
+                            } else {
+                                forwardToRuleTargets(vertx, socket, data, senderHost, senderPort,
+                                        plan.ruleTargets(), qname, txId, questionOffset, questionEnd);
+                            }
                             return;
                         }
-                        DnsAnswer records = answer.orElseThrow();
+                        DnsAnswer records = plan.answer().orElseThrow();
                         byte[] response = !records.isEmpty()
                                 ? buildAResponse(data, txId, questionOffset, questionEnd, records)
                                 : buildEmptyResponse(data, txId, questionOffset, questionEnd,
@@ -194,15 +219,122 @@ public class EmbeddedDnsServer {
     }
 
     private Optional<DnsAnswer> resolveRecordWithOwnership(String name, String myIp, int type) {
+        Optional<DnsAnswer> emulatorName = resolveEmulatorName(name, myIp, type);
+        return emulatorName.isPresent() ? emulatorName : resolveFromRecordSources(name, type);
+    }
+
+    /**
+     * What happens to one query, decided on a worker thread because every step behind it reads
+     * storage: an answer Floci owns, a set of resolvers a rule forwards the query to, or neither,
+     * which leaves it to the upstream resolvers.
+     */
+    record QueryPlan(Optional<DnsAnswer> answer, List<DnsForwardingRule.Target> ruleTargets) {
+
+        static final QueryPlan UPSTREAM = new QueryPlan(Optional.empty(), List.of());
+
+        static QueryPlan answering(DnsAnswer answer) {
+            return new QueryPlan(Optional.of(answer), List.of());
+        }
+
+        static QueryPlan forwardingTo(List<DnsForwardingRule.Target> targets) {
+            return new QueryPlan(Optional.empty(), targets);
+        }
+    }
+
+    /**
+     * Names the emulator itself owns come first, whatever the rules say. Route 53 Resolver does
+     * the same for the AWS-internal domains it autodefines system rules for, so that a rule for a
+     * broad domain (or for "." itself) cannot send the platform's own names off to a resolver that
+     * knows nothing about them.
+     *
+     * <p>A forwarding rule associated with the querying VPC is then applied before Floci resolves
+     * the name from a record source, because a Resolver rule takes precedence over a private
+     * hosted zone that matches the same name.
+     */
+    QueryPlan planQuery(String name, String clientAddress, String myIp, int type) {
+        Optional<DnsAnswer> emulatorName = resolveEmulatorName(name, myIp, type);
+        if (emulatorName.isPresent()) {
+            return QueryPlan.answering(emulatorName.orElseThrow());
+        }
+        // A rule steers the name whatever the query asks about it, so this is deliberately not
+        // gated on the record type: the raw query is relayed to the rule's resolvers as it stands.
+        Optional<DnsForwardingRule> rule = matchingRule(name, clientAddress);
+        if (rule.isPresent() && rule.orElseThrow().forwards()) {
+            return QueryPlan.forwardingTo(rule.orElseThrow().targets());
+        }
+        return resolveFromRecordSources(name, type).map(QueryPlan::answering).orElse(QueryPlan.UPSTREAM);
+    }
+
+    private Optional<DnsAnswer> resolveEmulatorName(String name, String myIp, int type) {
         if (matchesSuffix(name)) {
             return Optional.of(type == 1 ? DnsAnswer.records(List.of(myIp), DnsAnswer.DEFAULT_TTL_SECONDS)
                     : DnsAnswer.noData());
         }
-        Optional<String> ec2PrivateDnsName = resolveEc2PrivateDnsName(name);
-        return ec2PrivateDnsName
+        return resolveEc2PrivateDnsName(name)
                 .map(address -> type == 1 ? DnsAnswer.records(List.of(address), DnsAnswer.DEFAULT_TTL_SECONDS)
-                        : DnsAnswer.noData())
-                .map(Optional::of).orElseGet(() -> resolveFromRecordSources(name, type));
+                        : DnsAnswer.noData());
+    }
+
+    /**
+     * The rule that governs this query: the most specific one whose domain matches the name among
+     * those associated with the VPC the query came from. A source that throws is skipped rather
+     * than allowed to fail the query, which is how {@link #resolveFromRecordSources} treats one too.
+     */
+    Optional<DnsForwardingRule> matchingRule(String name, String clientAddress) {
+        if (forwardingRuleSources == null || name == null || name.isBlank()) {
+            return Optional.empty();
+        }
+        Optional<DnsClientVpcSource.ClientVpc> clientVpc = vpcForClient(clientAddress);
+        if (clientVpc.isEmpty()) {
+            return Optional.empty();
+        }
+        DnsClientVpcSource.ClientVpc origin = clientVpc.orElseThrow();
+        DnsForwardingRule best = null;
+        for (DnsForwardingRuleSource source : forwardingRuleSources) {
+            try {
+                for (DnsForwardingRule rule :
+                        source.rulesFor(origin.accountId(), origin.region(), origin.vpcId())) {
+                    if (rule == null || !rule.matches(name)) {
+                        continue;
+                    }
+                    if (best == null || rule.specificity() > best.specificity()) {
+                        best = rule;
+                    }
+                }
+            } catch (Exception e) {
+                LOG.debugv("DNS forwarding rule source {0} failed for {1}: {2}",
+                        source.getClass().getSimpleName(), name, e.getMessage());
+            }
+        }
+        return Optional.ofNullable(best);
+    }
+
+    private Optional<DnsClientVpcSource.ClientVpc> vpcForClient(String clientAddress) {
+        if (clientVpcSources == null || clientAddress == null || clientAddress.isBlank()) {
+            return Optional.empty();
+        }
+        for (DnsClientVpcSource source : clientVpcSources) {
+            try {
+                Optional<DnsClientVpcSource.ClientVpc> clientVpc =
+                        source.vpcForClient(clientAddress.trim());
+                if (clientVpc != null && clientVpc.isPresent() && isUsableOrigin(clientVpc.orElseThrow())) {
+                    return clientVpc;
+                }
+            } catch (Exception e) {
+                LOG.debugv("DNS client VPC source {0} failed for {1}: {2}",
+                        source.getClass().getSimpleName(), clientAddress, e.getMessage());
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static boolean isUsableOrigin(DnsClientVpcSource.ClientVpc clientVpc) {
+        return isPresent(clientVpc.accountId()) && isPresent(clientVpc.region())
+                && isPresent(clientVpc.vpcId());
+    }
+
+    private static boolean isPresent(String value) {
+        return value != null && !value.isBlank();
     }
 
     /**
@@ -229,10 +361,25 @@ public class EmbeddedDnsServer {
     }
 
     byte[] buildEmptyResponse(byte[] query, short txId, int questionOffset, int questionEnd, int responseCode) {
+        return buildAnswerlessResponse(query, txId, questionOffset, questionEnd,
+                (short) (0x8580 | responseCode));
+    }
+
+    /**
+     * The failure answer for a query a forwarding rule claimed and no target answered. Not
+     * authoritative, unlike {@link #buildEmptyResponse}: Floci is not the authority for a name a
+     * rule sends elsewhere, it only failed to reach the resolver that is.
+     */
+    byte[] buildServerFailureResponse(byte[] query, short txId, int questionOffset, int questionEnd) {
+        return buildAnswerlessResponse(query, txId, questionOffset, questionEnd, (short) 0x8182);
+    }
+
+    private static byte[] buildAnswerlessResponse(byte[] query, short txId, int questionOffset,
+                                                  int questionEnd, short flags) {
         UdpPayload payload = udpPayload(query, questionEnd);
         ByteBuffer response = ByteBuffer.allocate(12 + questionEnd - questionOffset + (payload.edns() ? 11 : 0));
         response.putShort(txId);
-        response.putShort((short) (0x8580 | responseCode));
+        response.putShort(flags);
         response.putShort((short) 1);
         response.putShort((short) 0);
         response.putShort((short) 0);
@@ -405,27 +552,70 @@ public class EmbeddedDnsServer {
     }
 
     /**
+     * Sends the query to the resolvers a forwarding rule names instead of to the upstreams. The
+     * order is shuffled because Route 53 Resolver picks a rule's target at random and retries
+     * another one when it does not answer.
+     *
+     * <p>A rule whose targets are all unreachable fails this query with SERVFAIL rather than
+     * falling back to the upstream resolvers. The rule said where the name lives, so an upstream
+     * answer for it would be the wrong answer, and resolution of every other name is untouched.
+     */
+    private void forwardToRuleTargets(Vertx vertx, DatagramSocket socket, byte[] query,
+                                      String senderHost, int senderPort,
+                                      List<DnsForwardingRule.Target> targets, String qname,
+                                      short txId, int questionOffset, int questionEnd) {
+        vertx.executeBlocking(() -> forwardToTargets(query, shuffled(targets)))
+                .onSuccess(response ->
+                        socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {}))
+                .onFailure(e -> {
+                    LOG.warnv("Resolver rule forwarding for {0} failed on every target {1}: {2}",
+                            qname, targets, e.getMessage());
+                    socket.send(Buffer.buffer(
+                                    buildServerFailureResponse(query, txId, questionOffset, questionEnd)),
+                            senderPort, senderHost, v -> {});
+                });
+    }
+
+    private static List<DnsForwardingRule.Target> shuffled(List<DnsForwardingRule.Target> targets) {
+        if (targets.size() < 2) {
+            return targets;
+        }
+        List<DnsForwardingRule.Target> order = new ArrayList<>(targets);
+        Collections.shuffle(order, ThreadLocalRandom.current());
+        return order;
+    }
+
+    /**
      * Forwards the query to each upstream in order and returns the first valid UDP response.
      * Throws if every upstream times out or errors, so the caller can log a single warning.
      * The {@code upstreamPort} is parameterised for tests; production always uses {@link #DNS_PORT}.
      */
     static byte[] forwardToUpstreams(byte[] query, List<String> upstreams, int upstreamPort) throws Exception {
+        return forwardToTargets(query, upstreams.stream()
+                .map(upstream -> new DnsForwardingRule.Target(upstream, upstreamPort)).toList());
+    }
+
+    /**
+     * Forwards the query to each target in order and returns the first valid UDP response. Targets
+     * carry their own port because a resolver rule may name a resolver that does not listen on 53.
+     */
+    static byte[] forwardToTargets(byte[] query, List<DnsForwardingRule.Target> targets) throws Exception {
         Exception last = null;
-        for (String upstream : upstreams) {
+        for (DnsForwardingRule.Target target : targets) {
             try (java.net.DatagramSocket fwd = new java.net.DatagramSocket()) {
                 fwd.setSoTimeout(FORWARD_TIMEOUT_MS);
-                InetAddress addr = InetAddress.getByName(upstream);
-                fwd.send(new DatagramPacket(query, query.length, addr, upstreamPort));
+                InetAddress addr = InetAddress.getByName(target.address());
+                fwd.send(new DatagramPacket(query, query.length, addr, target.port()));
                 byte[] buf = new byte[MAX_DNS_UDP_RESPONSE];
                 DatagramPacket resp = new DatagramPacket(buf, buf.length);
                 fwd.receive(resp);
                 return Arrays.copyOf(resp.getData(), resp.getLength());
             } catch (Exception e) {
                 last = e;
-                LOG.debugv("DNS forward to {0} failed: {1}", upstream, e.getMessage());
+                LOG.debugv("DNS forward to {0} failed: {1}", target.address(), e.getMessage());
             }
         }
-        throw last != null ? last : new IOException("no upstream resolvers configured");
+        throw last != null ? last : new IOException("no resolvers to forward to");
     }
 
     /**

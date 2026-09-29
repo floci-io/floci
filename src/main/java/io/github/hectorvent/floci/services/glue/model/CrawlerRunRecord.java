@@ -17,6 +17,7 @@ public class CrawlerRunRecord {
     private String currentMessagePrefix;
     private String currentCrawlId;
     private String currentOriginRunId;
+    private String currentWorkflowRunId;
     private Instant lastStart;
     private String lastStatus;
     private String lastMessagePrefix;
@@ -43,6 +44,9 @@ public class CrawlerRunRecord {
 
     public String getCurrentOriginRunId() { return currentOriginRunId; }
     public void setCurrentOriginRunId(String currentOriginRunId) { this.currentOriginRunId = currentOriginRunId; }
+
+    public String getCurrentWorkflowRunId() { return currentWorkflowRunId; }
+    public void setCurrentWorkflowRunId(String currentWorkflowRunId) { this.currentWorkflowRunId = currentWorkflowRunId; }
 
     public String getLastStatus() { return lastStatus; }
     public void setLastStatus(String lastStatus) { this.lastStatus = lastStatus; }

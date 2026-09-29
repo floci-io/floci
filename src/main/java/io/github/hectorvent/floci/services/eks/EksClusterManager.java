@@ -1,17 +1,18 @@
 package io.github.hectorvent.floci.services.eks;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.ContainerNetwork;
-import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource;
+import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
@@ -71,7 +72,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -80,7 +80,8 @@ import java.util.stream.Collectors;
  * Not used when {@code floci.services.eks.mock=true}.
  */
 @ApplicationScoped
-public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteTableListener {
+public class EksClusterManager
+        implements ClusterNodeInstanceProvider, VpcRouteTableListener, DnsClientVpcSource {
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
@@ -173,6 +174,61 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
     }
 
     record ClusterNodeRecord(String accountId, String region, Instance instance) {}
+
+    /** Which cluster owns a Docker address its node container answers on, and where that cluster sits. */
+    record ClusterNodeVpc(String clusterResourceName, ClientVpc clientVpc) {}
+
+    private final Map<String, ClusterNodeVpc> clusterNodeVpcs = new ConcurrentHashMap<>();
+
+    /**
+     * A DNS query from a cluster container originates in the account, region and VPC the cluster was
+     * created with, which is what a Route 53 Resolver rule has to belong to for the query to follow
+     * it. A cluster with no resolvable VPC id claims no address: its queries resolve as they do
+     * without any rule rather than picking up another cluster's.
+     */
+    @Override
+    public Optional<ClientVpc> vpcForClient(String clientAddress) {
+        if (clientAddress == null || clientAddress.isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(clusterNodeVpcs.get(clientAddress.trim()))
+                .map(ClusterNodeVpc::clientVpc);
+    }
+
+    private void registerClusterNodeVpc(Cluster cluster, String accountId, String region,
+                                        Set<String> addresses) {
+        String clusterKey = clusterResourceName(cluster);
+        forgetClusterNodeVpcs(clusterKey);
+        String vpcId = cluster.getResourcesVpcConfig() != null
+                ? cluster.getResourcesVpcConfig().getVpcId() : null;
+        if (vpcId == null || vpcId.isBlank()) {
+            return;
+        }
+        Set<String> usable = new LinkedHashSet<>();
+        for (String address : addresses) {
+            if (address != null && !address.isBlank()) {
+                usable.add(address);
+            }
+        }
+        if (usable.isEmpty()) {
+            // Without the container's own addresses there is nothing to recognise its queries by, so
+            // resolver rules cannot apply to this cluster. Said out loud rather than left as silence:
+            // the cluster runs fine and only rule-steered names behave as though no rule existed.
+            LOG.warnv("Resolver rules will not apply to EKS cluster {0} in {1}: its container"
+                    + " addresses could not be determined, so its DNS queries cannot be attributed"
+                    + " to the VPC. Restart the cluster to retry.", cluster.getName(), vpcId);
+            return;
+        }
+        ClientVpc clientVpc = new ClientVpc(accountId, region, vpcId);
+        for (String address : usable) {
+            clusterNodeVpcs.put(address, new ClusterNodeVpc(clusterKey, clientVpc));
+        }
+    }
+
+    private void forgetClusterNodeVpcs(String clusterResourceName) {
+        clusterNodeVpcs.entrySet().removeIf(
+                entry -> clusterResourceName.equals(entry.getValue().clusterResourceName()));
+    }
 
     public EksClusterManager(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
@@ -1692,6 +1748,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
             Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
             nodeInstance.setDockerContainerId(containerId);
             clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
+            registerClusterNodeVpc(cluster, accountId, region, containerIps.allIps());
             for (Consumer<Instance> listener : nodeRegistrationListeners) {
                 try {
                     listener.accept(nodeInstance);
@@ -1728,7 +1785,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
                 metadataServer.reconcileContainerAddresses(containerIps.allIps(), nodeInstance);
             }
 
-            ContainerExecResult install = execInContainerForResult(containerId,
+            ContainerExec.Result install = execInContainerForResult(containerId,
                     Ec2MetadataProxy.installCommand(), 180);
             if (install.exitCode() != 0) {
                 LOG.warnv("Could not install IMDS proxy dependencies for EKS cluster {0}: {1}",
@@ -1739,7 +1796,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
             String flociHost = dockerHostResolver.resolve();
             int imdsPort = config.services().ec2().imdsPort();
 
-            ContainerExecResult start = execInContainerForResult(containerId,
+            ContainerExec.Result start = execInContainerForResult(containerId,
                     Ec2MetadataProxy.startCommand(flociHost, imdsPort), 30);
             if (start.exitCode() != 0) {
                 LOG.warnv("Could not start link-local IMDS proxy for EKS cluster {0}: {1}",
@@ -1763,7 +1820,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
             return;
         }
         try {
-            ContainerExecResult install = execInContainerForResult(containerId,
+            ContainerExec.Result install = execInContainerForResult(containerId,
                     Ec2MetadataProxy.installCommand(), 180);
             if (install.exitCode() != 0) {
                 LOG.warnv("Could not install Pod Identity relay dependencies for EKS cluster {0}: {1}",
@@ -1774,7 +1831,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
             String flociHost = dockerHostResolver.resolve();
             int flociPort = config.port();
 
-            ContainerExecResult start = execInContainerForResult(containerId,
+            ContainerExec.Result start = execInContainerForResult(containerId,
                     Ec2MetadataProxy.podIdentityStartCommand(flociHost, flociPort), 30);
             if (start.exitCode() != 0) {
                 LOG.warnv("Could not start link-local Pod Identity relay for EKS cluster {0}: {1}",
@@ -1800,7 +1857,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
             String[] routingCmd = EksPodNetworkRouting.buildRoutingCommand(
                     EksPodNetworkRouting.DEFAULT_POD_CIDR,
                     endpoints);
-            ContainerExecResult routing = execInContainerForResult(containerId, routingCmd, 15);
+            ContainerExec.Result routing = execInContainerForResult(containerId, routingCmd, 15);
             if (routing.exitCode() != 0) {
                 LOG.warnv("Could not configure link-local pod network routing for EKS cluster {0}: {1}",
                         cluster.getName(), routing.summary());
@@ -1859,7 +1916,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
                     programmedClusterRoutes.put(clusterKey, desiredDests);
                     return;
                 }
-                ContainerExecResult result = execInContainerForResult(containerId, cmd.get(), 30);
+                ContainerExec.Result result = execInContainerForResult(containerId, cmd.get(), 30);
                 if (result.exitCode() != 0) {
                     LOG.warnv("Could not program VPC routes for EKS cluster {0}: {1}",
                             cluster.getName(), result.summary());
@@ -1936,6 +1993,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
             activeClusters.remove(clusterKey);
             programmedClusterRoutes.remove(clusterKey);
         }
+        forgetClusterNodeVpcs(clusterKey);
         ClusterNodeRecord record = clusterNodeInstances.remove(clusterKey);
         Instance nodeInstance = record != null ? record.instance() : null;
         if (metadataServer != null && nodeInstance != null) {
@@ -2104,38 +2162,8 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
         return record != null ? record.instance() : null;
     }
 
-    ContainerExecResult execInContainerForResult(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
-        DockerClient dockerClient = lifecycleManager.getDockerClient();
-        ExecCreateCmdResponse exec = dockerClient
-                .execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec();
-
-        StringBuilder output = new StringBuilder();
-        boolean completed = dockerClient.execStartCmd(exec.getId())
-                .exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onNext(Frame frame) {
-                        if (frame != null && frame.getPayload() != null) {
-                            output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
-                        }
-                    }
-                })
-                .awaitCompletion(timeoutSeconds, TimeUnit.SECONDS);
-
-        if (!completed) {
-            return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s");
-        }
-        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-        return new ContainerExecResult(exitCode != null ? exitCode : -1, output.toString());
-    }
-
-    record ContainerExecResult(long exitCode, String output) {
-        String summary() {
-            return output == null || output.isBlank() ? "(no output)" : output.trim();
-        }
+    ContainerExec.Result execInContainerForResult(String containerId, String[] cmd, int timeoutSeconds) {
+        return ContainerExec.runMerged(lifecycleManager.getDockerClient(), containerId, cmd, timeoutSeconds);
     }
 
     /**
@@ -2171,11 +2199,7 @@ public class EksClusterManager implements ClusterNodeInstanceProvider, VpcRouteT
 
 
     private String execInContainer(String containerId, String[] cmd) throws Exception {
-        ContainerExecResult result = execInContainerForResult(containerId, cmd, 10);
-        if (result.exitCode() == -1 && result.output().startsWith("Timed out")) {
-            throw new RuntimeException("exec timed out in container " + containerId);
-        }
-        return result.output();
+        return execInContainerForResult(containerId, cmd, 10).throwIfTimedOut(containerId).stdout();
     }
 
     private String extractYamlField(String yaml, String fieldName) {

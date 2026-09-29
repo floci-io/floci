@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elbv2;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
@@ -62,6 +63,31 @@ class ElbV2DefaultAttributesIntegrationTest {
         .when().post("/")
         .then().statusCode(200)
             .extract().path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+    }
+
+    /**
+     * Network load balancers have their own hosted zone per region (the ELB table in the AWS
+     * General Reference, as the Terraform provider transcribes it); floci reported the ALB zone
+     * for every type before the per-region facts landed.
+     */
+    @Test
+    void eachLoadBalancerTypeReportsItsOwnHostedZone() {
+        String albArn = createLoadBalancer("zone-alb", "application", "10.101.");
+        String nlbArn = createLoadBalancer("zone-nlb", "network", "10.102.");
+
+        assertEquals("Z35SXDOTRQ7X7K", canonicalHostedZoneId(albArn));
+        assertEquals("Z26RNL4JYFTOTI", canonicalHostedZoneId(nlbArn));
+    }
+
+    private String canonicalHostedZoneId(String arn) {
+        return given()
+            .formParam("Action", "DescribeLoadBalancers")
+            .formParam("Version", "2015-12-01")
+            .formParam("LoadBalancerArns.member.1", arn)
+            .header("Authorization", AUTH)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.CanonicalHostedZoneId");
     }
 
     @Test

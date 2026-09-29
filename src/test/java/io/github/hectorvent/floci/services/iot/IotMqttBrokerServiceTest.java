@@ -668,11 +668,14 @@ class IotMqttBrokerServiceTest {
     void aFailedRestartKeepsRulesOff() throws Exception {
         broker.startIfEnabled();
         broker.stop();
+        awaitClosed(plainPort);
+        awaitClosed(tlsPort);
         try (ServerSocket blocker = new ServerSocket()) {
             blocker.bind(new InetSocketAddress("127.0.0.1", tlsPort));
 
             assertThrows(IllegalStateException.class, broker::startIfEnabled);
             assertFalse(rulesRun(), "a failed restart leaves rules off");
+            awaitClosed(plainPort);
         }
 
         broker.startIfEnabled();

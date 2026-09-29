@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExecStubs;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -17,6 +18,7 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
+import io.github.hectorvent.floci.services.kinesisanalytics.model.Snapshot;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
@@ -136,6 +138,21 @@ class FlinkContainerManagerTest {
         EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
         when(storage.efs()).thenReturn(efs);
         return storage;
+    }
+
+    @Test
+    void deleteSnapshotFilesRemovesTheSavepointInsideTheJobManager() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, "jm-container-id", 0, "", "");
+        FlinkApplication app = application("my-app");
+        app.setContainerId("jm-container-id");
+        Snapshot snapshot = new Snapshot();
+        snapshot.setFlinkLocation("/savepoints/savepoint-1");
+
+        manager.deleteSnapshotFiles(app, snapshot);
+
+        assertEquals(List.of(List.of("rm", "-rf", "/savepoints/savepoint-1")), commands);
     }
 
     private FlinkApplication application(String name) {
