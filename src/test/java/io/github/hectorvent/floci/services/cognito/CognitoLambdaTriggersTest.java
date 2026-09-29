@@ -28,14 +28,14 @@ import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -1014,6 +1014,30 @@ class CognitoLambdaTriggersTest {
     // =========================================================================
     // CUSTOM_AUTH triggers (already covered indirectly; check triggerSource wiring)
     // =========================================================================
+
+    @Test
+    void customPasswordChallengeRequiresTotpBeforeIssuingTokens() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of(
+                "DefineAuthChallenge", "arn:aws:lambda:::define",
+                "CreateAuthChallenge", "arn:aws:lambda:::create"));
+        seedUser(pool, "alice", "Perm1234!");
+        service.setUserPoolMfaConfig(pool.getId(), "ON", true, false);
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("challengeName", "PASSWORD_VERIFIER")))
+                .thenReturn(ok(Map.of("issueTokens", true)));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of()));
+
+        Map<String, Object> started = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "alice"));
+        assertEquals("PASSWORD_VERIFIER", started.get("ChallengeName"));
+        Map<String, Object> completed = service.respondToAuthChallenge(client.getClientId(),
+                "PASSWORD_VERIFIER", (String) started.get("Session"),
+                Map.of("USERNAME", "alice", "ANSWER", "Perm1234!"));
+        assertEquals("MFA_SETUP", completed.get("ChallengeName"));
+        assertFalse(completed.containsKey("AuthenticationResult"));
+    }
 
     @Test
     @SuppressWarnings("unchecked")

@@ -12,8 +12,6 @@ import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -22,6 +20,8 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -154,6 +154,28 @@ class CognitoTotpMfaTest {
                 () -> service.associateSoftwareToken(null, session));
         assertEquals("NotAuthorizedException", expired.getErrorCode());
         assertTrue(expired.getMessage().contains("expired"));
+    }
+
+    @Test
+    void associationRejectsPoolsWithoutSoftwareTokenMfa() {
+        service.setUserPoolMfaConfig(pool.getId(), "OFF", null, false);
+        String accessToken = (String) ((Map<?, ?>) passwordLogin().get("AuthenticationResult")).get("AccessToken");
+
+        AwsException unsupported = assertThrows(AwsException.class,
+                () -> service.associateSoftwareToken(accessToken, null));
+        assertEquals("SoftwareTokenMFANotFoundException", unsupported.getErrorCode());
+    }
+
+    @Test
+    void invalidSetupCodeUsesEnableSoftwareTokenMfaError() {
+        String loginSession = (String) passwordLogin().get("Session");
+        Map<String, Object> associated = service.associateSoftwareToken(null, loginSession);
+        String code = CognitoTotp.code((String) associated.get("SecretCode"), clock.instant());
+        String wrongCode = code.equals("000000") ? "000001" : "000000";
+
+        AwsException mismatch = assertThrows(AwsException.class,
+                () -> service.verifySoftwareToken(null, (String) associated.get("Session"), wrongCode));
+        assertEquals("EnableSoftwareTokenMFAException", mismatch.getErrorCode());
     }
 
     @Test

@@ -303,7 +303,8 @@ final class CognitoAuthFlowHandler {
         }
         UserPool pool = service.describeUserPool(poolId);
         if (!Boolean.TRUE.equals(pool.getSoftwareTokenMfaEnabled())) {
-            throw new AwsException("InvalidParameterException", "Software token MFA is not enabled for this user pool", 400);
+            throw new AwsException("SoftwareTokenMFANotFoundException",
+                    "Software token MFA is not enabled for this user pool", 400);
         }
         String secret = CognitoTotp.newSecret();
         if (state != null && !totpSessions.remove(session, state)) {
@@ -339,7 +340,8 @@ final class CognitoAuthFlowHandler {
         }
         if (!service.activateSoftwareTokenMfa(poolId, username, state == null ? null : state.secret(),
                 userCode, clock.instant())) {
-            throw new AwsException("CodeMismatchException", "Invalid verification code provided, please try again.", 400);
+            throw new AwsException("EnableSoftwareTokenMFAException",
+                    "Invalid verification code provided, please try again.", 400);
         }
         Map<String, Object> result = new HashMap<>();
         result.put("Status", "SUCCESS");
@@ -1194,10 +1196,7 @@ final class CognitoAuthFlowHandler {
         }
         if (Boolean.TRUE.equals(defineResp.get("issueTokens"))) {
             customAuthSessions.remove(session);
-            Map<String, Object> result = new HashMap<>();
-            result.put("AuthenticationResult",
-                    issueTokens(pool, client, user, "TokenGeneration_Authentication", state.clientMetadata));
-            return result;
+            return completePrimaryAuth(pool, client, user, "TokenGeneration_Authentication", state.clientMetadata);
         }
 
         String nextChallenge = (String) defineResp.getOrDefault("challengeName", "CUSTOM_CHALLENGE");
