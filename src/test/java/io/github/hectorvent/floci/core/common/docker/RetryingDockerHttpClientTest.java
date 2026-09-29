@@ -96,7 +96,7 @@ class RetryingDockerHttpClientTest {
         byte[] body = "{\"Image\":\"busybox\"}".getBytes(StandardCharsets.UTF_8);
         Request create = Request.builder()
                 .method(Request.Method.POST)
-                .path("/containers/create")
+                .path("/containers/create?name=x")
                 .bodyBytes(body)
                 .build();
 
@@ -109,7 +109,7 @@ class RetryingDockerHttpClientTest {
         assertEquals(Arrays.hashCode(delegate.seenRequests.get(0).bodyBytes()),
                 Arrays.hashCode(delegate.seenRequests.get(1).bodyBytes()),
                 "the retried attempt must carry byte-identical body content");
-        assertEquals("/containers/create", delegate.seenRequests.get(1).path());
+        assertEquals("/containers/create?name=x", delegate.seenRequests.get(1).path());
     }
 
     @Test
@@ -225,6 +225,66 @@ class RetryingDockerHttpClientTest {
         assertThrows(RuntimeException.class, () -> createClient.execute(execCreate));
         assertEquals(1, createDelegate.calls.get(),
                 "exec-create must be excluded too, the /exec exclusion covers both spellings");
+    }
+
+    @Test
+    void doesNotRetryUnnamedContainerCreate() {
+        // Catches: replaying an unnamed containers/create whose first attempt landed, which
+        // creates a second orphaned container nobody can adopt.
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            throw brokenPipe();
+        });
+        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+        Request create = Request.builder()
+                .method(Request.Method.POST)
+                .path("/containers/create")
+                .bodyBytes("{}".getBytes(StandardCharsets.UTF_8))
+                .build();
+
+        RuntimeException thrown = assertThrows(RuntimeException.class, () -> client.execute(create));
+        assertEquals("Broken pipe", thrown.getCause().getMessage());
+        assertEquals(1, delegate.calls.get());
+    }
+
+    @Test
+    void doesNotRetryNetworkCreate() {
+        // Catches: replaying networks/create, where the replay gets a 409 that the VPC manager
+        // swallows, so the VPC silently loses its network.
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            throw brokenPipe();
+        });
+        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+        Request create = Request.builder()
+                .method(Request.Method.POST)
+                .path("/networks/create")
+                .bodyBytes("{}".getBytes(StandardCharsets.UTF_8))
+                .build();
+
+        RuntimeException thrown = assertThrows(RuntimeException.class, () -> client.execute(create));
+        assertEquals("Broken pipe", thrown.getCause().getMessage());
+        assertEquals(1, delegate.calls.get());
+    }
+
+    @Test
+    void retriesNamedContainerCreate() {
+        // Catches: over-broad exclusion that stops replaying named creates, which are safe
+        // because the caller adopts the container on a 409.
+        Response ok = mock(Response.class);
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            if (attempt == 1) {
+                throw brokenPipe();
+            }
+            return ok;
+        });
+        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+        Request create = Request.builder()
+                .method(Request.Method.POST)
+                .path("/containers/create?platform=linux%2Famd64&name=floci-x")
+                .bodyBytes("{}".getBytes(StandardCharsets.UTF_8))
+                .build();
+
+        assertSame(ok, client.execute(create));
+        assertEquals(2, delegate.calls.get());
     }
 
     @Test

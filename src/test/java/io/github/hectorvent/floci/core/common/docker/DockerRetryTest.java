@@ -138,6 +138,23 @@ class DockerRetryTest {
     }
 
     @Test
+    void interruptedExceptionFromOperationRestoresFlagAndIsNotRetried() {
+        // Catches: wrapping an InterruptedException from the operation without restoring the
+        // thread's interrupt flag, or retrying past a cancellation.
+        AtomicInteger calls = new AtomicInteger();
+        try {
+            assertThrows(RuntimeException.class, () -> DockerRetry.call(5, 0L, () -> {
+                calls.incrementAndGet();
+                throw new InterruptedException("stop");
+            }));
+            assertTrue(Thread.currentThread().isInterrupted());
+            assertEquals(1, calls.get());
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
     void rejectsMaxAttemptsBelowOne() {
         AtomicInteger calls = new AtomicInteger();
         assertThrows(IllegalArgumentException.class,

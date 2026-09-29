@@ -122,6 +122,10 @@ public final class DockerRetry {
             try {
                 return call.run();
             } catch (Exception e) {
+                if (e instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                    throw asUnchecked(e);
+                }
                 if (attempt >= maxAttempts || !isTransientIo(e)) {
                     throw asUnchecked(e);
                 }

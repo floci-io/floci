@@ -122,7 +122,38 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
         if (request.path().contains("/exec")) {
             return false;
         }
+        if (isNonIdempotentCreate(request)) {
+            return false;
+        }
         return request.bodyBytes() != null || request.body() == null;
+    }
+
+    /**
+     * Creates whose replay after a lost response is harmful. A replayed {@code networks/create}
+     * gets a 409 that callers swallow, silently losing the network. A replayed unnamed
+     * {@code containers/create} makes a second, orphaned container; a named one is safe because
+     * the caller adopts the existing container on a 409.
+     */
+    private static boolean isNonIdempotentCreate(Request request) {
+        if (!"POST".equals(request.method())) {
+            return false;
+        }
+        String path = request.path();
+        int queryStart = path.indexOf('?');
+        String route = queryStart < 0 ? path : path.substring(0, queryStart);
+        if (route.endsWith("/networks/create")) {
+            return true;
+        }
+        if (route.endsWith("/containers/create")) {
+            String query = queryStart < 0 ? "" : path.substring(queryStart + 1);
+            for (String param : query.split("&")) {
+                if (param.startsWith("name=")) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
     }
 
     @Override
