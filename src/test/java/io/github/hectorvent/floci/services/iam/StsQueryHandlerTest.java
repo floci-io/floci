@@ -314,6 +314,19 @@ class StsQueryHandlerTest {
     }
 
     @Test
+    void assumeRoleWithWebIdentityRejectsMalformedRoleArnWhenTokenCannotBeVerified() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "not-an-arn");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("WebIdentityToken", "opaque-token");
+
+        Response response = newHandler(null).handle("AssumeRoleWithWebIdentity", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>ValidationError</Code>"));
+    }
+
+    @Test
     void assumeRoleWithSAMLRejectsDurationSecondsBelowMinimum() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");

@@ -265,6 +265,10 @@ public class StsQueryHandler {
         if (validation != null) {
             return validation;
         }
+        validation = validateIamRoleArn(getParam(params, "RoleArn"));
+        if (validation != null) {
+            return validation;
+        }
         Response durationValidation = validateDurationSeconds(params, 900, 43200);
         if (durationValidation != null) {
             return durationValidation;
@@ -322,6 +326,25 @@ public class StsQueryHandler {
                 .elem("SubjectFromWebIdentityToken", subject)
                 .build();
         return Response.ok(AwsQueryResponse.envelope("AssumeRoleWithWebIdentity", AwsNamespaces.STS, result)).build();
+    }
+
+    private Response validateIamRoleArn(String roleArn) {
+        if (!AwsArnUtils.isArn(roleArn)) {
+            return AwsQueryResponse.error("ValidationError", "RoleArn must be a valid IAM role ARN.",
+                    AwsNamespaces.STS, 400);
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(roleArn);
+        boolean validRoleArn = arn.partition().matches(AwsArnUtils.PARTITION_REGEX)
+                && "iam".equals(arn.service())
+                && arn.region().isEmpty()
+                && arn.accountId().matches("[0-9]{12}")
+                && arn.resource().startsWith("role/")
+                && arn.resource().length() > "role/".length();
+        if (!validRoleArn) {
+            return AwsQueryResponse.error("ValidationError", "RoleArn must be a valid IAM role ARN.",
+                    AwsNamespaces.STS, 400);
+        }
+        return null;
     }
 
     /** The claims of a token Floci issued and verified, used to fill the response accurately. */
