@@ -640,7 +640,8 @@ class AppSyncResolverExecutorTest {
                 .thenReturn(new InvokeResult(200, null, "{\"id\":\"42\"}".getBytes(StandardCharsets.UTF_8),
                         null, "request-id"));
         AppSyncResolverExecutor lambdaExecutor = new AppSyncResolverExecutor(appSync, jsRuntime,
-                new AppSyncDataSourceInvokers(List.of(new LambdaDataSourceInvoker(lambdaService, objectMapper))),
+                new AppSyncDataSourceInvokers(List.of(new LambdaDataSourceInvoker(lambdaService, objectMapper)),
+                        mock(AppSyncDataSourceAuthorizer.class)),
                 vtlEngine(), objectMapper);
         Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
         resolver.setDataSourceName("accountFunction");
