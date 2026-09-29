@@ -354,7 +354,8 @@ public class ResourceGroupsTaggingService implements Resettable {
         Map<String, ViewEntry> byArn = new TreeMap<>();
         for (ResourceTagMapping stored : store.values()) {
             String arn = stored.getResourceArn();
-            if (isVisible(arn, region, accountId)) {
+            // ponytail: IAM is the only global service with store-only ARNs handled here; another would need adding.
+            if (isVisible(arn, region, accountId) && !AwsArnUtils.isArnFor(arn, "iam")) {
                 byArn.computeIfAbsent(arn, ViewEntry::of).mapping().getTags().putAll(stored.getTags());
             }
         }

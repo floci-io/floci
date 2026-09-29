@@ -519,6 +519,11 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+
+        getResources("""
+                {"TagFilters": [%s]}
+                """.formatted(tagFilter("fd", marker)))
+            .body("ResourceTagMappingList", empty());
     }
 
     @Test

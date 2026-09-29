@@ -94,10 +94,12 @@ decides, also for tags the tagging store holds for that ARN, so an
 `us-east-1`. A region-less ARN known only to the tagging store is visible in
 every region. As in AWS, a resource the owning service reports without a
 region, or in the region `global` as IAM does for users and roles, is never
-listed, and `TagResources` does not forward to its owning service. Every store
-is per account, so results are scoped to the calling account. An ARN with an
-empty account segment, such as an API Gateway ARN, only leaves the account out
-of the ARN; the resource is still listed for the account that owns it.
+listed, and `TagResources` does not forward to its owning service; an IAM ARN
+is never listed at all, even one only the tagging store holds, for example
+after the role is deleted. Every store is per account, so results are scoped
+to the calling account. An ARN with an empty account segment, such as an API
+Gateway ARN, only leaves the account out of the ARN; the resource is still
+listed for the account that owns it.
 
 ## Configuration
 

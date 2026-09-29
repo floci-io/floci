@@ -180,6 +180,14 @@ class ResourceGroupsTaggingServiceTest {
     }
 
     @Test
+    void storeOnlyIamArnIsNotListed() {
+        ResourceGroupsTaggingService service = service(List.of(), List.of());
+        service.tagResources(List.of(ROLE_ARN), Map.of("team", "a"), REGION);
+
+        assertTrue(allResources(service).isEmpty());
+    }
+
+    @Test
     void failingProviderIsSkipped() {
         ResourceProvider failing = new ResourceProvider() {
             @Override
