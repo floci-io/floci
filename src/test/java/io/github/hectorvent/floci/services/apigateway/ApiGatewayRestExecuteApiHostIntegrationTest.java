@@ -3,11 +3,15 @@ package io.github.hectorvent.floci.services.apigateway;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.testing.ConfiguredHostnameProfile;
 import io.github.hectorvent.floci.testutil.ExecuteApiRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -21,6 +25,9 @@ import static org.hamcrest.Matchers.equalTo;
 class ApiGatewayRestExecuteApiHostIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    @Inject
+    ApiGatewayV2Service v2Service;
 
     @Test
     void routesRestApiVirtualHostToDeployedMethods() {
@@ -231,6 +238,35 @@ class ApiGatewayRestExecuteApiHostIntegrationTest {
                 .header("Host", "websocket.example.com.regional.local")
                 .when().get("/@connections/missing")
                 .then().statusCode(410);
+    }
+
+    @Test
+    void directWebSocketConnectionRoutingFindsNonDefaultAndDuplicateOwners() {
+        String authorization = "AWS4-HMAC-SHA256 Credential=000000000001/20260929/us-east-1/apigateway/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        String apiId = given()
+                .header("Authorization", authorization)
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"other-account-websocket\",\"protocolType\":\"WEBSOCKET\","
+                        + "\"routeSelectionExpression\":\"$request.body.action\"}")
+                .when().post("/v2/apis")
+                .then().statusCode(201)
+                .extract().path("apiId");
+        given()
+                .when().get("/execute-api/" + apiId + "/test/@connections/missing")
+                .then().statusCode(410);
+
+        Api firstAccountApi = RequestScopes.callAs("000000000001",
+                () -> v2Service.getApi("us-east-1", apiId));
+        RequestScopes.runAs("000000000002", () -> v2Service.putApi("us-east-1", firstAccountApi));
+        try {
+            given()
+                    .when().get("/execute-api/" + apiId + "/test/@connections/missing")
+                    .then().statusCode(410);
+        } finally {
+            RequestScopes.runAs("000000000002", () -> v2Service.deleteApi("us-east-1", apiId));
+            RequestScopes.runAs("000000000001", () -> v2Service.deleteApi("us-east-1", apiId));
+        }
     }
 
     private static String resourceId(String apiId, String path) throws Exception {

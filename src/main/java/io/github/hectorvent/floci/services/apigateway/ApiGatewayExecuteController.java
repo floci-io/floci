@@ -172,15 +172,7 @@ public class ApiGatewayExecuteController {
         if (proxy == null || !proxy.startsWith(CONNECTIONS_PREFIX) || routeContext.isRestApiRoute()) {
             return false;
         }
-        Optional<ApiGatewayV2Service.ApiOwner> owner = apiGatewayV2Service.findApiOwner(apiId);
-        if (owner.isEmpty()) {
-            return false;
-        }
-        if (!"WEBSOCKET".equals(apiGatewayV2Service.getApi(owner.get().region(), apiId).getProtocolType())) {
-            return false;
-        }
-        applyApiOwnerContext(owner.get());
-        return true;
+        return apiGatewayV2Service.hasWebSocketApi(apiId);
     }
 
     private String decodeConnectionId(String rawConnectionId) {
