@@ -116,6 +116,7 @@ floci:
     log-max-size: "10m"                      # Max size per container log file before rotation
     log-max-file: "3"                        # Number of rotated log files to retain
     docker-host: unix:///var/run/docker.sock # Docker daemon socket (shared by Lambda, RDS, ElastiCache)
+    max-connections: 1024                    # Docker client connection pool; each live Lambda container holds 2
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 
@@ -136,6 +137,10 @@ floci:
 
     dynamodb:
       enabled: true
+      backend: native                         # native | local (forward calls to DynamoDB Local)
+      # local-endpoint: http://dynamodb-local:8000  # DynamoDB Local base URL, required when backend is local
+      local-connect-timeout-seconds: 2        # Seconds to wait for a connection to DynamoDB Local
+      local-request-timeout-seconds: 10       # Seconds to wait for DynamoDB Local to answer a forwarded request
 
     sns:
       enabled: true

@@ -77,6 +77,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -93,6 +94,8 @@ public class EcsContainerManager {
     private static final Logger LOG = Logger.getLogger(EcsContainerManager.class);
 
     private static final String ATTACHMENT_DELETED = "DELETED";
+    /** The label naming the Floci process that created a container, set by {@link #ownerLabels()}. */
+    public static final String RUN_LABEL = "floci.ecs-run";
 
     /** EC2 error codes the task ENI path can raise, none of which RunTask declares. */
     private static final Set<String> EC2_NETWORK_LOOKUP_FAILURES =
@@ -133,6 +136,11 @@ public class EcsContainerManager {
     private final EcsTaskRoleCredentials taskRoleCredentials;
     private final EcsCredentialsProxy credentialsProxy;
     private final EcsTaskLinkLocalAddresses linkLocalAddresses;
+    // Stamped as RUN_LABEL on every container this process creates, so a sweep can tell its own apart.
+    private final String runId = UUID.randomUUID().toString();
+    // A sweep failure is retried before each task launch; each distinct failure is a WARN once.
+    private volatile boolean leftoverListFailureReported;
+    private final Set<String> leftoverRemovalFailuresReported = ConcurrentHashMap.newKeySet();
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -312,7 +320,8 @@ public class EcsContainerManager {
                         .withHostDockerInternalOnLinux()
                         .withEmbeddedDns()
                         .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                                "ecs", taskId, regionResolver.getAccountId(), region));
+                                "ecs", taskId, regionResolver.getAccountId(), region))
+                        .withLabels(ownerLabels());
                 if (protectedNetwork != null) {
                     specBuilder.withNetworkMode("container:" + protectedNetwork.namespace().helperId());
                     specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
@@ -992,6 +1001,30 @@ public class EcsContainerManager {
     }
 
     /**
+     * The VPC an awsvpc task's interface was created in, read from its subnet, or {@code null}
+     * for a task without one or whose subnet is gone.
+     */
+    public String taskVpcId(EcsTask task, String region) {
+        if (task.getNetworkInterfaceId() == null || ec2Service == null) {
+            return null;
+        }
+        AwsVpcConfiguration awsvpc = task.getNetworkConfiguration() == null ? null
+                : task.getNetworkConfiguration().getAwsvpcConfiguration();
+        if (awsvpc == null || awsvpc.getSubnets() == null || awsvpc.getSubnets().isEmpty()) {
+            return null;
+        }
+        try {
+            return ec2Service.describeSubnets(region, List.of(awsvpc.getSubnets().getFirst()), Map.of()).stream()
+                    .findFirst()
+                    .map(subnet -> subnet.getVpcId())
+                    .orElse(null);
+        } catch (AwsException e) {
+            LOG.debugv("Could not look up the VPC of ECS task {0}: {1}", task.getTaskArn(), e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * Restates an EC2 lookup failure as the error RunTask declares. A caller naming a subnet or a
      * security group that is not there asked for something the task cannot have, and
      * {@code InvalidSubnetID.NotFound} is not in RunTask's error list, so an SDK sees it as an
@@ -1028,6 +1061,76 @@ public class EcsContainerManager {
             LOG.debugv("Could not delete the ENI {0} of task {1}: {2}",
                     eniId, task.getTaskArn(), e.getMessage());
         }
+    }
+
+    /**
+     * Removes the ECS containers a previous run of this Floci left on the daemon: task containers
+     * and the security-group helpers whose network namespace they share. Task state is memory-only,
+     * so no container carrying this deployment's owner label and another run's {@link #RUN_LABEL}
+     * belongs to a task this process knows. A graceful shutdown already stops them; this
+     * covers a run that ended without one (SIGKILL, OOM, a stop timeout that expired mid-drain),
+     * whose containers would otherwise keep serving beside the replacements the service scheduler
+     * starts. Containers created before the owner label existed carry none and are left alone.
+     * Leaving out the ones this process created is what makes a retry safe once tasks run. The run
+     * label decides that rather than the creation time, which Docker reports to the second and from
+     * a clock that can drift from this process's.
+     *
+     * Each distinct failure, a failed listing or a container that would not go, is logged as a
+     * WARN the first time and at DEBUG on every retry that repeats it, so an unreachable Docker
+     * daemon does not log on every launch attempt while a new failure is still reported.
+     *
+     * @return whether every leftover is gone: false when Docker could not list or remove one
+     */
+    public boolean removeLeftoverContainers() {
+        return removeLeftoverContainers(runId);
+    }
+
+    /** The labels that tie a container to this deployment and to this process's run of it. */
+    private Map<String, String> ownerLabels() {
+        return Map.of(ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config),
+                RUN_LABEL, runId);
+    }
+
+    /** {@link #removeLeftoverContainers()} keeping only the containers of run {@code currentRunId}. */
+    public boolean removeLeftoverContainers(String currentRunId) {
+        String owner = ContainerStorageHelper.ownerIdentity(config);
+        List<com.github.dockerjava.api.model.Container> containers;
+        try {
+            // Docker's container summary, not the ECS model Container this class imports.
+            containers = lifecycleManager.getDockerClient()
+                    .listContainersCmd()
+                    .withShowAll(true)
+                    .withLabelFilter(Map.of("io.floci.service", "ecs", ContainerStorageHelper.OWNER_LABEL, owner))
+                    .exec();
+        } catch (Exception e) {
+            LOG.logv(leftoverListFailureReported ? Logger.Level.DEBUG : Logger.Level.WARN,
+                    "Could not list the ECS containers a previous run left behind: {0}", e.getMessage());
+            leftoverListFailureReported = true;
+            return false;
+        }
+        leftoverListFailureReported = false;
+        boolean allRemoved = true;
+        for (com.github.dockerjava.api.model.Container container : containers) {
+            if (container.getLabels() != null && currentRunId.equals(container.getLabels().get(RUN_LABEL))) {
+                continue;
+            }
+            try {
+                lifecycleManager.removeIfExistsStrict(container.getId());
+                leftoverRemovalFailuresReported.remove(container.getId());
+                LOG.infov("Removed ECS container {0} ({1}) left by a previous run", container.getId(),
+                        container.getNames() == null ? "" : String.join(",", container.getNames()));
+            } catch (Exception e) {
+                allRemoved = false;
+                Logger.Level level = leftoverRemovalFailuresReported.add(container.getId())
+                        ? Logger.Level.WARN : Logger.Level.DEBUG;
+                LOG.logv(level, "Could not remove ECS container {0} left by a previous run: {1}",
+                        container.getId(), e.getMessage());
+            }
+        }
+        if (allRemoved) {
+            leftoverRemovalFailuresReported.clear();
+        }
+        return allRemoved;
     }
 
     /** The ENI {@link #attachTaskNetwork} allocated for this task, or null if it is already gone. */
@@ -1071,7 +1174,7 @@ public class EcsContainerManager {
                     containerDetector.isRunningInContainer(),
                     config.services().ecs().publishAwsvpcPortsToHost());
             namespace = firewallManager.createNamespace("ecs", taskId, regionResolver.getAccountId(),
-                    region, config.services().ecs().dockerNetwork(), bindings);
+                    region, config.services().ecs().dockerNetwork(), bindings, Map.of(RUN_LABEL, runId));
             List<String> groupIds = eni.getGroups().stream().map(g -> g.getGroupId()).toList();
             List<SecurityGroup> groups = ec2Service.describeSecurityGroups(region, groupIds, List.of(), Map.of());
             if (groups.size() != groupIds.size()) {

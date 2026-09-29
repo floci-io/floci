@@ -11,8 +11,6 @@ import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
@@ -29,17 +27,14 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Enables embedded DNS on the container it starts itself, so it needs no profile and runs on the
+ * default one alongside the other EKS Docker classes. It needs Docker and a bound embedded DNS
+ * server, and that server only binds when Floci itself runs in a container, so anywhere else the
+ * class skips.
+ */
 @QuarkusTest
-@TestProfile(EksRoute53DnsDockerIntegrationTest.Profile.class)
 class EksRoute53DnsDockerIntegrationTest {
-
-    public static final class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.eks.embedded-dns", "true");
-        }
-    }
 
     private static final Logger LOG = Logger.getLogger(EksRoute53DnsDockerIntegrationTest.class);
     private static final String TEST_IMAGE = "alpine:3.21";

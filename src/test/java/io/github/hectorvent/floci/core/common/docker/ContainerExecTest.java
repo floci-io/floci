@@ -12,6 +12,8 @@ import com.github.dockerjava.api.model.StreamType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.function.Consumer;
@@ -106,8 +108,10 @@ class ContainerExecTest {
     }
 
     @Test
-    void aCommandThatOutlivesItsTimeoutIsReportedWithWhatItPrintedSoFar() {
+    void aCommandThatOutlivesItsTimeoutIsReportedWithWhatItPrintedSoFar() throws IOException {
+        Closeable attach = mock(Closeable.class);
         startWith(callback -> {
+            callback.onStart(attach);
             callback.onNext(frame(StreamType.STDOUT, "partial"));
             callback.onNext(frame(StreamType.STDERR, "warning"));
         });
@@ -118,6 +122,7 @@ class ContainerExecTest {
         assertEquals(-1L, result.exitCode());
         assertEquals("partial", result.stdout());
         assertEquals("warning\nTimed out after 0s", result.stderr());
+        verify(attach).close();
         verify(dockerClient, never()).inspectExecCmd(EXEC_ID);
     }
 
@@ -172,13 +177,14 @@ class ContainerExecTest {
     }
 
     @Test
-    void anInterruptIsRaisedAndTheInterruptFlagKept() {
-        startWith(callback -> {
-        });
+    void anInterruptIsRaisedAndTheInterruptFlagKept() throws IOException {
+        Closeable attach = mock(Closeable.class);
+        startWith(callback -> callback.onStart(attach));
         Thread.currentThread().interrupt();
         try {
             assertThrows(IllegalStateException.class, () -> ContainerExec.run(dockerClient, CONTAINER_ID, CMD, 5));
             assertTrue(Thread.currentThread().isInterrupted());
+            verify(attach).close();
         } finally {
             Thread.interrupted();
         }

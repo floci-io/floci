@@ -1,11 +1,19 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.model.Frame;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -13,9 +21,16 @@ import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Optional;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Bug condition exploration test for Docker host scheme normalization.
@@ -609,5 +624,75 @@ class DockerClientProducerTest {
         assertThrows(IllegalStateException.class, () -> DockerClientProducer.resolveDockerConnection(
                 "unix:///var/run/docker.sock", null, false, tempDir, null),
                 "An incomplete TLS material directory should fail loudly rather than connect insecurely");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, -1})
+    void validateMaxConnections_belowOne_throwsNamingTheSetting(int maxConnections) {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> DockerClientProducer.validateMaxConnections(maxConnections));
+
+        assertThat(e.getMessage(), containsString("floci.docker.max-connections"));
+    }
+
+    @Test
+    void validateMaxConnections_positive_returnsItUnchanged() {
+        assertEquals(1, DockerClientProducer.validateMaxConnections(1));
+        assertEquals(1024, DockerClientProducer.validateMaxConnections(1024));
+    }
+
+    /**
+     * The pool size comes from {@code floci.docker.max-connections}. A followed log stream holds
+     * its connection until the container exits, and this fake daemon never answers, so with a
+     * pool of two only two of three streams may reach it; the third waits for a free connection.
+     */
+    @Test
+    void dockerClient_opensAtMostMaxConnectionsToTheDaemon() throws Exception {
+        try (ServerSocket daemon = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+            BlockingQueue<Socket> accepted = new LinkedBlockingQueue<>();
+            Thread acceptor = new Thread(() -> {
+                try {
+                    while (!daemon.isClosed()) {
+                        accepted.add(daemon.accept());
+                    }
+                } catch (IOException expected) {
+                    // Closing the server socket at the end of the test ends the accept loop.
+                }
+            });
+            acceptor.setDaemon(true);
+            acceptor.start();
+
+            EmulatorConfig config = mock(EmulatorConfig.class);
+            EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+            when(config.docker()).thenReturn(docker);
+            when(docker.dockerHost()).thenReturn("tcp://127.0.0.1:" + daemon.getLocalPort());
+            when(docker.dockerConfigPath()).thenReturn(Optional.empty());
+            when(docker.maxConnections()).thenReturn(2);
+
+            DockerClient client = new DockerClientProducer(config).dockerClient();
+            try {
+                for (int i = 0; i < 3; i++) {
+                    client.logContainerCmd("container-" + i)
+                            .withStdOut(true)
+                            .withFollowStream(true)
+                            .exec(new ResultCallback.Adapter<Frame>() {
+                                @Override
+                                public void onError(Throwable ignored) {
+                                    // Expected once the client is closed under the pending streams.
+                                }
+                            });
+                }
+
+                assertNotNull(accepted.poll(10, TimeUnit.SECONDS), "first stream should connect");
+                assertNotNull(accepted.poll(10, TimeUnit.SECONDS), "second stream should connect");
+                assertNull(accepted.poll(1, TimeUnit.SECONDS),
+                        "third stream should wait for a pooled connection instead of opening one");
+            } finally {
+                client.close();
+                for (Socket socket : accepted) {
+                    socket.close();
+                }
+            }
+        }
     }
 }

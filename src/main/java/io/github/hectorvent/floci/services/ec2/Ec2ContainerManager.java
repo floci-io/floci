@@ -116,7 +116,7 @@ public class Ec2ContainerManager {
      * unless a resource namespace is configured, so it cannot scope the default configuration.
      * Containers created before this label existed carry no owner and are therefore never swept.
      */
-    static final String LABEL_OWNER_PORT = "floci_owner_port";
+    static final String LABEL_OWNER_PORT = ContainerStorageHelper.OWNER_LABEL;
 
     /**
      * Identity of the Floci deployment that owns a container, for scoping the startup sweep.
@@ -126,9 +126,7 @@ public class Ec2ContainerManager {
      * unnamespaced single Floci keeps the bare port it already stamped.
      */
     private String ownerIdentity() {
-        String ns = config.docker() == null || config.docker().resourceNamespace() == null
-                ? "" : config.docker().resourceNamespace().orElse("");
-        return ns.isBlank() ? String.valueOf(config.port()) : ns + "/" + config.port();
+        return ContainerStorageHelper.ownerIdentity(config);
     }
     static final String LABEL_SERVICE = "io.floci.service";
     static final String SERVICE_VALUE = "ec2";
@@ -192,7 +190,7 @@ public class Ec2ContainerManager {
         if (!"true".equals(labels.get("floci.security-group-helper"))
                 || !"ec2".equals(labels.get(LABEL_SERVICE))
                 || !instance.getInstanceId().equals(labels.get(LABEL_RESOURCE_ID))
-                || !ownerIdentity().equals(labels.get("floci_owner_port"))) {
+                || !ownerIdentity().equals(labels.get(LABEL_OWNER_PORT))) {
             throw new IllegalStateException("EC2 workload network namespace is not Floci protected");
         }
         String address = helper.getNetworkSettings().getNetworks().values().stream()

@@ -37,7 +37,7 @@ class EcsContainerManagerFirelensDockerIntegrationTest {
     private static final String IMAGE = TestImages.BUSYBOX;
     /** A real FireLens router image: Floci writes the generated config to its own
      * {@code /fluent-bit/etc}, which no minimal image carries. */
-    private static final String ROUTER_IMAGE = "public.ecr.aws/aws-observability/aws-for-fluent-bit:3";
+    private static final String ROUTER_IMAGE = TestImages.FLUENT_BIT;
 
     @Inject
     EcsContainerManager containerManager;

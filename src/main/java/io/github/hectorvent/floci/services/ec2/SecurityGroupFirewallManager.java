@@ -67,12 +67,11 @@ public class SecurityGroupFirewallManager {
             return;
         }
         try {
-            String namespace = config.docker().resourceNamespace().orElse("");
-            String owner = namespace.isBlank() ? String.valueOf(config.port()) : namespace + "/" + config.port();
+            String owner = ContainerStorageHelper.ownerIdentity(config);
             dockerClient.listContainersCmd().withShowAll(true)
                     .withLabelFilter(Map.of("floci.security-group-helper", "true"))
                     .exec().stream()
-                    .filter(container -> owner.equals(container.getLabels().get("floci_owner_port")))
+                    .filter(container -> owner.equals(container.getLabels().get(ContainerStorageHelper.OWNER_LABEL)))
                     .forEach(container -> {
                         if ("running".equals(container.getState())) {
                             quarantine(container.getId());
@@ -92,6 +91,13 @@ public class SecurityGroupFirewallManager {
     /** The helper starts before any workload process and owns all published ports. */
     public Namespace createNamespace(String service, String resourceId, String accountId, String region,
                                      Optional<String> dockerNetwork, Map<Integer, Integer> portBindings) {
+        return createNamespace(service, resourceId, accountId, region, dockerNetwork, portBindings, Map.of());
+    }
+
+    /** {@link #createNamespace} with extra labels on the helper, as the owning service tracks it by. */
+    public Namespace createNamespace(String service, String resourceId, String accountId, String region,
+                                     Optional<String> dockerNetwork, Map<Integer, Integer> portBindings,
+                                     Map<String, String> extraLabels) {
         if (!enabled()) {
             throw new IllegalStateException("Security-group enforcement is disabled");
         }
@@ -106,8 +112,6 @@ public class SecurityGroupFirewallManager {
         ensureHelperImage();
         String name = ContainerStorageHelper.resourceName(config, "sg", null,
                 resourceId.replaceAll("[^a-zA-Z0-9_.-]", "-"));
-        String namespace = config.docker().resourceNamespace().orElse("");
-        String owner = namespace.isBlank() ? String.valueOf(config.port()) : namespace + "/" + config.port();
         ContainerBuilder.Builder builder = containerBuilder.newContainer(config.network().securityGroupEnforcement().helperImage())
                 .withName(name)
                 .withDockerNetwork(dockerNetwork)
@@ -117,7 +121,9 @@ public class SecurityGroupFirewallManager {
                 .withEntrypoint(List.of("sh", "-c"))
                 .withCmd(List.of("exec sleep 2147483647"))
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(service, resourceId, accountId, region))
-                .withLabels(Map.of("floci.security-group-helper", "true", "floci_owner_port", owner));
+                .withLabels(Map.of("floci.security-group-helper", "true",
+                        ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
+                .withLabels(extraLabels);
         if (portBindings != null) {
             portBindings.forEach(builder::withPortBinding);
         }

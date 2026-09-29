@@ -208,7 +208,7 @@ class OrganizationsServiceTest {
         AwsException error = assertThrows(AwsException.class, () -> service.createOrganizationalUnit(
                 OUTSIDER_ACCOUNT, organization.getRoot().getId(), "Unit", null));
         assertEquals("AccessDeniedException", error.getErrorCode());
-        assertEquals(403, error.getHttpStatus());
+        assertEquals(400, error.getHttpStatus());
     }
 
     @Test

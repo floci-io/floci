@@ -52,7 +52,25 @@ cat > "${WORK}/root-bin/chroot" <<'EOF'
 #!/bin/sh
 printf 'dropped privileges\n'
 EOF
-chmod +x "${WORK}/root-bin/id" "${WORK}/root-bin/chroot"
+# Record chown's arguments instead of changing ownership (the tests run unprivileged).
+cat > "${WORK}/root-bin/chown" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "${WORK}/chown.log"
+EOF
+chmod +x "${WORK}/root-bin/id" "${WORK}/root-bin/chroot" "${WORK}/root-bin/chown"
+
+# Runs the root phase with the given state dir and prints every path chown was asked to re-own.
+# TEST_SH picks the shell that runs the entrypoint (default sh), so a case can pin bash.
+# A root phase that stops before the privilege drop prints a marker instead, so an empty result
+# can only mean chown was never called.
+chowned() {
+    : > "${WORK}/chown.log"
+    if ! PATH="${WORK}/root-bin:${PATH}" FLOCI_STORAGE_PERSISTENT_PATH="$1" LOCALSTACK_PARITY=false \
+        "${TEST_SH:-sh}" "${SCRIPT}" echo preserved 2>"${WORK}/chown.err" | grep -q 'dropped privileges'; then
+        printf 'root phase did not reach the privilege drop\n'
+    fi
+    cat "${WORK}/chown.log"
+}
 
 assert_eq "root drops privileges by default" \
     "dropped privileges" \
@@ -69,6 +87,56 @@ assert_eq "other values keep the unprivileged default" \
 assert_eq "explicit root option preserves command arguments" \
     "one two|three" \
     "$(PATH="${WORK}/root-bin:${PATH}" FLOCI_RUN_AS_ROOT=true FLOCI_STORAGE_PERSISTENT_PATH="${WORK}/absent" LOCALSTACK_PARITY=false sh "${SCRIPT}" sh -c 'printf "%s|%s\n" "$1" "$2"' _ "one two" three)"
+
+# --- the root phase re-owns the configured state dir, and never / ---
+CUSTOM_DIR="${WORK}/custom-data"
+mkdir -p "${CUSTOM_DIR}"
+CUSTOM_DIR_PHYSICAL="$(cd -P "${CUSTOM_DIR}" && pwd -P)"
+assert_eq "root re-owns a custom FLOCI_STORAGE_PERSISTENT_PATH" \
+    "--preserve-root -R floci:root ${CUSTOM_DIR_PHYSICAL}" \
+    "$(chowned "${CUSTOM_DIR}")"
+
+assert_eq "root re-owns a relative path resolved against the working directory" \
+    "--preserve-root -R floci:root ${CUSTOM_DIR_PHYSICAL}" \
+    "$(cd "${WORK}" && chowned custom-data)"
+
+mkdir -p "${WORK}/elsewhere/custom-data"
+assert_eq "CDPATH does not redirect a relative path" \
+    "--preserve-root -R floci:root ${CUSTOM_DIR_PHYSICAL}" \
+    "$(cd "${WORK}" && CDPATH="${WORK}/elsewhere" chowned custom-data)"
+
+assert_eq "root skips a state dir that does not exist" \
+    "" \
+    "$(chowned "${WORK}/absent")"
+
+assert_eq "root never re-owns /" \
+    "" \
+    "$(chowned /)"
+
+assert_eq "root never re-owns //" \
+    "" \
+    "$(chowned //)"
+
+# bash keeps a leading // through cd -P and pwd -P, which dash normalises to /, so only a bash
+# run can catch a guard that compares the path as a string. The native images run bash as sh.
+if command -v bash >/dev/null 2>&1; then
+    assert_eq "root never re-owns // under bash" \
+        "" \
+        "$(TEST_SH=bash chowned //)"
+else
+    printf '[SKIP] root never re-owns // under bash (bash not installed)\n'
+fi
+
+assert_eq "root never re-owns a path that resolves to /" \
+    "" \
+    "$(chowned "${WORK}/../../../../../../../../../..")"
+if grep -q 'resolves to /' "${WORK}/chown.err"; then
+    printf '[PASS] refusing / says why\n'
+    PASS=$((PASS + 1))
+else
+    printf '[FAIL] refusing / says why\n  stderr was:\n%s\n' "$(cat "${WORK}/chown.err")"
+    FAIL=$((FAIL + 1))
+fi
 
 assert_eq "non-root process cannot elevate with root option" \
     "one two" \

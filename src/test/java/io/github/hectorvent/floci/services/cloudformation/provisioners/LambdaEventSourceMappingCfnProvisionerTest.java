@@ -43,6 +43,19 @@ class LambdaEventSourceMappingCfnProvisionerTest {
             new LambdaEventSourceMappingCfnProvisioner(lambdaService);
     private final ObjectMapper mapper = new ObjectMapper();
 
+    LambdaEventSourceMappingCfnProvisionerTest() {
+        when(lambdaService.updateEventSourceMapping(anyString(), any()))
+                .thenAnswer(inv -> storedMapping(inv.getArgument(0), "us-east-1"));
+    }
+
+    private static EventSourceMapping storedMapping(String uuid, String region) {
+        EventSourceMapping esm = new EventSourceMapping();
+        esm.setUuid(uuid);
+        esm.setRegion(region);
+        esm.setAccountId("000000000000");
+        return esm;
+    }
+
     private ProvisionContext ctx() {
         return ctx(false, null);
     }
@@ -133,8 +146,7 @@ class LambdaEventSourceMappingCfnProvisionerTest {
         props.put("Enabled", "true");
         props.put("StartingPosition", "TRIM_HORIZON");
 
-        EventSourceMapping esm = new EventSourceMapping();
-        esm.setUuid("test-esm-uuid-1234");
+        EventSourceMapping esm = storedMapping("test-esm-uuid-1234", "us-east-1");
         when(lambdaService.createEventSourceMapping(eq("us-east-1"), any())).thenReturn(esm);
 
         provisioner.provision(r, props, ctx());
@@ -153,6 +165,24 @@ class LambdaEventSourceMappingCfnProvisionerTest {
         assertEquals(5, req.get("BatchSize"));
         assertEquals(true, req.get("Enabled"));
         assertEquals("TRIM_HORIZON", req.get("StartingPosition"));
+    }
+
+    @Test
+    void eventSourceMappingArnUsesTheRegionTheMappingIsStoredIn() {
+        StackResource r = new StackResource();
+        r.setResourceType("AWS::Lambda::EventSourceMapping");
+
+        ObjectNode props = mapper.createObjectNode();
+        props.put("FunctionName", "my-function");
+        props.put("EventSourceArn", "arn:aws:sqs:eu-west-1:000000000000:my-queue");
+
+        EventSourceMapping esm = storedMapping("cross-region-esm-uuid", "eu-west-1");
+        when(lambdaService.createEventSourceMapping(eq("us-east-1"), any())).thenReturn(esm);
+
+        provisioner.provision(r, props, ctx());
+
+        assertEquals("arn:aws:lambda:eu-west-1:000000000000:event-source-mapping:cross-region-esm-uuid",
+                r.getAttributes().get("EventSourceMappingArn"));
     }
 
     @Test
@@ -175,8 +205,7 @@ class LambdaEventSourceMappingCfnProvisionerTest {
 
         props.set("Topics", mapper.createArrayNode().add("my-topic"));
 
-        EventSourceMapping esm = new EventSourceMapping();
-        esm.setUuid("kafka-esm-uuid");
+        EventSourceMapping esm = storedMapping("kafka-esm-uuid", "us-east-1");
         when(lambdaService.createEventSourceMapping(eq("us-east-1"), any())).thenReturn(esm);
 
         provisioner.provision(r, props, ctx());
@@ -294,8 +323,7 @@ class LambdaEventSourceMappingCfnProvisionerTest {
     private Map<String, Object> provisionAndCaptureCreateRequest(ObjectNode props) {
         StackResource r = new StackResource();
         r.setResourceType("AWS::Lambda::EventSourceMapping");
-        EventSourceMapping esm = new EventSourceMapping();
-        esm.setUuid("options-esm-uuid");
+        EventSourceMapping esm = storedMapping("options-esm-uuid", "us-east-1");
         when(lambdaService.createEventSourceMapping(eq("us-east-1"), any())).thenReturn(esm);
 
         provisioner.provision(r, props, ctx());

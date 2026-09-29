@@ -76,7 +76,7 @@ class ScpEnforcementLeaveOrganizationIntegrationTest {
         // --- the member is now bounded by the OU's deny SCP ------------------------------------
         org(memberId, "LeaveOrganization", "{}")
                 .then()
-                .statusCode(403)
+                .statusCode(400)
                 .body(containsString("AccessDeniedException"));
 
         // An action the SCP does not deny must still succeed (FullAWSAccess baseline holds).

@@ -157,7 +157,7 @@ class OrganizationsInvalidEffectivePolicyIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(403)
+            .statusCode(400)
             .body("__type", equalTo("AccessDeniedException"));
     }
 
@@ -185,7 +185,7 @@ class OrganizationsInvalidEffectivePolicyIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(403)
+            .statusCode(400)
             .body("__type", equalTo("AccessDeniedException"));
     }
 }

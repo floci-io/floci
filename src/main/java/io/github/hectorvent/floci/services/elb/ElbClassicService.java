@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elb;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
@@ -45,9 +46,6 @@ import java.util.stream.Collectors;
  */
 @ApplicationScoped
 public class ElbClassicService {
-
-    /** The hosted zone ID AWS reports for Classic load balancers; fixed per region on AWS too. */
-    private static final String CANONICAL_HOSTED_ZONE_ID = "Z35SXDOTRQ7X7K";
 
     private static final SecureRandom RANDOM = new SecureRandom();
 
@@ -101,6 +99,18 @@ public class ElbClassicService {
      * nothing reachable from {@link #initializeStorage()} may touch an injected collaborator.
      */
     public void restorePersistedRuntime() {
+        // A balancer stored before the zone was looked up per region still carries the one fixed
+        // zone every balancer used to report; take the region's zone again and store it back.
+        for (String region : List.copyOf(loadBalancers.keySet())) {
+            Map<String, ClassicLoadBalancer> regionLbs = loadBalancers.get(region);
+            if (regionLbs == null) {
+                continue;
+            }
+            for (ClassicLoadBalancer lb : regionLbs.values()) {
+                lb.setCanonicalHostedZoneNameId(AwsRegionFacts.classicElbHostedZoneId(region).orElse(null));
+            }
+            loadBalancers.put(region, regionLbs);
+        }
         for (Map<String, ClassicLoadBalancer> regionLbs : loadBalancers.values()) {
             for (ClassicLoadBalancer lb : regionLbs.values()) {
                 healthChecker.startMonitoring(lb);
@@ -148,7 +158,7 @@ public class ElbClassicService {
         }
         lb.setDnsName(dnsName);
         lb.setCanonicalHostedZoneName(dnsName);
-        lb.setCanonicalHostedZoneNameId(CANONICAL_HOSTED_ZONE_ID);
+        lb.setCanonicalHostedZoneNameId(AwsRegionFacts.classicElbHostedZoneId(region).orElse(null));
         lb.setScheme(scheme != null && !scheme.isBlank() ? scheme : "internet-facing");
         lb.setCreatedTime(Instant.now());
         lb.setListeners(new ArrayList<>(listeners));

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.*;
@@ -1584,9 +1585,11 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    // The common AWS interface-endpoint services, as short names. Rendered as
-    // com.amazonaws.<region>.<name>. CDK's InterfaceVpcEndpoint (lookupSupportedAzs)
-    // calls DescribeVpcEndpointServices at synth time; an empty set aborts synth.
+    // The common AWS interface-endpoint services, as short names. Rendered with the
+    // region's interface-endpoint prefix: com.amazonaws.<region>.<name>, or the reversed
+    // suffix for the (region, service) pairs AwsRegionFacts lists (cn.com.amazonaws in
+    // China). CDK's InterfaceVpcEndpoint (lookupSupportedAzs) calls
+    // DescribeVpcEndpointServices at synth time; an empty set aborts synth.
     private static final List<String> INTERFACE_ENDPOINT_SERVICES = List.of(
             "ec2", "ec2messages", "ssm", "ssmmessages", "logs", "monitoring", "sts",
             "secretsmanager", "kms", "ecr.api", "ecr.dkr", "ecs", "ecs-agent", "ecs-telemetry",
@@ -1612,8 +1615,9 @@ public class Ec2QueryHandler {
         } else {
             // S3 has both a Gateway and an Interface offering; keep it in the set.
             for (String name : INTERFACE_ENDPOINT_SERVICES) {
-                fullNames.add("com.amazonaws." + region + "." + name);
+                fullNames.add(AwsRegionFacts.vpcEndpointServiceName(region, name));
             }
+            // The S3 gateway service keeps com.amazonaws in every partition.
             fullNames.add("com.amazonaws." + region + ".s3");
         }
         for (String full : fullNames) {

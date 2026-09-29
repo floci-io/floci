@@ -7,25 +7,6 @@
 files:
   - path: src/main/java/io/github/hectorvent/floci/services/route53/Route53VpcRegions.java
     reason: the VPCRegion enum transcribed verbatim from the Route 53 model.
-  - path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceAgreementService.java
-    reason: AWS Marketplace exists only in the commercial partition and AWS pins its APIs to
-      us-east-1 with the validation messages this service reproduces.
-  - path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceCatalogController.java
-    reason: see MarketplaceAgreementService.
-  - path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceDeploymentController.java
-    reason: see MarketplaceAgreementService.
-  - path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceDeploymentService.java
-    reason: see MarketplaceAgreementService.
-  - path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceDiscoveryController.java
-    reason: see MarketplaceAgreementService.
-  - path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceDiscoveryService.java
-    reason: see MarketplaceAgreementService.
-  - path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceEntitlementService.java
-    reason: see MarketplaceAgreementService.
-  - path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceReportingService.java
-    reason: see MarketplaceAgreementService.
-  - path: src/main/java/io/github/hectorvent/floci/services/marketplace/MarketplaceService.java
-    reason: see MarketplaceAgreementService.
   - path: src/main/java/io/github/hectorvent/floci/core/common/AwsNamespaces.java
     reason: XML namespace URIs (http://s3.amazonaws.com/doc/2006-03-01/ and the Query
       namespaces) are identifiers, not hosts, and are byte-identical in every partition;

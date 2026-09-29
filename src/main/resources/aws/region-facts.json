@@ -1,0 +1,499 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_region_facts.py",
+    "terraform": "terraform-provider-aws internal/service/elb/hosted_zone_id_data_source.go, internal/service/elbv2/hosted_zone_id_data_source.go, internal/service/s3/hosted_zones.go, internal/conns/awsclient.go",
+    "cdk": "aws-cdk packages/aws-cdk-lib/region-info/build-tools/fact-tables.ts, packages/aws-cdk-lib/aws-route53-targets/lib/cloudfront-target.ts, packages/aws-cdk-lib/aws-ec2/lib/vpc-endpoint.ts",
+    "s3WebsiteConflicts": "terraform wins over the CDK where they disagree (it cites the S3 website-endpoint table)"
+  },
+  "partitions": {
+    "aws": {
+      "vpcEndpointServiceNamePrefix": "com.amazonaws.vpce",
+      "cloudfrontHostedZoneId": "Z2FDTNDATAQYW2",
+      "samlSignOnUrl": "https://signin.aws.amazon.com/saml"
+    },
+    "aws-cn": {
+      "vpcEndpointServiceNamePrefix": "cn.com.amazonaws.vpce",
+      "cloudfrontHostedZoneId": "Z3RFFRIM2A3IF5",
+      "samlSignOnUrl": "https://signin.amazonaws.cn/saml"
+    },
+    "aws-eusc": {
+      "vpcEndpointServiceNamePrefix": "eu.amazonaws.vpce"
+    },
+    "aws-iso": {
+      "vpcEndpointServiceNamePrefix": "gov.ic.c2s.vpce",
+      "samlSignOnUrl": "https://signin.c2shome.ic.gov/saml"
+    },
+    "aws-iso-b": {
+      "vpcEndpointServiceNamePrefix": "gov.sgov.sc2s.vpce",
+      "samlSignOnUrl": "https://signin.sc2shome.sgov.gov/saml"
+    },
+    "aws-iso-e": {
+      "vpcEndpointServiceNamePrefix": "uk.adc-e.cloud.vpce"
+    },
+    "aws-iso-f": {
+      "vpcEndpointServiceNamePrefix": "gov.ic.hci.csp.vpce"
+    },
+    "aws-us-gov": {
+      "vpcEndpointServiceNamePrefix": "com.amazonaws.vpce",
+      "samlSignOnUrl": "https://signin.amazonaws-us-gov.com/saml"
+    }
+  },
+  "regions": {
+    "af-south-1": {
+      "albHostedZoneId": "Z268VQBMOI5EKX",
+      "classicElbHostedZoneId": "Z268VQBMOI5EKX",
+      "nlbHostedZoneId": "Z203XCE67M25HM",
+      "s3WebsiteHostedZoneId": "Z83WF9RJE8B12"
+    },
+    "ap-east-1": {
+      "albHostedZoneId": "Z3DQVH9N71FHZ0",
+      "classicElbHostedZoneId": "Z3DQVH9N71FHZ0",
+      "nlbHostedZoneId": "Z12Y7K3UBGUAD1",
+      "s3WebsiteHostedZoneId": "ZNB98KWMFR0R6"
+    },
+    "ap-east-2": {
+      "albHostedZoneId": "Z02789141MW7T1WBU19PO",
+      "classicElbHostedZoneId": "Z02789141MW7T1WBU19PO",
+      "nlbHostedZoneId": "Z09176273OC2HWIAUNYW",
+      "s3WebsiteHostedZoneId": "Z064739330DAH7WJVOO93"
+    },
+    "ap-northeast-1": {
+      "albHostedZoneId": "Z14GRHDCWA56QT",
+      "classicElbHostedZoneId": "Z14GRHDCWA56QT",
+      "nlbHostedZoneId": "Z31USIVHYNEOWT",
+      "s3WebsiteHostedZoneId": "Z2M4EHUR26P7ZW"
+    },
+    "ap-northeast-2": {
+      "albHostedZoneId": "ZWKZPGTI48KDX",
+      "classicElbHostedZoneId": "ZWKZPGTI48KDX",
+      "nlbHostedZoneId": "ZIBE1TIR4HY56",
+      "s3WebsiteHostedZoneId": "Z3W03O7B5YMIYP"
+    },
+    "ap-northeast-3": {
+      "albHostedZoneId": "Z5LXEXXYW11ES",
+      "classicElbHostedZoneId": "Z5LXEXXYW11ES",
+      "nlbHostedZoneId": "Z1GWIQ4HH19I5X",
+      "s3WebsiteHostedZoneId": "Z2YQB5RD63NC85"
+    },
+    "ap-south-1": {
+      "albHostedZoneId": "ZP97RAFLXTNZK",
+      "classicElbHostedZoneId": "ZP97RAFLXTNZK",
+      "nlbHostedZoneId": "ZVDDRBQ08TROA",
+      "s3WebsiteHostedZoneId": "Z11RGJOFQNVJUP"
+    },
+    "ap-south-2": {
+      "albHostedZoneId": "Z0173938T07WNTVAEPZN",
+      "classicElbHostedZoneId": "Z0173938T07WNTVAEPZN",
+      "nlbHostedZoneId": "Z0711778386UTO08407HT",
+      "s3WebsiteHostedZoneId": "Z02976202B4EZMXIPMXF7"
+    },
+    "ap-southeast-1": {
+      "albHostedZoneId": "Z1LMS91P8CMLE5",
+      "classicElbHostedZoneId": "Z1LMS91P8CMLE5",
+      "nlbHostedZoneId": "ZKVM4W9LS7TM",
+      "s3WebsiteHostedZoneId": "Z3O0J2DXBE1FTB"
+    },
+    "ap-southeast-2": {
+      "albHostedZoneId": "Z1GM3OXH4ZPM65",
+      "classicElbHostedZoneId": "Z1GM3OXH4ZPM65",
+      "nlbHostedZoneId": "ZCT6FZBF4DROD",
+      "s3WebsiteHostedZoneId": "Z1WCIGYICN2BYD"
+    },
+    "ap-southeast-3": {
+      "albHostedZoneId": "Z08888821HLRG5A9ZRTER",
+      "classicElbHostedZoneId": "Z08888821HLRG5A9ZRTER",
+      "nlbHostedZoneId": "Z01971771FYVNCOVWJU1G",
+      "s3WebsiteHostedZoneId": "Z01846753K324LI26A3VV"
+    },
+    "ap-southeast-4": {
+      "albHostedZoneId": "Z09517862IB2WZLPXG76F",
+      "classicElbHostedZoneId": "Z09517862IB2WZLPXG76F",
+      "nlbHostedZoneId": "Z01156963G8MIIL7X90IV",
+      "s3WebsiteHostedZoneId": "Z0312387243XT5FE14WFO"
+    },
+    "ap-southeast-5": {
+      "albHostedZoneId": "Z06010284QMVVW7WO5J",
+      "classicElbHostedZoneId": "Z06010284QMVVW7WO5J",
+      "nlbHostedZoneId": "Z026317210H9ACVTRO6FB",
+      "s3WebsiteHostedZoneId": "Z08660063OXLMA7F1FJHU"
+    },
+    "ap-southeast-6": {
+      "albHostedZoneId": "Z023301818UFJ50CIO0MV",
+      "classicElbHostedZoneId": "Z023301818UFJ50CIO0MV",
+      "nlbHostedZoneId": "Z01392953RKV2Q3RBP0KU",
+      "s3WebsiteHostedZoneId": "Z05686083R66JX5C163TC"
+    },
+    "ap-southeast-7": {
+      "albHostedZoneId": "Z0390008CMBRTHFGWBCB",
+      "classicElbHostedZoneId": "Z0390008CMBRTHFGWBCB",
+      "nlbHostedZoneId": "Z054363131YWATEMWRG5L",
+      "s3WebsiteHostedZoneId": "Z0031014GXUMRZG6I14G"
+    },
+    "ca-central-1": {
+      "albHostedZoneId": "ZQSVJUPU6J1EY",
+      "classicElbHostedZoneId": "ZQSVJUPU6J1EY",
+      "nlbHostedZoneId": "Z2EPGBW3API2WT",
+      "s3WebsiteHostedZoneId": "Z1QDHH18159H29"
+    },
+    "ca-west-1": {
+      "albHostedZoneId": "Z06473681N0SF6OS049SD",
+      "classicElbHostedZoneId": "Z06473681N0SF6OS049SD",
+      "nlbHostedZoneId": "Z02754302KBB00W2LKWZ9",
+      "s3WebsiteHostedZoneId": "Z03565811Z33SLEZTHOUL"
+    },
+    "cn-north-1": {
+      "albHostedZoneId": "Z1GDH35T77C1KE",
+      "classicElbHostedZoneId": "Z1GDH35T77C1KE",
+      "nlbHostedZoneId": "Z3QFB96KMJ7ED6",
+      "s3WebsiteHostedZoneId": "Z5CN8UMXT92WN",
+      "vpcEndpointExceptionPrefix": "cn.com.amazonaws",
+      "vpcEndpointPrefixServices": [
+        "application-autoscaling",
+        "appmesh-envoy-management",
+        "athena",
+        "autoscaling",
+        "awsconnector",
+        "backup",
+        "batch",
+        "cassandra",
+        "cloudcontrolapi",
+        "cloudformation",
+        "codedeploy-commands-secure",
+        "databrew",
+        "dms",
+        "ebs",
+        "ec2",
+        "ecr.api",
+        "ecr.dkr",
+        "eks",
+        "elasticache",
+        "elasticbeanstalk",
+        "elasticfilesystem",
+        "elasticfilesystem-fips",
+        "emr-containers",
+        "execute-api",
+        "fsx",
+        "imagebuilder",
+        "iot.data",
+        "iotsitewise.api",
+        "iotsitewise.data",
+        "kinesis-streams",
+        "lambda",
+        "license-manager",
+        "monitoring",
+        "rds",
+        "redshift",
+        "redshift-data",
+        "s3",
+        "sagemaker.api",
+        "sagemaker.featurestore-runtime",
+        "sagemaker.runtime",
+        "securityhub",
+        "servicecatalog",
+        "sms",
+        "sqs",
+        "states",
+        "sts",
+        "sync-states",
+        "synthetics",
+        "transcribe",
+        "transcribestreaming",
+        "transfer",
+        "xray"
+      ],
+      "vpcEndpointCnSuffixServices": [
+        "transcribe"
+      ]
+    },
+    "cn-northwest-1": {
+      "albHostedZoneId": "ZM7IZAIOVVDZF",
+      "classicElbHostedZoneId": "ZM7IZAIOVVDZF",
+      "nlbHostedZoneId": "ZQEIKTCZ8352D",
+      "s3WebsiteHostedZoneId": "Z282HJ1KT0DH03",
+      "vpcEndpointExceptionPrefix": "cn.com.amazonaws",
+      "vpcEndpointPrefixServices": [
+        "account",
+        "application-autoscaling",
+        "appmesh-envoy-management",
+        "athena",
+        "autoscaling",
+        "awsconnector",
+        "backup",
+        "batch",
+        "cassandra",
+        "cloudcontrolapi",
+        "cloudformation",
+        "codedeploy-commands-secure",
+        "databrew",
+        "dms",
+        "ebs",
+        "ec2",
+        "ecr.api",
+        "ecr.dkr",
+        "eks",
+        "elasticache",
+        "elasticbeanstalk",
+        "elasticfilesystem",
+        "elasticfilesystem-fips",
+        "emr-containers",
+        "execute-api",
+        "fsx",
+        "imagebuilder",
+        "iot.data",
+        "kinesis-streams",
+        "lambda",
+        "license-manager",
+        "monitoring",
+        "polly",
+        "rds",
+        "redshift",
+        "redshift-data",
+        "s3",
+        "sagemaker.api",
+        "sagemaker.featurestore-runtime",
+        "sagemaker.runtime",
+        "securityhub",
+        "servicecatalog",
+        "sms",
+        "sqs",
+        "states",
+        "sts",
+        "sync-states",
+        "synthetics",
+        "transcribe",
+        "transcribestreaming",
+        "transfer",
+        "workspaces",
+        "xray"
+      ],
+      "vpcEndpointCnSuffixServices": [
+        "transcribe"
+      ]
+    },
+    "eu-central-1": {
+      "albHostedZoneId": "Z215JYRZR1TBD5",
+      "classicElbHostedZoneId": "Z215JYRZR1TBD5",
+      "nlbHostedZoneId": "Z3F0SRJ5LGBH90",
+      "s3WebsiteHostedZoneId": "Z21DNDUVLTQW6Q"
+    },
+    "eu-central-2": {
+      "albHostedZoneId": "Z06391101F2ZOEP8P5EB3",
+      "classicElbHostedZoneId": "Z06391101F2ZOEP8P5EB3",
+      "nlbHostedZoneId": "Z02239872DOALSIDCX66S",
+      "s3WebsiteHostedZoneId": "Z030506016YDQGETNASS"
+    },
+    "eu-isoe-west-1": {
+      "vpcEndpointExceptionPrefix": "uk.adc-e.cloud",
+      "vpcEndpointPrefixServices": [
+        "ebs",
+        "ecr.api",
+        "ecr.dkr",
+        "execute-api"
+      ]
+    },
+    "eu-north-1": {
+      "albHostedZoneId": "Z23TAZ6LKFMNIO",
+      "classicElbHostedZoneId": "Z23TAZ6LKFMNIO",
+      "nlbHostedZoneId": "Z1UDT6IFJ4EJM",
+      "s3WebsiteHostedZoneId": "Z3BAZG2TWCNX0D"
+    },
+    "eu-south-1": {
+      "albHostedZoneId": "Z3ULH7SSC9OV64",
+      "classicElbHostedZoneId": "Z3ULH7SSC9OV64",
+      "nlbHostedZoneId": "Z23146JA1KNAFP",
+      "s3WebsiteHostedZoneId": "Z30OZKI7KPW7MI"
+    },
+    "eu-south-2": {
+      "albHostedZoneId": "Z0956581394HF5D5LXGAP",
+      "classicElbHostedZoneId": "Z0956581394HF5D5LXGAP",
+      "nlbHostedZoneId": "Z1011216NVTVYADP1SSV",
+      "s3WebsiteHostedZoneId": "Z0081959F7139GRJC19J"
+    },
+    "eu-west-1": {
+      "albHostedZoneId": "Z32O12XQLNTSW2",
+      "classicElbHostedZoneId": "Z32O12XQLNTSW2",
+      "nlbHostedZoneId": "Z2IFOLAFXWLO4F",
+      "s3WebsiteHostedZoneId": "Z1BKCTXD74EZPE"
+    },
+    "eu-west-2": {
+      "albHostedZoneId": "ZHURV8PSTC4K8",
+      "classicElbHostedZoneId": "ZHURV8PSTC4K8",
+      "nlbHostedZoneId": "ZD4D7Y8KGAS4G",
+      "s3WebsiteHostedZoneId": "Z3GKZC51ZF0DB4"
+    },
+    "eu-west-3": {
+      "albHostedZoneId": "Z3Q77PNBQS71R4",
+      "classicElbHostedZoneId": "Z3Q77PNBQS71R4",
+      "nlbHostedZoneId": "Z1CMS0P5QUZ6D5",
+      "s3WebsiteHostedZoneId": "Z3R1K369G5AVDG"
+    },
+    "eusc-de-east-1": {
+      "vpcEndpointExceptionPrefix": "eu.amazonaws",
+      "vpcEndpointPrefixServices": [
+        "ecr.api",
+        "ecr.dkr",
+        "execute-api",
+        "securityhub"
+      ]
+    },
+    "il-central-1": {
+      "albHostedZoneId": "Z09170902867EHPV2DABU",
+      "classicElbHostedZoneId": "Z09170902867EHPV2DABU",
+      "nlbHostedZoneId": "Z0313266YDI6ZRHTGQY4",
+      "s3WebsiteHostedZoneId": "Z09640613K4A3MN55U7GU"
+    },
+    "me-central-1": {
+      "albHostedZoneId": "Z08230872XQRWHG2XF6I",
+      "classicElbHostedZoneId": "Z08230872XQRWHG2XF6I",
+      "nlbHostedZoneId": "Z00282643NTTLPANJJG2P",
+      "s3WebsiteHostedZoneId": "Z06143092I8HRXZRUZROF"
+    },
+    "me-south-1": {
+      "albHostedZoneId": "ZS929ML54UICD",
+      "classicElbHostedZoneId": "ZS929ML54UICD",
+      "nlbHostedZoneId": "Z3QSRYVP46NYYV",
+      "s3WebsiteHostedZoneId": "Z1MPMWCPA7YB62"
+    },
+    "mx-central-1": {
+      "albHostedZoneId": "Z023552324OKD1BB28BH5",
+      "classicElbHostedZoneId": "Z023552324OKD1BB28BH5",
+      "nlbHostedZoneId": "Z02031231H3ID6HYJ9A7U",
+      "s3WebsiteHostedZoneId": "Z057606446ZNVQJJ8WOP"
+    },
+    "sa-east-1": {
+      "albHostedZoneId": "Z2P70J7HTTTPLU",
+      "classicElbHostedZoneId": "Z2P70J7HTTTPLU",
+      "nlbHostedZoneId": "ZTK26PT1VY4CU",
+      "s3WebsiteHostedZoneId": "Z7KQH4QJS55SO"
+    },
+    "us-east-1": {
+      "albHostedZoneId": "Z35SXDOTRQ7X7K",
+      "classicElbHostedZoneId": "Z35SXDOTRQ7X7K",
+      "nlbHostedZoneId": "Z26RNL4JYFTOTI",
+      "s3WebsiteHostedZoneId": "Z3AQBSTGFYJSTF"
+    },
+    "us-east-2": {
+      "albHostedZoneId": "Z3AADJGX6KTTL2",
+      "classicElbHostedZoneId": "Z3AADJGX6KTTL2",
+      "nlbHostedZoneId": "ZLMOA37VPKANP",
+      "s3WebsiteHostedZoneId": "Z2O1EMRO9K5GLX"
+    },
+    "us-gov-east-1": {
+      "albHostedZoneId": "Z166TLBEWOO7G0",
+      "classicElbHostedZoneId": "Z166TLBEWOO7G0",
+      "nlbHostedZoneId": "Z1ZSMQQ6Q24QQ8",
+      "s3WebsiteHostedZoneId": "Z2NIFVYYW2VKV1"
+    },
+    "us-gov-west-1": {
+      "albHostedZoneId": "Z33AYJ8TM3BH4J",
+      "classicElbHostedZoneId": "Z33AYJ8TM3BH4J",
+      "nlbHostedZoneId": "ZMG1MZ2THAWF1",
+      "s3WebsiteHostedZoneId": "Z31GFT0UA1I2HV"
+    },
+    "us-iso-east-1": {
+      "vpcEndpointExceptionPrefix": "gov.ic.c2s",
+      "vpcEndpointPrefixServices": [
+        "application-autoscaling",
+        "athena",
+        "autoscaling",
+        "comprehend",
+        "diode-messaging",
+        "diode-messaging-proxy",
+        "ebs",
+        "ec2",
+        "ecr.api",
+        "ecr.dkr",
+        "elasticfilesystem",
+        "elasticfilesystem-fips",
+        "execute-api",
+        "sagemaker.api",
+        "sagemaker.runtime",
+        "sns",
+        "sqs",
+        "textract",
+        "textract-fips",
+        "transcribe",
+        "workspaces"
+      ]
+    },
+    "us-iso-west-1": {
+      "vpcEndpointExceptionPrefix": "gov.ic.c2s",
+      "vpcEndpointPrefixServices": [
+        "autoscaling",
+        "ebs",
+        "ec2",
+        "ecr.api",
+        "ecr.dkr",
+        "elasticfilesystem",
+        "elasticfilesystem-fips",
+        "execute-api",
+        "monitoring",
+        "sns",
+        "sqs",
+        "workspaces"
+      ]
+    },
+    "us-isob-east-1": {
+      "vpcEndpointExceptionPrefix": "gov.sgov.sc2s",
+      "vpcEndpointPrefixServices": [
+        "application-autoscaling",
+        "autoscaling",
+        "diode-messaging",
+        "diode-messaging-proxy",
+        "ebs",
+        "ec2",
+        "ecr.api",
+        "ecr.dkr",
+        "elasticfilesystem",
+        "elasticfilesystem-fips",
+        "execute-api",
+        "sagemaker.api",
+        "sagemaker.runtime",
+        "sns",
+        "sqs",
+        "workspaces"
+      ]
+    },
+    "us-isob-west-1": {
+      "vpcEndpointExceptionPrefix": "gov.sgov.sc2s",
+      "vpcEndpointPrefixServices": [
+        "ecr.api",
+        "ecr.dkr",
+        "elasticfilesystem-fips",
+        "execute-api"
+      ]
+    },
+    "us-isof-east-1": {
+      "s3WebsiteHostedZoneId": "Z03373031FTGQH4MNG6ST",
+      "vpcEndpointExceptionPrefix": "gov.ic.hci.csp",
+      "vpcEndpointPrefixServices": [
+        "ebs",
+        "ecr.api",
+        "ecr.dkr",
+        "execute-api"
+      ]
+    },
+    "us-isof-south-1": {
+      "s3WebsiteHostedZoneId": "Z03376072I8GXC2DXUFXI",
+      "vpcEndpointExceptionPrefix": "gov.ic.hci.csp",
+      "vpcEndpointPrefixServices": [
+        "ebs",
+        "ecr.api",
+        "ecr.dkr",
+        "execute-api"
+      ]
+    },
+    "us-west-1": {
+      "albHostedZoneId": "Z368ELLRRE2KJ0",
+      "classicElbHostedZoneId": "Z368ELLRRE2KJ0",
+      "nlbHostedZoneId": "Z24FKFUX50B4VW",
+      "s3WebsiteHostedZoneId": "Z2F56UZL2M1ACD"
+    },
+    "us-west-2": {
+      "albHostedZoneId": "Z1H1FL5HABSF5",
+      "classicElbHostedZoneId": "Z1H1FL5HABSF5",
+      "nlbHostedZoneId": "Z18D5FSROUN65G",
+      "s3WebsiteHostedZoneId": "Z3BJ6K6RIION7M"
+    }
+  }
+}

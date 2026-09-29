@@ -1,15 +1,13 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import io.github.hectorvent.floci.testing.ExtraCorsOriginProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -26,13 +24,16 @@ import static org.hamcrest.Matchers.notNullValue;
  * {@code /execute-api/...} path must be skipped by the filter and routed all the way to the
  * integration. This test drives that full chain — filter skip → route match → OPTIONS/ANY
  * method resolution → integration invocation — so a regression in any single stage fails here.</p>
+ *
+ * <p>Global CORS has to be on for this to mean anything: without the deployed-path exclusion, the
+ * filter would answer the preflight itself and the integration would never run.</p>
  */
 @QuarkusTest
-@TestProfile(ApiGatewayPreflightRoutingIntegrationTest.CorsEnabledProfile.class)
+@TestProfile(ExtraCorsOriginProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayPreflightRoutingIntegrationTest {
 
-    private static final String ORIGIN = "http://localhost:3000";
+    private static final String ORIGIN = ExtraCorsOriginProfile.ORIGIN;
     private static final String STAGE = "cors";
 
     private static String apiId;
@@ -260,14 +261,5 @@ class ApiGatewayPreflightRoutingIntegrationTest {
     void cleanup() {
         given().when().delete("/restapis/" + apiId).then().statusCode(202);
         given().when().delete("/v2/apis/" + httpApiId).then().statusCode(204);
-    }
-
-    public static final class CorsEnabledProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            // Global CORS on: without the deployed-path exclusion, this filter would answer the
-            // preflight itself and the integration would never run.
-            return Map.of("floci.security.extra-cors-allowed-origins", ORIGIN);
-        }
     }
 }

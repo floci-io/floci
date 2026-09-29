@@ -1360,6 +1360,21 @@ public interface EmulatorConfig {
          */
         @WithDefault("10")
         int vectorIndexBackfillSeconds();
+
+        /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
+        @WithDefault("native")
+        String backend();
+
+        /** The DynamoDB Local base URL, required when backend is local. Env: FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT. */
+        Optional<String> localEndpoint();
+
+        /** Env: FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS. */
+        @WithDefault("2")
+        int localConnectTimeoutSeconds();
+
+        /** Env: FLOCI_SERVICES_DYNAMODB_LOCAL_REQUEST_TIMEOUT_SECONDS. */
+        @WithDefault("10")
+        int localRequestTimeoutSeconds();
     }
 
     interface SnsServiceConfig {
@@ -3089,6 +3104,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
+        /** Optional ceiling for the single k3s node container, in MiB. Zero uses its instance type. */
+        @WithDefault("0")
+        int maxMemoryMib();
+
+        /** Optional vCPU ceiling for the single k3s node container. Zero uses its instance type. */
+        @WithDefault("0")
+        int maxVcpus();
+
         @WithDefault("k3s")
         String provider();
 
@@ -3341,6 +3364,22 @@ public interface EmulatorConfig {
         /** Unix socket or TCP URL for the Docker daemon (e.g. unix:///var/run/docker.sock). */
         @WithDefault("unix:///var/run/docker.sock")
         String dockerHost();
+
+        /**
+         * Size of the connection pool behind the shared Docker client. Every Docker call leases a
+         * connection from it, and some hold one for as long as a container runs: a Lambda
+         * container holds two (its followed log stream and its exit watcher) plus one per
+         * extension, and other container-backed services hold one for their log stream. Once
+         * those fill the pool, create, start, stop and remove wait for a free connection,
+         * including the calls that would release one, so the emulator stalls.
+         *
+         * <p>1024 rather than the former hard-coded 100, which capped live Lambda containers at
+         * about 50: a tenth of the 500 that the runtime API port range
+         * ({@link LambdaServiceConfig#runtimeApiBasePort}) exists to allow. Connections are
+         * opened on demand, so a small stack never approaches the limit.
+         */
+        @WithDefault("1024")
+        int maxConnections();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.
