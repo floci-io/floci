@@ -2015,4 +2015,107 @@ class SqsServiceTest {
         assertEquals(1, result.get().size());
         assertEquals("wake-up", result.get().get(0).getBody());
     }
+
+    @Test
+    void messagePastRetentionPeriodIsNotReturned() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("retention-queue",
+                Map.of("MessageRetentionPeriod", "60"), region);
+        Message sent = sqsService.sendMessage(queue.getQueueUrl(), "old", 0, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "fresh", 0, region);
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("ApproximateNumberOfMessages"), region);
+        assertEquals("1", attrs.get("ApproximateNumberOfMessages"));
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0, region);
+        assertEquals(List.of("fresh"), received.stream().map(Message::getBody).toList());
+    }
+
+    @Test
+    void shorterRetentionPeriodExpiresExistingMessages() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("retention-shrink", null, region);
+        Message sent = sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        sent.setSentTimestamp(Instant.now().minusSeconds(120));
+        assertEquals(1, sqsService.peekMessages(queue.getQueueUrl(), region).size());
+
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("MessageRetentionPeriod", "60"), region);
+
+        assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty());
+    }
+
+    @Test
+    void standardDeadLetterQueueKeepsOriginalEnqueueTimeForRetention() {
+        String region = "us-east-1";
+        Queue dlq = sqsService.createQueue("retention-dlq",
+                Map.of("MessageRetentionPeriod", "60"), region);
+        Queue source = sqsService.createQueue("retention-src",
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + queueArn("retention-dlq")
+                        + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "msg", 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        assertEquals(1, sqsService.peekMessages(dlq.getQueueUrl(), region).size());
+
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+
+        assertTrue(sqsService.peekMessages(dlq.getQueueUrl(), region).isEmpty());
+    }
+
+    @Test
+    void fifoDeadLetterQueueRestartsRetentionPeriod() {
+        String region = "us-east-1";
+        Queue dlq = sqsService.createQueue("retention-dlq.fifo",
+                Map.of("FifoQueue", "true", "MessageRetentionPeriod", "60"), region);
+        Queue source = sqsService.createQueue("retention-src.fifo",
+                Map.of("FifoQueue", "true", "RedrivePolicy", "{\"deadLetterTargetArn\":\""
+                        + queueArn("retention-dlq.fifo") + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "msg", 0, "g1", "d1", region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+
+        assertEquals(1, sqsService.peekMessages(dlq.getQueueUrl(), region).size());
+    }
+
+    @Test
+    void messageMoveTaskRestartsRetentionPeriod() {
+        String region = "us-east-1";
+        sqsService.createQueue("retention-mv-dlq", null, region);
+        Queue source = sqsService.createQueue("retention-mv-src",
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + queueArn("retention-mv-dlq")
+                        + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Queue dest = sqsService.createQueue("retention-mv-dest",
+                Map.of("MessageRetentionPeriod", "60"), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "msg", 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        Instant sentAt = Instant.now().minusSeconds(61);
+        sent.setSentTimestamp(sentAt);
+
+        sqsService.startMessageMoveTask(queueArn("retention-mv-dlq"), queueArn("retention-mv-dest"), region);
+
+        List<Message> moved = sqsService.peekMessages(dest.getQueueUrl(), region);
+        assertEquals(1, moved.size());
+        assertEquals(sentAt, moved.get(0).getSentTimestamp());
+    }
+
+    @Test
+    void deleteExpiredMessagesRemovesThemFromStorage() {
+        String region = "us-east-1";
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>();
+        SqsService service = new SqsService(new InMemoryStorage<>(), messageStore, new InMemoryStorage<>(),
+                30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"));
+        Queue queue = service.createQueue("retention-sweep", Map.of("MessageRetentionPeriod", "60"), region);
+        Message sent = service.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+        String storageKey = region + "::/000000000000/retention-sweep";
+        assertEquals(1, messageStore.get(storageKey).orElseThrow().size());
+
+        service.deleteExpiredMessages();
+
+        assertTrue(messageStore.get(storageKey).orElseThrow().isEmpty());
+    }
 }

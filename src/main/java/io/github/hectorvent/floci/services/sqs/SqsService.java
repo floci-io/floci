@@ -65,6 +65,7 @@ public class SqsService implements Resettable, ResourceProvider {
      * Both the maximum and the default were raised from 256 KiB in August 2025. */
     private static final int MIN_MAXIMUM_MESSAGE_SIZE = 1024;
     private static final int AWS_MAXIMUM_MESSAGE_SIZE = 1048576;
+    private static final int DEFAULT_MESSAGE_RETENTION_PERIOD_SECONDS = 345600;
 
     private final StorageBackend<String, Queue> queueStore;
     private final StorageBackend<String, List<Message>> messageStore;
@@ -693,7 +694,7 @@ public class SqsService implements Resettable, ResourceProvider {
         attrs.put("CreatedTimestamp", String.valueOf(queue.getCreatedTimestamp().getEpochSecond()));
         attrs.put("LastModifiedTimestamp", String.valueOf(queue.getLastModifiedTimestamp().getEpochSecond()));
 
-        GuardedMessageQueue.MessageCounts counts = getOrCreateQueue(storageKey).messageCounts();
+        GuardedMessageQueue.MessageCounts counts = unexpiredMessages(storageKey, queue).messageCounts();
         attrs.put("ApproximateNumberOfMessages", String.valueOf(counts.visible()));
         attrs.put("ApproximateNumberOfMessagesNotVisible", String.valueOf(counts.inFlight()));
         attrs.put("ApproximateNumberOfMessagesDelayed", String.valueOf(counts.delayed()));
@@ -1167,7 +1168,7 @@ public class SqsService implements Resettable, ResourceProvider {
         int maxReceiveCount = rp != null ? rp.maxReceiveCount() : -1;
         String deadLetterTargetArn = rp != null ? rp.deadLetterTargetArn() : null;
 
-        GuardedMessageQueue guardedQueue = getOrCreateQueue(storageKey);
+        GuardedMessageQueue guardedQueue = unexpiredMessages(storageKey, queue);
         GuardedMessageQueue.ClaimResult claimResult = guardedQueue.claimVisibleMessages(
                 maxMessages, effectiveTimeout, queue.isFifo(), maxReceiveCount, deadLetterTargetArn);
 
@@ -1183,6 +1184,9 @@ public class SqsService implements Resettable, ResourceProvider {
                     // Remember where the message came from so StartMessageMoveTask
                     // with no DestinationArn can put it back.
                     msg.setOriginalSourceQueueUrl(queue.getQueueUrl());
+                    if (queue.isFifo()) {
+                        msg.setRetentionStartTimestamp(Instant.now());
+                    }
                 }
                 String dlqStorageKey = regionKey(region, dlqUrl);
                 getOrCreateQueue(dlqStorageKey).addAll(dlqCandidates);
@@ -1206,8 +1210,10 @@ public class SqsService implements Resettable, ResourceProvider {
 
     public List<Message> peekMessages(String queueUrl, String region) {
         String storageKey = regionKey(region, queueUrl);
-        ensureQueueExists(storageKey);
-        return getOrCreateQueue(storageKey).peekAll();
+        Queue queue = queueStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                        "The specified queue does not exist.", 400));
+        return unexpiredMessages(storageKey, queue).peekAll();
     }
 
     public void deleteMessage(String queueUrl, String receiptHandle, String region) {
@@ -1313,7 +1319,8 @@ public class SqsService implements Resettable, ResourceProvider {
                     "Invalid source ARN: " + sourceArn, 400);
         }
         String srcKey = regionKey(region, sourceUrl);
-        if (queueStore.get(srcKey).isEmpty()) {
+        Optional<Queue> srcQueue = queueStore.get(srcKey);
+        if (srcQueue.isEmpty()) {
             throw new AwsException("ResourceNotFoundException",
                     "The resource that you specified for the SourceArn parameter does not exist.", 404);
         }
@@ -1354,7 +1361,7 @@ public class SqsService implements Resettable, ResourceProvider {
             }
         }
 
-        GuardedMessageQueue srcQueueInitial = getOrCreateQueue(srcKey);
+        GuardedMessageQueue srcQueueInitial = unexpiredMessages(srcKey, srcQueue.get());
         GuardedMessageQueue.MessageCounts srcCounts = srcQueueInitial.messageCounts();
         long toMove = srcCounts.visible() + srcCounts.inFlight() + srcCounts.delayed();
 
@@ -1781,6 +1788,35 @@ public class SqsService implements Resettable, ResourceProvider {
             return queueUrl;
         }
         return queueUrl.substring(pathStart);
+    }
+
+    private GuardedMessageQueue unexpiredMessages(String storageKey, Queue queue) {
+        GuardedMessageQueue messages = getOrCreateQueue(storageKey);
+        messages.removeExpired(retentionCutoff(queue));
+        return messages;
+    }
+
+    private static Instant retentionCutoff(Queue queue) {
+        int retentionSeconds = DEFAULT_MESSAGE_RETENTION_PERIOD_SECONDS;
+        String value = queue.getAttributes().get("MessageRetentionPeriod");
+        if (value != null) {
+            try {
+                retentionSeconds = Integer.parseInt(value.trim());
+            } catch (NumberFormatException e) {
+                LOG.debugv("Ignoring invalid MessageRetentionPeriod {0} on queue {1}", value, queue.getQueueUrl());
+            }
+        }
+        return Instant.now().minusSeconds(retentionSeconds);
+    }
+
+    /** Frees the memory and storage held by expired messages. Reads already skip them. */
+    void deleteExpiredMessages() {
+        for (Map.Entry<String, GuardedMessageQueue> entry : messagesByQueue.entrySet()) {
+            String storageKey = entry.getKey();
+            String queueUrl = baseUrl + storageKey.substring(storageKey.indexOf("::") + 2);
+            getQueueByUrl(storageKey, queueUrl)
+                    .ifPresent(queue -> entry.getValue().removeExpired(retentionCutoff(queue)));
+        }
     }
 
     private void ensureQueueExists(String storageKey) {

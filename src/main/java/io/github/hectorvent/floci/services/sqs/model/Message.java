@@ -46,6 +46,10 @@ public class Message {
     // on ReceiveMessage when requested.
     private String awsTraceHeader;
 
+    // The retention period starts over when a message is moved to a FIFO DLQ or by a message
+    // move task. A standard DLQ keeps the original enqueue time.
+    private Instant retentionStartTimestamp;
+
     // Transient fields for visibility timeout tracking
     @JsonIgnore
     private String receiptHandle;
@@ -81,6 +85,7 @@ public class Message {
         copy.sequenceNumber = sequenceNumber;
         copy.originalSourceQueueUrl = originalSourceQueueUrl;
         copy.awsTraceHeader = awsTraceHeader;
+        copy.retentionStartTimestamp = Instant.now();
         // receiveCount 0, firstReceiveTimestamp / receiptHandle / visibleAt null: a fresh life.
         return copy;
     }
@@ -129,6 +134,15 @@ public class Message {
 
     public String getAwsTraceHeader() { return awsTraceHeader; }
     public void setAwsTraceHeader(String awsTraceHeader) { this.awsTraceHeader = awsTraceHeader; }
+
+    public Instant getRetentionStartTimestamp() { return retentionStartTimestamp; }
+    public void setRetentionStartTimestamp(Instant retentionStartTimestamp) { this.retentionStartTimestamp = retentionStartTimestamp; }
+
+    @JsonIgnore
+    public boolean isExpired(Instant cutoff) {
+        Instant start = retentionStartTimestamp != null ? retentionStartTimestamp : sentTimestamp;
+        return start != null && !start.isAfter(cutoff);
+    }
 
     @JsonIgnore
     public boolean isVisible() {
