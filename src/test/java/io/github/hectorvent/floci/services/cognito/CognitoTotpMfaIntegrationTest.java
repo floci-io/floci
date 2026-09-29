@@ -11,6 +11,7 @@ import java.time.Clock;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -60,6 +61,11 @@ class CognitoTotpMfaIntegrationTest {
                 """.formatted(firstSession));
         assertTrue(associated.path("SecretCode").asText().matches("[A-Z2-7]{32}"));
         String code = CognitoTotp.code(associated.path("SecretCode").asText(), clock.instant());
+        String wrongCode = code.equals("000000") ? "000001" : "000000";
+        cognitoAction("VerifySoftwareToken", """
+                {"Session":"%s","UserCode":"%s"}
+                """.formatted(associated.path("Session").asText(), wrongCode))
+                .then().statusCode(400).body("__type", equalTo("CodeMismatchException"));
         JsonNode verified = cognitoJson("VerifySoftwareToken", """
                 {"Session":"%s","UserCode":"%s"}
                 """.formatted(associated.path("Session").asText(), code));

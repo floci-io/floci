@@ -167,7 +167,7 @@ class CognitoTotpMfaTest {
     }
 
     @Test
-    void invalidSetupCodeUsesEnableSoftwareTokenMfaError() {
+    void invalidSetupCodeUsesCodeMismatchError() {
         String loginSession = (String) passwordLogin().get("Session");
         Map<String, Object> associated = service.associateSoftwareToken(null, loginSession);
         String code = CognitoTotp.code((String) associated.get("SecretCode"), clock.instant());
@@ -175,7 +175,7 @@ class CognitoTotpMfaTest {
 
         AwsException mismatch = assertThrows(AwsException.class,
                 () -> service.verifySoftwareToken(null, (String) associated.get("Session"), wrongCode));
-        assertEquals("EnableSoftwareTokenMFAException", mismatch.getErrorCode());
+        assertEquals("CodeMismatchException", mismatch.getErrorCode());
     }
 
     @Test
@@ -189,13 +189,13 @@ class CognitoTotpMfaTest {
         for (int attempt = 0; attempt < CognitoTotp.MAX_FAILED_ATTEMPTS; attempt++) {
             AwsException mismatch = assertThrows(AwsException.class,
                     () -> service.verifySoftwareToken(null, session, wrongCode));
-            assertEquals("EnableSoftwareTokenMFAException", mismatch.getErrorCode());
+            assertEquals("CodeMismatchException", mismatch.getErrorCode());
         }
         CognitoUser pending = service.adminGetUser(pool.getId(), USERNAME);
         ObjectMapper mapper = new ObjectMapper();
         CognitoUser reloaded = mapper.readValue(mapper.writeValueAsBytes(pending), CognitoUser.class);
         assertEquals(0, reloaded.getPendingSoftwareTokenMfaAttemptsRemaining());
-        assertEquals("EnableSoftwareTokenMFAException", assertThrows(AwsException.class,
+        assertEquals("CodeMismatchException", assertThrows(AwsException.class,
                 () -> service.verifySoftwareToken(null, session, code)).getErrorCode());
 
         Map<String, Object> replacement = service.associateSoftwareToken(null,
@@ -215,10 +215,10 @@ class CognitoTotpMfaTest {
         String wrongCode = code.equals("000000") ? "000001" : "000000";
 
         for (int attempt = 0; attempt < CognitoTotp.MAX_FAILED_ATTEMPTS; attempt++) {
-            assertEquals("EnableSoftwareTokenMFAException", assertThrows(AwsException.class,
+            assertEquals("CodeMismatchException", assertThrows(AwsException.class,
                     () -> service.verifySoftwareToken(accessToken, null, wrongCode)).getErrorCode());
         }
-        assertEquals("EnableSoftwareTokenMFAException", assertThrows(AwsException.class,
+        assertEquals("CodeMismatchException", assertThrows(AwsException.class,
                 () -> service.verifySoftwareToken(accessToken, null, code)).getErrorCode());
     }
 

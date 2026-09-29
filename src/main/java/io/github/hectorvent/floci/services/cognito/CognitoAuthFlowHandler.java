@@ -342,7 +342,7 @@ final class CognitoAuthFlowHandler {
         }
         if (!service.activateSoftwareTokenMfa(poolId, username, state == null ? null : state.secret(),
                 userCode, clock.instant())) {
-            throw new AwsException("EnableSoftwareTokenMFAException",
+            throw new AwsException("CodeMismatchException",
                     "Invalid verification code provided, please try again.", 400);
         }
         Map<String, Object> result = new HashMap<>();
