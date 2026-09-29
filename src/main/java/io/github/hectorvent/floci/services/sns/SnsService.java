@@ -267,7 +267,7 @@ public class SnsService implements Resettable, ResourceProvider {
     }
 
     public synchronized void setSmsAttributes(Map<String, String> attributes, String region) {
-        String key = regionResolver.getAccountId() + "::" + region;
+        String key = smsAttributesKey(region);
         Map<String, String> updated = new LinkedHashMap<>(smsAttributesStore.get(key).orElse(Map.of()));
         for (Map.Entry<String, String> entry : attributes.entrySet()) {
             String name = entry.getKey();
@@ -312,7 +312,7 @@ public class SnsService implements Resettable, ResourceProvider {
     }
 
     public Map<String, String> getSmsAttributes(List<String> names, String region) {
-        String key = regionResolver.getAccountId() + "::" + region;
+        String key = smsAttributesKey(region);
         Map<String, String> stored = smsAttributesStore.get(key).orElse(Map.of());
         if (names == null || names.isEmpty()) {
             return new LinkedHashMap<>(stored);
@@ -2300,6 +2300,10 @@ public class SnsService implements Resettable, ResourceProvider {
         } catch (NoSuchAlgorithmException e) {
             return UUID.randomUUID().toString();
         }
+    }
+
+    private String smsAttributesKey(String region) {
+        return regionResolver.getAccountId() + "::" + region;
     }
 
     private static String topicKey(String region, String arn) {
