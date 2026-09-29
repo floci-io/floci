@@ -609,17 +609,31 @@ public class CloudFormationService implements ResourceProvider {
                 }
             });
 
-            if (!replacedResourceIds.isEmpty()) {
-                Set<String> alreadyChangedIds = changes.stream()
-                        .map(ResourceChange::logicalResourceId)
-                        .collect(Collectors.toCollection(LinkedHashSet::new));
+            Set<String> alreadyChangedIds = changes.stream()
+                    .map(ResourceChange::logicalResourceId)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            Map<String, Set<String>> inPlaceChangedAttributes = new HashMap<>();
+            for (ResourceChange change : changes) {
+                if ("Modify".equals(change.action()) && !replacedResourceIds.contains(change.logicalResourceId())) {
+                    String logicalId = change.logicalResourceId();
+                    JsonNode oldDef = oldResources.get(logicalId);
+                    JsonNode newDef = newResources.get(logicalId);
+                    String resourceType = newDef != null ? newDef.path("Type").asText() : "";
+                    Set<String> attrs = expectedChangedAttributes(resourceType, oldDef, newDef);
+                    if (!attrs.isEmpty()) {
+                        inPlaceChangedAttributes.put(logicalId, attrs);
+                    }
+                }
+            }
+
+            if (!replacedResourceIds.isEmpty() || !inPlaceChangedAttributes.isEmpty()) {
                 Set<String> allResourceIds = new LinkedHashSet<>();
                 newResources.fieldNames().forEachRemaining(allResourceIds::add);
 
                 List<String> sortedLogicalIds = topologicalSort(newResources, newConditions);
-                boolean anyNewReplacement = true;
-                while (anyNewReplacement) {
-                    anyNewReplacement = false;
+                boolean anyNewChange = true;
+                while (anyNewChange) {
+                    anyNewChange = false;
                     for (String logicalId : sortedLogicalIds) {
                         JsonNode newDef = newResources.get(logicalId);
                         String newConditionName = newDef.path("Condition").asText(null);
@@ -630,7 +644,19 @@ public class CloudFormationService implements ResourceProvider {
                         }
                         Set<String> propertyDependencies = new LinkedHashSet<>();
                         collectDependencies(newDef.path("Properties"), allResourceIds, propertyDependencies, newConditions);
-                        if (propertyDependencies.stream().anyMatch(replacedResourceIds::contains)) {
+
+                        boolean dependsOnReplaced = propertyDependencies.stream().anyMatch(replacedResourceIds::contains);
+                        boolean referencesChangedAttr = false;
+                        if (!dependsOnReplaced) {
+                            for (Map.Entry<String, Set<String>> entry : inPlaceChangedAttributes.entrySet()) {
+                                if (referencesAnyAttribute(newDef.path("Properties"), entry.getKey(), entry.getValue(), newConditions)) {
+                                    referencesChangedAttr = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (dependsOnReplaced || referencesChangedAttr) {
                             String resourceType = newDef.path("Type").asText();
                             JsonNode oldDef = oldResources.get(logicalId);
                             boolean typeChanged = oldDef != null && !oldDef.path("Type").asText().equals(resourceType);
@@ -655,13 +681,18 @@ public class CloudFormationService implements ResourceProvider {
                                     || (oldDef != null && requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams, changedConditions))
                                     || createOnlyReferencesReplaced;
                             if (replacement && replacedResourceIds.add(logicalId)) {
-                                anyNewReplacement = true;
+                                anyNewChange = true;
                             }
                             if (!alreadyChangedIds.contains(logicalId)) {
                                 alreadyChangedIds.add(logicalId);
                                 changes.add(new ResourceChange("Modify", logicalId,
                                         resourcePhysicalId(stack, logicalId), resourceType,
                                         replacement ? "True" : "False"));
+                                anyNewChange = true;
+                                Set<String> attrs = expectedChangedAttributes(resourceType, oldDef, newDef);
+                                if (!attrs.isEmpty()) {
+                                    inPlaceChangedAttributes.put(logicalId, attrs);
+                                }
                             }
                         }
                     }
@@ -1515,7 +1546,7 @@ public class CloudFormationService implements ResourceProvider {
                                 }
                             }
                         } else {
-                            // Cập nhật in-place nhưng có thể thay đổi attribute (ví dụ LatestVersionNumber của LaunchTemplate)
+                            // In-place updates can still change attributes (e.g. LatestVersionNumber of LaunchTemplate)
                             Map<String, String> newAttrs = resource.getAttributes();
                             Set<String> changedAttrNames = new HashSet<>();
                             if (newAttrs != null) {
@@ -3161,11 +3192,28 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
+    private Set<String> expectedChangedAttributes(String resourceType, JsonNode oldDef, JsonNode newDef) {
+        Set<String> changedAttrs = new HashSet<>();
+        if ("AWS::EC2::LaunchTemplate".equals(resourceType)) {
+            changedAttrs.add("LatestVersionNumber");
+            changedAttrs.add("DefaultVersionNumber");
+        }
+        JsonNode oldProps = oldDef != null ? oldDef.path("Properties") : null;
+        JsonNode newProps = newDef != null ? newDef.path("Properties") : null;
+        if (oldProps != null && newProps != null && oldProps.isObject() && newProps.isObject()) {
+            newProps.fieldNames().forEachRemaining(field -> {
+                if (!Objects.equals(newProps.get(field), oldProps.get(field))) {
+                    changedAttrs.add(field);
+                }
+            });
+        }
+        return changedAttrs;
+    }
+
     /**
-     * Kiểm tra xem một node trong template có tham chiếu đến bất kỳ attribute nào bị thay đổi
-     * của tài nguyên targetLogicalId hay không (thông qua Fn::GetAtt hoặc Fn::Sub).
-     * Được dùng để kéo lại (pull in) các tài nguyên phụ thuộc khi một tài nguyên được cập nhật in-place
-     * nhưng có attribute bị thay đổi (ví dụ LatestVersionNumber của LaunchTemplate).
+     * Checks whether a template node references any changed attribute of targetLogicalId
+     * (via Fn::GetAtt or Fn::Sub). Used to pull in dependent resources when a resource
+     * is updated in-place with modified attributes (e.g. LatestVersionNumber of LaunchTemplate).
      */
     private boolean referencesAnyAttribute(JsonNode node, String targetLogicalId, Set<String> targetAttrNames,
                                            Map<String, Boolean> conditions) {

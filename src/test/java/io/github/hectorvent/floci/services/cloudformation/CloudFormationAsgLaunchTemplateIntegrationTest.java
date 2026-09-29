@@ -5,12 +5,15 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -404,6 +407,42 @@ class CloudFormationAsgLaunchTemplateIntegrationTest {
         assertStackCreated(stackName);
         assertThat(describeAutoScalingGroup(asgName), containsString("<Version>1</Version>"));
 
+        // DescribeChangeSet must include ASG with Action=Modify, Replacement=False
+        String csName = "cs-" + Long.toString(System.nanoTime(), 36);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", csName)
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", template2)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String csXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", csName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+
+        List<Map<String, String>> resourceChanges = XmlParser.extractGroups(csXml, "ResourceChange");
+        Map<String, String> asgChange = resourceChanges.stream()
+                .filter(m -> "Asg".equals(m.get("LogicalResourceId")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(asgChange, "DescribeChangeSet must preview ASG update when LaunchTemplate version changes");
+        assertEquals("Modify", asgChange.get("Action"));
+        assertEquals("False", asgChange.get("Replacement"));
+
         updateStack(stackName, template2);
         String describe = describeStacks(stackName);
         assertThat(describe, containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
@@ -434,5 +473,99 @@ class CloudFormationAsgLaunchTemplateIntegrationTest {
                 .toList();
         assertTrue(queueStatuses.contains("CREATE_COMPLETE"));
         assertFalse(queueStatuses.contains("UPDATE_COMPLETE"));
+    }
+
+    @Test
+    void asgRollsBackWhenLaterResourceFails() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String ltName = "cfn-lt-rb-" + suffix;
+        String asgName = "cfn-asg-rb-" + suffix;
+        String stackName = "cfn-asg-rb-stack-" + suffix;
+        String queueName = "cfn-rb-q-" + suffix;
+
+        String template1 = """
+                {
+                  "Resources": {
+                    "Lt": {
+                      "Type": "AWS::EC2::LaunchTemplate",
+                      "Properties": {
+                        "LaunchTemplateName": "%s",
+                        "LaunchTemplateData": {
+                          "ImageId": "ami-12345678",
+                          "InstanceType": "t3.micro"
+                        }
+                      }
+                    },
+                    "Asg": {
+                      "Type": "AWS::AutoScaling::AutoScalingGroup",
+                      "Properties": {
+                        "AutoScalingGroupName": "%s",
+                        "LaunchTemplate": {
+                          "LaunchTemplateId": {"Ref": "Lt"},
+                          "Version": {"Fn::GetAtt": ["Lt", "LatestVersionNumber"]}
+                        },
+                        "MinSize": 0,
+                        "MaxSize": 0,
+                        "DesiredCapacity": 0,
+                        "AvailabilityZones": ["us-east-1a"]
+                      }
+                    },
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "DependsOn": ["Asg"],
+                      "Properties": {"QueueName": "%s"}
+                    }
+                  }
+                }
+                """.formatted(ltName, asgName, queueName);
+
+        String template2 = """
+                {
+                  "Resources": {
+                    "Lt": {
+                      "Type": "AWS::EC2::LaunchTemplate",
+                      "Properties": {
+                        "LaunchTemplateName": "%s",
+                        "LaunchTemplateData": {
+                          "ImageId": "ami-87654321",
+                          "InstanceType": "t3.small"
+                        }
+                      }
+                    },
+                    "Asg": {
+                      "Type": "AWS::AutoScaling::AutoScalingGroup",
+                      "Properties": {
+                        "AutoScalingGroupName": "%s",
+                        "LaunchTemplate": {
+                          "LaunchTemplateId": {"Ref": "Lt"},
+                          "Version": {"Fn::GetAtt": ["Lt", "LatestVersionNumber"]}
+                        },
+                        "MinSize": 0,
+                        "MaxSize": 0,
+                        "DesiredCapacity": 0,
+                        "AvailabilityZones": ["us-east-1a"]
+                      }
+                    },
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "DependsOn": ["Asg"],
+                      "Properties": {
+                        "QueueName": "%s",
+                        "FifoQueue": true
+                      }
+                    }
+                  }
+                }
+                """.formatted(ltName, asgName, queueName);
+
+        createStack(stackName, template1);
+        assertStackCreated(stackName);
+        assertThat(describeAutoScalingGroup(asgName), containsString("<Version>1</Version>"));
+
+        updateStack(stackName, template2);
+        String describe = describeStacks(stackName);
+        assertThat(describe, containsString("<StackStatus>UPDATE_ROLLBACK_COMPLETE</StackStatus>"));
+        // ASG must have rolled back to Version 1
+        assertThat(describeAutoScalingGroup(asgName), containsString("<Version>1</Version>"));
     }
 }
