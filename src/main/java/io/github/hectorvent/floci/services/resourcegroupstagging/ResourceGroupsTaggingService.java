@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.resourcegroupstagging.model.ResourceTagMapping;
@@ -213,14 +214,14 @@ public class ResourceGroupsTaggingService implements Resettable {
         }
     }
 
-    // Providers are only read when some ARN has a handler, so a store-only request stays cheap. When a
-    // provider failed, an unlisted ARN with a handler may be that provider's, so it fails instead.
+    // Providers are only read when some ARN has a handler, so a store-only request stays cheap. When the
+    // provider of an ARN's service failed, an unlisted ARN with a handler may be one it lists, so it fails.
     private Map<String, TagHandler> listedOwners(List<String> resourceArns, String region,
                                                  Map<String, AwsException> failures) {
         Map<String, TagHandler> owners = new HashMap<>();
         String accountId = regionResolver != null ? regionResolver.getAccountId() : null;
         Set<String> listed = null;
-        boolean complete = true;
+        Set<String> unreadServices = Set.of();
         for (String arn : resourceArns) {
             // ponytail: AWS returns the owner's own error code per ARN; Floci uses AccessDeniedException 403 for all.
             if (accountId != null && !AwsArnUtils.accountOrDefault(arn, accountId).equals(accountId)) {
@@ -235,7 +236,7 @@ public class ResourceGroupsTaggingService implements Resettable {
             if (listed == null) {
                 listed = new HashSet<>();
                 ProviderScan scan = providerResources();
-                complete = scan.complete();
+                unreadServices = scan.unreadServices();
                 for (ExplorerResource resource : scan.resources()) {
                     String listedArn = withoutWildcard(resource.arn());
                     String resourceRegion = providerRegion(listedArn, resource.region());
@@ -248,7 +249,7 @@ public class ResourceGroupsTaggingService implements Resettable {
             // A wildcard ARN always reaches its handler, which rejects it as AWS does, listed or not.
             if (arn.endsWith(WILDCARD_SUFFIX) || listed.contains(arn)) {
                 owners.put(arn, handler);
-            } else if (!complete) {
+            } else if (unreadServices.contains(handler.serviceKey())) {
                 failures.put(arn, new AwsException("InternalServiceException",
                         "An owning service could not be read. Retry the request.", 500));
             }
@@ -404,13 +405,13 @@ public class ResourceGroupsTaggingService implements Resettable {
         return new ArrayList<>(byArn.values());
     }
 
-    private record ProviderScan(List<ExplorerResource> resources, boolean complete) {}
+    private record ProviderScan(List<ExplorerResource> resources, Set<String> unreadServices) {}
 
     // Tags are copied inside the try so a live tag map that changes mid-copy skips only its provider,
-    // and the scan is then not complete.
+    // and the services it declares are then unread.
     private ProviderScan providerResources() {
         List<ExplorerResource> resources = new ArrayList<>();
-        boolean complete = true;
+        Set<String> unreadServices = new HashSet<>();
         for (ResourceProvider provider : providers) {
             try {
                 List<ExplorerResource> copies = new ArrayList<>();
@@ -423,10 +424,12 @@ public class ResourceGroupsTaggingService implements Resettable {
             } catch (RuntimeException e) {
                 LOG.warnv(e, "ResourceProvider {0} failed to supply resources; excluding it from tag discovery",
                         provider.getClass().getSimpleName());
-                complete = false;
+                for (SupportedResourceType type : provider.getSupportedResourceTypes()) {
+                    unreadServices.add(type.service());
+                }
             }
         }
-        return new ProviderScan(resources, complete);
+        return new ProviderScan(resources, unreadServices);
     }
 
     // Region and account come from the ARN (arn:<partition>:svc:region:acct:resource), and a string

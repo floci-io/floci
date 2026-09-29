@@ -66,10 +66,10 @@ goes to the tagging store and the owning service is not called.
 `UntagResources` routes the same way, and also removes the keys from the
 tagging store for every ARN, including one the owning service rejects but not
 one reported as unresolved or from another account, so a copy stored earlier
-can always be cleared. When an owning service cannot be
-read while routing, an ARN that has an owning service but that no service lists
-is reported in `FailedResourcesMap` with `InternalServiceException` (status
-500) and left unchanged, while ARNs a service lists still reach it. An ARN
+can always be cleared. When the service owning an ARN cannot be read while
+routing and no service lists the ARN, it is reported in `FailedResourcesMap`
+with `InternalServiceException` (status 500) and left unchanged, while ARNs a
+service lists, and ARNs of services that were read, still go through. An ARN
 from another account is reported in `FailedResourcesMap` with
 `AccessDeniedException` (status 403) and nothing is tagged; AWS also reports
 it per ARN, but with the owning service's own error, such as `InvalidAddress`

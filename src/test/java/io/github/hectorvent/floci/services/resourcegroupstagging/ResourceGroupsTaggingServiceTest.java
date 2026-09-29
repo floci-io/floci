@@ -212,7 +212,7 @@ class ResourceGroupsTaggingServiceTest {
 
     @Test
     void failingProviderIsSkipped() {
-        ResourceGroupsTaggingService service = service(List.of(failingProvider(),
+        ResourceGroupsTaggingService service = service(List.of(failingProvider("ssm"),
                 provider(resource(QUEUE_ARN, "sqs:queue", Map.of("k", "v")))), List.of());
 
         assertEquals(List.of(QUEUE_ARN), arns(allResources(service)));
@@ -221,7 +221,7 @@ class ResourceGroupsTaggingServiceTest {
     @Test
     void tagResourcesFailsWhenAnOwnerCannotBeRead() {
         RecordingTagHandler handler = new RecordingTagHandler("sqs", false);
-        ResourceGroupsTaggingService service = service(List.of(failingProvider()), List.of(handler));
+        ResourceGroupsTaggingService service = service(List.of(failingProvider("sqs")), List.of(handler));
 
         Map<String, AwsException> failures = service.applyTags(List.of(QUEUE_ARN), Map.of("k", "v"), REGION);
 
@@ -236,7 +236,7 @@ class ResourceGroupsTaggingServiceTest {
     @Test
     void untagResourcesFailsWhenAnOwnerCannotBeRead() {
         RecordingTagHandler handler = new RecordingTagHandler("sqs", false);
-        ResourceGroupsTaggingService service = service(List.of(failingProvider()), List.of(handler));
+        ResourceGroupsTaggingService service = service(List.of(failingProvider("sqs")), List.of(handler));
         service.tagResources(List.of(QUEUE_ARN), Map.of("k", "v"), REGION);
 
         Map<String, AwsException> failures = service.removeTags(List.of(QUEUE_ARN), List.of("k"), REGION);
@@ -251,7 +251,7 @@ class ResourceGroupsTaggingServiceTest {
     @Test
     void listedOwnerIsTaggedWhenAnotherProviderFails() {
         RecordingTagHandler handler = new RecordingTagHandler("sqs", false);
-        ResourceGroupsTaggingService service = service(List.of(failingProvider(),
+        ResourceGroupsTaggingService service = service(List.of(failingProvider("sqs"),
                 provider(resource(QUEUE_ARN, "sqs:queue", Map.of()))), List.of(handler));
 
         assertTrue(service.applyTags(List.of(QUEUE_ARN), Map.of("k", "v"), REGION).isEmpty());
@@ -265,13 +265,28 @@ class ResourceGroupsTaggingServiceTest {
     @Test
     void storeOnlyWriteSucceedsWhenAProviderCannotBeRead() {
         RecordingTagHandler handler = new RecordingTagHandler("sqs", false);
-        ResourceGroupsTaggingService service = service(List.of(failingProvider()), List.of(handler));
+        ResourceGroupsTaggingService service = service(List.of(failingProvider("sqs")), List.of(handler));
 
         service.applyTags(List.of(INSTANCE_ARN), Map.of("a", "1", "b", "2"), REGION);
         service.removeTags(List.of(INSTANCE_ARN), List.of("a"), REGION);
 
         assertEquals(Map.of("b", "2"), service.getTagsForResource(REGION, INSTANCE_ARN));
         assertTrue(handler.tagged.isEmpty());
+    }
+
+    @Test
+    void unlistedArnIsStoredWhenAnotherServicesProviderFails() {
+        String deploymentArn = "arn:aws:apigateway:us-east-1::/restapis/abc/deployments/d1";
+        RecordingTagHandler handler = new RecordingTagHandler("apigateway", false);
+        ResourceGroupsTaggingService service = service(List.of(failingProvider("ssm"), provider(resource(
+                "arn:aws:apigateway:us-east-1::/restapis/abc", "apigateway:restapis", Map.of()))),
+                List.of(handler));
+
+        Map<String, AwsException> failures = service.applyTags(List.of(deploymentArn), Map.of("k", "v"), REGION);
+
+        assertTrue(failures.isEmpty());
+        assertTrue(handler.tagged.isEmpty());
+        assertEquals(Map.of("k", "v"), service.getTagsForResource(REGION, deploymentArn));
     }
 
     @Test
@@ -595,7 +610,7 @@ class ResourceGroupsTaggingServiceTest {
         return new FakeProvider(List.of(resources), types);
     }
 
-    private static ResourceProvider failingProvider() {
+    private static ResourceProvider failingProvider(String service) {
         return new ResourceProvider() {
             @Override
             public List<ExplorerResource> getResources() {
@@ -604,7 +619,7 @@ class ResourceGroupsTaggingServiceTest {
 
             @Override
             public Set<SupportedResourceType> getSupportedResourceTypes() {
-                return Set.of();
+                return Set.of(new SupportedResourceType(service + ":thing", service, true));
             }
         };
     }
