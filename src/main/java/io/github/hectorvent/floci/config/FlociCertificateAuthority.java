@@ -181,9 +181,8 @@ public final class FlociCertificateAuthority {
             Files.move(temporary, certFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             FlociCertificateAuthority replacement = new FlociCertificateAuthority(certFile, upgraded,
                     existing.key(), pem, existing.generator);
-            LOG.warnv("TLS: reissued local CA with key identifiers using the existing key. "
-                    + "Its SHA256 fingerprint changed from {0} to {1}; clients using the old CA file "
-                    + "must re-import {2}", existing.fingerprint(), replacement.fingerprint(), CA_CERT_NAME);
+            LOG.warnv("TLS: reissued local CA with key identifiers using the existing key. Its SHA256 fingerprint changed from {0} to {1}; clients using the old CA file must re-import {2}",
+                    existing.fingerprint(), replacement.fingerprint(), CA_CERT_NAME);
             return replacement;
         } catch (Exception e) {
             throw new IllegalStateException("Failed to upgrade local CA at " + certFile
