@@ -3142,7 +3142,7 @@ public class ApiGatewayService {
                     String t = importedAuthorizerType(authDef, schemeName); // token | request | cognito_user_pools
                     Map<String, Object> req = new HashMap<>();
                     req.put("name", schemeName);
-                    String authorizerUri = importedAuthorizerUri(region, authDef, schemeName);
+                    String authorizerUri = importedAuthorizerUri(authDef, schemeName);
                     String existingId = authorizerNameToId.get(schemeName);
                     Authorizer existing = existingId == null ? null : getAuthorizer(region, apiId, existingId);
                     if (existing != null && "COGNITO_USER_POOLS".equals(existing.getType())
@@ -3168,7 +3168,7 @@ public class ApiGatewayService {
                     if ("cognito_user_pools".equalsIgnoreCase(t)) {
                         req.put("type", "COGNITO_USER_POOLS");
                         // Cognito user-pool authorizers carry the pool ARNs in the authorizer extension.
-                        List<String> providerArns = importedProviderArns(region, authDef, schemeName);
+                        List<String> providerArns = importedProviderArns(authDef, schemeName);
                         if (providerArns == null && existing != null
                                 && "COGNITO_USER_POOLS".equals(existing.getType())) {
                             providerArns = existing.getProviderARNs();
