@@ -19,6 +19,7 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -349,6 +350,17 @@ public class Ec2QueryHandler {
     private String firstPresent(MultivaluedMap<String, String> p, String first, String second) {
         String value = p.getFirst(first);
         return value != null && !value.isBlank() ? value : p.getFirst(second);
+    }
+
+    private List<String> getListOrSingle(MultivaluedMap<String, String> p, String prefix) {
+        List<String> result = getList(p, prefix);
+        if (result.isEmpty()) {
+            String single = p.getFirst(prefix);
+            if (single != null && !single.isBlank()) {
+                result.add(single);
+            }
+        }
+        return result;
     }
 
     private int parseIntParam(MultivaluedMap<String, String> p, String name, int defaultValue) {
@@ -6058,14 +6070,62 @@ public class Ec2QueryHandler {
      * clients such as Karpenter to distinguish an empty result from an unsupported action.</p>
      */
     private Response handleDescribeSpotPriceHistory(MultivaluedMap<String, String> p, String region) {
+        List<String> instanceTypes = getListOrSingle(p, "InstanceType");
+        List<String> productDescriptions = getListOrSingle(p, "ProductDescription");
+        String availabilityZone = p.getFirst("AvailabilityZone");
+        if (availabilityZone == null) {
+            availabilityZone = p.getFirst("AvailabilityZone.1");
+        }
+        String availabilityZoneId = p.getFirst("AvailabilityZoneId");
+        if (availabilityZoneId == null) {
+            availabilityZoneId = p.getFirst("AvailabilityZoneId.1");
+        }
+        Instant startTime = instantOrNull(p, "StartTime");
+        Instant endTime = instantOrNull(p, "EndTime");
+        Map<String, List<String>> filters = getFilters(p);
+        String nextToken = p.getFirst("NextToken");
+
+        int maxResults = 0;
+        String maxResultsStr = p.getFirst("MaxResults");
+        if (maxResultsStr != null && !maxResultsStr.isEmpty()) {
+            try {
+                maxResults = Integer.parseInt(maxResultsStr);
+                if (maxResults < 1) {
+                    throw new AwsException("InvalidParameterValue",
+                            "The parameter MaxResults must be greater than or equal to 1", 400);
+                }
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidParameterValue",
+                        "The specified value for MaxResults is not valid.", 400);
+            }
+        }
+
+        service.validateSpotPriceHistory(productDescriptions, availabilityZone, availabilityZoneId, startTime, endTime, filters);
         checkDryRun(p);
+
+        SpotPriceHistoryResult result = service.describeSpotPriceHistory(region,
+                instanceTypes, productDescriptions, availabilityZone, availabilityZoneId,
+                startTime, endTime, filters, maxResults, nextToken);
+
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeSpotPriceHistoryResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
-                .elem("nextToken", "")
-                .start("spotPriceHistorySet")
-                .end("spotPriceHistorySet")
-                .end("DescribeSpotPriceHistoryResponse");
+                .start("spotPriceHistorySet");
+        for (SpotPrice sp : result.spotPrices()) {
+            xml.start("item")
+                    .elem("instanceType", sp.instanceType())
+                    .elem("productDescription", sp.productDescription())
+                    .elem("spotPrice", sp.spotPrice())
+                    .elem("timestamp", ISO_FMT.format(sp.timestamp()))
+                    .elem("availabilityZone", sp.availabilityZone());
+            if (sp.availabilityZoneId() != null) {
+                xml.elem("availabilityZoneId", sp.availabilityZoneId());
+            }
+            xml.end("item");
+        }
+        xml.end("spotPriceHistorySet");
+        xml.elem("nextToken", result.nextToken() != null ? result.nextToken() : "");
+        xml.end("DescribeSpotPriceHistoryResponse");
         return xmlResponse(xml.build());
     }
 

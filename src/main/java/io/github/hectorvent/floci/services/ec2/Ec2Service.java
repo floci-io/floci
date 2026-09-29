@@ -60,8 +60,11 @@ import io.github.hectorvent.floci.services.ec2.model.RouteTable;
 import io.github.hectorvent.floci.services.ec2.model.RouteTableAssociation;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
+import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
+import io.github.hectorvent.floci.services.ec2.model.SpotPrice;
+import io.github.hectorvent.floci.services.ec2.model.SpotPriceHistoryResult;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.TransitGateway;
@@ -100,6 +103,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -196,6 +200,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private static final Set<String> EGRESS_ONLY_INTERNET_GATEWAY_FILTERS = Set.of(
             "attachment.state", "attachment.vpc-id",
             "egress-only-internet-gateway-id", "tag-key", "tag-value");
+    private static final Set<String> SPOT_PRICE_HISTORY_FILTERS = Set.of(
+            "availability-zone", "availability-zone-id",
+            "instance-type", "product-description",
+            "spot-price", "timestamp");
+    private static final Set<String> VALID_PRODUCT_DESCRIPTIONS = Set.of(
+            "Linux/UNIX", "Linux/UNIX (Amazon VPC)",
+            "SUSE Linux", "SUSE Linux (Amazon VPC)",
+            "Red Hat Enterprise Linux", "Red Hat Enterprise Linux (Amazon VPC)",
+            "Windows", "Windows (Amazon VPC)");
+    private static final List<String> MODELLED_PRODUCT_DESCRIPTIONS = List.of(
+            "Linux/UNIX", "Linux/UNIX (Amazon VPC)");
 
     private final String defaultAccountId;
     private final jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance;
@@ -9772,6 +9787,159 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
 
         return result;
+    }
+
+    public void validateSpotPriceHistory(List<String> productDescriptions,
+                                         String availabilityZone,
+                                         String availabilityZoneId,
+                                         Instant startTime,
+                                         Instant endTime,
+                                         Map<String, List<String>> filters) {
+        if (filters != null && !filters.isEmpty()) {
+            requireSupportedFilters(filters, SPOT_PRICE_HISTORY_FILTERS);
+        }
+        if (productDescriptions != null) {
+            for (String desc : productDescriptions) {
+                if (!VALID_PRODUCT_DESCRIPTIONS.contains(desc)) {
+                    throw new AwsException("InvalidParameterValue",
+                            "The parameter ProductDescription is not valid", 400);
+                }
+            }
+        }
+        if (availabilityZone != null && availabilityZoneId != null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "The parameter AvailabilityZone cannot be used with the parameter AvailabilityZoneId", 400);
+        }
+        if (startTime != null && endTime != null && startTime.isAfter(endTime)) {
+            throw new AwsException("InvalidParameterValue",
+                    "StartTime must be before EndTime", 400);
+        }
+    }
+
+    /**
+     * Synthesizes spot price history for known instance types across modeled availability zones.
+     * Prices are synthetic and derived deterministically from instance type vCPU and memory.
+     * They bear no relation to real AWS spot prices.
+     */
+    public SpotPriceHistoryResult describeSpotPriceHistory(String region,
+                                                          List<String> instanceTypes,
+                                                          List<String> productDescriptions,
+                                                          String availabilityZone,
+                                                          String availabilityZoneId,
+                                                          Instant startTime,
+                                                          Instant endTime,
+                                                          Map<String, List<String>> filters,
+                                                          int maxResults,
+                                                          String nextToken) {
+        ensureDefaultResources(region);
+        validateSpotPriceHistory(productDescriptions, availabilityZone, availabilityZoneId, startTime, endTime, filters);
+
+        Instant effectiveTimestamp = startTime != null
+                ? startTime
+                : (endTime != null ? endTime : Instant.now().truncatedTo(ChronoUnit.HOURS));
+
+        List<Map<String, String>> zones = describeAvailabilityZones(region);
+        if (availabilityZone != null) {
+            zones = zones.stream()
+                    .filter(z -> availabilityZone.equals(z.get("zoneName")))
+                    .toList();
+        }
+        if (availabilityZoneId != null) {
+            zones = zones.stream()
+                    .filter(z -> availabilityZoneId.equals(z.get("zoneId")))
+                    .toList();
+        }
+        if (filters != null && filters.containsKey("availability-zone")) {
+            List<String> azFilter = filters.get("availability-zone");
+            zones = zones.stream()
+                    .filter(z -> matchesValue(z.get("zoneName"), azFilter))
+                    .toList();
+        }
+        if (filters != null && filters.containsKey("availability-zone-id")) {
+            List<String> azIdFilter = filters.get("availability-zone-id");
+            zones = zones.stream()
+                    .filter(z -> matchesValue(z.get("zoneId"), azIdFilter))
+                    .toList();
+        }
+
+        List<CatalogInstanceType> catalogTypes;
+        if (instanceTypes != null && !instanceTypes.isEmpty()) {
+            Set<String> distinctTypes = new LinkedHashSet<>(instanceTypes);
+            catalogTypes = distinctTypes.stream()
+                    .map(instanceTypeCatalog::find)
+                    .flatMap(Optional::stream)
+                    .filter(t -> t.supportedUsageClasses.contains("spot"))
+                    .toList();
+        } else {
+            catalogTypes = instanceTypeCatalog.instanceTypes().stream()
+                    .filter(t -> t.supportedUsageClasses.contains("spot"))
+                    .toList();
+        }
+        if (filters != null && filters.containsKey("instance-type")) {
+            List<String> itFilter = filters.get("instance-type");
+            catalogTypes = catalogTypes.stream()
+                    .filter(t -> matchesValue(t.instanceType, itFilter))
+                    .toList();
+        }
+
+        List<String> targetProductDescs = MODELLED_PRODUCT_DESCRIPTIONS;
+        if (productDescriptions != null && !productDescriptions.isEmpty()) {
+            Set<String> requested = new HashSet<>(productDescriptions);
+            targetProductDescs = targetProductDescs.stream()
+                    .filter(requested::contains)
+                    .toList();
+        }
+        if (filters != null && filters.containsKey("product-description")) {
+            List<String> pdFilter = filters.get("product-description");
+            targetProductDescs = targetProductDescs.stream()
+                    .filter(pd -> matchesValue(pd, pdFilter))
+                    .toList();
+        }
+
+        List<String> priceFilter = filters != null ? filters.get("spot-price") : null;
+        List<String> timestampFilter = filters != null ? filters.get("timestamp") : null;
+        String formattedTimestamp = ISO_FMT.format(effectiveTimestamp);
+
+        if (timestampFilter != null && !matchesValue(formattedTimestamp, timestampFilter)) {
+            return new SpotPriceHistoryResult(List.of(), null);
+        }
+
+        List<SpotPrice> allEntries = new ArrayList<>();
+        for (CatalogInstanceType type : catalogTypes) {
+            for (Map<String, String> zone : zones) {
+                String zoneName = zone.get("zoneName");
+                String zoneId = zone.get("zoneId");
+                int zoneOffset = Math.max(0, zoneName.charAt(zoneName.length() - 1) - 'a');
+                double multiplier = 1.0 + (zoneOffset * 0.03);
+                double priceVal = ((type.vcpu * 0.0016) + ((type.memoryMib / 1024.0) * 0.0012)) * multiplier;
+                String formattedPrice = String.format(Locale.ROOT, "%.6f", priceVal);
+
+                if (priceFilter != null && !matchesValue(formattedPrice, priceFilter)) {
+                    continue;
+                }
+
+                for (String pd : targetProductDescs) {
+                    allEntries.add(new SpotPrice(zoneName, zoneId, type.instanceType, pd, formattedPrice, effectiveTimestamp));
+                }
+            }
+        }
+
+        allEntries.sort(Comparator
+                .comparing(SpotPrice::instanceType)
+                .thenComparing(SpotPrice::availabilityZone)
+                .thenComparing(SpotPrice::productDescription));
+
+        if (maxResults > 0) {
+            int offset = decodeToken(nextToken);
+            int total = allEntries.size();
+            int fromIndex = Math.min(offset, total);
+            int toIndex = Math.min(fromIndex + maxResults, total);
+            List<SpotPrice> paged = allEntries.subList(fromIndex, toIndex);
+            String newNextToken = toIndex < total ? encodeToken(toIndex) : null;
+            return new SpotPriceHistoryResult(paged, newNextToken);
+        }
+
+        return new SpotPriceHistoryResult(allEntries, null);
     }
 
     // ─── Resource Explorer 2 ───────────────────────────────────────────────────
