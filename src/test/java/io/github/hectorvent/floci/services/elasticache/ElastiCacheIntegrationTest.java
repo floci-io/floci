@@ -575,6 +575,15 @@ class ElastiCacheIntegrationTest {
                 write(socket, respArray("PING"));
                 assertEquals("+PONG\r\n", readLine(socket));
             }
+
+            // 4. Client authenticating via HELLO with wrong password is rejected
+            String wrongHelloReply = sendCommand(proxyPort, respArray("HELLO", "3", "AUTH", passUserName, "wrong-password"));
+            assertEquals("-WRONGPASS invalid username-password pair or user is disabled.\r\n", wrongHelloReply);
+
+            // 5. Client authenticating via HELLO with correct password succeeds
+            String helloReply = sendCommand(proxyPort, respArray("HELLO", "3", "AUTH", passUserName, password));
+            assertTrue(helloReply.startsWith("%") || helloReply.startsWith("*") || helloReply.startsWith("+"),
+                    "HELLO response must be returned from backend");
         } finally {
             given()
                 .formParam("Action", "DeleteReplicationGroup")
@@ -586,6 +595,85 @@ class ElastiCacheIntegrationTest {
             given()
                 .formParam("Action", "DeleteUser")
                 .formParam("UserId", defUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/");
+
+            given()
+                .formParam("Action", "DeleteUser")
+                .formParam("UserId", passUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/");
+        }
+    }
+
+    @Test
+    @Order(18)
+    void replicationGroupWithMembersWithoutDefaultMemberRequiresAuth() throws Exception {
+        String groupId = "it-ec-nodef-members";
+        String passUserId = "it-nodef-pass-uid";
+        String passUserName = "nodef-user";
+        String password = "secret-pass-456";
+
+        // Create replication group with AuthMode.NO_AUTH
+        int proxyPort =
+                given()
+                    .formParam("Action", "CreateReplicationGroup")
+                    .formParam("ReplicationGroupId", groupId)
+                    .formParam("ReplicationGroupDescription", "Test group with members but no default member")
+                    .header("Authorization", AUTH_HEADER)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200)
+                    .extract()
+                    .xmlPath()
+                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port");
+
+        try {
+            // Create password user (NOT named default)
+            given()
+                .formParam("Action", "CreateUser")
+                .formParam("UserId", passUserId)
+                .formParam("UserName", passUserName)
+                .formParam("Engine", "redis")
+                .formParam("AuthenticationMode.Type", "password")
+                .formParam("AuthenticationMode.Passwords.member.1", password)
+                .formParam("AccessString", "on ~* +@all")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            // Associate only this password user with the replication group (no default user)
+            given()
+                .formParam("Action", "ModifyReplicationGroup")
+                .formParam("ReplicationGroupId", groupId)
+                .formParam("UserGroupIdsToAdd.member.1", passUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            // 1. Unauthenticated client sends PING directly without AUTH and is rejected with NOAUTH
+            String noAuthReply = sendCommand(proxyPort, respArray("PING"));
+            assertEquals("-NOAUTH Authentication required.\r\n", noAuthReply);
+
+            // 2. Client authenticating with correct password succeeds
+            try (Socket socket = openSocket(proxyPort)) {
+                write(socket, respArray("AUTH", passUserName, password));
+                assertEquals("+OK\r\n", readLine(socket));
+
+                write(socket, respArray("PING"));
+                assertEquals("+PONG\r\n", readLine(socket));
+            }
+        } finally {
+            given()
+                .formParam("Action", "DeleteReplicationGroup")
+                .formParam("ReplicationGroupId", groupId)
                 .header("Authorization", AUTH_HEADER)
             .when()
                 .post("/");

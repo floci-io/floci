@@ -38,6 +38,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
             if (defaultMode != null) {
                 return defaultMode != AuthMode.NO_AUTH;
             }
+            return true;
         }
         return authMode != AuthMode.NO_AUTH;
     }

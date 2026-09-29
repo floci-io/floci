@@ -331,4 +331,30 @@ class ElastiCacheAuthProxyTest {
                 "AUTH <token> must authenticate with group auth token");
         assertFalse(proxy.authenticate("default", "wrong-token"));
     }
+
+    @Test
+    void authRequiredIsTrueWhenGroupHasMembersWithoutDefaultMember() {
+        SigV4Validator sigV4Validator = mock(SigV4Validator.class);
+        ElastiCacheAuthProxy.PasswordValidator validatorWithoutDefault = new ElastiCacheAuthProxy.PasswordValidator() {
+            @Override
+            public boolean validatePassword(String username, String password) {
+                return false;
+            }
+
+            @Override
+            public boolean hasMembers() {
+                return true;
+            }
+
+            @Override
+            public AuthMode memberAuthMode(String username) {
+                return "app-user".equals(username) ? AuthMode.PASSWORD : null;
+            }
+        };
+
+        ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy("grp-no-default", AuthMode.NO_AUTH,
+                "127.0.0.1", 6379, validatorWithoutDefault, sigV4Validator);
+        assertTrue(proxy.authRequired(),
+                "authRequired must be true when group has members but no default member, even if replication group is NO_AUTH");
+    }
 }
