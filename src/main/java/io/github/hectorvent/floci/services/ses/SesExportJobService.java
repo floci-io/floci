@@ -373,7 +373,7 @@ public class SesExportJobService implements Resettable {
         }
         return Optional.of(preSignedUrlGenerator.generatePresignedUrl(baseUrl,
                 exportBucket(job.getAccountId(), job.getRegion()), job.getObjectKey(), "GET",
-                PRESIGNED_URL_EXPIRY_SECONDS));
+                PRESIGNED_URL_EXPIRY_SECONDS, job.getRegion()));
     }
 
     public List<ExportJob> listExportJobs(String region, String sourceType, String jobStatus) {

@@ -257,10 +257,10 @@ class S3Test {
     void deleteBucketTagging() {
         s3.deleteBucketTagging(DeleteBucketTaggingRequest.builder().bucket(BUCKET).build());
 
-        GetBucketTaggingResponse response = s3.getBucketTagging(
-                GetBucketTaggingRequest.builder().bucket(BUCKET).build());
-
-        assertThat(response.tagSet()).isEmpty();
+        assertThatThrownBy(() -> s3.getBucketTagging(
+                GetBucketTaggingRequest.builder().bucket(BUCKET).build()))
+                .isInstanceOfSatisfying(S3Exception.class,
+                        e -> assertThat(e.awsErrorDetails().errorCode()).isEqualTo("NoSuchTagSet"));
     }
 
     @Test

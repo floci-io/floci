@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import com.github.dockerjava.api.model.Frame;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -23,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class ContainerPlatformDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(ContainerPlatformDockerIntegrationTest.class);
-    private static final String IMAGE = "public.ecr.aws/docker/library/busybox:1.36";
+    private static final String IMAGE = TestImages.BUSYBOX_FOREIGN_PLATFORM;
 
     @Inject
     DockerClient dockerClient;

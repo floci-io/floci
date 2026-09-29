@@ -4,18 +4,16 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
-import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
-import com.github.dockerjava.api.model.Frame;
-import com.github.dockerjava.api.model.StreamType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -356,7 +354,7 @@ public class MwaaEnvironmentManager {
         }
         copyFileIntoContainer(containerId, "/tmp", "mwaa-requirements.txt", requirementsContent);
         try {
-            ExecResult result = execInContainer(containerId,
+            ContainerExec.Result result = execInContainer(containerId,
                     new String[]{"pip", "install", "--no-cache-dir", "-r", "/tmp/mwaa-requirements.txt"});
             if (result.exitCode() != 0) {
                 LOG.warnv("pip install -r requirements.txt exited {0} for environment {1}: {2}",
@@ -370,7 +368,7 @@ public class MwaaEnvironmentManager {
     }
 
     /** Runs {@code airflow <cliCommand>} inside the Airflow container via {@code sh -c}. */
-    public ExecResult runAirflowCli(String airflowContainerId, String cliCommand) throws Exception {
+    public ContainerExec.Result runAirflowCli(String airflowContainerId, String cliCommand) throws Exception {
         return execInContainer(airflowContainerId, new String[]{"sh", "-c", "airflow " + cliCommand});
     }
 
@@ -531,7 +529,7 @@ public class MwaaEnvironmentManager {
         Exception last = null;
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
-                ExecResult result = execInContainer(containerId,
+                ContainerExec.Result result = execInContainer(containerId,
                         new String[]{"pg_isready", "-h", "127.0.0.1", "-U", "airflow"});
                 if (result.exitCode() == 0) {
                     return;
@@ -608,35 +606,8 @@ public class MwaaEnvironmentManager {
         }
     }
 
-    ExecResult execInContainer(String containerId, String[] cmd) throws Exception {
-        var dockerClient = lifecycleManager.getDockerClient();
-        var exec = dockerClient.execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec();
-
-        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
-        boolean completed = dockerClient.execStartCmd(exec.getId())
-                .exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onNext(Frame frame) {
-                        if (frame.getStreamType() == StreamType.STDERR) {
-                            stderr.writeBytes(frame.getPayload());
-                        } else {
-                            stdout.writeBytes(frame.getPayload());
-                        }
-                    }
-                })
-                .awaitCompletion(30, TimeUnit.SECONDS);
-
-        if (!completed) {
-            throw new RuntimeException("exec timed out in container " + containerId);
-        }
-        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-        return new ExecResult(exitCode != null ? exitCode : -1,
-                stdout.toString(StandardCharsets.UTF_8), stderr.toString(StandardCharsets.UTF_8));
+    ContainerExec.Result execInContainer(String containerId, String[] cmd) throws Exception {
+        return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, 30).throwIfTimedOut(containerId);
     }
 
     private static String generateSecret(int bytes) {
@@ -652,5 +623,4 @@ public class MwaaEnvironmentManager {
         return Base64.getUrlEncoder().encodeToString(buf);
     }
 
-    public record ExecResult(long exitCode, String stdout, String stderr) {}
 }

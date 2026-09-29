@@ -578,7 +578,7 @@ final class CognitoAuthFlowHandler {
                     clientMetadata);
         }
 
-        SrpSession srp = srpSessions.get(session);
+        SrpSession srp = session == null ? null : srpSessions.get(session);
         if (srp == null) throw new AwsException("NotAuthorizedException", "Session not found", 400);
         if (sessionExpired(srp.expiresAt())) {
             srpSessions.remove(session);

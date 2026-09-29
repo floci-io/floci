@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
-import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -21,8 +20,11 @@ class S3PresignedPutTaggingIntegrationTest {
 
     private static final String BUCKET = "presigned-tagging-bucket";
 
-    @Inject
-    PreSignedUrlGenerator presignGenerator;
+    // These tests exercise S3 tagging dispatch with deliberately edited URL parameters.
+    // The CDI presigner now uses registered SigV4 credentials, so editing its signature
+    // would correctly fail. Authenticated SigV4 tagging is covered by the companion suite.
+    private final PreSignedUrlGenerator presignGenerator =
+            new PreSignedUrlGenerator("test", 3600, false);
 
     /**
      * Regression test for #932: a presigned PUT URL whose {@code X-Amz-SignedHeaders}

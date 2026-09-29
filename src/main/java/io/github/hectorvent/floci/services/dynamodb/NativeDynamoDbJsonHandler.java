@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /**
  * DynamoDB JSON protocol handler of the native engine, reached through the native backend
@@ -48,6 +49,7 @@ import java.util.function.Supplier;
 public class NativeDynamoDbJsonHandler {
 
     private static final String SSE_TYPE_KMS = "KMS";
+    private static final Pattern INDEX_NAME_CHARS = Pattern.compile("[a-zA-Z0-9_.\\-]+");
 
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
@@ -164,7 +166,8 @@ public class NativeDynamoDbJsonHandler {
             var gsiPosition = 0;
             for (JsonNode gsiNode : gsiArray) {
                 gsiPosition++;
-                String indexName = gsiNode.path("IndexName").asText();
+                String indexName = requireIndexName(gsiNode,
+                        memberPrefix + "globalSecondaryIndexes." + gsiPosition + ".member");
                 List<KeySchemaElement> gsiKeySchema = new ArrayList<>();
                 gsiNode.path("KeySchema").forEach(ks ->
                         gsiKeySchema.add(new KeySchemaElement(
@@ -205,7 +208,8 @@ public class NativeDynamoDbJsonHandler {
             var lsiPosition = 0;
             for (JsonNode lsiNode : lsiArray) {
                 lsiPosition++;
-                String indexName = lsiNode.path("IndexName").asText();
+                String indexName = requireIndexName(lsiNode,
+                        memberPrefix + "localSecondaryIndexes." + lsiPosition + ".member");
                 List<KeySchemaElement> lsiKeySchema = new ArrayList<>();
                 lsiNode.path("KeySchema").forEach(ks ->
                         lsiKeySchema.add(new KeySchemaElement(
@@ -289,6 +293,28 @@ public class NativeDynamoDbJsonHandler {
 
     // AWS reports an empty list as a length constraint on the 1-based member path, before the
     // projection type check. A null NonKeyAttributes counts as not specified.
+    private static String requireIndexName(JsonNode node, String memberPath) {
+        JsonNode indexNameNode = node.path("IndexName");
+        String constraint = " at '" + memberPath + ".indexName' failed to satisfy constraint: ";
+        if (indexNameNode.isMissingNode() || indexNameNode.isNull()) {
+            throwValidationErrors(List.of("Value null" + constraint + "Member must not be null"));
+        }
+        String indexName = indexNameNode.asText();
+        String value = "Value '" + indexName + "'" + constraint;
+        List<String> errors = new ArrayList<>();
+        if (!INDEX_NAME_CHARS.matcher(indexName).matches()) {
+            errors.add(value + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
+        }
+        if (indexName.length() < 3) {
+            errors.add(value + "Member must have length greater than or equal to 3");
+        }
+        if (255 < indexName.length()) {
+            errors.add(value + "Member must have length less than or equal to 255");
+        }
+        throwValidationErrors(errors);
+        return indexName;
+    }
+
     private static void rejectEmptyNonKeyAttributes(JsonNode nonKeyAttrArray, String memberPath) {
         if (nonKeyAttrArray.isArray() && nonKeyAttrArray.isEmpty()) {
             throw new AwsException("ValidationException",
@@ -566,7 +592,9 @@ public class NativeDynamoDbJsonHandler {
         rejectExprAttrsWithoutExpression(exprAttrNames, exprAttrValues,
                 conditionExpression != null, "ConditionExpression is null");
 
-        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
+        requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
 
         // Reject ExpressionAttributeNames/Values entries not referenced by ConditionExpression (AWS parity, #2893)
         checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
@@ -695,7 +723,9 @@ public class NativeDynamoDbJsonHandler {
         rejectExprAttrsWithoutExpression(exprAttrNames, exprAttrValues,
                 conditionExpression != null, "ConditionExpression is null");
 
-        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
+        requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
 
         // Reject ExpressionAttributeNames/Values entries not referenced by ConditionExpression (AWS parity, #2893)
         checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
@@ -777,7 +807,7 @@ public class NativeDynamoDbJsonHandler {
                 updateExpression != null || conditionExpression != null,
                 "UpdateExpression is null, ConditionExpression is null");
 
-        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
 
         if (conditionExpression != null && expectedUpd != null) {
             throw new AwsException("ValidationException",
@@ -803,18 +833,19 @@ public class NativeDynamoDbJsonHandler {
                             "Invalid UpdateExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
                 }
             }
-            Set<String> colonTokens = extractColonTokens(updateExpression);
-            for (String token : colonTokens) {
-                if (exprAttrValues == null || !exprAttrValues.has(token)) {
-                    throw new AwsException("ValidationException",
-                            "Invalid UpdateExpression: An expression attribute value used in expression is not defined; attribute value: " + token, 400);
-                }
-            }
+            // Undefined tokens, then ConditionExpression's semantic errors, must both be caught
+            // before the unused-EAN/EAV checks below.
+            requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
+            requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+            ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
             Set<String> hashTokens = extractHashTokens(updateExpression, conditionExpression);
             checkUnusedEan(exprAttrNames, hashTokens);
             Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
             checkUnusedEav(exprAttrValues, colonTokensAll);
             dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
+        } else {
+            requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+            ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
         }
 
         if (expectedUpd != null) {
@@ -1072,9 +1103,16 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbNumberUtils.requireStorable(exprAttrValues, false);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(keyConditions), false);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(queryFilter), false);
-        ExpressionEvaluator.validateExpression(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
-        ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSyntax(keyConditionExpr, "KeyConditionExpression");
+        ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
+        // DynamoDB reports filter errors before projection errors, and projection before key-condition.
+        requireDefinedTokens(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSemantics(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
+        // Must run before DynamoDbAccessPathValidator below: an unresolved #name there falls
+        // through to "Query condition missed key schema element" instead of the real cause.
+        requireDefinedTokens(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSemantics(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
 
         if (select != null && !VALID_SELECT.contains(select)) {
             throw new AwsException("ValidationException",
@@ -1097,15 +1135,6 @@ public class NativeDynamoDbJsonHandler {
                 projectionExpression, attributesToGet, exprAttrNames);
         rejectConsistentReadOnGsi(request, queryAccessPath);
 
-        // Check undefined #tokens in FilterExpression
-        if (filterExpr != null) {
-            for (String token : extractHashTokens(filterExpr)) {
-                if (exprAttrNames == null || !exprAttrNames.has(token)) {
-                    throw new AwsException("ValidationException",
-                            "Invalid FilterExpression: An expression attribute name used in the document path is not defined; attribute name: " + token, 400);
-                }
-            }
-        }
         // Reject ExpressionAttributeNames/Values entries not referenced by any expression
         // (AWS parity, #2893). Unconditional: a legacy KeyConditions request that still
         // carries EAN/EAV must be rejected, and either map can only be referenced from
@@ -1244,7 +1273,10 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         DynamoDbNumberUtils.requireStorable(exprAttrValues, false);
-        ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
+        // DynamoDB reports filter errors before projection errors.
+        requireDefinedTokens(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSemantics(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpressionScan, exprAttrNames);
 
         // Reject ExpressionAttributeNames/Values entries not referenced by any expression (AWS parity, #2893)
@@ -1670,7 +1702,8 @@ public class NativeDynamoDbJsonHandler {
                 updatePosition++;
                 JsonNode createNode = update.path("Create");
                 if (!createNode.isMissingNode()) {
-                    String indexName = createNode.path("IndexName").asText();
+                    String indexName = requireIndexName(createNode,
+                            "globalSecondaryIndexUpdates." + updatePosition + ".member.create");
                     List<KeySchemaElement> gsiKeySchema = new ArrayList<>();
                     createNode.path("KeySchema").forEach(ks ->
                             gsiKeySchema.add(new KeySchemaElement(
@@ -1706,13 +1739,15 @@ public class NativeDynamoDbJsonHandler {
                 }
                 JsonNode deleteNode = update.path("Delete");
                 if (!deleteNode.isMissingNode()) {
-                    gsiDeletes.add(deleteNode.path("IndexName").asText());
+                    gsiDeletes.add(requireIndexName(deleteNode,
+                            "globalSecondaryIndexUpdates." + updatePosition + ".member.delete"));
                 }
                 JsonNode updateNode = update.path("Update");
                 if (updateNode.isObject()) {
                     JsonNode gsiPt = updateNode.path("ProvisionedThroughput");
                     gsiThroughputUpdates.add(new GsiThroughputUpdate(
-                            updateNode.path("IndexName").asText(),
+                            requireIndexName(updateNode,
+                                    "globalSecondaryIndexUpdates." + updatePosition + ".member.update"),
                             gsiPt.isObject() ? parseThroughput(gsiPt) : null,
                             parseOnDemandThroughput(updateNode.path("OnDemandThroughput"))));
                 }
@@ -1728,8 +1763,7 @@ public class NativeDynamoDbJsonHandler {
                             "Cannot delete and update the same index: " + indexName, 400);
                 }
                 if (currentTable.findGsi(indexName).isEmpty()) {
-                    throw new AwsException("ValidationException",
-                            "The table does not have the specified index: " + indexName, 400);
+                    throw DynamoDbService.missingGsi(indexName, currentTable.getTableName());
                 }
             }
         }
@@ -1859,14 +1893,22 @@ public class NativeDynamoDbJsonHandler {
             for (JsonNode op : txItem) {
                 String conditionExpression = op.has("ConditionExpression")
                         ? op.get("ConditionExpression").asText() : null;
+                String updateExpression = op.has("UpdateExpression")
+                        ? op.get("UpdateExpression").asText() : null;
+                JsonNode opExprAttrNames = op.get("ExpressionAttributeNames");
+                JsonNode opExprAttrValues = op.get("ExpressionAttributeValues");
                 DynamoDbExpressionSize.checkRead(op.path("UpdateExpression").textValue(), "UpdateExpression");
                 DynamoDbExpressionSize.checkReadWithSize(conditionExpression, "ConditionExpression");
-                ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression",
-                        op.get("ExpressionAttributeNames"),
-                        op.get("ExpressionAttributeValues"));
+                ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
+                // Undefined tokens must fail here as a ValidationException, never a
+                // TransactionCanceledException with a false ConditionalCheckFailed reason.
+                requireDefinedTokens(updateExpression, "UpdateExpression", opExprAttrNames, opExprAttrValues);
+                requireDefinedTokens(conditionExpression, "ConditionExpression", opExprAttrNames, opExprAttrValues);
+                ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression",
+                        opExprAttrNames, opExprAttrValues);
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
                 dynamoDbService.requireAddOrDeleteOperandTypes(op.path("UpdateExpression").textValue(),
-                        op.get("ExpressionAttributeValues"), false);
+                        opExprAttrValues, false);
             }
         }
 
@@ -2315,30 +2357,81 @@ public class NativeDynamoDbJsonHandler {
 
     // ── Expression token utilities ──
 
-    private static void extractPrefixedTokens(String expr, char prefix, Set<String> out) {
-        if (expr == null) return;
+    // A #name or :value placeholder found while scanning an expression left to right.
+    private record ExprToken(char prefix, String text) {}
+
+    // Scans an expression once, left to right, for #name and :value placeholders, in the order
+    // they occur in the text. Both extractHashTokens/extractColonTokens (membership checks) and
+    // requireDefinedTokens (first-undefined-token-wins) build on this single scan.
+    private static List<ExprToken> scanExprTokens(String expr) {
+        List<ExprToken> tokens = new ArrayList<>();
+        if (expr == null) {
+            return tokens;
+        }
         int i = 0;
         while (i < expr.length()) {
-            if (expr.charAt(i) == prefix) {
-                int start = i++;
-                while (i < expr.length() && (Character.isLetterOrDigit(expr.charAt(i)) || expr.charAt(i) == '_')) i++;
-                if (i > start + 1) out.add(expr.substring(start, i));
-            } else {
+            char c = expr.charAt(i);
+            if (c != '#' && c != ':') {
+                i++;
+                continue;
+            }
+            int start = i++;
+            while (i < expr.length() && (Character.isLetterOrDigit(expr.charAt(i)) || expr.charAt(i) == '_')) {
                 i++;
             }
+            if (i > start + 1) {
+                tokens.add(new ExprToken(c, expr.substring(start, i)));
+            }
         }
+        return tokens;
     }
 
     private static Set<String> extractHashTokens(String... expressions) {
         Set<String> tokens = new LinkedHashSet<>();
-        for (String expr : expressions) extractPrefixedTokens(expr, '#', tokens);
+        for (String expr : expressions) {
+            for (ExprToken t : scanExprTokens(expr)) {
+                if (t.prefix() == '#') {
+                    tokens.add(t.text());
+                }
+            }
+        }
         return tokens;
     }
 
     private static Set<String> extractColonTokens(String... expressions) {
         Set<String> tokens = new LinkedHashSet<>();
-        for (String expr : expressions) extractPrefixedTokens(expr, ':', tokens);
+        for (String expr : expressions) {
+            for (ExprToken t : scanExprTokens(expr)) {
+                if (t.prefix() == ':') {
+                    tokens.add(t.text());
+                }
+            }
+        }
         return tokens;
+    }
+
+    /**
+     * Rejects the first #name or :value token, in textual order, that neither
+     * ExpressionAttributeNames nor ExpressionAttributeValues defines. This matches DynamoDB for
+     * condition, key-condition and filter expressions, and for a single-action update expression;
+     * with several undefined tokens spread across an UpdateExpression's actions/clauses, DynamoDB
+     * may name a different one, though always with this same error type and message form.
+     */
+    private static void requireDefinedTokens(String expression, String exprType,
+            JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        for (ExprToken token : scanExprTokens(expression)) {
+            if (token.prefix() == '#') {
+                if (exprAttrNames == null || !exprAttrNames.has(token.text())) {
+                    throw new AwsException("ValidationException",
+                            "Invalid " + exprType + ": An expression attribute name used in the document path "
+                            + "is not defined; attribute name: " + token.text(), 400);
+                }
+            } else if (exprAttrValues == null || !exprAttrValues.has(token.text())) {
+                throw new AwsException("ValidationException",
+                        "Invalid " + exprType + ": An expression attribute value used in expression is not "
+                        + "defined; attribute value: " + token.text(), 400);
+            }
+        }
     }
 
     /**

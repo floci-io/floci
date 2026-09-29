@@ -2306,8 +2306,7 @@ public class DynamoDbService {
 
         for (String gsiName : gsiDeletes) {
             if (table.findGsi(gsiName).isEmpty()) {
-                throw new AwsException("ResourceNotFoundException",
-                        "Global secondary index " + gsiName + " does not exist on the table", 400);
+                throw missingGsi(gsiName, table.getTableName());
             }
         }
 
@@ -4801,6 +4800,11 @@ public class DynamoDbService {
                     + "billingMode' failed to satisfy constraint: "
                     + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]", 400);
         }
+    }
+
+    static AwsException missingGsi(String indexName, String tableName) {
+        return new AwsException("ResourceNotFoundException",
+                "Requested resource not found: Index " + indexName + " for table " + tableName, 400);
     }
 
     public ImportTableDescription validateImportRequest(JsonNode request) {

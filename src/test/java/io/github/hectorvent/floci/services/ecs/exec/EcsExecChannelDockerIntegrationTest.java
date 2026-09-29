@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.vertx.core.Vertx;
@@ -39,7 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class EcsExecChannelDockerIntegrationTest {
 
-    private static final String BUSYBOX_IMAGE = "public.ecr.aws/docker/library/busybox:latest";
+    private static final String BUSYBOX_IMAGE = TestImages.BUSYBOX;
     private static final String TASK_ARN =
             "arn:aws:ecs:us-east-1:000000000000:task/exec-cluster/execdockertask";
 

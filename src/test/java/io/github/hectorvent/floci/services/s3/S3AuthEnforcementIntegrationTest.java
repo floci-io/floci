@@ -1737,8 +1737,8 @@ class S3AuthEnforcementIntegrationTest {
         .when()
             .get("/" + BUCKET_CONFIG_BUCKET + "?tagging")
         .then()
-            .statusCode(200)
-            .body(not(containsString("<Key>k</Key>")));
+            .statusCode(404)
+            .body(containsString("NoSuchTagSet"));
     }
 
     @Test

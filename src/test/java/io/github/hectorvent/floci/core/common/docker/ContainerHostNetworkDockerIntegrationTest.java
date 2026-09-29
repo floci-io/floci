@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.Ports;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -20,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ContainerHostNetworkDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(ContainerHostNetworkDockerIntegrationTest.class);
-    private static final String IMAGE = "public.ecr.aws/docker/library/busybox:1.36";
+    private static final String IMAGE = TestImages.BUSYBOX;
 
     @Inject
     DockerClient dockerClient;

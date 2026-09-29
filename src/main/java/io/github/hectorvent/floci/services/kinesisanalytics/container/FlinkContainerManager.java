@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -24,9 +25,6 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.model.Frame;
-import com.github.dockerjava.api.model.StreamType;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
@@ -43,7 +41,6 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Manages the backing Apache Flink cluster for a Managed Service for Apache Flink application.
@@ -654,36 +651,7 @@ public class FlinkContainerManager {
         }
     }
 
-    private ExecResult execInContainer(String containerId, String[] cmd) throws Exception {
-        var dockerClient = lifecycleManager.getDockerClient();
-        var exec = dockerClient.execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec();
-
-        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
-        boolean completed = dockerClient.execStartCmd(exec.getId())
-                .exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onNext(Frame frame) {
-                        if (frame.getStreamType() == StreamType.STDERR) {
-                            stderr.writeBytes(frame.getPayload());
-                        } else {
-                            stdout.writeBytes(frame.getPayload());
-                        }
-                    }
-                })
-                .awaitCompletion(15, TimeUnit.SECONDS);
-
-        if (!completed) {
-            throw new RuntimeException("exec timed out in container " + containerId);
-        }
-        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-        return new ExecResult(exitCode != null ? exitCode : -1,
-                stdout.toString(StandardCharsets.UTF_8), stderr.toString(StandardCharsets.UTF_8));
+    private ContainerExec.Result execInContainer(String containerId, String[] cmd) throws Exception {
+        return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, 15).throwIfTimedOut(containerId);
     }
-
-    private record ExecResult(long exitCode, String stdout, String stderr) {}
 }

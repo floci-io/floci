@@ -23,7 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SageMakerTest {
 
-    private static final String TRAINING_IMAGE = "public.ecr.aws/docker/library/busybox:stable";
+    private static final String TRAINING_IMAGE = "busybox:stable";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/sdk-test-role";
 
     static SageMakerClient sagemaker;

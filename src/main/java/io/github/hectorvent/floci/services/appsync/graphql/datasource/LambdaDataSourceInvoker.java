@@ -61,8 +61,8 @@ public class LambdaDataSourceInvoker implements AppSyncDataSourceInvoker {
 
     @Override
     public Object invokeVtl(DataSource dataSource, Object request, String region) {
-        // AWS sends the entire resolved VTL request document to the Lambda function.
-        return invokeOnce(functionArn(dataSource), request, region);
+        Object payload = request instanceof Map<?, ?> map ? map.get("payload") : null;
+        return invokeOnce(functionArn(dataSource), payload, region);
     }
 
     private Object invokeOnce(String functionArn, Object payload, String region) {
