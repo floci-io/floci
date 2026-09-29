@@ -250,18 +250,20 @@ class CloudMapCfnProvisionerTest {
                 {"Name": "main", "NamespaceId": "ns-1"}"""), ctx(null));
         stored.setDescription("d1");
         stored.setDnsConfig("{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":60}]}");
-        stored.setHealthCheckConfig(null);
+        stored.setHealthCheckConfig("{\"Type\":\"HTTP\",\"ResourcePath\":\"/\",\"FailureThreshold\":1}");
         stored.setTags(new HashMap<>(Map.of("k1", "v1")));
         when(cloudMap.listTagsForResource(SRV_ARN)).thenReturn(Map.of("k1", "v2"));
 
         provisioner.provision(r, props("""
                 {"Name": "main", "NamespaceId": "ns-1", "Description": "d2",
                  "DnsConfig": {"DnsRecords": [{"Type": "A", "TTL": "120"}]},
+                 "HealthCheckConfig": {"Type": "HTTP", "ResourcePath": "/health", "FailureThreshold": 2},
                  "Tags": [{"Key": "k1", "Value": "v2"}]}"""), ctx("srv-1"));
 
         assertTrue(provisioner.rollbackUpdate(r));
 
-        verify(cloudMap).updateService("srv-1", "d1", "{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":60}]}", null);
+        verify(cloudMap).updateService("srv-1", "d1", "{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":60}]}",
+                "{\"Type\":\"HTTP\",\"ResourcePath\":\"/\",\"FailureThreshold\":1}");
         verify(cloudMap).tagResource(SRV_ARN, Map.of("k1", "v1"));
         assertFalse(r.getAttributes().containsKey(SNAPSHOT_ATTR));
         assertEquals("srv-1", r.getPhysicalId());
