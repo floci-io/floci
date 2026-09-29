@@ -376,11 +376,13 @@ public class ResourceGroupsTaggingService implements Resettable {
         String accountId = regionResolver != null ? regionResolver.getAccountId() : null;
         // TreeMap keeps the ARN order offset pagination depends on
         Map<String, ViewEntry> byArn = new TreeMap<>();
-        for (ResourceTagMapping stored : store.values()) {
-            String arn = stored.getResourceArn();
-            // ponytail: IAM is the only global service with store-only ARNs handled here; another would need adding.
-            if (isVisible(arn, region, accountId) && !AwsArnUtils.isArnFor(arn, "iam")) {
-                byArn.computeIfAbsent(arn, ViewEntry::of).mapping().getTags().putAll(stored.getTags());
+        synchronized (this) {
+            for (ResourceTagMapping stored : store.values()) {
+                String arn = stored.getResourceArn();
+                // ponytail: IAM is the only global service with store-only ARNs handled here; another would need adding.
+                if (isVisible(arn, region, accountId) && !AwsArnUtils.isArnFor(arn, "iam")) {
+                    byArn.computeIfAbsent(arn, ViewEntry::of).mapping().getTags().putAll(stored.getTags());
+                }
             }
         }
         for (ExplorerResource resource : providerResources().resources()) {
