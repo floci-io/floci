@@ -16,6 +16,9 @@ import static org.hamcrest.Matchers.not;
 @QuarkusTest
 class S3ContentMd5IntegrationTest {
 
+    private static final String INVALID_DIGEST_MESSAGE = "The Content-MD5 you specified was invalid.";
+    private static final String BAD_DIGEST_MESSAGE = "The Content-MD5 you specified did not match what we received.";
+
     @Test
     void putObject_matchingContentMd5_isStored() throws Exception {
         String bucket = createBucket("md5-match");
@@ -42,7 +45,8 @@ class S3ContentMd5IntegrationTest {
             .put("/" + bucket + "/object.txt")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>BadDigest</Code>"));
+            .body(containsString("<Code>BadDigest</Code>"))
+            .body(containsString("<Message>" + BAD_DIGEST_MESSAGE + "</Message>"));
 
         assertObjectAbsent(bucket, "object.txt");
     }
@@ -59,7 +63,8 @@ class S3ContentMd5IntegrationTest {
             .put("/" + bucket + "/object.txt")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>BadDigest</Code>"));
+            .body(containsString("<Code>BadDigest</Code>"))
+            .body(containsString("<Message>" + BAD_DIGEST_MESSAGE + "</Message>"));
 
         assertObjectBody(bucket, "object.txt", "original");
     }
@@ -77,7 +82,8 @@ class S3ContentMd5IntegrationTest {
                 .put("/" + bucket + "/object.txt")
             .then()
                 .statusCode(400)
-                .body(containsString("<Code>InvalidDigest</Code>"));
+                .body(containsString("<Code>InvalidDigest</Code>"))
+                .body(containsString("<Message>" + INVALID_DIGEST_MESSAGE + "</Message>"));
         }
 
         assertObjectAbsent(bucket, "object.txt");
@@ -120,7 +126,8 @@ class S3ContentMd5IntegrationTest {
             .put("/" + bucket + "/object.txt")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>BadDigest</Code>"));
+            .body(containsString("<Code>BadDigest</Code>"))
+            .body(containsString("<Message>" + BAD_DIGEST_MESSAGE + "</Message>"));
 
         assertObjectAbsent(bucket, "object.txt");
     }
@@ -142,7 +149,8 @@ class S3ContentMd5IntegrationTest {
             .put("/" + bucket + "/object.txt?partNumber=1&uploadId=" + uploadId)
         .then()
             .statusCode(400)
-            .body(containsString("<Code>BadDigest</Code>"));
+            .body(containsString("<Code>BadDigest</Code>"))
+            .body(containsString("<Message>" + BAD_DIGEST_MESSAGE + "</Message>"));
 
         // The rejected part was not stored.
         given()
