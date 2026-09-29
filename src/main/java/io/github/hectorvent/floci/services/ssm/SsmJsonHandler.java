@@ -989,7 +989,7 @@ public class SsmJsonHandler {
 
     private Response handleAddTagsToResource(JsonNode request, String region) {
         String resourceId = request.path("ResourceId").asText();
-        Map<String, String> tags = new HashMap<>();
+        Map<String, String> tags = new LinkedHashMap<>();
         request.path("Tags").forEach(t ->
                 tags.put(t.path("Key").asText(), t.path("Value").asText()));
 

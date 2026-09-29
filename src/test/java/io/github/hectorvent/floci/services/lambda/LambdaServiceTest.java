@@ -41,6 +41,11 @@ class LambdaServiceTest {
 
     private static final String REGION = "us-east-1";
 
+    private static final String TAG_KEYS_CONSTRAINT = " at 'tags' failed to satisfy constraint: Map keys must"
+            + " satisfy constraint: [Member must have length less than or equal to 128, Member must have length"
+            + " greater than or equal to 1, Member must satisfy regular expression pattern:"
+            + " ([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)]";
+
     private LambdaService service;
 
     @BeforeEach
@@ -333,6 +338,57 @@ class LambdaServiceTest {
                 () -> service.getFunction(REGION, "nonexistent"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
+    }
+
+    @Test
+    void tagResource_keyOutsideTheAwsPattern_isRejectedBeforeTheLookup() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.tagResource(
+                "arn:aws:lambda:us-east-1:000000000000:function:no-such-fn", Map.of("a,b", "x")));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("1 validation error detected: Value '{a,b=x}'" + TAG_KEYS_CONSTRAINT, ex.getMessage());
+    }
+
+    @Test
+    void tagResource_emptyOrTooLongKeyIsRejected() {
+        LambdaFunction fn = service.createFunction(REGION, baseRequest("tag-length-fn"));
+        String longKey = "k".repeat(129);
+
+        AwsException empty = assertThrows(AwsException.class,
+                () -> service.tagResource(fn.getFunctionArn(), Map.of("", "x")));
+        AwsException tooLong = assertThrows(AwsException.class,
+                () -> service.tagResource(fn.getFunctionArn(), Map.of(longKey, "x")));
+
+        assertEquals("ValidationException", empty.getErrorCode());
+        assertEquals("1 validation error detected: Value '{=x}'" + TAG_KEYS_CONSTRAINT, empty.getMessage());
+        assertEquals("ValidationException", tooLong.getErrorCode());
+        assertEquals("1 validation error detected: Value '{" + longKey + "=x}'" + TAG_KEYS_CONSTRAINT,
+                tooLong.getMessage());
+        assertTrue(service.listTags(fn.getFunctionArn()).isEmpty());
+    }
+
+    @Test
+    void tagResource_validKeyIsApplied() {
+        LambdaFunction fn = service.createFunction(REGION, baseRequest("tag-valid-fn"));
+
+        service.tagResource(fn.getFunctionArn(), Map.of("team:name/x=y+z-@_. 1", "v"));
+
+        assertEquals(Map.of("team:name/x=y+z-@_. 1", "v"), service.listTags(fn.getFunctionArn()));
+    }
+
+    @Test
+    void createFunction_invalidTagKeyIsRejectedAndTheFunctionIsNotCreated() {
+        Map<String, Object> request = baseRequest("tag-rejected-fn");
+        request.put("Tags", Map.of("a,b", "x"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createFunction(REGION, request));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("1 validation error detected: Value '{a,b=x}'" + TAG_KEYS_CONSTRAINT, ex.getMessage());
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.getFunction(REGION, "tag-rejected-fn"));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
     }
 
     @Test
