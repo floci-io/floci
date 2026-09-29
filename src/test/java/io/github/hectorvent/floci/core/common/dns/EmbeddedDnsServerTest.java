@@ -735,4 +735,82 @@ class EmbeddedDnsServerTest {
             assertArrayEquals(realReply, response);
         }
     }
+
+    @Test
+    void forwardToTargets_discardsWrongTxIdDatagramBeforeRealAnswer() throws Exception {
+        // Catches: a datagram with a wrong transaction ID is relayed as the answer
+        try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
+            byte[] query = buildQuery("db.corp.internal", (short) 7);
+            byte[] realReply = replyTo(query, query.length);
+            byte[] badReply = replyTo(query, query.length);
+            badReply[1] ^= 0x01;
+            DnsForwardingRule.Target target = new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort());
+
+            Thread t = new Thread(() -> {
+                try {
+                    byte[] reqBuf = new byte[4096];
+                    DatagramPacket req = new DatagramPacket(reqBuf, reqBuf.length);
+                    real.receive(req);
+                    real.send(new DatagramPacket(badReply, badReply.length, req.getAddress(), req.getPort()));
+                    real.send(new DatagramPacket(realReply, realReply.length, req.getAddress(), req.getPort()));
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            t.setDaemon(true);
+            t.start();
+
+            byte[] response = EmbeddedDnsServer.forwardToTargets(query, List.of(target));
+            assertArrayEquals(realReply, response);
+        }
+    }
+
+    @Test
+    void forwardToTargets_acceptsAnswerToQueryCarryingAnEdnsOptRecord() throws Exception {
+        // Catches: validation compares bytes past the question (the client's OPT record), so every
+        // real answer to an EDNS query is discarded and forwarding times out
+        byte[] plain = buildQuery("db.corp.internal", (short) 7);
+        byte[] query = Arrays.copyOf(plain, plain.length + 11);
+        query[11] = 1; // arcount
+        ByteBuffer.wrap(query, plain.length, 11)
+                .put((byte) 0).putShort((short) 41).putShort((short) 4096).putInt(0).putShort((short) 0);
+        byte[] answer = replyTo(plain, plain.length);
+        try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
+            startResponder(real, answer);
+
+            byte[] response = EmbeddedDnsServer.forwardToTargets(
+                    query, List.of(new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort())));
+
+            assertArrayEquals(answer, response);
+        }
+    }
+
+    @Test
+    void forwardToTargets_discardsWrongQuestionDatagramBeforeRealAnswer() throws Exception {
+        // Catches: a datagram with a matching txId but different question section is relayed as the answer
+        try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
+            byte[] query = buildQuery("db.corp.internal", (short) 7);
+            byte[] realReply = replyTo(query, query.length);
+            byte[] wrongQuery = buildQuery("other.corp.internal", (short) 7);
+            byte[] badReply = replyTo(wrongQuery, wrongQuery.length);
+            DnsForwardingRule.Target target = new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort());
+
+            Thread t = new Thread(() -> {
+                try {
+                    byte[] reqBuf = new byte[4096];
+                    DatagramPacket req = new DatagramPacket(reqBuf, reqBuf.length);
+                    real.receive(req);
+                    real.send(new DatagramPacket(badReply, badReply.length, req.getAddress(), req.getPort()));
+                    real.send(new DatagramPacket(realReply, realReply.length, req.getAddress(), req.getPort()));
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            t.setDaemon(true);
+            t.start();
+
+            byte[] response = EmbeddedDnsServer.forwardToTargets(query, List.of(target));
+            assertArrayEquals(realReply, response);
+        }
+    }
 }
