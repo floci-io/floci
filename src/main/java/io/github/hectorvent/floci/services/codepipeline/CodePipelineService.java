@@ -29,8 +29,14 @@ import jakarta.annotation.PreDestroy;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
+import org.apache.commons.compress.archivers.zip.ZipFile;
+import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -50,6 +56,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
+import java.util.zip.ZipEntry;
 
 @ApplicationScoped
 public class CodePipelineService {
@@ -1340,6 +1349,10 @@ public class CodePipelineService {
             waitForApproval(execution, state);
             return;
         }
+        if ("Source".equals(category) && "GitHub".equals(provider)) {
+            executeGitHubSource(execution, action, state);
+            return;
+        }
         if (!"AWS".equals(owner)) {
             waitForCustomJob(pipeline, execution, action, state);
             return;
@@ -1392,6 +1405,146 @@ public class CodePipelineService {
         }
         s3Service.putObject(bucket, objectKey, data, "application/zip", Map.of());
         state.setExternalExecutionId("s3://" + bucket + "/" + objectKey);
+    }
+
+    /**
+     * The ThirdParty GitHub (version 1) source action: fetches the branch archive from
+     * github.com and publishes it as the output artifact with the repo contents at the
+     * artifact root, the layout the real action produces.
+     */
+    private void executeGitHubSource(CodePipelineExecution execution, JsonNode action,
+                                     ActionExecution state) {
+        JsonNode config = action.path("configuration");
+        String repoOwner = config.path("Owner").asText(null);
+        String repo = config.path("Repo").asText(null);
+        String branch = config.path("Branch").asText("main");
+        if (repoOwner == null || repo == null) {
+            throw new AwsException("InvalidActionDeclarationException",
+                    "GitHub source actions require Owner and Repo", 400);
+        }
+        if (!isValidGitHubPathSegment(repoOwner) || !isValidGitHubPathSegment(repo)
+                || !isValidGitHubRef(branch)) {
+            throw new AwsException("InvalidActionDeclarationException",
+                    "GitHub source Owner, Repo, and Branch must not contain path separators "
+                            + "or traversal segments", 400);
+        }
+        byte[] archive = fetchGitHubArchive(java.net.URI.create(
+                "https://codeload.github.com/" + repoOwner + "/" + repo
+                        + "/zip/refs/heads/" + branch));
+        byte[] artifact = stripTopLevelDirectory(archive);
+        for (JsonNode output : action.path("outputArtifacts")) {
+            runtimeArtifacts.put(artifactKey(execution, output.path("name").asText()), artifact);
+        }
+        Map<String, Object> revision = new LinkedHashMap<>();
+        revision.put("name", state.getActionName());
+        revision.put("revisionId", branch);
+        revision.put("revisionChangeIdentifier", branch);
+        revision.put("revisionSummary", "github.com/" + repoOwner + "/" + repo + "@" + branch);
+        revision.put("revisionUrl", "https://github.com/" + repoOwner + "/" + repo + "/tree/" + branch);
+        revision.put("created", now());
+        synchronized (execution) {
+            execution.getArtifactRevisions().add(revision);
+        }
+        state.setExternalExecutionId(branch);
+        state.setExternalExecutionUrl("https://github.com/" + repoOwner + "/" + repo);
+    }
+
+    /** repoOwner/repo path segments: no '/', no '..', non-empty. */
+    private static boolean isValidGitHubPathSegment(String segment) {
+        return !segment.isEmpty() && !segment.contains("/") && !segment.contains("..");
+    }
+
+    /** Branch ref: slashes are legal (e.g. {@code release/v1.16.0}), but no '..' traversal,
+     * leading slash, or whitespace/control characters that could reshape the request path. */
+    private static boolean isValidGitHubRef(String ref) {
+        return !ref.isEmpty() && !ref.startsWith("/") && !ref.contains("..")
+                && ref.chars().noneMatch(Character::isWhitespace);
+    }
+
+    /** Overridable seam for tests; production goes to github.com with the JVM's proxy settings. */
+    byte[] fetchGitHubArchive(java.net.URI uri) {
+        try {
+            java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                    .connectTimeout(java.time.Duration.ofSeconds(10))
+                    .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+                    .build();
+            java.net.http.HttpResponse<byte[]> response = client.send(
+                    java.net.http.HttpRequest.newBuilder(uri)
+                            .timeout(java.time.Duration.ofSeconds(30))
+                            .GET().build(),
+                    java.net.http.HttpResponse.BodyHandlers.ofByteArray());
+            if (response.statusCode() != 200) {
+                throw new AwsException("ActionExecutionFailed",
+                        "GitHub source download returned HTTP " + response.statusCode()
+                                + " for " + uri, 400);
+            }
+            return response.body();
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("ActionExecutionFailed",
+                    "GitHub source download failed: " + e.getMessage(), 400);
+        }
+    }
+
+    /**
+     * GitHub's codeload archives wrap the repo in a {@code <repo>-<branch>/} directory;
+     * the real source artifact has the repo contents at the root.
+     */
+    private static byte[] stripTopLevelDirectory(byte[] zip) {
+        try {
+            var baos = new java.io.ByteArrayOutputStream();
+            try (var zipFile = ZipFile.builder()
+                    .setSeekableByteChannel(new SeekableInMemoryByteChannel(zip)).get();
+                 var zos = new ZipArchiveOutputStream(baos)) {
+                var entries = zipFile.getEntriesInPhysicalOrder();
+                while (entries.hasMoreElements()) {
+                    ZipArchiveEntry entry = entries.nextElement();
+                    int slash = entry.getName().indexOf('/');
+                    if (slash < 0 || slash == entry.getName().length() - 1) {
+                        continue;
+                    }
+                    String stripped = entry.getName().substring(slash + 1);
+                    if (entry.isDirectory()) {
+                        continue;
+                    }
+                    // Symlink entries (unix mode S_IFLNK, content = link target) are not
+                    // directories, so they flow through this copy path: preserving the
+                    // unix mode and the content keeps them symlinks for CodeBuild, which
+                    // recreates them via extractZip. node_modules/.bin/* rely on this.
+                    ZipArchiveEntry copy = new ZipArchiveEntry(stripped);
+                    if (entry.getUnixMode() != 0) {
+                        copy.setUnixMode(entry.getUnixMode());
+                    }
+                    zos.putArchiveEntry(copy);
+                    try (var in = openEntryStream(zipFile, entry)) {
+                        in.transferTo(zos);
+                    }
+                    zos.closeArchiveEntry();
+                }
+            }
+            return baos.toByteArray();
+        } catch (Exception e) {
+            throw new AwsException("ActionExecutionFailed",
+                    "Could not repackage GitHub archive: " + e.getMessage(), 400);
+        }
+    }
+
+    // ZipFile's decoding stream accessor dispatches on entry.getMethod() through a switch that also
+    // covers BZIP2, DEFLATE64, XZ and ZSTD, instantiating the matching CompressorInputStream
+    // inline; GraalVM's static analysis resolves every branch of that switch because the method
+    // itself is reachable, not just the branch a given entry happens to take, and XZ/ZSTD need
+    // org.tukaani:xz / com.github.luben:zstd-jni on the classpath at native link time to do so.
+    // GitHub archives are ordinary zips (STORED or DEFLATED only), so decoding just those two
+    // methods off the entry's raw bytes avoids the dispatch method and the optional codecs.
+    private static InputStream openEntryStream(ZipFile zipFile, ZipArchiveEntry entry) throws IOException {
+        InputStream raw = zipFile.getRawInputStream(entry);
+        return switch (entry.getMethod()) {
+            case ZipEntry.STORED -> raw;
+            case ZipEntry.DEFLATED -> new InflaterInputStream(raw, new Inflater(true));
+            default -> throw new IOException(
+                    "Unsupported zip compression method " + entry.getMethod() + " for entry " + entry.getName());
+        };
     }
 
     private void executeCodeBuild(CodePipelineExecution execution, JsonNode action,
