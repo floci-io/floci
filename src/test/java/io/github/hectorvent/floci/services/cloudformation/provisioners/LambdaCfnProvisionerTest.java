@@ -122,7 +122,7 @@ class LambdaCfnProvisionerTest {
     }
 
     @Test
-    void adoptedFunctionIsTaggedWithTheTemplateTags() {
+    void adoptedFunctionKeepsItsOwnTags() {
         when(lambda.createFunction(eq(REGION), anyMap())).thenThrow(
                 new AwsException("ResourceConflictException", "Function already exist: my-fn", 409));
         when(lambda.getFunction(REGION, "my-fn")).thenReturn(lambdaFunction("my-fn"));
@@ -130,7 +130,7 @@ class LambdaCfnProvisionerTest {
 
         provisioner.provision(r, props("my-fn", "team", "a", "env", "dev"), ctx());
 
-        verify(lambda).tagResource(FUNCTION_ARN + "my-fn", Map.of("team", "a", "env", "dev"));
+        verify(lambda, never()).tagResource(any(), any());
         assertEquals("env,team", r.getAttributes().get(TEMPLATE_TAG_KEYS_ATTR));
     }
 

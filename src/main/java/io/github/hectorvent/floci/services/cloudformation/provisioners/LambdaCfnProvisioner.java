@@ -372,12 +372,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         } catch (AwsException e) {
             if (allowAdopt && ("ResourceConflictException".equals(e.getErrorCode())
                     || (e.getMessage() != null && e.getMessage().contains("Function already exist")))) {
-                LambdaFunction adopted = lambdaService.getFunction(region, desired.functionName());
-                // The create failed, so its tags never reached the adopted function.
-                if (!desired.tags().isEmpty()) {
-                    lambdaService.tagResource(adopted.getFunctionArn(), desired.tags());
-                }
-                return adopted;
+                return lambdaService.getFunction(region, desired.functionName());
             }
             throw e;
         }
