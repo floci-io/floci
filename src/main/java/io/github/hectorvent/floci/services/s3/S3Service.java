@@ -1080,8 +1080,9 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         Map<String, List<String>> conditionCtx = principalArn != null
-                ? Map.of("aws:PrincipalArn", List.of(principalArn))
-                : Map.of();
+                ? Map.of("aws:PrincipalArn", List.of(principalArn),
+                        "aws:PrincipalIsAWSService", List.of("false"))
+                : Map.of("aws:PrincipalIsAWSService", List.of("false"));
 
         ResourcePolicyDecision decision = policyEvaluator.evaluateResourcePolicy(
                 List.of(policy),
@@ -1162,7 +1163,8 @@ public class S3Service implements Resettable, ResourceProvider {
                         principalArn.get(),
                         action,
                         resourceArn,
-                        Map.of("aws:PrincipalArn", principalArn.get()));
+                        Map.of("aws:PrincipalArn", principalArn.get(),
+                                "aws:PrincipalIsAWSService", "false"));
         ResourcePolicyDecision decision = switch (policyEvaluation.decision()) {
             case ALLOW -> policyEvaluation.directPrincipalAllow() && principalArn.get().contains(":user/")
                     ? ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
