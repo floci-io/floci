@@ -84,11 +84,15 @@ did before.
   distinct from the Application/Classic one. The CloudFront hosted zone is published for `aws`
   and `aws-cn`; the SAML sign-on URL for five partitions. The ISO and EUSC regions have no load
   balancer hosted zones, and only the two ISO-F regions have an S3 website zone; where a table has
-  no row the field is omitted rather than guessed. An `EDGE` API Gateway custom domain, which is
-  fronted by CloudFront, is refused where the partition has no CloudFront (`BadRequestException`).
-- **VPC endpoint service names**: `com.amazonaws.<region>.<service>` everywhere, except the
-  (region, service) pairs the CDK lists for China, ISO and EUSC, which reverse the DNS suffix
-  (`cn.com.amazonaws.cn-north-1.s3`). GovCloud keeps `com.amazonaws`.
+  no row the field is omitted rather than guessed. An `EDGE` API Gateway custom domain is refused
+  outside the commercial partition (`BadRequestException`): GovCloud and ISO have no CloudFront,
+  and China has no edge-optimized API Gateway
+  ([China API Gateway](https://docs.amazonaws.cn/en_us/aws/latest/userguide/api-gateway.html)).
+- **VPC endpoint service names**: interface endpoints (as `DescribeVpcEndpointServices` lists them)
+  are `com.amazonaws.<region>.<service>` everywhere, except the (region, service) pairs the CDK
+  lists for China, ISO and EUSC, which reverse the DNS suffix (`cn.com.amazonaws.cn-north-1.lambda`).
+  GovCloud keeps `com.amazonaws`. Gateway endpoints and their AWS-managed prefix lists (S3,
+  DynamoDB) are `com.amazonaws.<region>.<service>` in every partition.
 - **Lambda runtime images** pull from ECR Public (`public.ecr.aws`), which exists only in the
   commercial partition; point `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI` at a mirror elsewhere.
 - **WAF `CLOUDFRONT` scope**: available only where CloudFront exists (`aws`, `aws-cn`), and its
@@ -121,7 +125,9 @@ the commercial value or Floci's own base host until sourced:
 - the Lambda function-URL host outside the commercial partition;
 - whether AWS managed policy documents differ in content in China or GovCloud;
 - the API Gateway regional hosted zone per region;
-- S3 `LocationConstraint` enum values and Route 53 hosted zones for the ISO and EUSC regions.
+- S3 `LocationConstraint` enum values and Route 53 hosted zones for the ISO and EUSC regions;
+- the SAML sign-on URL in `aws-iso-e`, `aws-iso-f` and `aws-eusc`, where assertions keep being
+  checked against the commercial `https://signin.aws.amazon.com/saml`.
 
 ## Related
 

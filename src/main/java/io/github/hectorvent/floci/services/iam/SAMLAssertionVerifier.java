@@ -131,8 +131,7 @@ final class SAMLAssertionVerifier {
                 }
                 String recipient = confirmationData.getAttribute("Recipient");
                 Instant confirmationExpiry = instant(confirmationData.getAttribute("NotOnOrAfter"));
-                if (AwsRegionFacts.samlSignOnUrl(AwsArnUtils.parse(provider.getArn()).partition())
-                        .filter(recipient::equals).isPresent()
+                if (expectedRecipient(provider).equals(recipient)
                         && confirmationExpiry != null && now.isBefore(confirmationExpiry)) {
                     validBearer = true;
                     break;
@@ -240,4 +239,17 @@ final class SAMLAssertionVerifier {
         }
     }
 
+    /**
+     * The console sign-on URL a bearer assertion must name, in the provider's partition. The CDK
+     * publishes none for {@code aws-iso-e}, {@code aws-iso-f} and {@code aws-eusc}; there the
+     * commercial URL is kept, as every partition used before the per-partition table, rather than
+     * refusing every assertion.
+     */
+    // Package-private for unit testing.
+    static String expectedRecipient(SAMLProvider provider) {
+        String partition = AwsArnUtils.parse(provider.getArn()).partition();
+        return AwsRegionFacts.samlSignOnUrl(partition)
+                .or(() -> AwsRegionFacts.samlSignOnUrl("aws"))
+                .orElseThrow();
+    }
 }

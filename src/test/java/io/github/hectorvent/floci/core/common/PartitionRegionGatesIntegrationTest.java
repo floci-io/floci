@@ -66,52 +66,25 @@ class PartitionRegionGatesIntegrationTest {
         }
     }
 
-    private static Response createPrefixList(String region, String name) {
-        return given()
-            .header("Authorization", PartitionMatrix.sigV4Auth(region, "ec2"))
-            .formParam("Action", "CreateManagedPrefixList")
-            .formParam("Version", "2016-11-15")
-            .formParam("PrefixListName", name)
-            .formParam("AddressFamily", "IPv4")
-            .formParam("MaxEntries", "5")
-        .when().post("/");
-    }
-
     /**
-     * China's AWS-managed lists are named {@code cn.com.amazonaws.<region>.<service>}, so a
-     * customer list may not take that prefix there; elsewhere the prefix is nothing special.
+     * Edge-optimized domains exist only in the commercial partition: GovCloud has no CloudFront, and
+     * China has CloudFront but no edge-optimized API Gateway. A regional domain needs neither.
      */
     @Test
-    void theChinaManagedPrefixListNameIsReservedOnlyInChina() {
-        createPrefixList("cn-north-1", "cn.com.amazonaws.cn-north-1.s3").then().statusCode(400)
-            .body(containsString("InvalidParameterValue"))
-            .body(containsString("cn.com.amazonaws."));
-
-        String name = "cn.com.amazonaws.custom-" + Long.toString(System.nanoTime(), 36);
-        Response created = createPrefixList("us-east-1", name);
-        created.then().statusCode(200);
-        String id = created.xmlPath().getString("CreateManagedPrefixListResponse.prefixList.prefixListId");
-        cleanup.register(() -> given()
-            .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", "ec2"))
-            .formParam("Action", "DeleteManagedPrefixList")
-            .formParam("Version", "2016-11-15")
-            .formParam("PrefixListId", id)
-        .when().post("/"));
-    }
-
-    /** An edge-optimized domain is fronted by CloudFront; a regional one needs nothing from it. */
-    @Test
-    void edgeCustomDomainsAreRejectedWhereThePartitionHasNoCloudFront() {
+    void edgeCustomDomainsAreRejectedOutsideTheCommercialPartition() {
         String suffix = Long.toString(System.nanoTime(), 36);
-        given()
-            .header("Authorization", PartitionMatrix.sigV4Auth("us-gov-west-1", "apigateway"))
-            .contentType("application/json")
-            .body("{\"domainName\":\"edge-" + suffix + ".example.com\","
-                    + "\"certificateArn\":\"arn:aws-us-gov:acm:us-gov-west-1:000000000000:certificate/edge\","
-                    + "\"endpointConfiguration\":{\"types\":[\"EDGE\"]}}")
-        .when().post("/domainnames")
-        .then().statusCode(400)
-            .body(containsString("not available in partition aws-us-gov"));
+        for (String region : List.of("us-gov-west-1", "cn-north-1")) {
+            String partition = AwsRegions.partitionFor(region);
+            given()
+                .header("Authorization", PartitionMatrix.sigV4Auth(region, "apigateway"))
+                .contentType("application/json")
+                .body("{\"domainName\":\"edge-" + suffix + "." + region + ".example.com\","
+                        + "\"certificateArn\":\"arn:" + partition + ":acm:" + region + ":000000000000:certificate/edge\","
+                        + "\"endpointConfiguration\":{\"types\":[\"EDGE\"]}}")
+            .when().post("/domainnames")
+            .then().statusCode(400)
+                .body(containsString("not available in partition " + partition));
+        }
 
         String regional = "regional-" + suffix + ".example.com";
         given()
@@ -144,17 +117,30 @@ class PartitionRegionGatesIntegrationTest {
         assertTrue(arn.startsWith("arn:aws-cn:wafv2:cn-northwest-1:000000000000:global/ipset/" + name + "/"), arn);
     }
 
-    /** The AWS-owned gateway prefix lists carry the China service-name prefix for S3, but not for DynamoDB. */
+    /**
+     * The AWS-managed prefix lists belong to the S3 and DynamoDB gateway endpoints, which keep
+     * {@code com.amazonaws} in every partition; only interface endpoint names take the reversed
+     * suffix China lists.
+     */
     @Test
-    void managedPrefixListsUseThePartitionsVpcEndpointServiceNames() {
+    void gatewayPrefixListsKeepComAmazonawsWhileChinaInterfaceNamesReverseTheSuffix() {
         List<String> names = given()
             .header("Authorization", PartitionMatrix.sigV4Auth("cn-north-1", "ec2"))
             .formParam("Action", "DescribeManagedPrefixLists")
             .formParam("Version", "2016-11-15")
         .when().post("/").then().statusCode(200)
             .extract().xmlPath().getList("DescribeManagedPrefixListsResponse.prefixListSet.item.prefixListName");
-        assertTrue(names.contains("cn.com.amazonaws.cn-north-1.s3"), names.toString());
+        assertTrue(names.contains("com.amazonaws.cn-north-1.s3"), names.toString());
         assertTrue(names.contains("com.amazonaws.cn-north-1.dynamodb"), names.toString());
+
+        List<String> services = given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("cn-north-1", "ec2"))
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Version", "2016-11-15")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getList("DescribeVpcEndpointServicesResponse.serviceNameSet.item");
+        assertTrue(services.contains("cn.com.amazonaws.cn-north-1.lambda"), services.toString());
+        assertTrue(services.contains("com.amazonaws.cn-north-1.s3"), services.toString());
     }
 
     @Test

@@ -22,8 +22,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * An edge-optimized custom domain is fronted by CloudFront, so it cannot be created or switched to
- * in a partition without CloudFront. A domain stored before that rule still has to take updates
+ * An edge-optimized custom domain exists only in the commercial partition, so it cannot be created
+ * or switched to elsewhere. A domain stored before that rule still has to take updates
  * that leave its endpoint type alone.
  */
 class ApiGatewayEdgeDomainPartitionTest {
@@ -74,6 +74,17 @@ class ApiGatewayEdgeDomainPartitionTest {
         AwsException error = assertThrows(AwsException.class, () -> service.updateDomainName(GOV_REGION,
                 "regional.example.com", List.of(Map.of("op", "replace",
                         "path", "/endpointConfiguration/types/REGIONAL", "value", "EDGE"))));
+
+        assertEquals("BadRequestException", error.getErrorCode());
+    }
+
+    /** China has CloudFront but no edge-optimized API Gateway. */
+    @Test
+    void anEdgeDomainIsRefusedInChina() {
+        AwsException error = assertThrows(AwsException.class, () -> service.createDomainName("cn-north-1",
+                Map.of("domainName", "edge.example.cn",
+                        "certificateArn", "arn:aws-cn:acm:cn-north-1:000000000000:certificate/e",
+                        "endpointConfiguration", Map.of("types", List.of("EDGE")))));
 
         assertEquals("BadRequestException", error.getErrorCode());
     }

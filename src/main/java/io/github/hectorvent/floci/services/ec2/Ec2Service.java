@@ -5,7 +5,6 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartition;
-import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
@@ -1215,38 +1214,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private static final List<String> RESERVED_PREFIX_LIST_NAME_PREFIXES =
             List.of("com.amazonaws.", "com.amazon.", "com.aws.");
 
-    /** The services whose AWS-managed prefix lists every region carries. */
-    private static final List<String> AWS_MANAGED_PREFIX_LIST_SERVICES = List.of("s3", "dynamodb");
-
-    /**
-     * AWS applies the reserved-name rule to a rename as well as a create. Beyond AWS's three
-     * published prefixes, a name may not take the prefix of an AWS-managed list this region
-     * carries: in China those are named {@code cn.com.amazonaws.<region>.<service>}, and a
-     * customer list under that name would make name-based discovery ambiguous. No source shows
-     * AWS's message for that case, so the second message is Floci's own.
-     */
-    private void requireUnreservedPrefixListName(String region, String prefixListName) {
+    /** AWS applies the reserved-name rule to a rename as well as a create. */
+    private void requireUnreservedPrefixListName(String prefixListName) {
         for (String reserved : RESERVED_PREFIX_LIST_NAME_PREFIXES) {
             if (prefixListName.startsWith(reserved)) {
                 throw new AwsException("InvalidParameterValue",
                         "The prefix list name cannot begin with (com.amazonaws., com.amazon., com.aws.).", 400);
             }
         }
-        for (String service : AWS_MANAGED_PREFIX_LIST_SERVICES) {
-            String managedName = AwsRegionFacts.vpcEndpointServiceName(region, service);
-            String prefix = managedName.substring(0, managedName.indexOf(region));
-            if (prefixListName.startsWith(prefix)) {
-                throw new AwsException("InvalidParameterValue",
-                        "The prefix list name cannot begin with (" + prefix + ").", 400);
-            }
-        }
     }
 
+    /**
+     * The managed lists belong to the S3 and DynamoDB gateway endpoints, which are named
+     * {@code com.amazonaws.<region>.<service>} in every partition (the CDK's
+     * {@code GatewayVpcEndpointAwsService}); the reversed-suffix names apply to interface endpoints only.
+     */
     private List<ManagedPrefixList> awsManagedPrefixLists(String region) {
         return List.of(
-                awsManagedPrefixList(region, "pl-63a5400a", AwsRegionFacts.vpcEndpointServiceName(region, "s3"),
+                awsManagedPrefixList(region, "pl-63a5400a", "com.amazonaws." + region + ".s3",
                         List.of("52.216.0.0/15", "54.231.0.0/16")),
-                awsManagedPrefixList(region, "pl-02cd2c6b", AwsRegionFacts.vpcEndpointServiceName(region, "dynamodb"),
+                awsManagedPrefixList(region, "pl-02cd2c6b", "com.amazonaws." + region + ".dynamodb",
                         List.of("3.218.182.0/24", "52.94.0.0/22")));
     }
 
@@ -1275,7 +1262,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (prefixListName == null || prefixListName.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter PrefixListName.", 400);
         }
-        requireUnreservedPrefixListName(region, prefixListName);
+        requireUnreservedPrefixListName(prefixListName);
         if (!"IPv4".equals(addressFamily) && !"IPv6".equals(addressFamily)) {
             throw new AwsException("InvalidParameterValue",
                     "Invalid value '" + addressFamily + "' for addressFamily. Valid values are IPv4 and IPv6.", 400);
@@ -1387,7 +1374,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 list.setMaxEntries(maxEntries);
             }
             if (prefixListName != null && !prefixListName.isBlank()) {
-                requireUnreservedPrefixListName(region, prefixListName);
+                requireUnreservedPrefixListName(prefixListName);
                 list.setPrefixListName(prefixListName);
             }
 

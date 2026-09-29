@@ -68,6 +68,9 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class ApiGatewayService {
 
+    /** The only partition where API Gateway offers edge-optimized APIs and custom domain names. */
+    private static final Set<String> EDGE_OPTIMIZED_PARTITIONS = Set.of("aws");
+
     private static final ObjectMapper JSON = new ObjectMapper();
 
     /** Documented default page size for GetUsage. */
@@ -1926,24 +1929,25 @@ public class ApiGatewayService {
     }
 
     /**
-     * An edge-optimized domain fronts a CloudFront distribution, and a DNS alias points at the
-     * distribution's name in the fixed CloudFront hosted zone AWS documents for every region. A
-     * regional domain has none, so a move to {@code REGIONAL} drops the distribution again while a
-     * move to {@code EDGE} puts one in front of the domain, as the migration does on AWS.
-     */
-    /**
-     * An edge-optimized domain is fronted by CloudFront, so it only exists in a partition that has
-     * CloudFront; elsewhere it would have no distribution hosted zone to alias to. No source shows
-     * AWS's message for this, so the wording is Floci's own.
+     * Edge-optimized APIs and domains exist only in the commercial partition: GovCloud and the
+     * ISO partitions have no CloudFront, and China has CloudFront but no edge-optimized API Gateway
+     * (https://docs.amazonaws.cn/en_us/aws/latest/userguide/api-gateway.html). No source shows
+     * AWS's message for the refusal, so the wording is Floci's own.
      */
     private static void requireEndpointTypeAvailable(String endpointType, String region) {
         AwsPartition partition = AwsPartitions.forRegionOrCommercial(region);
-        if ("EDGE".equals(endpointType) && !partition.offers("cloudfront")) {
+        if ("EDGE".equals(endpointType) && !EDGE_OPTIMIZED_PARTITIONS.contains(partition.id())) {
             throw new AwsException("BadRequestException",
                     "Endpoint type EDGE is not available in partition " + partition.id() + ".", 400);
         }
     }
 
+    /**
+     * An edge-optimized domain fronts a CloudFront distribution, and a DNS alias points at the
+     * distribution's name in the CloudFront hosted zone of its partition. A regional domain has
+     * none, so a move to {@code REGIONAL} drops the distribution again while a move to {@code EDGE}
+     * puts one in front of the domain, as the migration does on AWS.
+     */
     private void applyEndpointType(CustomDomain domain, String endpointType, String region) {
         domain.setEndpointConfigurationType(endpointType);
         if (!"EDGE".equals(endpointType)) {
