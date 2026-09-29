@@ -67,6 +67,7 @@ import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 /**
@@ -271,6 +272,7 @@ public class AwsJson11Controller {
     public Response handle(
             @HeaderParam("X-Amz-Target") String target,
             @Context HttpHeaders httpHeaders,
+            @Context UriInfo uriInfo,
             String body) {
 
         if (target == null) {
@@ -313,7 +315,9 @@ public class AwsJson11Controller {
                 case "wafv2" -> wafV2Handler.handle(action, request, region);
                 case "memorydb" -> memoryDbHandler.handle(action, request, region);
                 case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
-                case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region);
+                case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region,
+                        IamEnforcementFilter.requestAuthorization(
+                                httpHeaders.getHeaderString("Authorization"), uriInfo.getQueryParameters()));
                 case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
                 case "kinesisanalytics" -> kinesisAnalyticsV2JsonHandler.handle(action, request, region);
                 case "apigatewayv2" -> apigwV2JsonHandler.handle(action, request, region);

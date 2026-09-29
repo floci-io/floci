@@ -24,6 +24,7 @@ import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
@@ -255,7 +256,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
         String auth = ctx.getHeaderString("Authorization");
         if (auth == null) {
-            auth = presignedCredentialAsAuthorization(ctx);
+            auth = requestAuthorization(null, ctx.getUriInfo().getQueryParameters());
         }
         if (auth == null) {
             refuseUnsignedManagementCall(ctx);
@@ -908,9 +909,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * same way for the same reason. Synthesizing a {@code Credential=...} string from the query
      * parameter lets every downstream step here - access key extraction, credential scope,
      * action resolution, resource ARNs - run unchanged for both signing styles.
+     *
+     * <p>Public so that a handler authorizing a secondary resource through
+     * {@link #authorizeAdditionalResource} hands it the same caller this filter evaluated, whichever
+     * way the request was signed.
+     *
+     * @return the {@code Authorization} header, else a {@code Credential=...} string built from
+     *         {@code X-Amz-Credential}, else {@code null}
      */
-    private static String presignedCredentialAsAuthorization(ContainerRequestContext ctx) {
-        String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
+    public static String requestAuthorization(String authorizationHeader,
+                                              MultivaluedMap<String, String> queryParameters) {
+        if (authorizationHeader != null) {
+            return authorizationHeader;
+        }
+        String credential = queryParameters == null ? null : queryParameters.getFirst("X-Amz-Credential");
         return credential == null || credential.isBlank() ? null : "Credential=" + credential;
     }
 
