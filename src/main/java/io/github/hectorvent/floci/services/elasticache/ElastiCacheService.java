@@ -42,6 +42,7 @@ import java.net.UnknownHostException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -1460,11 +1461,26 @@ public class ElastiCacheService implements ResourceProvider {
             ReplicationGroup group = getReplicationGroup(groupId);
             // every check before any change: the store hands out its own object, so a mutation
             // made before a later refusal would stay visible
+            Set<String> nextUserIds = new HashSet<>(group.getAssociatedUserIds());
+            if (userIdsToRemove != null) {
+                nextUserIds.removeAll(userIdsToRemove);
+            }
             if (userIdsToAdd != null) {
                 for (String userId : userIdsToAdd) {
                     getUser(userId);
                 }
+                nextUserIds.addAll(userIdsToAdd);
             }
+
+            Set<String> seenUserNames = new HashSet<>();
+            for (String userId : nextUserIds) {
+                ElastiCacheUser u = users.get(userId).orElse(null);
+                if (u != null && !seenUserNames.add(u.getUserName())) {
+                    throw new AwsException("DuplicateUserNameFault",
+                            "Duplicate user name " + u.getUserName() + " in user group.", 400);
+                }
+            }
+
             settings.applyTo(group);
             if (userIdsToAdd != null) {
                 group.getAssociatedUserIds().addAll(userIdsToAdd);
@@ -1569,6 +1585,13 @@ public class ElastiCacheService implements ResourceProvider {
             throw new AwsException("UserNotFoundFault", "User " + userId + " not found.", 404);
         }
         users.delete(userId);
+        for (ReplicationGroup group : groups.scan(k -> true)) {
+            synchronized (lockFor("rg:" + group.getReplicationGroupId())) {
+                if (group.getAssociatedUserIds().remove(userId)) {
+                    groups.put(group.getReplicationGroupId(), group);
+                }
+            }
+        }
         LOG.infov("ElastiCache user {0} deleted", userId);
     }
 
@@ -1592,26 +1615,47 @@ public class ElastiCacheService implements ResourceProvider {
             }
             // Fall back to the "default" user associated with this group
             Set<String> groupUserIds = group.getAssociatedUserIds();
-            return groupUserIds.stream()
+            ElastiCacheUser defaultUser = groupUserIds.stream()
                     .map(id -> users.get(id).orElse(null))
-                    .filter(u -> u != null
-                            && "default".equals(u.getUserName())
-                            && (u.getAuthMode() == AuthMode.PASSWORD || u.getAuthMode() == AuthMode.NO_AUTH))
-                    .anyMatch(u -> u.getAuthMode() == AuthMode.NO_AUTH
-                            || (u.getPasswords() != null && u.getPasswords().contains(password)));
+                    .filter(u -> u != null && "default".equals(u.getUserName()))
+                    .findFirst()
+                    .orElse(null);
+            if (defaultUser == null) {
+                return false;
+            }
+            if (defaultUser.getAuthMode() == AuthMode.NO_AUTH) {
+                return true;
+            }
+            if (defaultUser.getAuthMode() == AuthMode.PASSWORD) {
+                return defaultUser.getPasswords() != null && defaultUser.getPasswords().contains(password);
+            }
+            return false;
         }
         // AUTH username password form: find user by userName, scoped to group
         Set<String> groupUserIds = group.getAssociatedUserIds();
-        return groupUserIds.stream()
+        ElastiCacheUser targetUser = groupUserIds.stream()
                 .map(id -> users.get(id).orElse(null))
                 .filter(u -> u != null && username.equals(u.getUserName()))
-                .anyMatch(u -> u.getAuthMode() == AuthMode.NO_AUTH
-                        || (u.getAuthMode() == AuthMode.PASSWORD && u.getPasswords() != null && u.getPasswords().contains(password)));
+                .findFirst()
+                .orElse(null);
+        if (targetUser == null) {
+            return false;
+        }
+        if (targetUser.getAuthMode() == AuthMode.NO_AUTH) {
+            return true;
+        }
+        if (targetUser.getAuthMode() == AuthMode.PASSWORD) {
+            return targetUser.getPasswords() != null && targetUser.getPasswords().contains(password);
+        }
+        return false;
     }
 
     public boolean hasMembers(String groupId) {
         ReplicationGroup group = groups.get(groupId).orElse(null);
-        return group != null && !group.getAssociatedUserIds().isEmpty();
+        if (group == null) {
+            return false;
+        }
+        return group.getAssociatedUserIds().stream().anyMatch(id -> users.get(id).isPresent());
     }
 
     public AuthMode memberAuthMode(String groupId, String username) {

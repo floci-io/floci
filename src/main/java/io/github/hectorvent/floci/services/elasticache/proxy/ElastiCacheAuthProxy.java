@@ -33,29 +33,41 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
 
     @Override
     protected boolean authRequired() {
-        return authMode != AuthMode.NO_AUTH || passwordValidator.hasMembers();
+        if (passwordValidator.hasMembers()) {
+            AuthMode defaultMode = passwordValidator.memberAuthMode("default");
+            if (defaultMode != null) {
+                return defaultMode != AuthMode.NO_AUTH;
+            }
+        }
+        return authMode != AuthMode.NO_AUTH;
     }
 
     @Override
     protected boolean authenticate(String username, String password) {
         String effectiveUser = (username == null || username.isEmpty()) ? "default" : username;
         if (passwordValidator.hasMembers()) {
-            if (username == null) {
-                if (passwordValidator.validatePassword(null, password)) {
+            if ("default".equals(effectiveUser)) {
+                if (passwordValidator.validatePassword(username, password)) {
                     return true;
                 }
                 AuthMode defaultMode = passwordValidator.memberAuthMode("default");
+                if (defaultMode == null) {
+                    defaultMode = passwordValidator.memberAuthMode(username);
+                }
                 if (defaultMode == AuthMode.IAM) {
                     return sigV4Validator.validate(password, groupId, "default");
                 }
                 return false;
             }
 
-            AuthMode userMode = passwordValidator.memberAuthMode(username);
+            AuthMode userMode = passwordValidator.memberAuthMode(effectiveUser);
+            if (userMode == null && username != null) {
+                userMode = passwordValidator.memberAuthMode(username);
+            }
             if (userMode != null) {
                 return switch (userMode) {
                     case IAM -> sigV4Validator.validate(password, groupId, effectiveUser);
-                    case PASSWORD, NO_AUTH -> passwordValidator.validatePassword(username, password);
+                    case PASSWORD, NO_AUTH -> passwordValidator.validatePassword(effectiveUser, password);
                 };
             }
             return false;

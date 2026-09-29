@@ -491,6 +491,114 @@ class ElastiCacheIntegrationTest {
         }
     }
 
+    @Test
+    @Order(17)
+    void replicationGroupWithNoAuthDefaultMemberAdmitsUnauthenticatedClients() throws Exception {
+        String groupId = "it-ec-def-noauth";
+        String defUserId = "it-def-noauth-uid";
+        String passUserId = "it-def-pass-uid";
+        String passUserName = "custom-user";
+        String password = "secret-pass-123";
+
+        // Create replication group with AuthMode.NO_AUTH
+        int proxyPort =
+                given()
+                    .formParam("Action", "CreateReplicationGroup")
+                    .formParam("ReplicationGroupId", groupId)
+                    .formParam("ReplicationGroupDescription", "Test group for no-auth default member")
+                    .header("Authorization", AUTH_HEADER)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200)
+                    .extract()
+                    .xmlPath()
+                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port");
+
+        try {
+            // Create user "default" with NO_AUTH
+            given()
+                .formParam("Action", "CreateUser")
+                .formParam("UserId", defUserId)
+                .formParam("UserName", "default")
+                .formParam("Engine", "redis")
+                .formParam("AuthenticationMode.Type", "no-password-required")
+                .formParam("AccessString", "on ~* +@all")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            // Create password user
+            given()
+                .formParam("Action", "CreateUser")
+                .formParam("UserId", passUserId)
+                .formParam("UserName", passUserName)
+                .formParam("Engine", "redis")
+                .formParam("AuthenticationMode.Type", "password")
+                .formParam("AuthenticationMode.Passwords.member.1", password)
+                .formParam("AccessString", "on ~* +@all")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            // Associate both users with the replication group
+            given()
+                .formParam("Action", "ModifyReplicationGroup")
+                .formParam("ReplicationGroupId", groupId)
+                .formParam("UserGroupIdsToAdd.member.1", defUserId)
+                .formParam("UserGroupIdsToAdd.member.2", passUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            // 1. Passwordless client sends PING directly without AUTH and reaches the cache
+            try (Socket socket = openSocket(proxyPort)) {
+                write(socket, respArray("PING"));
+                assertEquals("+PONG\r\n", readLine(socket));
+            }
+
+            // 2. Client authenticating as custom user with wrong password is rejected
+            String wrongPassReply = sendCommand(proxyPort, respArray("AUTH", passUserName, "wrong-password"));
+            assertEquals("-ERR invalid username-password pair or user is disabled.\r\n", wrongPassReply);
+
+            // 3. Client authenticating as custom user with correct password succeeds
+            try (Socket socket = openSocket(proxyPort)) {
+                write(socket, respArray("AUTH", passUserName, password));
+                assertEquals("+OK\r\n", readLine(socket));
+
+                write(socket, respArray("PING"));
+                assertEquals("+PONG\r\n", readLine(socket));
+            }
+        } finally {
+            given()
+                .formParam("Action", "DeleteReplicationGroup")
+                .formParam("ReplicationGroupId", groupId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/");
+
+            given()
+                .formParam("Action", "DeleteUser")
+                .formParam("UserId", defUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/");
+
+            given()
+                .formParam("Action", "DeleteUser")
+                .formParam("UserId", passUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/");
+        }
+    }
+
     static boolean isDockerAvailable() {
         try {
             Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")

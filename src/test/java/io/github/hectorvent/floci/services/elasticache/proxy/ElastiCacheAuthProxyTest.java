@@ -211,9 +211,10 @@ class ElastiCacheAuthProxyTest {
     }
 
     @Test
-    void authRequiredIsTrueWhenClusterHasMembersEvenIfGroupAuthModeIsNoAuth() {
+    void authRequiredDependsOnDefaultMemberAuthModeWhenClusterHasMembers() {
         SigV4Validator sigV4Validator = mock(SigV4Validator.class);
-        ElastiCacheAuthProxy.PasswordValidator validatorWithMembers = new ElastiCacheAuthProxy.PasswordValidator() {
+
+        ElastiCacheAuthProxy.PasswordValidator validatorNoAuthDefault = new ElastiCacheAuthProxy.PasswordValidator() {
             @Override
             public boolean validatePassword(String username, String password) {
                 return false;
@@ -222,6 +223,45 @@ class ElastiCacheAuthProxyTest {
             @Override
             public boolean hasMembers() {
                 return true;
+            }
+
+            @Override
+            public AuthMode memberAuthMode(String username) {
+                return "default".equals(username) ? AuthMode.NO_AUTH : AuthMode.PASSWORD;
+            }
+        };
+
+        ElastiCacheAuthProxy.PasswordValidator validatorPasswordDefault = new ElastiCacheAuthProxy.PasswordValidator() {
+            @Override
+            public boolean validatePassword(String username, String password) {
+                return false;
+            }
+
+            @Override
+            public boolean hasMembers() {
+                return true;
+            }
+
+            @Override
+            public AuthMode memberAuthMode(String username) {
+                return "default".equals(username) ? AuthMode.PASSWORD : null;
+            }
+        };
+
+        ElastiCacheAuthProxy.PasswordValidator validatorIamDefault = new ElastiCacheAuthProxy.PasswordValidator() {
+            @Override
+            public boolean validatePassword(String username, String password) {
+                return false;
+            }
+
+            @Override
+            public boolean hasMembers() {
+                return true;
+            }
+
+            @Override
+            public AuthMode memberAuthMode(String username) {
+                return "default".equals(username) ? AuthMode.IAM : null;
             }
         };
 
@@ -237,12 +277,58 @@ class ElastiCacheAuthProxyTest {
             }
         };
 
-        ElastiCacheAuthProxy proxyWithMembers = new ElastiCacheAuthProxy("grp-noauth-members", AuthMode.NO_AUTH,
-                "127.0.0.1", 6379, validatorWithMembers, sigV4Validator);
-        assertTrue(proxyWithMembers.authRequired(), "authRequired must be true if group has members");
+        ElastiCacheAuthProxy proxyNoAuth = new ElastiCacheAuthProxy("grp-noauth", AuthMode.NO_AUTH,
+                "127.0.0.1", 6379, validatorNoAuthDefault, sigV4Validator);
+        assertFalse(proxyNoAuth.authRequired(), "authRequired must be false when default member is NO_AUTH");
 
-        ElastiCacheAuthProxy proxyWithoutMembers = new ElastiCacheAuthProxy("grp-noauth-plain", AuthMode.NO_AUTH,
+        ElastiCacheAuthProxy proxyPassword = new ElastiCacheAuthProxy("grp-pass", AuthMode.NO_AUTH,
+                "127.0.0.1", 6379, validatorPasswordDefault, sigV4Validator);
+        assertTrue(proxyPassword.authRequired(), "authRequired must be true when default member is PASSWORD");
+
+        ElastiCacheAuthProxy proxyIam = new ElastiCacheAuthProxy("grp-iam", AuthMode.NO_AUTH,
+                "127.0.0.1", 6379, validatorIamDefault, sigV4Validator);
+        assertTrue(proxyIam.authRequired(), "authRequired must be true when default member is IAM");
+
+        ElastiCacheAuthProxy proxyNoMembersNoAuth = new ElastiCacheAuthProxy("grp-plain-noauth", AuthMode.NO_AUTH,
                 "127.0.0.1", 6379, validatorWithoutMembers, sigV4Validator);
-        assertFalse(proxyWithoutMembers.authRequired(), "authRequired must be false if NO_AUTH and no members");
+        assertFalse(proxyNoMembersNoAuth.authRequired(), "authRequired must be false if NO_AUTH and no members");
+
+        ElastiCacheAuthProxy proxyNoMembersPass = new ElastiCacheAuthProxy("grp-plain-pass", AuthMode.PASSWORD,
+                "127.0.0.1", 6379, validatorWithoutMembers, sigV4Validator);
+        assertTrue(proxyNoMembersPass.authRequired(), "authRequired must be true if PASSWORD and no members");
+    }
+
+    @Test
+    void explicitDefaultUserAuthenticatesWithGroupAuthTokenWhenGroupHasMembers() {
+        SigV4Validator sigV4Validator = mock(SigV4Validator.class);
+        ElastiCacheAuthProxy.PasswordValidator validator = new ElastiCacheAuthProxy.PasswordValidator() {
+            @Override
+            public boolean validatePassword(String username, String password) {
+                boolean isDefault = (username == null || username.isEmpty() || "default".equals(username));
+                return isDefault && "group-secret-token".equals(password);
+            }
+
+            @Override
+            public boolean hasMembers() {
+                return true;
+            }
+
+            @Override
+            public AuthMode memberAuthMode(String username) {
+                // Group has members (e.g. app-user), but no member is named "default"
+                return "app-user".equals(username) ? AuthMode.PASSWORD : null;
+            }
+        };
+
+        ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy("grp-token-members", AuthMode.PASSWORD,
+                "127.0.0.1", 6379, validator, sigV4Validator);
+
+        assertTrue(proxy.authenticate("default", "group-secret-token"),
+                "AUTH default <token> must authenticate with group auth token even when group has members");
+        assertTrue(proxy.authenticate("", "group-secret-token"),
+                "AUTH \"\" <token> must authenticate with group auth token");
+        assertTrue(proxy.authenticate(null, "group-secret-token"),
+                "AUTH <token> must authenticate with group auth token");
+        assertFalse(proxy.authenticate("default", "wrong-token"));
     }
 }

@@ -199,7 +199,7 @@ public abstract class AbstractRedisAuthProxy {
             return;
         }
 
-        boolean authenticated = !authRequired() || authenticate(username, password);
+        boolean authenticated = authenticate(username, password);
         if (!authenticated) {
             writeResponse(client, INVALID_AUTH_RESPONSE);
             closeQuietly(client);
@@ -267,7 +267,7 @@ public abstract class AbstractRedisAuthProxy {
             writeResponse(client, HELLO_NOAUTH_RESPONSE);
             return false;
         }
-        if (authRequired() && !authenticate(username, password)) {
+        if (authProvided && !authenticate(username, password)) {
             writeResponse(client, WRONGPASS_RESPONSE);
             return false;
         }
