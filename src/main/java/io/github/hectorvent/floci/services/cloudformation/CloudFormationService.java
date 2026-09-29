@@ -1400,7 +1400,6 @@ public class CloudFormationService implements ResourceProvider {
         boolean updateCommitted = false;
         Set<String> attemptedResourceIds = new LinkedHashSet<>();
         try {
-            boolean templateOrParamsChanged = isTemplateOrParamsChanged(stack, templateBody, params);
             Set<String> changedResourceIds = isCreate
                     ? Set.of()
                     : changedResourceIds(stack, templateBody, params, region);
@@ -1461,9 +1460,8 @@ public class CloudFormationService implements ResourceProvider {
             if (resources.isObject()) {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
 
-                boolean shouldSkipUnchanged = templateOrParamsChanged || !changedResourceIds.isEmpty();
                 for (String logicalId : sortedLogicalIds) {
-                    if (!isCreate && shouldSkipUnchanged && !changedResourceIds.contains(logicalId)) {
+                    if (!isCreate && !changedResourceIds.contains(logicalId)) {
                         continue;
                     }
                     JsonNode resDef = resources.get(logicalId);
@@ -1740,19 +1738,6 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
         return changedResourceIds;
-    }
-
-    private boolean isTemplateOrParamsChanged(Stack stack, String templateBody, Map<String, String> params) {
-        String oldTemplate = stack.getOriginalTemplateBody() != null
-                ? stack.getOriginalTemplateBody()
-                : stack.getTemplateBody();
-        if (oldTemplate != null && !oldTemplate.equals(templateBody)) {
-            return true;
-        }
-        Map<String, String> oldParams = stack.parametersSnapshot();
-        Map<String, String> safeParams = params != null ? params : Map.of();
-        Map<String, String> safeOldParams = oldParams != null ? oldParams : Map.of();
-        return !safeParams.equals(safeOldParams);
     }
 
     private boolean isNestedStackChanged(Stack parentStack, String logicalId, JsonNode newDef,
