@@ -38,7 +38,9 @@ import static org.mockito.Mockito.when;
  * The Cloud Map namespace types and {@code AWS::ServiceDiscovery::Service} in isolation: the ids
  * back Ref and Fn::GetAtt, a textual TTL reaches the service as a number, an unchanged createOnly
  * set updates in place, a changed one replaces, a rolled back replacement puts the createOnly record
- * back, and delete tolerates only the not-found codes.
+ * back, a rolled back in-place update puts the prior description, DnsConfig, health check and tags
+ * back from its snapshot, a committed update drops that snapshot, and delete tolerates only the
+ * not-found codes.
  */
 class CloudMapCfnProvisionerTest {
 
@@ -46,6 +48,7 @@ class CloudMapCfnProvisionerTest {
     private static final String PUBLIC_DNS_NAMESPACE = "AWS::ServiceDiscovery::PublicDnsNamespace";
     private static final String HTTP_NAMESPACE = "AWS::ServiceDiscovery::HttpNamespace";
     private static final String SERVICE = "AWS::ServiceDiscovery::Service";
+    private static final String SNAPSHOT_ATTR = "__FlociCloudMapUpdateSnapshot";
     private static final String NS_ARN = "arn:aws:servicediscovery:us-east-1:000000000000:namespace/ns-1";
     private static final String SRV_ARN = "arn:aws:servicediscovery:us-east-1:000000000000:service/srv-1";
     private static final String SRV2_ARN = "arn:aws:servicediscovery:us-east-1:000000000000:service/srv-2";
@@ -240,6 +243,73 @@ class CloudMapCfnProvisionerTest {
     }
 
     @Test
+    void serviceInPlaceUpdateRollsBackToTheSnapshot() throws Exception {
+        Service stored = stubServiceCreate("srv-1", SRV_ARN);
+        StackResource r = resource(SERVICE, "Svc");
+        provisioner.provision(r, props("""
+                {"Name": "main", "NamespaceId": "ns-1"}"""), ctx(null));
+        stored.setDescription("d1");
+        stored.setDnsConfig("{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":60}]}");
+        stored.setHealthCheckConfig(null);
+        stored.setTags(new HashMap<>(Map.of("k1", "v1")));
+        when(cloudMap.listTagsForResource(SRV_ARN)).thenReturn(Map.of("k1", "v2"));
+
+        provisioner.provision(r, props("""
+                {"Name": "main", "NamespaceId": "ns-1", "Description": "d2",
+                 "DnsConfig": {"DnsRecords": [{"Type": "A", "TTL": "120"}]},
+                 "Tags": [{"Key": "k1", "Value": "v2"}]}"""), ctx("srv-1"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(cloudMap).updateService("srv-1", "d1", "{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":60}]}", null);
+        verify(cloudMap).tagResource(SRV_ARN, Map.of("k1", "v1"));
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT_ATTR));
+        assertEquals("srv-1", r.getPhysicalId());
+    }
+
+    @Test
+    void namespaceInPlaceUpdateRollsBackToTheSnapshot() throws Exception {
+        stubNamespaceCreate();
+        Namespace stored = new Namespace();
+        stored.setId("ns-1");
+        stored.setArn(NS_ARN);
+        stored.setDescription("d1");
+        stored.setTags(new HashMap<>(Map.of("k1", "v1")));
+        when(cloudMap.getNamespace("ns-1")).thenReturn(stored);
+        StackResource r = resource(PRIVATE_DNS_NAMESPACE, "Ns");
+        provisioner.provision(r, props("""
+                {"Name": "svc.internal", "Vpc": "vpc-1", "Description": "d1",
+                 "Tags": [{"Key": "k1", "Value": "v1"}]}"""), ctx(null));
+
+        provisioner.provision(r, props("""
+                {"Name": "svc.internal", "Vpc": "vpc-1", "Description": "d2",
+                 "Tags": [{"Key": "k1", "Value": "v2"}]}"""), ctx("ns-1"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(cloudMap).updateNamespace("ns-1", "d2");
+        verify(cloudMap).updateNamespace("ns-1", "d1");
+        verify(cloudMap).tagResource(NS_ARN, Map.of("k1", "v1"));
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT_ATTR));
+        assertEquals("ns-1", r.getPhysicalId());
+    }
+
+    @Test
+    void committedUpdateDropsTheSnapshot() throws Exception {
+        stubServiceCreate("srv-1", SRV_ARN);
+        StackResource r = resource(SERVICE, "Svc");
+        provisioner.provision(r, props("""
+                {"Name": "main", "NamespaceId": "ns-1"}"""), ctx(null));
+        provisioner.provision(r, props("""
+                {"Name": "main", "NamespaceId": "ns-1", "Description": "d2"}"""), ctx("srv-1"));
+        assertTrue(r.getAttributes().containsKey(SNAPSHOT_ATTR));
+
+        provisioner.completeUpdate(r);
+
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT_ATTR));
+    }
+
+    @Test
     void deleteNamespaceToleratesNamespaceNotFound() {
         doThrow(new AwsException("NamespaceNotFound", "gone", 404))
                 .when(cloudMap).deleteNamespace("ns-1", "us-east-1");
@@ -282,15 +352,18 @@ class CloudMapCfnProvisionerTest {
         return op;
     }
 
-    private void stubServiceCreate(String id, String arn) {
+    /** Stubs the create and the lookup of one service, returning the instance both hand out. */
+    private Service stubServiceCreate(String id, String arn) {
+        Service service = new Service();
+        service.setId(id);
+        service.setArn(arn);
         when(cloudMap.createService(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenAnswer(inv -> {
-                    Service service = new Service();
-                    service.setId(id);
-                    service.setArn(arn);
                     service.setName(inv.getArgument(0));
                     return service;
                 });
+        when(cloudMap.getService(id)).thenReturn(service);
+        return service;
     }
 
     private ProvisionContext ctx(String priorPhysicalId) {

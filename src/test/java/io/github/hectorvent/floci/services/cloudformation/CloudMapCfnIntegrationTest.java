@@ -30,7 +30,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
  * Provisions an {@code AWS::ServiceDiscovery::PrivateDnsNamespace} with a named and an unnamed
  * {@code AWS::ServiceDiscovery::Service} through a stack, checks Ref and Fn::GetAtt against Cloud
  * Map, that a Number parameter TTL is stored as a number, that Description and TTL update in place,
- * that renaming the service replaces it, and that deleting the stack removes everything.
+ * that a later resource failing the update puts those in-place changes back, that renaming the
+ * service replaces it, and that deleting the stack removes everything.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -50,7 +51,11 @@ class CloudMapCfnIntegrationTest {
         {
           "Parameters": {
             "NsDescription": {"Type": "String", "Default": "d1"},
-            "Ttl": {"Type": "Number", "Default": 60}
+            "Ttl": {"Type": "Number", "Default": 60},
+            "Fail": {"Type": "String", "Default": "false"}
+          },
+          "Conditions": {
+            "Failing": {"Fn::Equals": [{"Ref": "Fail"}, "true"]}
           },
           "Resources": {
             "Ns": {
@@ -84,6 +89,12 @@ class CloudMapCfnIntegrationTest {
                   "DnsRecords": [{"Type": "A", "TTL": 30}]
                 }
               }
+            },
+            "BadSecret": {
+              "Type": "AWS::SecretsManager::Secret",
+              "Condition": "Failing",
+              "DependsOn": "Svc",
+              "Properties": {"SecretString": "explicit", "GenerateSecretString": {"PasswordLength": 32}}
             }
           },
           "Outputs": {
@@ -163,6 +174,23 @@ class CloudMapCfnIntegrationTest {
 
     @Test
     @Order(3)
+    void aFailedUpdateRestoresTheInPlaceChanges() {
+        cloudFormation("UpdateStack", "main", Map.of("NsDescription", "d3", "Ttl", "90", "Fail", "true"));
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(STACK).status());
+        String outputs = describeStacks();
+
+        assertEquals(namespaceId, outputValue(outputs, "NsId"));
+        assertEquals(serviceId, outputValue(outputs, "SvcId"));
+        cloudMap("GetNamespace", "{\"Id\":\"" + namespaceId + "\"}")
+            .then().statusCode(200)
+            .body("Namespace.Description", equalTo("d2"));
+        cloudMap("GetService", "{\"Id\":\"" + serviceId + "\"}")
+            .then().statusCode(200)
+            .body("Service.DnsConfig.DnsRecords[0].TTL", equalTo(120));
+    }
+
+    @Test
+    @Order(4)
     void renamingTheServiceReplacesIt() {
         cloudFormation("UpdateStack", "main2", Map.of("NsDescription", "d2", "Ttl", "120"));
         assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(STACK).status());
@@ -179,7 +207,7 @@ class CloudMapCfnIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void deletingTheStackRemovesTheNamespaceAndServices() {
         cloudFormation("DeleteStack", "main2", Map.of());
         CfnStackWaits.awaitStackDeleted(STACK);

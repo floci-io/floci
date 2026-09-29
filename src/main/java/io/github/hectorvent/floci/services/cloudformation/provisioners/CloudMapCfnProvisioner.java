@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -24,9 +26,10 @@ import java.util.UUID;
  * {@code HttpNamespace}) and {@code AWS::ServiceDiscovery::Service}. {@code Ref} returns the id;
  * {@code Fn::GetAtt} exposes {@code Id} and {@code Arn}, plus {@code HostedZoneId} on a DNS
  * namespace and {@code Name} on a service.
- * Description, DnsConfig, HealthCheckConfig and Tags update in place; a createOnly change replaces
- * the resource through {@link ReplacementCleanup}. A {@code Ref} to a Number parameter resolves to
- * text, so the numeric DnsConfig and health check fields are coerced back to JSON numbers.
+ * Description, DnsConfig, HealthCheckConfig and Tags update in place, keeping the prior values to put
+ * back when a later resource fails the update; a createOnly change replaces the resource through
+ * {@link ReplacementCleanup}. A {@code Ref} to a Number parameter resolves to text, so the numeric
+ * DnsConfig and health check fields are coerced back to JSON numbers.
  */
 @ApplicationScoped
 public class CloudMapCfnProvisioner implements CfnResourceProvisioner {
@@ -37,6 +40,8 @@ public class CloudMapCfnProvisioner implements CfnResourceProvisioner {
     private static final String SERVICE = "AWS::ServiceDiscovery::Service";
     private static final String CREATE_ONLY_ATTR = "__FlociCreateOnly";
     private static final String CREATE_ONLY_PRIOR_ATTR = "__FlociCreateOnlyPrior";
+    private static final String SNAPSHOT_ATTR = "__FlociCloudMapUpdateSnapshot";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final CloudMapService cloudMapService;
 
@@ -71,6 +76,8 @@ public class CloudMapCfnProvisioner implements CfnResourceProvisioner {
         String createOnly = Arrays.asList(name, vpc).toString();
 
         if (ctx.isUpdate() && createOnly.equals(r.getAttributes().get(CREATE_ONLY_ATTR))) {
+            Namespace current = cloudMapService.getNamespace(ctx.priorPhysicalId());
+            snapshot(r, current.getDescription(), null, null, current.getTags());
             cloudMapService.updateNamespace(ctx.priorPhysicalId(), description);
             reconcileTags(r.getAttributes().get("Arn"), tags);
             return;
@@ -113,6 +120,9 @@ public class CloudMapCfnProvisioner implements CfnResourceProvisioner {
         String createOnly = Arrays.asList(name, namespaceId, type, json(customConfig)).toString();
 
         if (ctx.isUpdate() && createOnly.equals(r.getAttributes().get(CREATE_ONLY_ATTR))) {
+            Service current = cloudMapService.getService(ctx.priorPhysicalId());
+            snapshot(r, current.getDescription(), current.getDnsConfig(), current.getHealthCheckConfig(),
+                    current.getTags());
             cloudMapService.updateService(ctx.priorPhysicalId(), description, json(dnsConfig),
                     json(healthCheckConfig));
             reconcileTags(r.getAttributes().get("Arn"), tags);
@@ -127,6 +137,17 @@ public class CloudMapCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", service.getArn());
         r.getAttributes().put("Name", service.getName());
         r.getAttributes().put(CREATE_ONLY_ATTR, createOnly);
+    }
+
+    /** Keeps what an in-place update overwrites, for {@link #rollbackUpdate} to put back. */
+    private static void snapshot(StackResource r, String description, String dnsConfig,
+                                 String healthCheckConfig, Map<String, String> tags) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("Description", description);
+        snapshot.put("DnsConfig", dnsConfig);
+        snapshot.put("HealthCheckConfig", healthCheckConfig);
+        snapshot.set("Tags", MAPPER.valueToTree(tags));
+        r.getAttributes().put(SNAPSHOT_ATTR, snapshot.toString());
     }
 
     /** Resolves an object property to a fresh node, safe to mutate, or a MissingNode when absent. */
@@ -183,6 +204,7 @@ public class CloudMapCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
         resource.getAttributes().remove(CREATE_ONLY_PRIOR_ATTR);
+        resource.getAttributes().remove(SNAPSHOT_ATTR);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
@@ -193,8 +215,12 @@ public class CloudMapCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * {@link ReplacementCleanup} leaves {@code __Floci} attributes alone, so the createOnly record
-     * of the prior entity is put back here.
+     * A replacement is undone through the cleanup record, an in-place update from the snapshot taken
+     * before it. With neither, the provision failed before changing anything (every in-place
+     * mutation is preceded by the snapshot, every replacement followed by the record), so there is
+     * nothing to undo. {@link ReplacementCleanup} leaves {@code __Floci} attributes alone, so the
+     * createOnly record of the prior entity is put back here. A restore that throws leaves the
+     * snapshot for the next attempt.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
@@ -207,6 +233,31 @@ public class CloudMapCfnProvisioner implements CfnResourceProvisioner {
                 resource.getAttributes().put(CREATE_ONLY_ATTR, prior);
             }
         }
-        return replaced;
+        String snapshot = resource.getAttributes().get(SNAPSHOT_ATTR);
+        if (!replaced && snapshot != null) {
+            restore(resource, snapshot);
+        }
+        resource.getAttributes().remove(SNAPSHOT_ATTR);
+        return true;
+    }
+
+    private void restore(StackResource resource, String raw) {
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the Cloud Map update snapshot for "
+                    + resource.getLogicalId(), e);
+        }
+        String description = snapshot.path("Description").textValue();
+        if (SERVICE.equals(resource.getResourceType())) {
+            cloudMapService.updateService(resource.getPhysicalId(), description,
+                    snapshot.path("DnsConfig").textValue(), snapshot.path("HealthCheckConfig").textValue());
+        } else {
+            cloudMapService.updateNamespace(resource.getPhysicalId(), description);
+        }
+        Map<String, String> tags = new HashMap<>();
+        snapshot.path("Tags").fields().forEachRemaining(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
+        reconcileTags(resource.getAttributes().get("Arn"), tags);
     }
 }
