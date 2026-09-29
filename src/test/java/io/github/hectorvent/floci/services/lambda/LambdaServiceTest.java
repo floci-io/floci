@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.model.LambdaUrlConfig;
 import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,6 +21,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.HashMap;
@@ -1390,7 +1392,7 @@ class LambdaServiceTest {
     @Test
     void createFunctionRejectsMoreThanFiveLayers() {
         Map<String, Object> request = baseRequest("too-many-layers-fn");
-        List<String> layers = new java.util.ArrayList<>();
+        List<String> layers = new ArrayList<>();
         for (int i = 0; i < 6; i++) {
             layers.add("arn:aws:lambda:us-east-1:000000000000:layer:l" + i + ":1");
         }
@@ -1482,6 +1484,74 @@ class LambdaServiceTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.createFunctionUrlConfig(REGION, "any-fn", "123", Map.of()));
         assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionUrlConfig_invalidInvokeMode_leavesAuthTypeUnchanged() {
+        // Catches: UpdateFunctionUrlConfig applying AuthType to the stored config before InvokeMode is rejected
+        service.createFunction(REGION, baseRequest("url-atomic-fn"));
+        LambdaUrlConfig seeded = new LambdaUrlConfig();
+        seeded.setAuthType("NONE");
+        service.getFunction(REGION, "url-atomic-fn").setUrlConfig(seeded);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionUrlConfig(REGION, "url-atomic-fn", null,
+                        Map.of("AuthType", "AWS_IAM", "InvokeMode", "BOGUS")));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("NONE", service.getFunctionUrlConfig(REGION, "url-atomic-fn", null).getAuthType());
+    }
+
+    @Test
+    void getAndDeleteFunctionUrlConfig_rejectMalformedQualifier() {
+        // Catches: Get/DeleteFunctionUrlConfig skipping the FunctionUrlQualifier constraint that Create/Update enforce
+        AwsException numeric = assertThrows(AwsException.class,
+                () -> service.getFunctionUrlConfig(REGION, "any-fn", "123"));
+        AwsException empty = assertThrows(AwsException.class,
+                () -> service.getFunctionUrlConfig(REGION, "any-fn", ""));
+        AwsException deleteNumeric = assertThrows(AwsException.class,
+                () -> service.deleteFunctionUrlConfig(REGION, "any-fn", "123"));
+
+        assertEquals("ValidationException", numeric.getErrorCode());
+        assertEquals("ValidationException", empty.getErrorCode());
+        assertEquals("ValidationException", deleteNumeric.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionConfiguration_overlongDescription_isRejectedAndNotStored() {
+        // Catches: UpdateFunctionConfiguration persisting a Description over the 256-character shape limit
+        service.createFunction(REGION, baseRequest("update-desc-fn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "update-desc-fn",
+                        Map.of("Description", "d".repeat(257))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertNull(service.getFunction(REGION, "update-desc-fn").getDescription());
+    }
+
+    @Test
+    void createFunction_bareStringLayers_isRejectedAsSerializationError() {
+        // Catches: a non-list Layers value being treated as absent instead of rejected
+        Map<String, Object> request = baseRequest("bare-layers-fn");
+        request.put("Layers", "arn:aws:lambda:us-east-1:000000000000:layer:l0:1");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("SerializationException", error.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionConfiguration_bareStringLayers_isRejectedAndKeepsStoredLayers() {
+        // Catches: a non-list Layers value on update silently clearing the stored layers
+        service.createFunction(REGION, baseRequest("bare-layers-update-fn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "bare-layers-update-fn",
+                        Map.of("Layers", "not-a-list")));
+
+        assertEquals("SerializationException", error.getErrorCode());
     }
 
     @Test
@@ -1748,6 +1818,26 @@ class LambdaServiceTest {
         assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
                 "Topics", List.of(456)
         )));
+    }
+
+    @Test
+    void updateEventSourceMapping_invalidLaterField_leavesBatchSizeAndEnabledUnchanged() {
+        // Catches: UpdateEventSourceMapping mutating the stored mapping before a later member fails validation
+        service.createFunction(REGION, baseRequest("kafka-fn-update-atomic"));
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "kafka-fn-update-atomic",
+                "Topics", List.of("valid-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of("KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")))));
+
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "BatchSize", 5,
+                "Enabled", false,
+                "FunctionResponseTypes", List.of("Bogus"))));
+
+        EventSourceMapping stored = service.getEventSourceMapping(esm.getUuid());
+        assertEquals(10, stored.getBatchSize());
+        assertTrue(stored.isEnabled());
     }
 
     @Test
@@ -2020,6 +2110,21 @@ class LambdaServiceTest {
         assertEquals("ValidationException", digits.getErrorCode());
         assertEquals("ValidationException", tooLong.getErrorCode());
         assertEquals(0, service.listAliases(REGION, "alias-name-fn").size());
+    }
+
+    @Test
+    void createAlias_emptyOrMissingName_isRejected() {
+        // Catches: CreateAlias accepting an empty or null alias name despite the 1-character minimum
+        service.createFunction(REGION, baseRequest("alias-empty-fn"));
+
+        AwsException empty = assertThrows(AwsException.class,
+                () -> service.createAlias(REGION, "alias-empty-fn", "", "$LATEST", null, null));
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.createAlias(REGION, "alias-empty-fn", null, "$LATEST", null, null));
+
+        assertEquals("ValidationException", empty.getErrorCode());
+        assertEquals("ValidationException", missing.getErrorCode());
+        assertEquals(0, service.listAliases(REGION, "alias-empty-fn").size());
     }
 
     @Test

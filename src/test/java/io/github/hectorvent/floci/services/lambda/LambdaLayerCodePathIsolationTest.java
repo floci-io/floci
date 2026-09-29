@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
@@ -20,6 +21,7 @@ import java.util.zip.ZipOutputStream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -111,6 +113,24 @@ class LambdaLayerCodePathIsolationTest {
 
         assertEquals(published.getCodeLocalPath(), restored.getCodeLocalPath());
         assertEqualsContent(restored.getCodeLocalPath(), "persisted");
+    }
+
+    @Test
+    void publishLayerVersionRejectsBareStringCompatibilityLists(@TempDir Path baseDir) throws Exception {
+        // Catches: a non-list CompatibleRuntimes/CompatibleArchitectures being ignored instead of rejected
+        LambdaLayerService service = serviceFor(baseDir, "111111111111");
+        Map<String, Object> runtimes = Map.of("Content", Map.of("ZipFile", zipBase64("r")),
+                "CompatibleRuntimes", "python3.12");
+        Map<String, Object> architectures = Map.of("Content", Map.of("ZipFile", zipBase64("a")),
+                "CompatibleArchitectures", "x86_64");
+
+        AwsException badRuntimes = assertThrows(AwsException.class,
+                () -> service.publishLayerVersion("us-east-1", LAYER_NAME, runtimes));
+        AwsException badArchitectures = assertThrows(AwsException.class,
+                () -> service.publishLayerVersion("us-east-1", LAYER_NAME, architectures));
+
+        assertEquals("SerializationException", badRuntimes.getErrorCode());
+        assertEquals("SerializationException", badArchitectures.getErrorCode());
     }
 
     private static LambdaLayerVersion publish(LambdaLayerService service, String content) throws Exception {

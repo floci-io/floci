@@ -488,10 +488,9 @@ public class LambdaService implements ResourceProvider {
         }
 
         // Layers
+        validateArnList(request.get("Layers"), "layers", LAYER_VERSION_ARN_PATTERN, 5);
         @SuppressWarnings("unchecked")
-        List<String> layers = request.get("Layers") instanceof List
-                ? (List<String>) request.get("Layers") : null;
-        validateArnList(layers, "layers", LAYER_VERSION_ARN_PATTERN, 5);
+        List<String> layers = (List<String>) request.get("Layers");
         if (layers != null) {
             validateLayersResolvable(layers);
             fn.setLayers(new ArrayList<>(layers));
@@ -776,13 +775,15 @@ public class LambdaService implements ResourceProvider {
         // same reference, not a copy), so validating this late would leave every
         // already-applied field (Description, Timeout, ...) live on a rejected update, since
         // nothing here is transactional and there's a single save() at the very end.
-        @SuppressWarnings("unchecked")
-        List<String> layerList = request.containsKey("Layers") && request.get("Layers") instanceof List
-                ? (List<String>) request.get("Layers") : null;
         if (request.containsKey("Layers")) {
-            validateArnList(layerList, "layers", LAYER_VERSION_ARN_PATTERN, 5);
+            validateArnList(request.get("Layers"), "layers", LAYER_VERSION_ARN_PATTERN, 5);
+        }
+        @SuppressWarnings("unchecked")
+        List<String> layerList = (List<String>) request.get("Layers");
+        if (request.containsKey("Layers")) {
             validateLayersResolvable(layerList);
         }
+        validateMaxLength(request.get("Description"), "description", 256);
         if (request.containsKey("Runtime")) {
             validateEnum(request.get("Runtime"), "runtime", RUNTIME_VALUES);
         }
@@ -2407,9 +2408,20 @@ public class LambdaService implements ResourceProvider {
                         + String.join(", ", allowed) + "]", 400);
     }
 
+    /**
+     * A list member is either absent (null) or a JSON array; any other JSON type is a deserialization
+     * failure, so it must not be mistaken for an absent member and silently clear a stored value.
+     */
+    private static Object requireListOrNull(Object value, String field) {
+        if (value != null && !(value instanceof List<?>)) {
+            throw new AwsException("SerializationException", field + " must be a JSON array or null", 400);
+        }
+        return value;
+    }
+
     /** Validates every element of a request-supplied list against an enum, and its max size. */
     static void validateEnumList(Object value, String field, List<String> allowed, int maxItems) {
-        if (!(value instanceof List<?> list)) {
+        if (!(requireListOrNull(value, field) instanceof List<?> list)) {
             return;
         }
         if (list.size() > maxItems) {
@@ -2436,7 +2448,7 @@ public class LambdaService implements ResourceProvider {
 
     /** Validates every element of a request-supplied string list against a pattern, and its max size. */
     private static void validateArnList(Object value, String field, Pattern pattern, int maxItems) {
-        if (!(value instanceof List<?> list)) {
+        if (!(requireListOrNull(value, field) instanceof List<?> list)) {
             return;
         }
         if (list.size() > maxItems) {
@@ -2446,6 +2458,16 @@ public class LambdaService implements ResourceProvider {
         }
         for (Object item : list) {
             validatePattern(item, field + ".member", pattern);
+        }
+    }
+
+    /** Enforces a shape's 1-character minimum: an empty string is rejected, and null too when the member is required. */
+    private static void validateNonEmpty(String value, String field, boolean required) {
+        if ((value == null && required) || (value != null && value.isEmpty())) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + (value == null ? "" : value) + "' at '" + field
+                            + "' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                    400);
         }
     }
 
@@ -2630,8 +2652,15 @@ public class LambdaService implements ResourceProvider {
         return alias;
     }
 
+    /** FunctionUrlQualifier in botocore: 1-128 characters, not all digits. */
+    private static void validateFunctionUrlQualifier(String qualifier) {
+        validateNonEmpty(qualifier, "qualifier", false);
+        validatePattern(qualifier, "qualifier", FUNCTION_URL_QUALIFIER_PATTERN);
+    }
+
     /** Alias shape in botocore: 1-128 characters matching {@link #ALIAS_NAME_PATTERN}. */
     private static void validateAliasName(String aliasName) {
+        validateNonEmpty(aliasName, "name", true);
         validateMaxLength(aliasName, "name", 128);
         validatePattern(aliasName, "name", ALIAS_NAME_PATTERN);
     }
@@ -2647,7 +2676,7 @@ public class LambdaService implements ResourceProvider {
     // ──────────────────────────── Function URL Config ────────────────────────────
 
     public LambdaUrlConfig createFunctionUrlConfig(String region, String functionName, String qualifier, Map<String, Object> request) {
-        validatePattern(qualifier, "qualifier", FUNCTION_URL_QUALIFIER_PATTERN);
+        validateFunctionUrlQualifier(qualifier);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
         functionName = ref.name();
         qualifier = ref.qualifier();
@@ -2712,6 +2741,11 @@ public class LambdaService implements ResourceProvider {
     }
 
     public LambdaUrlConfig getFunctionUrlConfig(String region, String functionName, String qualifier) {
+        validateFunctionUrlQualifier(qualifier);
+        return lookupFunctionUrlConfig(region, functionName, qualifier);
+    }
+
+    private LambdaUrlConfig lookupFunctionUrlConfig(String region, String functionName, String qualifier) {
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
         functionName = ref.name();
         qualifier = ref.qualifier();
@@ -2729,20 +2763,26 @@ public class LambdaService implements ResourceProvider {
     }
 
     public LambdaUrlConfig updateFunctionUrlConfig(String region, String functionName, String qualifier, Map<String, Object> request) {
-        validatePattern(qualifier, "qualifier", FUNCTION_URL_QUALIFIER_PATTERN);
+        validateFunctionUrlQualifier(qualifier);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
         functionName = ref.name();
         qualifier = ref.qualifier();
-        LambdaUrlConfig urlConfig = getFunctionUrlConfig(region, functionName, qualifier);
+        LambdaUrlConfig urlConfig = lookupFunctionUrlConfig(region, functionName, qualifier);
 
+        // urlConfig is the live object nested in the stored function or alias, so both enums are
+        // validated before either is applied: a rejected request must leave the config unchanged.
+        Object authType = request.get("AuthType");
+        Object invokeMode = request.get("InvokeMode");
         if (request.containsKey("AuthType")) {
-            Object authType = request.get("AuthType");
             validateEnum(authType, "authType", FUNCTION_URL_AUTH_TYPE_VALUES);
+        }
+        if (request.containsKey("InvokeMode")) {
+            validateEnum(invokeMode, "invokeMode", INVOKE_MODE_VALUES);
+        }
+        if (request.containsKey("AuthType")) {
             urlConfig.setAuthType((String) authType);
         }
         if (request.containsKey("InvokeMode")) {
-            Object invokeMode = request.get("InvokeMode");
-            validateEnum(invokeMode, "invokeMode", INVOKE_MODE_VALUES);
             urlConfig.setInvokeMode((String) invokeMode);
         }
 
@@ -2780,6 +2820,7 @@ public class LambdaService implements ResourceProvider {
     }
 
     public void deleteFunctionUrlConfig(String region, String functionName, String qualifier) {
+        validateFunctionUrlQualifier(qualifier);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
         functionName = ref.name();
         qualifier = ref.qualifier();
