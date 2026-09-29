@@ -1529,6 +1529,11 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
+    // A current delete marker answers 404 NoSuchKey, the same as a missing key. That is deliberate:
+    // the S3 conditional-deletes guide says "If the latest version of the object is a delete marker,
+    // the object doesn't exist and the DeleteObject API will fail and return a 412 Precondition
+    // Failed response", but real S3 (general purpose bucket, ap-southeast-2, measured 2026-09-07)
+    // answered 404 NoSuchKey for If-Match: * over a current delete marker. Follow the measurement.
     private void checkDeletePrecondition(String bucketName, String key, String ifMatch) {
         if (ifMatch == null) {
             return;
