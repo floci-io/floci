@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import jakarta.inject.Inject;
@@ -152,7 +153,7 @@ class EcsCredentialsProxyDockerIntegrationTest {
         // kernel routes toward the default gateway instead of ARPing the peer directly, which
         // never reaches the proxy's socket. The real allocation (unique per task, avoiding the
         // proxy's own .2) is EcsContainerManager's job; this just proves the proxy's own side.
-        ContainerSpec taskSpec = containerBuilder.newContainer("public.ecr.aws/docker/library/python:3.12-alpine")
+        ContainerSpec taskSpec = containerBuilder.newContainer(TestImages.PYTHON_ALPINE)
                 .withName("floci-ecs-credentials-proxy-test-task-" + suffix)
                 .withDockerNetwork(Optional.of(network))
                 .withLinkLocalIp("169.254.170.5")

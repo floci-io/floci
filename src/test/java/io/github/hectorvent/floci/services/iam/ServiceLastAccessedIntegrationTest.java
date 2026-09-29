@@ -761,9 +761,14 @@ class ServiceLastAccessedIntegrationTest {
                     equalTo("COMPLETED"));
     }
 
-    /** A huge MaxItems must page, not overflow into a negative index. */
+    /**
+     * The largest MaxItems the API allows, combined with a Marker, must page rather than overflow
+     * into a negative index. The documented ceiling of 1000 now bounds this, so a value large
+     * enough to overflow is rejected before it reaches the arithmetic; the guard stays because the
+     * ceiling and the offset are enforced in different places.
+     */
     @Test
-    void getServiceLastAccessedDetailsSurvivesAnEnormousMaxItems() {
+    void getServiceLastAccessedDetailsSurvivesTheLargestAllowedMaxItems() {
         String tag = suffix();
         String userName = "laa-overflow-" + tag;
         String arn = createUser(userName);
@@ -776,10 +781,149 @@ class ServiceLastAccessedIntegrationTest {
         iam("GetServiceLastAccessedDetails")
             .formParam("JobId", generateJobFor(arn))
             .formParam("Marker", "1")
-            .formParam("MaxItems", Integer.toString(Integer.MAX_VALUE))
+            .formParam("MaxItems", "1000")
         .when().post("/").then()
             .statusCode(200)
             .body(containsString("<ServiceNamespace>s3</ServiceNamespace>"));
+    }
+
+    /**
+     * The API reference states the item count "defaults to 100" when MaxItems is omitted, so a
+     * report wider than that comes back truncated with a Marker rather than whole.
+     */
+    @Test
+    void getServiceLastAccessedDetailsDefaultsToAHundredItems() {
+        String tag = suffix();
+        String userName = "laa-default-page-" + tag;
+        String arn = createUser(userName);
+        StringBuilder actions = new StringBuilder();
+        for (int i = 1; i <= 120; i++) {
+            actions.append(actions.isEmpty() ? "" : ",").append("\"svc").append(i).append(":Do\"");
+        }
+        iam("PutUserPolicy").formParam("UserName", userName)
+            .formParam("PolicyName", "laa-default-page-policy-" + tag)
+            .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"Action\":[" + actions + "],\"Resource\":\"*\"}]}")
+        .when().post("/").then().statusCode(200);
+
+        String jobId = generateJobFor(arn);
+        String first = iam("GetServiceLastAccessedDetails").formParam("JobId", jobId)
+            .when().post("/").then()
+                .statusCode(200)
+                .body("GetServiceLastAccessedDetailsResponse.GetServiceLastAccessedDetailsResult.IsTruncated",
+                        equalTo("true"))
+                .extract().asString();
+
+        assertEquals(100, first.split("<ServiceNamespace>", -1).length - 1,
+                "expected the documented default page of 100 services");
+
+        // A truncated page the caller cannot continue from is useless, so the Marker has to be
+        // there and has to actually fetch the rest.
+        String marker = iam("GetServiceLastAccessedDetails").formParam("JobId", jobId)
+            .when().post("/").then().statusCode(200)
+            .extract().path("GetServiceLastAccessedDetailsResponse."
+                    + "GetServiceLastAccessedDetailsResult.Marker");
+        assertTrue(marker != null && !marker.isBlank(),
+                "a truncated response must carry a Marker, got: " + marker);
+
+        String second = iam("GetServiceLastAccessedDetails")
+            .formParam("JobId", jobId).formParam("Marker", marker)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("GetServiceLastAccessedDetailsResponse.GetServiceLastAccessedDetailsResult.IsTruncated",
+                    equalTo("false"))
+            .extract().asString();
+
+        assertEquals(20, second.split("<ServiceNamespace>", -1).length - 1,
+                "expected the remaining 20 services on the continued page");
+    }
+
+    /**
+     * The page bounds are shared by both readers, so the entities reader is held to the same
+     * documented default rather than only the service reader being covered.
+     */
+    @Test
+    void getServiceLastAccessedDetailsWithEntitiesDefaultsToAHundredItems() {
+        String tag = suffix();
+        String groupName = "laa-ent-page-" + tag;
+        iam("CreateGroup").formParam("GroupName", groupName)
+        .when().post("/").then().statusCode(200);
+        iam("PutGroupPolicy").formParam("GroupName", groupName)
+            .formParam("PolicyName", "laa-ent-page-policy-" + tag)
+            .formParam("PolicyDocument", S3_POLICY)
+        .when().post("/").then().statusCode(200);
+        for (int i = 1; i <= 120; i++) {
+            String member = "laa-ent-page-u" + i + "-" + tag;
+            createUser(member);
+            iam("AddUserToGroup").formParam("GroupName", groupName).formParam("UserName", member)
+            .when().post("/").then().statusCode(200);
+        }
+
+        String jobId = generateJobFor("arn:aws:iam::000000000000:group/" + groupName);
+        String first = iam("GetServiceLastAccessedDetailsWithEntities")
+            .formParam("JobId", jobId).formParam("ServiceNamespace", "s3")
+        .when().post("/").then()
+            .statusCode(200)
+            .body("GetServiceLastAccessedDetailsWithEntitiesResponse."
+                    + "GetServiceLastAccessedDetailsWithEntitiesResult.IsTruncated", equalTo("true"))
+            .extract().asString();
+
+        assertEquals(100, first.split("<EntityInfo>", -1).length - 1,
+                "expected the documented default page of 100 entities");
+
+        String marker = iam("GetServiceLastAccessedDetailsWithEntities")
+            .formParam("JobId", jobId).formParam("ServiceNamespace", "s3")
+        .when().post("/").then().statusCode(200)
+            .extract().path("GetServiceLastAccessedDetailsWithEntitiesResponse."
+                    + "GetServiceLastAccessedDetailsWithEntitiesResult.Marker");
+
+        iam("GetServiceLastAccessedDetailsWithEntities")
+            .formParam("JobId", jobId).formParam("ServiceNamespace", "s3")
+            .formParam("Marker", marker)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("GetServiceLastAccessedDetailsWithEntitiesResponse."
+                    + "GetServiceLastAccessedDetailsWithEntitiesResult.IsTruncated", equalTo("false"));
+    }
+
+    /** The 1000 ceiling is shared by both readers too. */
+    @Test
+    void getServiceLastAccessedDetailsWithEntitiesRejectsMaxItemsAboveTheCeiling() {
+        String arn = createUser("laa-ent-ceiling-" + suffix());
+
+        iam("GetServiceLastAccessedDetailsWithEntities")
+            .formParam("JobId", generateJobFor(arn))
+            .formParam("ServiceNamespace", "s3")
+            .formParam("MaxItems", "1001")
+        .when().post("/").then()
+            .statusCode(400)
+            .body(containsString("ValidationError"));
+    }
+
+    /** MaxItems is documented as 1 to 1000, so the ceiling is enforced as well as the floor. */
+    @Test
+    void getServiceLastAccessedDetailsRejectsMaxItemsAboveTheDocumentedCeiling() {
+        String arn = createUser("laa-maxitems-ceiling-" + suffix());
+
+        iam("GetServiceLastAccessedDetails")
+            .formParam("JobId", generateJobFor(arn)).formParam("MaxItems", "1001")
+        .when().post("/").then()
+            .statusCode(400)
+            .body(containsString("ValidationError"));
+    }
+
+    /** serviceNamespaceListType allows at most 200 members. */
+    @Test
+    void listPoliciesGrantingServiceAccessRejectsMoreThanTwoHundredNamespaces() {
+        String arn = createUser("laa-ns-limit-" + suffix());
+
+        RequestSpecification request = iam("ListPoliciesGrantingServiceAccess").formParam("Arn", arn);
+        for (int i = 1; i <= 201; i++) {
+            request.formParam("ServiceNamespaces.member." + i, "svc" + i);
+        }
+        request.when().post("/").then()
+            .statusCode(400)
+            .body(containsString("ValidationError"));
     }
 
     /** An empty report is a valid answer, not a request that fails its own page-size check. */

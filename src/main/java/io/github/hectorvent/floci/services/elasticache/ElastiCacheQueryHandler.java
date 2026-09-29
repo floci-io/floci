@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -242,7 +243,6 @@ public class ElastiCacheQueryHandler {
         String userId = params.getFirst("UserId");
         String userName = params.getFirst("UserName");
         String accessString = params.getFirst("AccessString");
-        String authModeType = params.getFirst("AuthenticationMode.Type");
         String engine = params.getFirst("Engine");
 
         if (userId == null || userId.isBlank()) {
@@ -252,18 +252,11 @@ public class ElastiCacheQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue", "UserName is required.", AwsNamespaces.EC, 400);
         }
 
-        AuthMode authMode;
-        List<String> passwords = new ArrayList<>();
-        if ("iam".equalsIgnoreCase(authModeType)) {
-            authMode = AuthMode.IAM;
-        } else if ("password".equalsIgnoreCase(authModeType)) {
-            authMode = AuthMode.PASSWORD;
-            passwords = extractMemberList(params, "AuthenticationMode.Passwords.member.");
-        } else {
-            authMode = AuthMode.NO_AUTH;
-        }
-
         try {
+            // A request naming no authentication at all keeps Floci's previous implicit no-password-required.
+            UserAuthentication auth = resolveUserAuthentication(params);
+            AuthMode authMode = auth != null ? auth.mode() : AuthMode.NO_AUTH;
+            List<String> passwords = auth != null ? auth.passwords() : List.of();
             ElastiCacheUser user = service.createUser(userId, userName, authMode, passwords, accessString, engine);
             return Response.ok(AwsQueryResponse.envelope("CreateUser", AwsNamespaces.EC, userXml(user))).build();
         } catch (AwsException e) {
@@ -293,9 +286,18 @@ public class ElastiCacheQueryHandler {
         if (userId == null || userId.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "UserId is required.", AwsNamespaces.EC, 400);
         }
-        List<String> passwords = extractMemberList(params, "AuthenticationMode.Passwords.member.");
+        String accessString = params.getFirst("AccessString");
+        String appendAccessString = params.getFirst("AppendAccessString");
+        if (accessString != null && appendAccessString != null) {
+            return AwsQueryResponse.error("InvalidParameterCombination",
+                    "AccessString and AppendAccessString cannot be specified together.", AwsNamespaces.EC, 400);
+        }
         try {
-            ElastiCacheUser user = service.modifyUser(userId, passwords.isEmpty() ? null : passwords, engine);
+            UserAuthentication auth = resolveUserAuthentication(params);
+            ElastiCacheUser user = service.modifyUser(userId,
+                    auth != null ? auth.mode() : null,
+                    auth != null ? auth.passwords() : null,
+                    accessString, appendAccessString, engine);
             return Response.ok(AwsQueryResponse.envelope("ModifyUser", AwsNamespaces.EC, userXml(user))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
@@ -1047,6 +1049,59 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                 .start("UserGroupIds").end("UserGroupIds")
                 .elem("ARN", AwsArnUtils.Arn.of("elasticache", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "user:" + u.getUserId()).toString())
                 .build();
+    }
+
+    private record UserAuthentication(AuthMode mode, List<String> passwords) {}
+
+    /**
+     * Resolves the authentication a CreateUser or ModifyUser request asks for. AWS accepts it
+     * either as an {@code AuthenticationMode} or through the top-level {@code Passwords} and
+     * {@code NoPasswordRequired} members, so passwords given either way mean password
+     * authentication. Returns null when the request names no authentication at all.
+     */
+    private static UserAuthentication resolveUserAuthentication(MultivaluedMap<String, String> params) {
+        String type = params.getFirst("AuthenticationMode.Type");
+        List<String> passwords = extractMemberList(params, "AuthenticationMode.Passwords.member.");
+        if (passwords.isEmpty()) {
+            passwords = extractMemberList(params, "Passwords.member.");
+        }
+        boolean noPasswordRequired = Boolean.parseBoolean(params.getFirst("NoPasswordRequired"));
+
+        if (type == null || type.isBlank()) {
+            if (noPasswordRequired && !passwords.isEmpty()) {
+                throw invalidCombination("NoPasswordRequired cannot be true when Passwords are provided.");
+            }
+            if (!passwords.isEmpty()) {
+                return new UserAuthentication(AuthMode.PASSWORD, passwords);
+            }
+            return noPasswordRequired ? new UserAuthentication(AuthMode.NO_AUTH, List.of()) : null;
+        }
+
+        String normalizedType = type.toLowerCase(Locale.ROOT);
+        if (noPasswordRequired && !"no-password-required".equals(normalizedType)) {
+            throw invalidCombination("NoPasswordRequired cannot be true when AuthenticationMode.Type is " + type + ".");
+        }
+        return switch (normalizedType) {
+            case "password" -> {
+                if (passwords.isEmpty()) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Passwords are required when AuthenticationMode.Type is password.", 400);
+                }
+                yield new UserAuthentication(AuthMode.PASSWORD, passwords);
+            }
+            case "iam", "no-password-required" -> {
+                if (!passwords.isEmpty()) {
+                    throw invalidCombination("Passwords cannot be provided when AuthenticationMode.Type is " + type + ".");
+                }
+                yield new UserAuthentication("iam".equals(normalizedType) ? AuthMode.IAM : AuthMode.NO_AUTH, List.of());
+            }
+            default -> throw new AwsException("InvalidParameterValue",
+                    "Invalid AuthenticationMode.Type " + type + ". Valid values are password, no-password-required and iam.", 400);
+        };
+    }
+
+    private static AwsException invalidCombination(String message) {
+        return new AwsException("InvalidParameterCombination", message, 400);
     }
 
     private static List<String> extractMemberList(MultivaluedMap<String, String> params, String prefix) {

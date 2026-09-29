@@ -31,7 +31,7 @@ def test_sagemaker_control_plane_and_training():
     cfg = f"compat-sm-cfg-{suffix}"
     bucket = f"compat-sm-{suffix}"
 
-    sm.create_model(ModelName=model, PrimaryContainer={"Image": "public.ecr.aws/docker/library/busybox:stable"}, ExecutionRoleArn="arn:aws:iam::000000000000:role/r")
+    sm.create_model(ModelName=model, PrimaryContainer={"Image": "busybox:stable"}, ExecutionRoleArn="arn:aws:iam::000000000000:role/r")
     assert sm.describe_model(ModelName=model)["ModelName"] == model
     sm.create_endpoint_config(EndpointConfigName=cfg, ProductionVariants=[{"VariantName": "AllTraffic", "ModelName": model, "InitialInstanceCount": 1, "InstanceType": "ml.t2.medium"}])
     assert any(c["EndpointConfigName"] == cfg for c in sm.list_endpoint_configs()["EndpointConfigs"])
@@ -43,7 +43,7 @@ def test_sagemaker_control_plane_and_training():
         TrainingJobName=job,
         RoleArn="arn:aws:iam::000000000000:role/r",
         AlgorithmSpecification={
-            "TrainingImage": "public.ecr.aws/docker/library/busybox:stable",
+            "TrainingImage": "busybox:stable",
             "TrainingInputMode": "File",
             "ContainerEntrypoint": ["/bin/sh", "-c"],
             "ContainerArguments": ["mkdir -p /opt/ml/model && echo ok > /opt/ml/model/model.txt"],

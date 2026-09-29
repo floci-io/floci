@@ -1,12 +1,10 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.ExecCreateCmdResponse;
-import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
@@ -25,13 +23,12 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -177,22 +174,22 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         String targetContainerId = instance.getDockerContainerId();
 
         // 1. Device node exists in container
-        ExecResult checkDev = execIn(targetContainerId, "test -b /dev/xvdf || test -L /dev/xvdf");
-        assertEquals(0, checkDev.exitCode(), "Device /dev/xvdf should exist as block or symlink: " + checkDev.output());
+        ContainerExec.Result checkDev = execIn(targetContainerId, "test -b /dev/xvdf || test -L /dev/xvdf");
+        assertEquals(0, checkDev.exitCode(), "Device /dev/xvdf should exist as block or symlink: " + checkDev.summary());
 
         // 2. Size matches 1 GiB (1073741824 bytes)
-        ExecResult checkSize = execIn(targetContainerId, "blockdev --getsize64 /dev/xvdf");
-        assertEquals(0, checkSize.exitCode(), "blockdev query should succeed: " + checkSize.output());
-        assertEquals("1073741824", checkSize.output().trim());
+        ContainerExec.Result checkSize = execIn(targetContainerId, "blockdev --getsize64 /dev/xvdf");
+        assertEquals(0, checkSize.exitCode(), "blockdev query should succeed: " + checkSize.summary());
+        assertEquals("1073741824", checkSize.stdout().trim());
 
         // 3. Format filesystem, mount, write data, unmount
-        ExecResult mkfs = execIn(targetContainerId, "mkfs.ext4 -F /dev/xvdf");
-        assertEquals(0, mkfs.exitCode(), "mkfs.ext4 should succeed: " + mkfs.output());
+        ContainerExec.Result mkfs = execIn(targetContainerId, "mkfs.ext4 -F /dev/xvdf");
+        assertEquals(0, mkfs.exitCode(), "mkfs.ext4 should succeed: " + mkfs.summary());
 
-        ExecResult mountAndWrite = execIn(targetContainerId,
+        ContainerExec.Result mountAndWrite = execIn(targetContainerId,
                 "mkdir -p /mnt/vol && mount /dev/xvdf /mnt/vol && echo 'floci-ebs-test-data' > /mnt/vol/test.txt && cat /mnt/vol/test.txt && umount /mnt/vol");
-        assertEquals(0, mountAndWrite.exitCode(), "Mount, write, read and umount should succeed: " + mountAndWrite.output());
-        assertTrue(mountAndWrite.output().contains("floci-ebs-test-data"));
+        assertEquals(0, mountAndWrite.exitCode(), "Mount, write, read and umount should succeed: " + mountAndWrite.summary());
+        assertTrue(mountAndWrite.stdout().contains("floci-ebs-test-data"));
     }
 
     @Test
@@ -206,7 +203,7 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         ec2Service.attachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf");
         String targetContainerId = instance.getDockerContainerId();
 
-        ExecResult existsBefore = execIn(targetContainerId, "test -e /dev/xvdf");
+        ContainerExec.Result existsBefore = execIn(targetContainerId, "test -e /dev/xvdf");
         assertEquals(0, existsBefore.exitCode());
 
         // Detach volume
@@ -214,7 +211,7 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         assertEquals("detached", detached.getState());
 
         // Device node should be removed from container
-        ExecResult existsAfter = execIn(targetContainerId, "test ! -e /dev/xvdf");
+        ContainerExec.Result existsAfter = execIn(targetContainerId, "test ! -e /dev/xvdf");
         assertEquals(0, existsAfter.exitCode(), "Device /dev/xvdf should no longer exist in container");
 
         // Delete volume
@@ -223,7 +220,7 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
 
         // Verify helper container removed backing file
         String helperName = ContainerStorageHelper.resourceName(config, "ec2", null, "volume-helper");
-        ExecResult checkFile = execIn(helperName, "test ! -f /volumes/" + volume.getVolumeId() + ".raw");
+        ContainerExec.Result checkFile = execIn(helperName, "test ! -f /volumes/" + volume.getVolumeId() + ".raw");
         assertEquals(0, checkFile.exitCode(), "Backing file should be removed on volume deletion");
     }
 
@@ -246,9 +243,9 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         assertEquals("VolumeInUse", ex.getErrorCode());
 
         // Format and write data on instance1
-        ExecResult formatAndWrite = execIn(instance1.getDockerContainerId(),
+        ContainerExec.Result formatAndWrite = execIn(instance1.getDockerContainerId(),
                 "mkfs.ext4 -F /dev/xvdf && mkdir -p /mnt/vol1 && mount /dev/xvdf /mnt/vol1 && echo 'persisted-payload' > /mnt/vol1/hello.txt && umount /mnt/vol1");
-        assertEquals(0, formatAndWrite.exitCode(), formatAndWrite.output());
+        assertEquals(0, formatAndWrite.exitCode(), formatAndWrite.summary());
 
         // Detach from instance1
         ec2Service.detachVolume("us-east-1", volume.getVolumeId(), instance1.getInstanceId(), "/dev/xvdf", false);
@@ -257,10 +254,10 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         ec2Service.attachVolume("us-east-1", volume.getVolumeId(), instance2.getInstanceId(), "/dev/xvdg");
 
         // Verify device exists on instance2 and data is preserved
-        ExecResult verifyData = execIn(instance2.getDockerContainerId(),
+        ContainerExec.Result verifyData = execIn(instance2.getDockerContainerId(),
                 "mkdir -p /mnt/vol2 && mount /dev/xvdg /mnt/vol2 && cat /mnt/vol2/hello.txt && umount /mnt/vol2");
-        assertEquals(0, verifyData.exitCode(), "Data should be preserved across detach and re-attach: " + verifyData.output());
-        assertTrue(verifyData.output().contains("persisted-payload"));
+        assertEquals(0, verifyData.exitCode(), "Data should be preserved across detach and re-attach: " + verifyData.summary());
+        assertTrue(verifyData.stdout().contains("persisted-payload"));
     }
 
     @Test
@@ -276,7 +273,7 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
 
         // Simulate device node loss (e.g. container reboot or tmpfs recreation)
         execIn(targetContainerId, "rm -f /dev/xvdf");
-        ExecResult deleted = execIn(targetContainerId, "test ! -e /dev/xvdf");
+        ContainerExec.Result deleted = execIn(targetContainerId, "test ! -e /dev/xvdf");
         assertEquals(0, deleted.exitCode());
 
         // Call restoreInstanceVolumeDevices
@@ -284,8 +281,8 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
                 volId -> Optional.of(volume));
 
         // Verify device node is restored
-        ExecResult restored = execIn(targetContainerId, "test -b /dev/xvdf || test -L /dev/xvdf");
-        assertEquals(0, restored.exitCode(), "Device /dev/xvdf should be restored: " + restored.output());
+        ContainerExec.Result restored = execIn(targetContainerId, "test -b /dev/xvdf || test -L /dev/xvdf");
+        assertEquals(0, restored.exitCode(), "Device /dev/xvdf should be restored: " + restored.summary());
     }
 
     @Test
@@ -333,8 +330,8 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         VolumeAttachment attachment = ec2Service.attachVolume("us-east-1", volume.getVolumeId(), instanceId, "/dev/xvdf");
         assertNotNull(attachment);
 
-        ExecResult checkDev = execIn(containerId, "test -b /dev/xvdf || test -L /dev/xvdf");
-        assertEquals(0, checkDev.exitCode(), "Block device should exist inside cluster node container: " + checkDev.output());
+        ContainerExec.Result checkDev = execIn(containerId, "test -b /dev/xvdf || test -L /dev/xvdf");
+        assertEquals(0, checkDev.exitCode(), "Block device should exist inside cluster node container: " + checkDev.summary());
 
         ec2Service.setClusterNodeInstanceProvider(null);
     }
@@ -396,35 +393,11 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         assertTrue(ex.getMessage().contains("already in use by volume"));
     }
 
-    private ExecResult execIn(String containerIdOrName, String command) {
+    private ContainerExec.Result execIn(String containerIdOrName, String command) {
         try {
-            ExecCreateCmdResponse exec = dockerClient.execCreateCmd(containerIdOrName)
-                    .withCmd("sh", "-c", command)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .exec();
-
-            StringBuilder sb = new StringBuilder();
-            boolean done = dockerClient.execStartCmd(exec.getId())
-                    .exec(new ResultCallback.Adapter<Frame>() {
-                        @Override
-                        public void onNext(Frame frame) {
-                            if (frame != null && frame.getPayload() != null) {
-                                sb.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
-                            }
-                        }
-                    })
-                    .awaitCompletion(30, TimeUnit.SECONDS);
-
-            if (!done) {
-                return new ExecResult(-1, "Timed out: " + sb);
-            }
-            Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-            return new ExecResult(exitCode != null ? exitCode : -1, sb.toString());
-        } catch (Exception e) {
-            return new ExecResult(-1, e.getMessage());
+            return ContainerExec.runMerged(dockerClient, containerIdOrName, new String[]{"sh", "-c", command}, 30);
+        } catch (RuntimeException e) {
+            return new ContainerExec.Result(-1, "", Objects.requireNonNullElse(e.getMessage(), e.toString()), false);
         }
     }
-
-    private record ExecResult(long exitCode, String output) {}
 }

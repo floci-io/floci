@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.cognito.verification;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.ses.SesService;
+import io.github.hectorvent.floci.services.ses.model.EmailContent;
+import io.github.hectorvent.floci.services.ses.model.SendEmailRequest;
 import io.github.hectorvent.floci.services.sns.SnsService;
 
 import java.util.List;
@@ -67,21 +69,12 @@ public final class CognitoMessageDispatcher {
                 String rawBody = stringOrNull(customMessageResponse, "emailMessage");
                 if (rawBody == null) rawBody = stringOr(template.get(emailTemplateKey()), DEFAULT_EMAIL_BODY);
                 String body = renderTemplate(rawBody, code);
-                ses.sendEmail(
-                    DEFAULT_FROM,
-                    List.of(email),
-                    List.of(), List.of(), List.of(),
-                    null,          // returnPath
-                    subject,
-                    body,
-                    null,          // bodyHtml
-                    null,          // configurationSetName
-                    List.of(),     // emailTags
-                    List.of(),     // additionalHeaders
-                    null,          // listManagement
-                    null,          // tenantName
-                    DEFAULT_REGION
-                );
+                ses.sendEmail(SendEmailRequest.builder()
+                    .source(DEFAULT_FROM)
+                    .toAddresses(List.of(email))
+                    .region(DEFAULT_REGION)
+                    .content(new EmailContent.Simple(subject, body, null, List.of()))
+                    .build());
             } else if ("SMS".equalsIgnoreCase(medium) && phone != null) {
                 String rawBody = stringOrNull(customMessageResponse, "smsMessage");
                 if (rawBody == null) rawBody = stringOr(resolveSmsTemplate(pool, template, purpose), DEFAULT_SMS_BODY);

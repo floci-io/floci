@@ -595,6 +595,105 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
+    void createTableRejectsAnInvalidGsiIndexName() {
+        assertIndexNameRejected("CreateTable", """
+                {
+                    "TableName": "InvalidGsiNameTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "ab",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "ALL"}
+                    }]
+                }
+                """, "1 validation error detected: Value 'ab' at 'globalSecondaryIndexes.1.member.indexName' "
+                + "failed to satisfy constraint: Member must have length greater than or equal to 3");
+    }
+
+    @Test
+    void createTableRejectsAnLsiWithoutAnIndexName() {
+        assertIndexNameRejected("CreateTable", """
+                {
+                    "TableName": "InvalidLsiNameTable",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "l", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "LocalSecondaryIndexes": [{
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "l", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "ALL"}
+                    }]
+                }
+                """, "1 validation error detected: Value null at 'localSecondaryIndexes.1.member.indexName' "
+                + "failed to satisfy constraint: Member must not be null");
+    }
+
+    @Test
+    void updateTableRejectsAnInvalidIndexNameBeforeTheTableLookup() {
+        assertIndexNameRejected("UpdateTable", """
+                {
+                    "TableName": "NoSuchIndexNameTable",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "ALL"}
+                    }}]
+                }
+                """, "2 validation errors detected: Value '' at 'globalSecondaryIndexUpdates.1.member.create.indexName' "
+                + "failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+; "
+                + "Value '' at 'globalSecondaryIndexUpdates.1.member.create.indexName' "
+                + "failed to satisfy constraint: Member must have length greater than or equal to 3");
+
+        assertIndexNameRejected("UpdateTable", """
+                {
+                    "TableName": "NoSuchIndexNameTable",
+                    "GlobalSecondaryIndexUpdates": [
+                        {"Update": {"IndexName": "bad name!", "OnDemandThroughput": {"MaxReadRequestUnits": 10}}}
+                    ]
+                }
+                """, "1 validation error detected: Value 'bad name!' at 'globalSecondaryIndexUpdates.1.member.update.indexName' "
+                + "failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
+
+        String longName = "x".repeat(256);
+        assertIndexNameRejected("UpdateTable", """
+                {
+                    "TableName": "NoSuchIndexNameTable",
+                    "GlobalSecondaryIndexUpdates": [{"Delete": {"IndexName": "%s"}}]
+                }
+                """.formatted(longName), "1 validation error detected: Value '" + longName
+                + "' at 'globalSecondaryIndexUpdates.1.member.delete.indexName' "
+                + "failed to satisfy constraint: Member must have length less than or equal to 255");
+    }
+
+    private void assertIndexNameRejected(String action, String body, String message) {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + action)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(message));
+    }
+
+    @Test
     void createTableWithGsiAndLsi() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")

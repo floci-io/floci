@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /**
  * DynamoDB JSON protocol handler of the native engine, reached through the native backend
@@ -48,6 +49,7 @@ import java.util.function.Supplier;
 public class NativeDynamoDbJsonHandler {
 
     private static final String SSE_TYPE_KMS = "KMS";
+    private static final Pattern INDEX_NAME_CHARS = Pattern.compile("[a-zA-Z0-9_.\\-]+");
 
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
@@ -164,7 +166,8 @@ public class NativeDynamoDbJsonHandler {
             var gsiPosition = 0;
             for (JsonNode gsiNode : gsiArray) {
                 gsiPosition++;
-                String indexName = gsiNode.path("IndexName").asText();
+                String indexName = requireIndexName(gsiNode,
+                        memberPrefix + "globalSecondaryIndexes." + gsiPosition + ".member");
                 List<KeySchemaElement> gsiKeySchema = new ArrayList<>();
                 gsiNode.path("KeySchema").forEach(ks ->
                         gsiKeySchema.add(new KeySchemaElement(
@@ -205,7 +208,8 @@ public class NativeDynamoDbJsonHandler {
             var lsiPosition = 0;
             for (JsonNode lsiNode : lsiArray) {
                 lsiPosition++;
-                String indexName = lsiNode.path("IndexName").asText();
+                String indexName = requireIndexName(lsiNode,
+                        memberPrefix + "localSecondaryIndexes." + lsiPosition + ".member");
                 List<KeySchemaElement> lsiKeySchema = new ArrayList<>();
                 lsiNode.path("KeySchema").forEach(ks ->
                         lsiKeySchema.add(new KeySchemaElement(
@@ -289,6 +293,28 @@ public class NativeDynamoDbJsonHandler {
 
     // AWS reports an empty list as a length constraint on the 1-based member path, before the
     // projection type check. A null NonKeyAttributes counts as not specified.
+    private static String requireIndexName(JsonNode node, String memberPath) {
+        JsonNode indexNameNode = node.path("IndexName");
+        String constraint = " at '" + memberPath + ".indexName' failed to satisfy constraint: ";
+        if (indexNameNode.isMissingNode() || indexNameNode.isNull()) {
+            throwValidationErrors(List.of("Value null" + constraint + "Member must not be null"));
+        }
+        String indexName = indexNameNode.asText();
+        String value = "Value '" + indexName + "'" + constraint;
+        List<String> errors = new ArrayList<>();
+        if (!INDEX_NAME_CHARS.matcher(indexName).matches()) {
+            errors.add(value + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
+        }
+        if (indexName.length() < 3) {
+            errors.add(value + "Member must have length greater than or equal to 3");
+        }
+        if (255 < indexName.length()) {
+            errors.add(value + "Member must have length less than or equal to 255");
+        }
+        throwValidationErrors(errors);
+        return indexName;
+    }
+
     private static void rejectEmptyNonKeyAttributes(JsonNode nonKeyAttrArray, String memberPath) {
         if (nonKeyAttrArray.isArray() && nonKeyAttrArray.isEmpty()) {
             throw new AwsException("ValidationException",
@@ -1676,7 +1702,8 @@ public class NativeDynamoDbJsonHandler {
                 updatePosition++;
                 JsonNode createNode = update.path("Create");
                 if (!createNode.isMissingNode()) {
-                    String indexName = createNode.path("IndexName").asText();
+                    String indexName = requireIndexName(createNode,
+                            "globalSecondaryIndexUpdates." + updatePosition + ".member.create");
                     List<KeySchemaElement> gsiKeySchema = new ArrayList<>();
                     createNode.path("KeySchema").forEach(ks ->
                             gsiKeySchema.add(new KeySchemaElement(
@@ -1712,13 +1739,15 @@ public class NativeDynamoDbJsonHandler {
                 }
                 JsonNode deleteNode = update.path("Delete");
                 if (!deleteNode.isMissingNode()) {
-                    gsiDeletes.add(deleteNode.path("IndexName").asText());
+                    gsiDeletes.add(requireIndexName(deleteNode,
+                            "globalSecondaryIndexUpdates." + updatePosition + ".member.delete"));
                 }
                 JsonNode updateNode = update.path("Update");
                 if (updateNode.isObject()) {
                     JsonNode gsiPt = updateNode.path("ProvisionedThroughput");
                     gsiThroughputUpdates.add(new GsiThroughputUpdate(
-                            updateNode.path("IndexName").asText(),
+                            requireIndexName(updateNode,
+                                    "globalSecondaryIndexUpdates." + updatePosition + ".member.update"),
                             gsiPt.isObject() ? parseThroughput(gsiPt) : null,
                             parseOnDemandThroughput(updateNode.path("OnDemandThroughput"))));
                 }

@@ -118,6 +118,15 @@ jobs:
           -Dsurefire.includesFile="$GITHUB_WORKSPACE/shard.txt"
           -Dsurefire.failIfNoTests=true
 
+      # The prefetch runs in the background past its own step, so its per-image
+      # results are only complete once the tests are done. A pull still running
+      # here (after an early exit) has no result line yet, so list it.
+      - name: Image prefetch results
+        if: always()
+        run: |
+          cat prefetch-images.log 2>/dev/null || echo "no prefetch log"
+          pgrep -af 'docker pull' | sed 's/^/still running: /' || true
+
       # Save from main only, and from shard 1 only. Actions caches are ref-scoped:
       # a pull_request run's write lands in refs/pull/N/merge where no other PR can
       # read it, so every open PR was storing a ~201 MB byte-identical duplicate of
@@ -144,6 +153,7 @@ jobs:
           path: |
             shard.txt
             all-classes.txt
+            prefetch-images.log
             target/surefire-reports/
           if-no-files-found: error
 

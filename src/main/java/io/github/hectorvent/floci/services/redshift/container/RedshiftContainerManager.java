@@ -1,13 +1,11 @@
 package io.github.hectorvent.floci.services.redshift.container;
 
-import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Container;
-import com.github.dockerjava.api.model.Frame;
-import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -27,8 +25,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -36,7 +32,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
@@ -181,7 +176,7 @@ public class RedshiftContainerManager {
 
         String[] cmd = new String[]{"pg_dump", "-U", effectiveUser, effectiveDb, "-f", "/tmp/dump.sql"};
         try {
-            ExecResult result = execInContainer(handle.getContainerId(), cmd, 30);
+            ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, 30);
             if (result.exitCode() != 0) {
                 LOG.warnv("pg_dump failed for cluster {0} (exit {1}): {2}", clusterIdentifier, result.exitCode(), result.stderr());
                 throw new AwsException("InternalFailure", "Failed to create snapshot for cluster " + clusterIdentifier + ": " + result.stderr(), 500);
@@ -241,7 +236,7 @@ public class RedshiftContainerManager {
         String sql = "ALTER USER " + effectiveUser + " PASSWORD '" + newPassword + "'";
         String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", "dev", "-c", sql};
         try {
-            ExecResult result = execInContainer(handle.getContainerId(), cmd, 15);
+            ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, 15);
             if (result.exitCode() != 0) {
                 // Deliberately omit result.stderr() from the log and the exception: psql echoes
                 // the failing ALTER USER statement, which contains the password literal.
@@ -285,7 +280,7 @@ public class RedshiftContainerManager {
                     .exec();
 
             String[] cmd = new String[]{"psql", "-U", effectiveUser, "-d", effectiveDb, "-f", "/tmp/" + fileName};
-            ExecResult result = execInContainer(handle.getContainerId(), cmd, 60);
+            ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, 60);
             if (result.exitCode() != 0) {
                 LOG.warnv("psql restore failed for cluster {0} (exit {1}): {2}", clusterIdentifier, result.exitCode(), result.stderr());
                 throw new AwsException("InternalFailure", "Failed to restore snapshot for cluster " + clusterIdentifier + ": " + result.stderr(), 500);
@@ -309,70 +304,8 @@ public class RedshiftContainerManager {
         restoreSnapshot(accountId, cluster.getClusterIdentifier(), cluster.getMasterUsername(), "dev", sqlDumpFile);
     }
 
-    private ExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
-        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-        ExecResult res = execInContainer(containerId, cmd, timeoutSeconds, stdout);
-        return new ExecResult(res.exitCode(), stdout.toString(StandardCharsets.UTF_8), res.stderr());
-    }
-
-    private ExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds, OutputStream out) throws Exception {
-        String execId = lifecycleManager.getDockerClient().execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec()
-                .getId();
-
-        CountDownLatch latch = new CountDownLatch(1);
-        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
-
-        Closeable callback = lifecycleManager.getDockerClient().execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
-            @Override
-            public void onNext(Frame frame) {
-                byte[] payload = frame.getPayload();
-                if (payload == null) {
-                    return;
-                }
-                try {
-                    if (frame.getStreamType() == StreamType.STDERR) {
-                        stderr.write(payload);
-                    } else {
-                        out.write(payload);
-                    }
-                } catch (IOException e) {
-                    LOG.warnv(e, "Failed to capture output of container exec {0}", execId);
-                }
-            }
-
-            @Override
-            public void onComplete() {
-                latch.countDown();
-            }
-
-            @Override
-            public void onError(Throwable t) {
-                LOG.warnv(t, "Container exec {0} failed", execId);
-                latch.countDown();
-            }
-        });
-
-        try {
-            boolean completed = latch.await(timeoutSeconds, TimeUnit.SECONDS);
-            if (!completed) {
-                return new ExecResult(-1, "", "Timed out after " + timeoutSeconds + "s");
-            }
-            Long exitCode = lifecycleManager.getDockerClient().inspectExecCmd(execId).exec().getExitCodeLong();
-            return new ExecResult(
-                    exitCode != null ? exitCode : -1,
-                    "",
-                    stderr.toString(StandardCharsets.UTF_8));
-        } finally {
-            try {
-                callback.close();
-            } catch (IOException ignored) {
-                // The exec result is already collected, so a failure to release the callback stream cannot change it.
-            }
-        }
+    private ContainerExec.Result execInContainer(String containerId, String[] cmd, int timeoutSeconds) {
+        return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, timeoutSeconds);
     }
 
     private byte[] buildSingleFileTar(String filename, byte[] content, int mode) throws IOException {
@@ -405,7 +338,7 @@ public class RedshiftContainerManager {
         String lastOutput = "";
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
-                ExecResult result = execInContainer(containerId, cmd, 5);
+                ContainerExec.Result result = execInContainer(containerId, cmd, 5);
                 lastOutput = result.stderr();
                 if (result.exitCode() == 0) {
                     LOG.infov("Initialized {0} in Redshift container {1}", description, containerName);
@@ -455,7 +388,7 @@ public class RedshiftContainerManager {
                         "-d", db,
                         "-f", "/tmp/bootstrap-catalog.sql"
                 };
-                ExecResult result = execInContainer(containerId, cmd, 30);
+                ContainerExec.Result result = execInContainer(containerId, cmd, 30);
                 if (result.exitCode() != 0) {
                     LOG.warnv("Redshift catalog bootstrap for {0} exited with code {1}: {2}", db, result.exitCode(), result.stderr());
                 } else {
@@ -467,5 +400,4 @@ public class RedshiftContainerManager {
         }
     }
 
-    public record ExecResult(long exitCode, String stdout, String stderr) {}
 }

@@ -149,7 +149,7 @@ public class SsmJsonHandler {
         }
         response.set("Parameters", parametersArray);
         response.set("InvalidParameters", invalidParameterNames(names,
-                params.stream().map(Parameter::getName).toList()));
+                params.stream().map(p -> p.getName() + (p.getSelector() == null ? "" : p.getSelector())).toList()));
         return Response.ok(response).build();
     }
 
@@ -929,17 +929,61 @@ public class SsmJsonHandler {
         return Response.ok(response).build();
     }
 
+    private static final int MAX_LABELS = 10;
+    private static final int MAX_LABEL_LENGTH = 100;
+
+    private List<String> requireLabels(JsonNode request) {
+        JsonNode labelsNode = request.path("Labels");
+        if (labelsNode.isMissingNode() || labelsNode.isNull()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'labels' failed to satisfy constraint: Member must not be null",
+                    400);
+        }
+        if (!labelsNode.isArray() || labelsNode.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                    400);
+        }
+        if (labelsNode.size() > MAX_LABELS) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to "
+                            + MAX_LABELS,
+                    400);
+        }
+        List<String> labels = new ArrayList<>(labelsNode.size());
+        for (JsonNode l : labelsNode) {
+            String label = l.asText();
+            if (!l.isTextual() || label.isEmpty()) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length greater than or equal to 1",
+                        400);
+            }
+            if (label.length() > MAX_LABEL_LENGTH) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'labels' failed to satisfy constraint: Member must have length less than or equal to "
+                                + MAX_LABEL_LENGTH,
+                        400);
+            }
+            labels.add(label);
+        }
+        return labels;
+    }
+
     private Response handleLabelParameterVersion(JsonNode request, String region) {
         String name = request.path("Name").asText();
-        long parameterVersion = request.path("ParameterVersion").asLong();
-        List<String> labels = new ArrayList<>();
-        request.path("Labels").forEach(l -> labels.add(l.asText()));
+        Long parameterVersion = request.hasNonNull("ParameterVersion")
+                ? request.path("ParameterVersion").asLong()
+                : null;
+        List<String> labels = requireLabels(request);
 
-        ssmService.labelParameterVersion(name, parameterVersion, labels, region);
+        SsmService.LabelParameterVersionResult result = ssmService.labelParameterVersion(
+                name, parameterVersion, labels, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("InvalidLabels", objectMapper.createArrayNode());
-        response.put("ParameterVersion", parameterVersion);
+        ArrayNode invalidArray = objectMapper.createArrayNode();
+        result.invalidLabels().forEach(invalidArray::add);
+        response.set("InvalidLabels", invalidArray);
+        response.put("ParameterVersion", result.parameterVersion());
         return Response.ok(response).build();
     }
 
@@ -987,6 +1031,9 @@ public class SsmJsonHandler {
         node.put("LastModifiedDate", p.getLastModifiedDate().toEpochMilli() / 1000.0);
         node.put("ARN", p.getArn());
         node.put("DataType", p.getDataType());
+        if (p.getSelector() != null) {
+            node.put("Selector", p.getSelector());
+        }
         return node;
     }
 
