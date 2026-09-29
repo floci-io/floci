@@ -59,6 +59,7 @@ import java.util.zip.ZipOutputStream;
 public class CodeBuildRunner implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(CodeBuildRunner.class);
+    private static final int FAILURE_OUTPUT_CHARS = 512;
 
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
@@ -588,7 +589,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         return tar;
     }
 
-    private PhaseResult runPhase(String containerId, String workDir, List<String> env,
+    PhaseResult runPhase(String containerId, String workDir, List<String> env,
                                  List<String> commands, int timeoutMinutes, AtomicBoolean stopFlag) {
         if (commands.isEmpty()) {
             return PhaseResult.ofSuccess();
@@ -611,13 +612,13 @@ public class CodeBuildRunner implements ContainerTeardown {
                     .getId();
 
             CountDownLatch latch = new CountDownLatch(1);
-            ByteArrayOutputStream outputCapture = new ByteArrayOutputStream();
+            OutputTail outputCapture = new OutputTail();
 
             dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
                 @Override
                 public void onNext(Frame frame) {
                     if (frame.getPayload() != null) {
-                        try { outputCapture.write(frame.getPayload()); } catch (IOException ignored) {}
+                        outputCapture.write(frame.getPayload());
                     }
                 }
                 @Override
@@ -636,11 +637,10 @@ public class CodeBuildRunner implements ContainerTeardown {
 
             Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
             if (exitCode != null && exitCode != 0) {
-                String output = outputCapture.toString(StandardCharsets.UTF_8);
+                String output = outputCapture.asString().stripTrailing();
                 String msg = "Exit code " + exitCode;
                 if (!output.isBlank()) {
-                    int start = Math.max(0, output.length() - 512);
-                    msg += ": " + output.stripTrailing().substring(start);
+                    msg += ": " + output.substring(Math.max(0, output.length() - FAILURE_OUTPUT_CHARS));
                 }
                 return PhaseResult.ofFailure(msg);
             }
@@ -867,9 +867,39 @@ public class CodeBuildRunner implements ContainerTeardown {
         return "text/plain";
     }
 
+    /**
+     * The last bytes a phase printed. Only the tail reaches the failure message, so a phase that
+     * prints gigabytes of logs does not hold them all in the heap. The buffer is twice the four
+     * bytes a UTF-8 character can take, so {@link #FAILURE_OUTPUT_CHARS} characters survive after
+     * trailing whitespace is stripped.
+     */
+    private static final class OutputTail {
+        private final byte[] buffer = new byte[FAILURE_OUTPUT_CHARS * 8];
+        private int length;
+
+        synchronized void write(byte[] bytes) {
+            if (bytes.length >= buffer.length) {
+                System.arraycopy(bytes, bytes.length - buffer.length, buffer, 0, buffer.length);
+                length = buffer.length;
+                return;
+            }
+            int overflow = length + bytes.length - buffer.length;
+            if (overflow > 0) {
+                System.arraycopy(buffer, overflow, buffer, 0, length - overflow);
+                length -= overflow;
+            }
+            System.arraycopy(bytes, 0, buffer, length, bytes.length);
+            length += bytes.length;
+        }
+
+        synchronized String asString() {
+            return new String(buffer, 0, length, StandardCharsets.UTF_8);
+        }
+    }
+
     private enum PhaseStatus { SUCCEEDED, FAILED, STOPPED }
 
-    private record PhaseResult(PhaseStatus status, String errorMessage) {
+    record PhaseResult(PhaseStatus status, String errorMessage) {
         boolean succeeded() { return status == PhaseStatus.SUCCEEDED; }
         boolean failed() { return status == PhaseStatus.FAILED; }
         boolean stopped() { return status == PhaseStatus.STOPPED; }
