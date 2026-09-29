@@ -6,6 +6,7 @@ import com.github.dockerjava.api.command.LogContainerCmd;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -19,10 +20,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Handler;
-import java.util.logging.Level;
 import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -97,7 +95,7 @@ class ContainerLogStreamerTest {
                 ArgumentCaptor.forClass(ContainerLogStreamer.LogReassemblyCallback.class);
         verify(command).exec(callback.capture());
 
-        List<LogRecord> records = captureConsoleLogs(() ->
+        List<LogRecord> records = LogCapture.capture(ContainerLogStreamer.class, () ->
                 callback.getValue().onNext(new Frame(StreamType.STDOUT, utf8("container output\n"))));
 
         assertEquals(1, records.size());
@@ -119,7 +117,7 @@ class ContainerLogStreamerTest {
                 : streamer.execLogCallbackForAccount("555555555555", "/aws/eks/cluster/cluster",
                         "stream", "us-east-1", "eks-audit:cluster", false);
 
-        List<LogRecord> records = captureConsoleLogs(() ->
+        List<LogRecord> records = LogCapture.capture(ContainerLogStreamer.class, () ->
                 callback.onNext(new Frame(StreamType.STDOUT, utf8("audit event\n"))));
 
         assertEquals(logToConsole ? 1 : 0, records.size());
@@ -128,38 +126,6 @@ class ContainerLogStreamerTest {
                 argThat(events ->
                         events.size() == 1 && "audit event".equals(events.getFirst().get("message"))),
                 eq("us-east-1"));
-    }
-
-    private static List<LogRecord> captureConsoleLogs(Runnable action) {
-        Logger logger = Logger.getLogger(ContainerLogStreamer.class.getName());
-        Level previousLevel = logger.getLevel();
-        List<LogRecord> records = new ArrayList<>();
-        Handler handler = new Handler() {
-            @Override
-            public void publish(LogRecord record) {
-                if (record.getLevel().intValue() >= Level.INFO.intValue()) {
-                    records.add(record);
-                }
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        handler.setLevel(Level.ALL);
-        logger.setLevel(Level.INFO);
-        logger.addHandler(handler);
-        try {
-            action.run();
-        } finally {
-            logger.removeHandler(handler);
-            logger.setLevel(previousLevel);
-        }
-        return records;
     }
 
     @Test
