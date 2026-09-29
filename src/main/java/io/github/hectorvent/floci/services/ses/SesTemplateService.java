@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ses.model.EmailContent;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -88,6 +89,12 @@ public class SesTemplateService {
         return templateStore.get(templateKey(region, templateName))
                 .orElseThrow(() -> new AwsException("TemplateDoesNotExist",
                         "Template " + templateName + " does not exist.", 400));
+    }
+
+    EmailContent.InlineTemplate inline(EmailContent.Template template, String region) {
+        EmailTemplate stored = getTemplate(template.templateName(), region);
+        return new EmailContent.InlineTemplate(stored.getSubject(), stored.getTextPart(),
+                stored.getHtmlPart(), template.templateData(), template.headers());
     }
 
     public EmailTemplate updateTemplate(EmailTemplate template, String region) {
@@ -247,6 +254,14 @@ public class SesTemplateService {
                     "Template rendering data must be a JSON object.", 400);
         }
         return node;
+    }
+
+    static EmailContent.Simple render(EmailContent.InlineTemplate template) {
+        return new EmailContent.Simple(
+                applyTemplateData(template.subject(), template.templateData()),
+                applyTemplateData(template.textPart(), template.templateData()),
+                applyTemplateData(template.htmlPart(), template.templateData()),
+                template.headers());
     }
 
     static String applyTemplateData(String text, JsonNode data) {

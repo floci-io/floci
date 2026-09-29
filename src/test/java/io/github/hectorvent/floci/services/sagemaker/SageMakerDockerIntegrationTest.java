@@ -6,6 +6,7 @@ import com.github.dockerjava.api.model.Event;
 import com.github.dockerjava.api.model.EventType;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
@@ -59,7 +60,7 @@ class SageMakerDockerIntegrationTest {
                 {
                   "TrainingJobName":"%s",
                   "AlgorithmSpecification":{
-                    "TrainingImage":"public.ecr.aws/docker/library/busybox:stable",
+                    "TrainingImage":"%s",
                     "ContainerEntrypoint":["/bin/sh","-c"],
                     "ContainerArguments":["mkdir -p /opt/ml/model && cp /opt/ml/input/data/train/data.txt /opt/ml/model/model.txt"]
                   },
@@ -68,7 +69,7 @@ class SageMakerDockerIntegrationTest {
                   "ResourceConfig":{"InstanceType":"ml.m5.large","InstanceCount":1,"VolumeSizeInGB":1},
                   "StoppingCondition":{"MaxRuntimeInSeconds":60}
                 }
-                """.formatted(job, bucket, bucket)).then().statusCode(200).body("TrainingJobArn", notNullValue());
+                """.formatted(job, TestImages.BUSYBOX, bucket, bucket)).then().statusCode(200).body("TrainingJobArn", notNullValue());
 
         waitForTraining(job, "Completed");
         String artifact = post("SageMaker.DescribeTrainingJob", "{\"TrainingJobName\":\"%s\"}".formatted(job))
@@ -86,8 +87,8 @@ class SageMakerDockerIntegrationTest {
         String endpoint = "sm-endpoint-" + suffix;
         String script = "trap 'exit 0' TERM; cat > /server.py <<'PY'\nfrom http.server import BaseHTTPRequestHandler,HTTPServer\nclass H(BaseHTTPRequestHandler):\n def do_GET(self):\n  self.send_response(200 if self.path == '/ping' else 404); self.end_headers()\n def do_POST(self):\n  n=int(self.headers.get('content-length','0')); b=self.rfile.read(n); self.send_response(200); self.send_header('Content-Type','text/plain'); self.end_headers(); self.wfile.write(b.upper())\nHTTPServer(('0.0.0.0',8080),H).serve_forever()\nPY\npython /server.py & wait $!";
         post("SageMaker.CreateModel", """
-                {"ModelName":"%s","PrimaryContainer":{"Image":"public.ecr.aws/docker/library/python:3-alpine","ContainerEntrypoint":["/bin/sh","-c"],"ContainerArguments":[%s]}}
-                """.formatted(model, json(script))).then().statusCode(200);
+                {"ModelName":"%s","PrimaryContainer":{"Image":"%s","ContainerEntrypoint":["/bin/sh","-c"],"ContainerArguments":[%s]}}
+                """.formatted(model, TestImages.PYTHON_ALPINE, json(script))).then().statusCode(200);
         post("SageMaker.CreateEndpointConfig", """
                 {"EndpointConfigName":"%s","ProductionVariants":[{"VariantName":"AllTraffic","ModelName":"%s","InitialInstanceCount":1,"InstanceType":"ml.t2.medium","InitialVariantWeight":1.0}]}
                 """.formatted(cfg, model)).then().statusCode(200);
@@ -111,7 +112,7 @@ class SageMakerDockerIntegrationTest {
                 {
                   "TrainingJobName":"%s",
                   "AlgorithmSpecification":{
-                    "TrainingImage":"public.ecr.aws/docker/library/busybox:stable",
+                    "TrainingImage":"%s",
                     "ContainerEntrypoint":["/bin/sh","-c"],
                     "ContainerArguments":["trap 'exit 143' TERM; mkfifo /tmp/hold; cat /tmp/hold & wait"]
                   },
@@ -119,7 +120,7 @@ class SageMakerDockerIntegrationTest {
                   "ResourceConfig":{"InstanceType":"ml.m5.large","InstanceCount":1,"VolumeSizeInGB":1},
                   "StoppingCondition":{"MaxRuntimeInSeconds":300}
                 }
-                """.formatted(job, bucket)).then().statusCode(200);
+                """.formatted(job, TestImages.BUSYBOX, bucket)).then().statusCode(200);
         // Wait for the container to actually be running, blocked on an empty pipe, so the stop
         // races a real running container rather than one still being staged.
         awaitContainerRunning("floci-aws-sagemaker-training-" + job);
@@ -144,8 +145,8 @@ class SageMakerDockerIntegrationTest {
         // up, well before /ping can succeed, so the start it races is always still in flight.
         String script = "trap 'exit 0' TERM; cat > /server.py <<'PY'\nfrom http.server import BaseHTTPRequestHandler,HTTPServer\nclass H(BaseHTTPRequestHandler):\n def do_GET(self):\n  self.send_response(200); self.end_headers()\nHTTPServer(('0.0.0.0',8080),H).serve_forever()\nPY\npython /server.py & wait $!";
         post("SageMaker.CreateModel", """
-                {"ModelName":"%s","PrimaryContainer":{"Image":"public.ecr.aws/docker/library/python:3-alpine","ContainerEntrypoint":["/bin/sh","-c"],"ContainerArguments":[%s]}}
-                """.formatted(model, json(script))).then().statusCode(200);
+                {"ModelName":"%s","PrimaryContainer":{"Image":"%s","ContainerEntrypoint":["/bin/sh","-c"],"ContainerArguments":[%s]}}
+                """.formatted(model, TestImages.PYTHON_ALPINE, json(script))).then().statusCode(200);
         post("SageMaker.CreateEndpointConfig", """
                 {"EndpointConfigName":"%s","ProductionVariants":[{"VariantName":"AllTraffic","ModelName":"%s","InitialInstanceCount":1,"InstanceType":"ml.t2.medium","InitialVariantWeight":1.0}]}
                 """.formatted(cfg, model)).then().statusCode(200);

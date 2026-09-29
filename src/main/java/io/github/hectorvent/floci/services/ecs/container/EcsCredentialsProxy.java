@@ -1,12 +1,11 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Container;
-import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
@@ -17,7 +16,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -45,6 +43,7 @@ public class EcsCredentialsProxy implements ContainerTeardown {
     private static final String OWNS_NETWORK_LABEL = "floci.ecs-task-role-credentials-proxy";
     private static final int VERIFY_ATTEMPTS = 30;
     private static final long VERIFY_INTERVAL_MILLIS = 200;
+    private static final int EXEC_TIMEOUT_SECONDS = 10;
 
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
@@ -250,19 +249,10 @@ public class EcsCredentialsProxy implements ContainerTeardown {
 
     private String execCapture(String containerId, String... cmd) {
         try {
-            String execId = dockerClient.execCreateCmd(containerId)
-                    .withAttachStdout(true).withAttachStderr(true).withCmd(cmd).exec().getId();
-            StringBuilder output = new StringBuilder();
-            try (ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
-                @Override
-                public void onNext(Frame frame) {
-                    output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
-                }
-            }) {
-                dockerClient.execStartCmd(execId).exec(callback).awaitCompletion();
-            }
-            return output.toString();
-        } catch (Exception e) {
+            ContainerExec.Result result = ContainerExec.runMerged(dockerClient, containerId, cmd, EXEC_TIMEOUT_SECONDS);
+            return result.timedOut() ? null : result.stdout();
+        } catch (RuntimeException e) {
+            LOG.debugv("Probe command in credentials proxy {0} failed: {1}", containerId, e.getMessage());
             return null;
         }
     }

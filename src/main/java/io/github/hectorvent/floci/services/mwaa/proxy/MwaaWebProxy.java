@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.mwaa.proxy;
 
-import io.github.hectorvent.floci.services.mwaa.MwaaEnvironmentManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.vertx.core.Vertx;
 import io.vertx.core.WorkerExecutor;
 import io.vertx.core.http.HttpClient;
@@ -121,7 +121,7 @@ public class MwaaWebProxy {
             String command = body.toString(StandardCharsets.UTF_8).trim();
             // The Docker exec can block for up to 30 seconds, so keep it off the event loop.
             // Unordered: independent CLI calls should not queue behind each other.
-            cliWorkers.<MwaaEnvironmentManager.ExecResult>executeBlocking(() -> cliExecutor.execute(command), false)
+            cliWorkers.<ContainerExec.Result>executeBlocking(() -> cliExecutor.execute(command), false)
                     .onSuccess(result -> {
                         String stdoutB64 = Base64.getEncoder().encodeToString(result.stdout().getBytes(StandardCharsets.UTF_8));
                         String stderrB64 = Base64.getEncoder().encodeToString(result.stderr().getBytes(StandardCharsets.UTF_8));
@@ -199,6 +199,6 @@ public class MwaaWebProxy {
 
     @FunctionalInterface
     public interface CliExecutor {
-        MwaaEnvironmentManager.ExecResult execute(String cliCommand) throws Exception;
+        ContainerExec.Result execute(String cliCommand) throws Exception;
     }
 }

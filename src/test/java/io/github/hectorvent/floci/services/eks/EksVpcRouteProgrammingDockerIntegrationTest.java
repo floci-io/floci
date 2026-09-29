@@ -1,10 +1,8 @@
 package io.github.hectorvent.floci.services.eks;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.ExecCreateCmdResponse;
-import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.quarkus.test.junit.QuarkusTest;
@@ -15,12 +13,10 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -119,23 +115,7 @@ class EksVpcRouteProgrammingDockerIntegrationTest {
         }
     }
 
-    private String execInContainer(String containerId, String[] cmd) throws Exception {
-        ExecCreateCmdResponse exec = dockerClient.execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec();
-
-        StringBuilder output = new StringBuilder();
-        dockerClient.execStartCmd(exec.getId()).exec(new ResultCallback.Adapter<Frame>() {
-            @Override
-            public void onNext(Frame item) {
-                if (item != null && item.getPayload() != null) {
-                    output.append(new String(item.getPayload(), StandardCharsets.UTF_8));
-                }
-            }
-        }).awaitCompletion(30, TimeUnit.SECONDS);
-
-        return output.toString();
+    private String execInContainer(String containerId, String[] cmd) {
+        return ContainerExec.runMerged(dockerClient, containerId, cmd, 30).stdout();
     }
 }

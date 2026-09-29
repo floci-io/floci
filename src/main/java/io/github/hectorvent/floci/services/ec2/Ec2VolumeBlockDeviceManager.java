@@ -1,14 +1,12 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
@@ -19,14 +17,13 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
@@ -108,7 +105,7 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
         int effectiveSize = sizeGib > 0 ? sizeGib : 8;
         String rawFile = "/volumes/" + volumeId + ".raw";
         String cmd = "truncate -s " + effectiveSize + "G " + rawFile;
-        ContainerExecResult result = execInContainer(helperId, new String[]{"sh", "-c", cmd}, DEFAULT_TIMEOUT_SECONDS);
+        ContainerExec.Result result = execInContainer(helperId, new String[]{"sh", "-c", cmd}, DEFAULT_TIMEOUT_SECONDS);
         if (result.exitCode() != 0) {
             LOG.warnv("Failed to create backing file for volume {0}: {1}", volumeId, result.summary());
         }
@@ -156,7 +153,7 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
                 + "  losetup -d \"$loop\" 2>/dev/null || break\n"
                 + "done\n"
                 + "rm -f \"$raw\"";
-        ContainerExecResult result = execInContainer(helperId,
+        ContainerExec.Result result = execInContainer(helperId,
                 new String[]{"sh", "-c", script, "delete", rawFile}, DEFAULT_TIMEOUT_SECONDS);
         activeLoopDevices.remove(volumeId);
         return result.exitCode() == 0;
@@ -222,7 +219,7 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
                 + "fi\n"
                 + "echo \"$loop\"";
 
-        ContainerExecResult helperResult;
+        ContainerExec.Result helperResult;
         synchronized (loopAllocationLock) {
             helperResult = execInContainer(helperId,
                     new String[]{"sh", "-c", helperScript, "helper", rawFile, String.valueOf(effectiveSize)},
@@ -258,7 +255,7 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
                 + "fi\n"
                 + "[ -b \"$dev\" ] || [ -L \"$dev\" ]";
 
-        ContainerExecResult targetResult = execInContainer(targetContainerId,
+        ContainerExec.Result targetResult = execInContainer(targetContainerId,
                 new String[]{"sh", "-c", targetScript, "target", normalizedDevice, loopDev, minorStr},
                 DEFAULT_TIMEOUT_SECONDS);
         if (targetResult.exitCode() != 0) {
@@ -364,34 +361,11 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
         }
     }
 
-    private ContainerExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds) {
+    private ContainerExec.Result execInContainer(String containerId, String[] cmd, int timeoutSeconds) {
         try {
-            ExecCreateCmdResponse exec = dockerClient
-                    .execCreateCmd(containerId)
-                    .withCmd(cmd)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .exec();
-
-            StringBuilder output = new StringBuilder();
-            boolean completed = dockerClient.execStartCmd(exec.getId())
-                    .exec(new ResultCallback.Adapter<Frame>() {
-                        @Override
-                        public void onNext(Frame frame) {
-                            if (frame != null && frame.getPayload() != null) {
-                                output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
-                            }
-                        }
-                    })
-                    .awaitCompletion(timeoutSeconds, TimeUnit.SECONDS);
-
-            if (!completed) {
-                return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s");
-            }
-            Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-            return new ContainerExecResult(exitCode != null ? exitCode : -1, output.toString());
-        } catch (Exception e) {
-            return new ContainerExecResult(-1, e.getMessage());
+            return ContainerExec.runMerged(dockerClient, containerId, cmd, timeoutSeconds);
+        } catch (RuntimeException e) {
+            return new ContainerExec.Result(-1, "", Objects.requireNonNullElse(e.getMessage(), e.toString()), false);
         }
     }
 
@@ -416,11 +390,5 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
             execInContainer(helperId, new String[]{"sh", "-c", script}, DEFAULT_TIMEOUT_SECONDS);
         }
         activeLoopDevices.clear();
-    }
-
-    public record ContainerExecResult(long exitCode, String output) {
-        public String summary() {
-            return output == null || output.isBlank() ? "(no output)" : output.trim();
-        }
     }
 }

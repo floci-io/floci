@@ -8,6 +8,7 @@ import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.model.Container;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerExecStubs;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
@@ -218,25 +219,7 @@ class EcsCredentialsProxyTest {
         when(inspectResponse.getState()).thenReturn(running);
         when(running.getRunning()).thenReturn(true);
 
-        com.github.dockerjava.api.command.ExecCreateCmd execCreate =
-                mock(com.github.dockerjava.api.command.ExecCreateCmd.class, RETURNS_SELF);
-        com.github.dockerjava.api.command.ExecCreateCmdResponse execResponse =
-                mock(com.github.dockerjava.api.command.ExecCreateCmdResponse.class);
-        when(dockerClient.execCreateCmd(containerId)).thenReturn(execCreate);
-        when(execCreate.exec()).thenReturn(execResponse);
-        when(execResponse.getId()).thenReturn("exec-" + containerId);
-        com.github.dockerjava.api.command.ExecStartCmd execStart =
-                mock(com.github.dockerjava.api.command.ExecStartCmd.class);
-        when(dockerClient.execStartCmd("exec-" + containerId)).thenReturn(execStart);
-        when(execStart.exec(any())).thenAnswer(invocation -> {
-            com.github.dockerjava.api.async.ResultCallback<com.github.dockerjava.api.model.Frame> callback =
-                    invocation.getArgument(0);
-            callback.onNext(new com.github.dockerjava.api.model.Frame(
-                    com.github.dockerjava.api.model.StreamType.STDOUT,
-                    "404".getBytes()));
-            callback.onComplete();
-            return callback;
-        });
+        ContainerExecStubs.completeEveryExec(dockerClient, containerId, 0, "404", "");
     }
 
     @Test

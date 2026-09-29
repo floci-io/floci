@@ -629,7 +629,35 @@ class AppSyncResolverExecutorTest {
     }
 
     @Test
-    void vtlLambdaInvokeWithoutPayloadSendsTheDocumentToTheFunction() throws Exception {
+    void jsLambdaResolverSendsOnlyThePayloadToTheFunction() throws Exception {
+        String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";
+        DataSource lambdaDataSource = dataSource("accountFunction", DataSourceType.AWS_LAMBDA);
+        lambdaDataSource.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
+        when(appSync.getDataSource(API_ID, "accountFunction")).thenReturn(lambdaDataSource);
+        LambdaService lambdaService = mock(LambdaService.class);
+        when(lambdaService.invokeArn(eq(functionArn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, null, "{\"id\":\"42\"}".getBytes(StandardCharsets.UTF_8),
+                        null, "request-id"));
+        AppSyncResolverExecutor lambdaExecutor = new AppSyncResolverExecutor(appSync, jsRuntime,
+                new AppSyncDataSourceInvokers(List.of(new LambdaDataSourceInvoker(lambdaService, objectMapper))),
+                vtlEngine(), objectMapper);
+        Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
+        resolver.setDataSourceName("accountFunction");
+        Map<String, Object> request = Map.of("operation", "Invoke", "payload", Map.of("id", "42"));
+        jsRuntime.script("unit-code", "request", (handler, context) -> ok(request));
+        jsRuntime.script("unit-code", "response", (handler, context) -> ok(context.get("result")));
+
+        ResolverOutcome result = lambdaExecutor.execute(resolver, invocation(Map.of("id", "42")));
+
+        assertTrue(result.errors().isEmpty());
+        assertEquals(Map.of("id", "42"), result.data());
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invokeArn(eq(functionArn), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(request.get("payload"), objectMapper.readValue(payload.getValue(), Map.class));
+    }
+
+    @Test
+    void vtlLambdaResolverSendsOnlyPayloadToTheFunction() throws Exception {
         String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";
         DataSource lambdaDataSource = dataSource("accountFunction", DataSourceType.AWS_LAMBDA);
         lambdaDataSource.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
@@ -645,17 +673,20 @@ class AppSyncResolverExecutorTest {
                 vtlEngine(), objectMapper);
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("accountFunction");
-        resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\",\"operation\":\"Invoke\"}");
+        resolver.setRequestMappingTemplate("""
+                {"version":"2018-05-29","operation":"Invoke",
+                 "payload":{"field":"getPost","arguments":{"id":$util.toJson($ctx.args.id)}}}
+                """);
         resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
 
-        ResolverOutcome result = lambdaExecutor.execute(resolver, invocation(Map.of()));
+        ResolverOutcome result = lambdaExecutor.execute(resolver, invocation(Map.of("id", "42")));
 
         assertTrue(result.errors().isEmpty());
         assertEquals(Map.of(), result.data());
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
         verify(lambdaService).invokeArn(eq(functionArn), payload.capture(),
                 eq(InvocationType.RequestResponse));
-        assertEquals(Map.of("version", "2018-05-29", "operation", "Invoke"),
+        assertEquals(Map.of("field", "getPost", "arguments", Map.of("id", "42")),
                 objectMapper.readValue(payload.getValue(), Map.class));
     }
 
