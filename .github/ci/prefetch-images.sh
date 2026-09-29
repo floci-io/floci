@@ -66,7 +66,8 @@ BUSYBOX_IMAGE="$(test_image BUSYBOX)"
 starts ContainerHostNetworkDockerIntegrationTest EcsServiceDiscoveryDockerIntegrationTest \
        EcsContainerManagerEfsIsolationDockerIntegrationTest EcsContainerManagerFirelensDockerIntegrationTest \
        EcsContainerManagerStatsDockerIntegrationTest EcsContainerManagerVolumesFromDockerIntegrationTest \
-       EcsExecChannelDockerIntegrationTest BatchDockerRunnerDockerIntegrationTest SageMakerDockerIntegrationTest \
+       EcsExecChannelDockerIntegrationTest EcsLeftoverContainersDockerIntegrationTest BatchDockerRunnerDockerIntegrationTest \
+       SageMakerDockerIntegrationTest \
     && [ -n "$BUSYBOX_IMAGE" ] && pull "$BUSYBOX_IMAGE"
 PYTHON_ALPINE_IMAGE="$(test_image PYTHON_ALPINE)"
 starts ContainerCaBundleDockerIntegrationTest EcsCredentialsProxyDockerIntegrationTest SageMakerDockerIntegrationTest \
