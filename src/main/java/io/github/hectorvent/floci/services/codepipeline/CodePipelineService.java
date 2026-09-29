@@ -205,7 +205,7 @@ public class CodePipelineService {
             case "GetActionType" -> getActionType(request, region, account);
             case "DeleteCustomActionType" -> deleteCustomActionType(request, region, account);
             case "ListActionTypes" -> listActionTypes(request, region, account);
-            case "ListRuleTypes" -> emptyPage("ruleTypes");
+            case "ListRuleTypes" -> listRuleTypes();
             case "PollForJobs" -> pollForJobs(request, region, account, false);
             case "PollForThirdPartyJobs" -> pollForJobs(request, region, account, true);
             case "AcknowledgeJob", "AcknowledgeThirdPartyJob" -> acknowledgeJob(request, region, account);
@@ -936,13 +936,147 @@ public class CodePipelineService {
     }
 
     private ObjectNode overrideStageCondition(JsonNode request, String region, String account) {
-        requireExecution(account, region, text(request, "pipelineName"), text(request, "pipelineExecutionId"));
+        String pipelineName = text(request, "pipelineName");
+        String stageName = text(request, "stageName");
+        String conditionType = text(request, "conditionType");
+        if (!"BEFORE_ENTRY".equals(conditionType) && !"ON_SUCCESS".equals(conditionType)) {
+            throw new AwsException("ValidationException",
+                    "conditionType must be BEFORE_ENTRY or ON_SUCCESS", 400);
+        }
+        CodePipelinePipeline pipeline = requirePipeline(account, region, pipelineName);
+        JsonNode stage = stageByName(pipeline, stageName);
+        CodePipelineExecution execution = requireExecution(
+                account, region, pipelineName, text(request, "pipelineExecutionId"));
+        // A run that failed on this very condition resumes from the overridden stage, skipping the
+        // stage's already-succeeded actions; admission shares the retry path's lock and run tracking.
+        Map<String, String> resumeStatuses = startLocks.withLock(lockKey(execution), () -> {
+            synchronized (execution) {
+                execution.getConditionOverrides().put(stageName + "/" + conditionType, true);
+            }
+            boolean failedOnThisCondition = "Failed".equals(execution.getStatus())
+                    && ("Condition " + conditionType + " failed in stage " + stageName + ".")
+                            .equals(execution.getStatusSummary())
+                    && !activeRuns.contains(runKey(execution));
+            if (!failedOnThisCondition) {
+                putExecution(execution);
+                return null;
+            }
+            execution.setStatus("InProgress");
+            execution.setStatusSummary("Condition " + conditionType + " overridden in stage "
+                    + stageName + ".");
+            execution.setStopRequested(false);
+            execution.setAbandon(false);
+            execution.setLastUpdateTime(now());
+            putExecution(execution);
+            activeRuns.add(runKey(execution));
+            return latestActionStatuses(execution, stageName);
+        });
+        if (resumeStatuses != null) {
+            try {
+                executor.submit(() -> runRetriedStage(pipeline, execution, stage, "FAILED_ACTIONS",
+                        resumeStatuses));
+            } catch (RejectedExecutionException exception) {
+                activeRuns.remove(runKey(execution));
+                execution.setStatus("Failed");
+                execution.setStatusSummary("Stage resume could not be scheduled.");
+                execution.setLastUpdateTime(now());
+                putExecution(execution);
+                throw new AwsException("ConflictException",
+                        "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
+                                + "Try again later.", 400);
+            }
+        }
         return mapper.createObjectNode();
     }
 
     private ObjectNode listRuleExecutions(JsonNode request, String region, String account) {
-        requirePipeline(account, region, text(request, "pipelineName"));
-        return emptyPage("ruleExecutionDetails");
+        String pipelineName = text(request, "pipelineName");
+        requirePipeline(account, region, pipelineName);
+        String executionFilter = request.path("filter").path("pipelineExecutionId").asText(null);
+        List<ObjectNode> details = new ArrayList<>();
+        for (CodePipelineExecution execution : executions(account, region, pipelineName)) {
+            if (executionFilter != null
+                    && !executionFilter.equals(execution.getPipelineExecutionId())) {
+                continue;
+            }
+            for (Map<String, Object> rule : execution.getRuleExecutions()) {
+                ObjectNode detail = mapper.createObjectNode();
+                detail.put("pipelineExecutionId", execution.getPipelineExecutionId());
+                detail.put("ruleExecutionId", Objects.toString(rule.get("ruleExecutionId"), null));
+                if (execution.getPipelineVersion() != null) {
+                    detail.put("pipelineVersion", execution.getPipelineVersion());
+                }
+                detail.put("stageName", Objects.toString(rule.get("stageName"), null));
+                detail.put("ruleName", Objects.toString(rule.get("ruleName"), null));
+                detail.put("status", Objects.toString(rule.get("status"), null));
+                if (rule.get("startTime") instanceof Number start) {
+                    detail.put("startTime", start.doubleValue());
+                }
+                if (rule.get("lastUpdateTime") instanceof Number updated) {
+                    detail.put("lastUpdateTime", updated.doubleValue());
+                }
+                ObjectNode input = detail.putObject("input");
+                input.putObject("ruleTypeId")
+                        .put("category", "Rule")
+                        .put("owner", "AWS")
+                        .put("provider", Objects.toString(rule.get("ruleProvider"), ""))
+                        .put("version", "1");
+                detail.putObject("output").putObject("executionResult")
+                        .put("externalExecutionSummary", Objects.toString(rule.get("summary"), ""));
+                details.add(detail);
+            }
+        }
+        Page page = page(request, details.size(), 100);
+        ObjectNode response = mapper.createObjectNode();
+        ArrayNode array = response.putArray("ruleExecutionDetails");
+        for (int i = page.start(); i < page.end(); i++) {
+            array.add(details.get(i));
+        }
+        addNextToken(response, page, details.size());
+        return response;
+    }
+
+    /** The AWS-owned rule types available for V2 stage conditions. */
+    private ObjectNode listRuleTypes() {
+        ObjectNode response = mapper.createObjectNode();
+        ArrayNode ruleTypes = response.putArray("ruleTypes");
+        ruleTypes.add(ruleTypeNode("LambdaInvoke",
+                "Invokes a Lambda function and passes when the invocation succeeds",
+                List.of("FunctionName")));
+        ruleTypes.add(ruleTypeNode("VariableCheck",
+                "Compares a pipeline variable against a value with EQ, NE, CONTAINS or MATCHES",
+                List.of("Variable", "Value", "Operator")));
+        ruleTypes.add(ruleTypeNode("Commands",
+                "Runs shell commands (accepted but not evaluated by the emulator)",
+                List.of("Commands")));
+        ruleTypes.add(ruleTypeNode("DeployWindow",
+                "Restricts deployments to a time window (accepted but not evaluated by the emulator)",
+                List.of("Cron", "TimeZone")));
+        return response;
+    }
+
+    private ObjectNode ruleTypeNode(String provider, String description, List<String> properties) {
+        ObjectNode node = mapper.createObjectNode();
+        node.putObject("id")
+                .put("category", "Rule")
+                .put("owner", "AWS")
+                .put("provider", provider)
+                .put("version", "1");
+        ObjectNode settings = node.putObject("settings");
+        settings.put("thirdPartyConfigurationUrl", "");
+        ArrayNode props = node.putArray("ruleConfigurationProperties");
+        for (String property : properties) {
+            props.addObject()
+                    .put("name", property)
+                    .put("required", true)
+                    .put("key", true)
+                    .put("secret", false)
+                    .put("description", description);
+        }
+        node.putObject("inputArtifactDetails")
+                .put("minimumCount", 0)
+                .put("maximumCount", 1);
+        return node;
     }
 
     private ObjectNode createCustomActionType(JsonNode request, String region, String account) {
@@ -1177,22 +1311,9 @@ public class CodePipelineService {
         String stageName = stage.path("name").asText();
         try {
             int stageIndex = stageIndex(pipeline, stageName);
-            execution.setCurrentStage(stageName);
-            execution.getStageExecutionStatuses().put(stageName, "InProgress");
-            execution.setLastUpdateTime(now());
-            putExecution(execution);
-            runStage(pipeline, execution, stage, retryMode, previousStatuses);
-            if ("Failed".equals(execution.getStatus())) {
-                execution.getStageExecutionStatuses().put(stageName, "Failed");
+            if (!runStageInRun(pipeline, execution, stage, retryMode, previousStatuses)) {
                 return;
             }
-            if (finishIfStopped(execution)) {
-                return;
-            }
-            execution.getStageExecutionStatuses().put(stageName, "Succeeded");
-            execution.setCurrentStage(null);
-            execution.setLastUpdateTime(now());
-            putExecution(execution);
             runStagesFrom(pipeline, execution, stageIndex + 1);
         } catch (Exception e) {
             if (execution.getCurrentStage() != null) {
@@ -1216,25 +1337,207 @@ public class CodePipelineService {
             if (finishIfStopped(execution)) {
                 return;
             }
-            execution.setCurrentStage(stageName);
-            execution.getStageExecutionStatuses().put(stageName, "InProgress");
-            execution.setLastUpdateTime(now());
-            putExecution(execution);
-            runStage(pipeline, execution, stage);
-            if ("Failed".equals(execution.getStatus())) {
-                execution.getStageExecutionStatuses().put(stageName, "Failed");
+            if (!runStageInRun(pipeline, execution, stage, "ALL_ACTIONS", Map.of())) {
                 return;
             }
-            if (finishIfStopped(execution)) {
-                return;
-            }
-            execution.getStageExecutionStatuses().put(stageName, "Succeeded");
-            execution.setCurrentStage(null);
-            execution.setLastUpdateTime(now());
-            putExecution(execution);
         }
         execution.setStatus("Succeeded");
         execution.setStatusSummary("Pipeline execution succeeded.");
+    }
+
+    /**
+     * Runs one stage of an execution, between its V2 {@code beforeEntry} and {@code onSuccess}
+     * conditions.
+     *
+     * @return {@code false} when the execution must not continue to the next stage
+     */
+    private boolean runStageInRun(CodePipelinePipeline pipeline, CodePipelineExecution execution, JsonNode stage,
+                                  String retryMode, Map<String, String> previousStatuses) {
+        String stageName = stage.path("name").asText();
+        execution.setCurrentStage(stageName);
+        execution.getStageExecutionStatuses().put(stageName, "InProgress");
+        execution.setLastUpdateTime(now());
+        putExecution(execution);
+
+        ConditionOutcome entry = evaluateConditions(execution, stage, "BEFORE_ENTRY");
+        if (entry == ConditionOutcome.SKIP_STAGE) {
+            execution.getStageExecutionStatuses().put(stageName, "Skipped");
+            execution.setCurrentStage(null);
+            execution.setLastUpdateTime(now());
+            putExecution(execution);
+            return true;
+        }
+        if (entry == ConditionOutcome.FAIL) {
+            failForCondition(execution, stageName, "BEFORE_ENTRY");
+            execution.getStageExecutionStatuses().put(stageName, "Failed");
+            return false;
+        }
+
+        runStage(pipeline, execution, stage, retryMode, previousStatuses);
+        if ("Failed".equals(execution.getStatus())) {
+            execution.getStageExecutionStatuses().put(stageName, "Failed");
+            return false;
+        }
+        if (finishIfStopped(execution)) {
+            return false;
+        }
+
+        if (evaluateConditions(execution, stage, "ON_SUCCESS") == ConditionOutcome.FAIL) {
+            failForCondition(execution, stageName, "ON_SUCCESS");
+            execution.getStageExecutionStatuses().put(stageName, "Failed");
+            return false;
+        }
+        execution.getStageExecutionStatuses().put(stageName, "Succeeded");
+        execution.setCurrentStage(null);
+        execution.setLastUpdateTime(now());
+        putExecution(execution);
+        return true;
+    }
+
+    // ---------------------------------------------------------------- V2 stage conditions
+
+    private enum ConditionOutcome { PASS, FAIL, SKIP_STAGE }
+
+    /**
+     * Evaluates the stage's {@code beforeEntry}/{@code onSuccess} condition block. Rules run
+     * through the AWS rule providers we emulate: {@code LambdaInvoke} (real invocation via the
+     * Lambda service) and {@code VariableCheck} (pipeline-variable comparison); other providers
+     * pass permissively. A condition overridden via OverrideStageCondition always passes.
+     */
+    private ConditionOutcome evaluateConditions(CodePipelineExecution execution, JsonNode stage,
+                                                String conditionType) {
+        JsonNode block = stage.path(conditionBlockField(conditionType));
+        if (block.isMissingNode() || !block.has("conditions")) {
+            return ConditionOutcome.PASS;
+        }
+        if (Boolean.TRUE.equals(execution.getConditionOverrides()
+                .get(stage.path("name").asText() + "/" + conditionType))) {
+            return ConditionOutcome.PASS;
+        }
+        for (JsonNode condition : block.path("conditions")) {
+            boolean passed = true;
+            for (JsonNode rule : condition.path("rules")) {
+                if (!evaluateRule(execution, stage.path("name").asText(), conditionType, rule)) {
+                    passed = false;
+                }
+            }
+            if (!passed) {
+                return "SKIP".equals(condition.path("result").asText("FAIL"))
+                        ? ConditionOutcome.SKIP_STAGE : ConditionOutcome.FAIL;
+            }
+        }
+        return ConditionOutcome.PASS;
+    }
+
+    private static String conditionBlockField(String conditionType) {
+        return switch (conditionType) {
+            case "BEFORE_ENTRY" -> "beforeEntry";
+            case "ON_SUCCESS" -> "onSuccess";
+            case "ON_FAILURE" -> "onFailure";
+            default -> throw new AwsException("ValidationException",
+                    "Unknown condition type " + conditionType, 400);
+        };
+    }
+
+    private boolean evaluateRule(CodePipelineExecution execution, String stageName,
+                                 String conditionType, JsonNode rule) {
+        Map<String, Object> record = new LinkedHashMap<>();
+        record.put("ruleExecutionId", UUID.randomUUID().toString());
+        record.put("ruleName", rule.path("name").asText());
+        record.put("stageName", stageName);
+        record.put("conditionType", conditionType);
+        record.put("ruleProvider", rule.path("ruleTypeId").path("provider").asText());
+        record.put("startTime", now());
+        record.put("status", "InProgress");
+        synchronized (execution) {
+            execution.getRuleExecutions().add(record);
+            putExecution(execution);
+        }
+        boolean passed;
+        String summary;
+        try {
+            String provider = rule.path("ruleTypeId").path("provider").asText();
+            passed = switch (provider) {
+                case "LambdaInvoke" -> lambdaRulePasses(execution, rule);
+                case "VariableCheck" -> variableCheckPasses(execution, rule);
+                // Commands / DeployWindow and unknown providers pass permissively.
+                default -> true;
+            };
+            summary = passed ? "Rule passed." : "Rule condition was not met.";
+        } catch (Exception e) {
+            passed = false;
+            summary = Objects.toString(e.getMessage(), "Rule evaluation failed");
+        }
+        record.put("status", passed ? "Succeeded" : "Failed");
+        record.put("summary", summary);
+        record.put("lastUpdateTime", now());
+        putExecution(execution);
+        return passed;
+    }
+
+    private boolean lambdaRulePasses(CodePipelineExecution execution, JsonNode rule) {
+        String functionName = rule.path("configuration").path("FunctionName").asText(null);
+        if (functionName == null) {
+            throw new AwsException("ValidationException",
+                    "LambdaInvoke rules require configuration.FunctionName", 400);
+        }
+        ObjectNode event = mapper.createObjectNode();
+        event.put("ruleName", rule.path("name").asText());
+        event.put("pipelineName", execution.getPipelineName());
+        event.put("pipelineExecutionId", execution.getPipelineExecutionId());
+        InvokeResult result = lambdaService.invoke(execution.getRegion(), functionName,
+                event.toString().getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
+        return result.getFunctionError() == null && result.getStatusCode() < 400;
+    }
+
+    /** Above this length, a MATCHES pattern or subject is rejected rather than risking
+     * catastrophic regex backtracking on pipeline-declared input. */
+    private static final int MAX_VARIABLE_CHECK_MATCH_LENGTH = 256;
+
+    private boolean variableCheckPasses(CodePipelineExecution execution, JsonNode rule) {
+        JsonNode config = rule.path("configuration");
+        String variable = resolveVariableReference(execution, config.path("Variable").asText(""));
+        String value = config.path("Value").asText("");
+        return switch (config.path("Operator").asText("EQ")) {
+            case "EQ" -> variable.equals(value);
+            case "NE" -> !variable.equals(value);
+            case "CONTAINS" -> variable.contains(value);
+            case "MATCHES" -> {
+                if (value.length() > MAX_VARIABLE_CHECK_MATCH_LENGTH
+                        || variable.length() > MAX_VARIABLE_CHECK_MATCH_LENGTH) {
+                    throw new AwsException("ValidationException",
+                            "VariableCheck MATCHES pattern or value exceeds "
+                                    + MAX_VARIABLE_CHECK_MATCH_LENGTH + " characters", 400);
+                }
+                yield variable.matches(value);
+            }
+            default -> throw new AwsException("ValidationException",
+                    "Unknown VariableCheck operator", 400);
+        };
+    }
+
+    /** Resolves {@code #{variables.name}} references against the execution's variables. */
+    private String resolveVariableReference(CodePipelineExecution execution, String reference) {
+        String name = reference;
+        if (reference.startsWith("#{") && reference.endsWith("}")) {
+            name = reference.substring(2, reference.length() - 1);
+            if (name.startsWith("variables.")) {
+                name = name.substring("variables.".length());
+            }
+        }
+        for (Map<String, String> variable : execution.getVariables()) {
+            if (variable.get("name").equals(name)) {
+                return variable.getOrDefault("resolvedValue", "");
+            }
+        }
+        return reference;
+    }
+
+    private void failForCondition(CodePipelineExecution execution, String stageName, String conditionType) {
+        execution.setStatus("Failed");
+        execution.setStatusSummary(
+                "Condition " + conditionType + " failed in stage " + stageName + ".");
+        putExecution(execution);
     }
 
     private void finishExecutionRun(CodePipelineExecution execution) {
