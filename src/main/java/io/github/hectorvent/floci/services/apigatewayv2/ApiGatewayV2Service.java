@@ -229,6 +229,12 @@ public class ApiGatewayV2Service {
 
     public Api updateApi(String region, String apiId, Map<String, Object> request) {
         Api api = getApi(region, apiId);
+        // Validated before any field is set, so a rejected update leaves the API as it was.
+        @SuppressWarnings("unchecked")
+        Map<String, String> tags = (Map<String, String>) request.get("tags");
+        if (request.containsKey("tags")) {
+            ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags, apiId);
+        }
 
         if (request.containsKey("name") && request.get("name") != null) {
             api.setName((String) request.get("name"));
@@ -250,9 +256,6 @@ public class ApiGatewayV2Service {
             api.setDisableExecuteApiEndpoint(booleanValue(request.get("disableExecuteApiEndpoint")));
         }
         if (request.containsKey("tags")) {
-            @SuppressWarnings("unchecked")
-            Map<String, String> tags = (Map<String, String>) request.get("tags");
-            ReservedTags.rejectApiGatewayReservedTagsOnUpdate(tags, apiId);
             api.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
         }
         if (request.containsKey("corsConfiguration")) {

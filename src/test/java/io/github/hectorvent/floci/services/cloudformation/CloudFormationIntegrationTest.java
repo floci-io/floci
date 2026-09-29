@@ -1447,7 +1447,9 @@ class CloudFormationIntegrationTest {
         .when()
             .get("/v2/apis/cfn-pinned-api")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .body("description", equalTo("after"))
+            .body("tags.env", equalTo("test"));
     }
 
     @Test
