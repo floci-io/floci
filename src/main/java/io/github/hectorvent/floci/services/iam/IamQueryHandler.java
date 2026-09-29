@@ -32,7 +32,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.TreeSet;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -1570,11 +1569,11 @@ public class IamQueryHandler {
         String accountId = accountResolver.resolve(authorization);
         String arn = requireParam(params, "Arn");
         AccessAdvisorTarget target = resolveAccessAdvisorTarget(accountId, arn);
-        IamPolicyEvaluator.GrantedServices granted =
-                policyEvaluator.servicesGrantedBy(target.policyDocuments());
+        // Already sorted and expanded, including the wildcard and NotAction grants that name no
+        // namespace of their own.
+        List<String> granted = policyEvaluator.servicesGrantedBy(target.policyDocuments());
         ServiceLastAccessedJob job = serviceLastAccessedService.generate(accountId, arn,
-                params.getFirst("Granularity"), new TreeSet<>(granted.namespaces()).stream().toList(),
-                target.entities());
+                params.getFirst("Granularity"), granted, target.entities());
         return Response.ok(AwsQueryResponse.envelope("GenerateServiceLastAccessedDetails", AwsNamespaces.IAM,
                 new XmlBuilder().elem("JobId", job.getJobId()).build())).build();
     }
@@ -1664,11 +1663,7 @@ public class IamQueryHandler {
             throw new AwsException("InvalidInput",
                     "The request must include at least one service namespace.", 400);
         }
-        if (namespaces.size() > MAX_SERVICE_NAMESPACES) {
-            throw new AwsException("ValidationError",
-                    "Value at 'serviceNamespaces' failed to satisfy constraint: Member must have "
-                            + "length less than or equal to " + MAX_SERVICE_NAMESPACES, 400);
-        }
+        checkListLength(namespaces.size(), "serviceNamespaces", MAX_SERVICE_NAMESPACES);
         List<GrantingPolicy> candidates = policiesForIdentity(accountId, arn);
         // The response list carries one entry per requested namespace, so that is what a Marker
         // walks through.
@@ -1738,11 +1733,13 @@ public class IamQueryHandler {
                     throw new AwsException("InvalidInput",
                             "The value " + raw + " at 'maxItems' is not a number.", 400);
                 }
-                if (limit < 1 || limit > MAX_MAX_ITEMS) {
-                    throw new AwsException("ValidationError",
-                            "Value at 'maxItems' failed to satisfy constraint: Member must have "
-                                    + "value greater than or equal to 1 and less than or equal to "
-                                    + MAX_MAX_ITEMS, 400);
+                if (limit < 1) {
+                    throw validationError(raw, "maxItems",
+                            "Member must have value greater than or equal to 1");
+                }
+                if (limit > MAX_MAX_ITEMS) {
+                    throw validationError(raw, "maxItems",
+                            "Member must have value less than or equal to " + MAX_MAX_ITEMS);
                 }
             }
         }
@@ -2197,14 +2194,14 @@ public class IamQueryHandler {
             String at = "tags." + (i + 1) + ".member";
             String keyViolation = tagKeyViolation(key);
             if (keyViolation != null) {
-                throw tagValidationError(key, at + ".key", keyViolation);
+                throw validationError(key, at + ".key", keyViolation);
             }
             if (value.codePointCount(0, value.length()) > MAX_TAG_VALUE_LENGTH) {
-                throw tagValidationError(value, at + ".value",
+                throw validationError(value, at + ".value",
                         "Member must have length less than or equal to " + MAX_TAG_VALUE_LENGTH);
             }
             if (!TAG_VALUE_PATTERN.matcher(value).matches()) {
-                throw tagValidationError(value, at + ".value",
+                throw validationError(value, at + ".value",
                         "Member must satisfy regular expression pattern: " + TAG_VALUE_PATTERN.pattern());
             }
             if (caseInsensitiveKeys) {
@@ -2226,10 +2223,21 @@ public class IamQueryHandler {
     }
 
     private static void checkListLength(int members, String param) {
-        if (members > MAX_TAG_LIST_MEMBERS) {
+        checkListLength(members, param, MAX_TAG_LIST_MEMBERS);
+    }
+
+    /**
+     * The constraint-violation shape used for a list member. Unlike the scalar form it leaves the
+     * value out, which is Floci's choice rather than a rule AWS follows: captured violations
+     * elsewhere in AWS do quote the list, such as Lambda's {@code Value '[x86_64, arm64]' at
+     * 'architectures'}, while IAM's own are inconsistent about it. Omitting it keeps a request that
+     * breaks the limit from echoing every member back in the error message.
+     */
+    private static void checkListLength(int members, String param, int limit) {
+        if (members > limit) {
             throw new AwsException("ValidationError",
                     "1 validation error detected: Value at '" + param + "' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to " + MAX_TAG_LIST_MEMBERS, 400);
+                            + "Member must have length less than or equal to " + limit, 400);
         }
     }
 
@@ -2247,7 +2255,12 @@ public class IamQueryHandler {
         return null;
     }
 
-    private static AwsException tagValidationError(String value, String at, String constraint) {
+    /**
+     * IAM's constraint-violation shape for a scalar member, which leads with the error count and
+     * quotes the offending value. Only the bound actually broken is named, as AWS does: a value
+     * outside a range reports the side it fell outside, not the whole range.
+     */
+    private static AwsException validationError(String value, String at, String constraint) {
         return new AwsException("ValidationError",
                 "1 validation error detected: Value '" + value + "' at '" + at + "' failed to satisfy constraint: "
                         + constraint, 400);
@@ -2274,7 +2287,7 @@ public class IamQueryHandler {
         for (String key : keys) {
             String violation = tagKeyViolation(key);
             if (violation != null) {
-                throw tagValidationError(keys.toString(), "tagKeys",
+                throw validationError(keys.toString(), "tagKeys",
                         "Member must satisfy constraint: [" + violation + "]");
             }
         }

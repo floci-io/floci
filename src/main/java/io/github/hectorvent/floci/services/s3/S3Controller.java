@@ -1347,11 +1347,13 @@ public class S3Controller {
             }
             boolean bypass = "true".equalsIgnoreCase(
                     httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
+            String ifMatch = httpHeaders.getHeaderString("If-Match");
             s3Service.authorizeDeleteObject(bucket, key, versionId, authorization);
+            authorizeDeleteETagRead(bucket, key, ifMatch, authorization);
             if (bypass) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:BypassGovernanceRetention", authorization);
             }
-            S3Object result = s3Service.deleteObject(bucket, key, versionId, bypass);
+            S3Object result = s3Service.deleteObject(bucket, key, versionId, bypass, ifMatch);
             var resp = Response.noContent();
             if (result != null) {
                 if (result.isDeleteMarker()) {
@@ -1542,6 +1544,7 @@ public class S3Controller {
         for (XmlParser.KeyVersion entry : entries) {
             try {
                 s3Service.authorizeDeleteObject(bucket, entry.key(), entry.versionId(), authorization);
+                authorizeDeleteETagRead(bucket, entry.key(), entry.eTag(), authorization);
                 if (bypass && s3Service.isGovernanceRetentionActive(
                         bucket, entry.key(), entry.versionId())) {
                     s3Service.authorizeObjectWrite(bucket, entry.key(),
@@ -1589,6 +1592,20 @@ public class S3Controller {
         }
         builder.end("DeleteResult");
         return Response.ok(builder.build()).type(MediaType.APPLICATION_XML).build();
+    }
+
+    // A conditional delete against an ETag reveals whether the object still has it, so S3 requires
+    // s3:GetObject as well as s3:DeleteObject. The existence check (If-Match: *) needs only the delete.
+    private void authorizeDeleteETagRead(String bucket, String key, String ifMatch,
+                                         S3Service.RequestAuthorization authorization) {
+        if (ifMatch == null) {
+            return;
+        }
+        String value = ifMatch.trim();
+        if (value.equals("*") || value.equals("\"*\"")) {
+            return;
+        }
+        s3Service.authorizeGetObject(bucket, key, null, authorization);
     }
 
     private Response handleListParts(String bucket, String key, String uploadId,
@@ -2061,12 +2078,15 @@ public class S3Controller {
     }
 
     /**
-     * S3's CreateBucket region rules, the same in every partition (moto's {@code aws_verified}
-     * matrix): every regional endpoint but {@code us-east-1} requires a constraint naming exactly
-     * its region and answers {@code IllegalLocationConstraintException} otherwise, including for a
-     * {@code us-east-1} constraint, so in a China or GovCloud deployment the constraint is de facto
-     * required; the {@code us-east-1} endpoint takes any constraint but its own, which is
-     * {@code InvalidLocationConstraint}.
+     * S3's CreateBucket region rules, the same in every partition: every regional endpoint but
+     * {@code us-east-1} requires a constraint naming exactly its region and answers
+     * {@code IllegalLocationConstraintException} otherwise, including for a {@code us-east-1}
+     * constraint, so in a China or GovCloud deployment the constraint is de facto required; the
+     * {@code us-east-1} endpoint takes any constraint but its own, which is
+     * {@code InvalidLocationConstraint}. The S3 model backs the us-east-1 rules on its own:
+     * {@code us-east-1} is the one region missing from the {@code BucketLocationConstraint} enum,
+     * and {@code GetBucketLocationOutput} gives buckets in {@code us-east-1} a null constraint. The
+     * exact error codes and messages come from moto's {@code aws_verified} CreateBucket tests.
      */
     static String bucketRegionForCreate(String locationConstraint, String endpointRegion) {
         boolean globalEndpoint = US_EAST_1.equals(endpointRegion);

@@ -694,6 +694,43 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
+    void aNonStringMemberFailsToDeserialize() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "NonStringBillingModeTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": 5
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("NUMBER_VALUE cannot be converted to String"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "NoSuchNonStringTable",
+                    "GlobalSecondaryIndexUpdates": [{"Delete": {"IndexName": true}}]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("TRUE_VALUE cannot be converted to String"));
+    }
+
+    @Test
     void createTableWithGsiAndLsi() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")

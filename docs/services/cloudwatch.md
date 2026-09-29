@@ -343,6 +343,18 @@ aws logs put-retention-policy \
 Metric streams are stored as definitions with their `running` or `stopped` state. Floci never
 delivers metrics to the Firehose delivery stream a metric stream names.
 
+### Metric-math alarm definitions
+
+`PutMetricAlarm` stores the `Metrics` query definitions and `DescribeAlarms` returns them over
+both JSON and Query protocols. Expressions, labels, `ReturnData`, account IDs, query periods,
+and nested metric statistics (including dimensions and units) survive storage reloads.
+Metric-math alarm responses omit the single-metric fields, including top-level `Period`.
+Updating an alarm replaces its metric definition, so changing between `Metrics` and a single
+metric does not retain the previous definition.
+
+This is management-plane support: the alarm evaluator currently evaluates only single-metric
+alarms, not metric-math expressions. `SetAlarmState` remains available for manual transitions.
+
 ### Examples
 
 ```bash

@@ -8,6 +8,7 @@ import software.amazon.awssdk.services.apigateway.model.BadRequestException;
 import software.amazon.awssdk.services.apigateway.model.GetIntegrationResponse;
 import software.amazon.awssdk.services.apigateway.model.GetMethodResponse;
 import software.amazon.awssdk.services.apigateway.model.ImportRestApiResponse;
+import software.amazon.awssdk.services.apigateway.model.NotFoundException;
 import software.amazon.awssdk.services.apigateway.model.PutMode;
 import software.amazon.awssdk.services.apigateway.model.Resource;
 import software.amazon.awssdk.services.apigateway.model.RestApi;
@@ -18,8 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * OpenAPI import of the {@code x-amazon-apigateway-any-method} pseudo-operation. The JVM test suite
- * cannot see a native-image reflection gap, so this runs the import against the native build.
+ * API Gateway OpenAPI import through the AWS SDK management API.
  */
 @DisplayName("API Gateway OpenAPI import")
 class ApiGatewayOpenApiImportCompatibilityTest {
@@ -163,6 +163,86 @@ class ApiGatewayOpenApiImportCompatibilityTest {
                         .resourceId(keptResourceId)
                         .httpMethod("GET"));
                 assertThat(integration.uri()).isEqualTo("http://example.com/kept");
+            } finally {
+                apiGateway.deleteRestApi(request -> request.restApiId(imported.id()));
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("PutRestApi with mode=merge retains unrelated methods and replaces a conflicting method")
+    void explicitMergeKeepsUnrelatedMethods() {
+        assertMergeKeepsUnrelatedMethods(PutMode.MERGE);
+    }
+
+    @Test
+    @DisplayName("PutRestApi defaults to merge when mode is omitted")
+    void omittedModeMerges() {
+        assertMergeKeepsUnrelatedMethods(null);
+    }
+
+    private static void assertMergeKeepsUnrelatedMethods(PutMode mode) {
+        String title = TestFixtures.uniqueName("apigw-merge");
+        String original = """
+                {
+                  "openapi": "3.0.1", "info": {"title": "%s", "version": "1"},
+                  "paths": {
+                    "/kept": {"get": {"x-amazon-apigateway-integration": {"type": "MOCK"}}},
+                    "/shared": {
+                      "get": {"x-amazon-apigateway-integration": {
+                        "type": "http_proxy", "httpMethod": "GET", "uri": "https://example.com/old",
+                        "responses": {"default": {"statusCode": "200"}, "legacy": {"statusCode": "206"}}
+                      }},
+                      "post": {"x-amazon-apigateway-integration": {"type": "MOCK"}}
+                    }
+                  }
+                }
+                """.formatted(title);
+        String incoming = """
+                {
+                  "openapi": "3.0.1", "info": {"title": "%s", "version": "2"},
+                  "paths": {
+                    "/shared": {"get": {"x-amazon-apigateway-integration": {
+                      "type": "http_proxy", "httpMethod": "GET", "uri": "https://example.com/new",
+                      "responses": {"default": {"statusCode": "200"}, "new": {"statusCode": "400"}}
+                    }}},
+                    "/new": {"get": {"x-amazon-apigateway-integration": {"type": "MOCK"}}}
+                  }
+                }
+                """.formatted(title);
+
+        try (ApiGatewayClient apiGateway = TestFixtures.apiGatewayClient()) {
+            ImportRestApiResponse imported = apiGateway.importRestApi(request -> request
+                    .body(SdkBytes.fromUtf8String(original)));
+            try {
+                apiGateway.putRestApi(request -> {
+                    request.restApiId(imported.id()).body(SdkBytes.fromUtf8String(incoming));
+                    if (mode != null) {
+                        request.mode(mode);
+                    }
+                });
+
+                List<String> paths = apiGateway.getResources(request -> request.restApiId(imported.id()))
+                        .items().stream().map(Resource::path).toList();
+                assertThat(paths).containsExactlyInAnyOrder("/", "/kept", "/shared", "/new");
+
+                apiGateway.getMethod(request -> request.restApiId(imported.id())
+                        .resourceId(resourceId(apiGateway, imported.id(), "/kept")).httpMethod("GET"));
+                String sharedId = resourceId(apiGateway, imported.id(), "/shared");
+                apiGateway.getMethod(request -> request.restApiId(imported.id())
+                        .resourceId(sharedId).httpMethod("POST"));
+                apiGateway.getMethodResponse(request -> request.restApiId(imported.id())
+                        .resourceId(sharedId).httpMethod("GET").statusCode("200"));
+                apiGateway.getMethodResponse(request -> request.restApiId(imported.id())
+                        .resourceId(sharedId).httpMethod("GET").statusCode("400"));
+                assertThatThrownBy(() -> apiGateway.getMethodResponse(request -> request
+                        .restApiId(imported.id()).resourceId(sharedId).httpMethod("GET")
+                        .statusCode("206"))).isInstanceOf(NotFoundException.class);
+                GetIntegrationResponse integration = apiGateway.getIntegration(request -> request
+                        .restApiId(imported.id()).resourceId(sharedId).httpMethod("GET"));
+                assertThat(integration.uri()).isEqualTo("https://example.com/new");
+                assertThat(integration.integrationResponses())
+                        .containsKeys("200", "400").doesNotContainKey("206");
             } finally {
                 apiGateway.deleteRestApi(request -> request.restApiId(imported.id()));
             }

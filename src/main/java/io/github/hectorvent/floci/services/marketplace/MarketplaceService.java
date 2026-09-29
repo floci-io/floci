@@ -32,7 +32,7 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class MarketplaceService implements Resettable {
     private static final String CATALOG = "AWSMarketplace";
-    private static final String REGION = "us-east-1";
+    private static final String REGION = "us-east-1"; // partition-literal: AWS Marketplace is commercial-only and AWS pins its APIs to these regions
     private static final Pattern CLIENT_TOKEN = Pattern.compile("[!-~]{1,64}");
     private static final Pattern CHANGE_SET_NAME = Pattern.compile("[\\w\\s+=.:@-]{1,100}");
     private static final Set<String> SUPPORTED_CHANGE_TYPES = Set.of(
@@ -789,7 +789,7 @@ public class MarketplaceService implements Resettable {
 
     private static void validateRegion(String region) {
         if (!REGION.equals(region)) {
-            throw validation("AWS Marketplace Catalog API is available only in us-east-1.");
+            throw validation("AWS Marketplace Catalog API is available only in us-east-1."); // partition-literal: AWS's message text
         }
     }
 

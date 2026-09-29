@@ -144,7 +144,7 @@ class OrganizationsCrossAccountIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(403)
+            .statusCode(400)
             .body("__type", equalTo("AccessDeniedException"));
     }
 
@@ -214,7 +214,7 @@ class OrganizationsCrossAccountIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(403)
+            .statusCode(400)
             .body("__type", equalTo("AccessDeniedException"));
 
         organizations(INVITED_ACCOUNT, "CreateAccount",
@@ -222,7 +222,7 @@ class OrganizationsCrossAccountIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(403)
+            .statusCode(400)
             .body("__type", equalTo("AccessDeniedException"));
     }
 
@@ -279,7 +279,7 @@ class OrganizationsCrossAccountIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(403)
+            .statusCode(400)
             .body("__type", equalTo("AccessDeniedException"));
 
         organizations(MANAGEMENT_ACCOUNT, "CancelHandshake", "{\"HandshakeId\":\"" + canceledHandshakeId + "\"}")
@@ -337,7 +337,7 @@ class OrganizationsCrossAccountIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(403)
+            .statusCode(400)
             .body("__type", equalTo("AccessDeniedException"));
     }
 

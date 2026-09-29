@@ -219,6 +219,31 @@ class AssumeRolePolicyEvaluatorTest {
     }
 
     @Test
+    void malformedEffectInvalidatesTheWholeTrustDocument() {
+        String doc = """
+            {"Statement":[
+              {"Effect":"Allow","Principal":{"Service":"appsync.amazonaws.com"},"Action":"sts:AssumeRole"},
+              {"Principal":{"Service":"appsync.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+            """;
+        assertFalse(evaluator.allowsService(doc, "appsync.amazonaws.com"));
+        assertFalse(evaluator.allowsService(doc, "appsync.amazonaws.com",
+                "arn:aws:appsync:us-east-1:000000000000:apis/example", "000000000000"));
+    }
+
+    @Test
+    void serviceSourceArnWildcardMatchesWithCaseSensitivity() {
+        String doc = """
+            {"Statement":{"Effect":"Allow","Principal":{"Service":"appsync.amazonaws.com"},
+              "Action":"sts:AssumeRole",
+              "Condition":{"ArnLike":{"aws:SourceArn":"arn:aws:appsync:us-east-1:000000000000:apis/Ex*"}}}}
+            """;
+        assertTrue(evaluator.allowsService(doc, "appsync.amazonaws.com",
+                "arn:aws:appsync:us-east-1:000000000000:apis/Example", "000000000000"));
+        assertFalse(evaluator.allowsService(doc, "appsync.amazonaws.com",
+                "arn:aws:appsync:us-east-1:000000000000:apis/example", "000000000000"));
+    }
+
+    @Test
     void deniesBlankOrMalformedDocument() {
         assertFalse(evaluator.allows(null, CALLER_ARN, CALLER_ACCOUNT));
         assertFalse(evaluator.allows("", CALLER_ARN, CALLER_ACCOUNT));

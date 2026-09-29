@@ -120,12 +120,21 @@ jobs:
 
       # The prefetch runs in the background past its own step, so its per-image
       # results are only complete once the tests are done. A pull still running
-      # here (after an early exit) has no result line yet, so list it.
+      # here (after an early exit) has no result line yet, so list it. The
+      # prefetch is best-effort by design, so a key that no longer matches a
+      # class, a pin the script could not read, or an image back on ECR Public
+      # that Docker Hub also carries (only the Lambda runtimes belong there) is
+      # an annotation, not a failure.
       - name: Image prefetch results
         if: always()
         run: |
           cat prefetch-images.log 2>/dev/null || echo "no prefetch log"
           pgrep -af 'docker pull' | sed 's/^/still running: /' || true
+          grep -E 'stale prefetch key|prefetch skipped' prefetch-images.log 2>/dev/null \
+            | sed 's/^/::warning title=prefetch-images.sh::/' || true
+          grep -E '(prefetched|prefetch failed) public\.ecr\.aws/' prefetch-images.log 2>/dev/null \
+            | grep -vE 'public\.ecr\.aws/lambda/' \
+            | sed 's/^/::warning title=prefetch-images.sh::not a Lambda runtime, pull it from Docker Hub: /' || true
 
       # Save from main only, and from shard 1 only. Actions caches are ref-scoped:
       # a pull_request run's write lands in refs/pull/N/merge where no other PR can

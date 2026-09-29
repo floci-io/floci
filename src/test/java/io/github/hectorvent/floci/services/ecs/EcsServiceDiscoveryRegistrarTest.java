@@ -7,8 +7,10 @@ import io.github.hectorvent.floci.services.cloudmap.model.Service;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.EcsTaskAddress;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -17,7 +19,11 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 
 /**
  * Component test for {@link EcsServiceDiscoveryRegistrar}: drives register/deregister directly
@@ -33,7 +39,7 @@ class EcsServiceDiscoveryRegistrarTest {
     @Inject
     EcsServiceDiscoveryRegistrar registrar;
 
-    @Inject
+    @InjectSpy
     CloudMapService cloudMapService;
 
     @Test
@@ -139,6 +145,105 @@ class EcsServiceDiscoveryRegistrarTest {
         assertTrue(!registrar.hasRegistries(svc));
     }
 
+    @Test
+    void releaseRecordedInstancesKeepsInstancesRegisteredByHand() {
+        String namespace = uniqueName("svcdisc") + ".internal";
+        Service cloudMapSvc = createDnsService(namespace, "web");
+        EcsServiceModel web = serviceWithRegistry(cloudMapSvc.getArn(), "web", 8080);
+        web.setServiceName("web-svc");
+        registrar.registerTask(taskInCluster("172.31.0.11", "payments"), web, REGION);
+        registrar.registerTask(taskInCluster("172.31.0.12", "payments"), web, REGION);
+        cloudMapService.registerInstance(cloudMapSvc.getId(), "registered-by-hand", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.15",
+                        "ECS_SERVICE_NAME", "web-svc", "ECS_CLUSTER_NAME", "payments"), REGION);
+
+        registrar.releaseRecordedInstances();
+
+        List<String> remaining = cloudMapService.listInstances(cloudMapSvc.getId()).stream()
+                .map(Instance::getInstanceId)
+                .toList();
+        assertEquals(List.of("registered-by-hand"), remaining);
+    }
+
+    @Test
+    void releaseRecordedInstancesReleasesAnInstanceWhoseRegistrationWasCutShort() {
+        String namespace = uniqueName("svcdisc") + ".internal";
+        Service cloudMapSvc = createDnsService(namespace, "killed");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw new ProcessKilled();
+        }).when(cloudMapService).registerInstance(eq(cloudMapSvc.getId()), any(), any(), any(), any());
+
+        assertThrows(ProcessKilled.class, () -> registrar.registerTask(task("172.31.0.13", "killed", 8080, 8080),
+                serviceWithRegistry(cloudMapSvc.getArn(), "killed", 8080), REGION));
+        registrar.releaseRecordedInstances();
+
+        assertTrue(cloudMapService.listInstances(cloudMapSvc.getId()).isEmpty(),
+                "an instance registered just before the process died should be released");
+    }
+
+    @Test
+    void evictUnrecordedInstancesRemovesAStaleInstanceAtTheTasksAddress() {
+        String namespace = uniqueName("svcdisc") + ".internal";
+        Service auth = createDnsService(namespace, "auth");
+        Service document = cloudMapService.createService("document", auth.getNamespaceId(),
+                null, null, null, null, null, null, Map.of(), REGION);
+        // Left by an auth task of a run that kept no record; the address now belongs to a document task.
+        cloudMapService.registerInstance(auth.getId(), "bdf778f0", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.21"), REGION);
+        cloudMapService.registerInstance(auth.getId(), "elsewhere", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.17"), REGION);
+        EcsTask documentTask = task("172.31.0.21", "document", 8080, 8080);
+        registrar.registerTask(documentTask, serviceWithRegistry(document.getArn(), "document", 8080), REGION);
+
+        registrar.evictUnrecordedInstances(documentTask, List.of(auth.getId(), document.getId()),
+                List.of(new EcsTaskAddress("172.31.0.21", null)), REGION);
+
+        assertEquals(List.of("elsewhere"), cloudMapService.listInstances(auth.getId()).stream()
+                .map(Instance::getInstanceId).toList());
+        assertEquals(1, cloudMapService.listInstances(document.getId()).size(),
+                "the task's own recorded instance should stay");
+        assertEquals(List.of("172.31.0.17"), cloudMapService.resolveDnsName("auth." + namespace));
+    }
+
+    @Test
+    void evictUnrecordedInstancesMatchesALoopbackAddressOnlyByItsPort() {
+        String namespace = uniqueName("svcdisc") + ".internal";
+        Service cloudMapSvc = createDnsService(namespace, "api");
+        cloudMapService.registerInstance(cloudMapSvc.getId(), "stale", null,
+                Map.of("AWS_INSTANCE_IPV4", "127.0.0.1", "AWS_INSTANCE_PORT", "32768"), REGION);
+        cloudMapService.registerInstance(cloudMapSvc.getId(), "other-port", null,
+                Map.of("AWS_INSTANCE_IPV4", "127.0.0.1", "AWS_INSTANCE_PORT", "32769"), REGION);
+
+        registrar.evictUnrecordedInstances(task(null, "api", 8080, 32768), List.of(cloudMapSvc.getId()),
+                List.of(EcsTaskAddress.of("127.0.0.1", 32768)), REGION);
+
+        assertEquals(List.of("other-port"), cloudMapService.listInstances(cloudMapSvc.getId()).stream()
+                .map(Instance::getInstanceId).toList());
+    }
+
+    @Test
+    void evictUnrecordedInstancesMatchesAnEniAddressOnlyInItsOwnVpc() {
+        String namespace = uniqueName("svcdisc") + ".internal";
+        Service cloudMapSvc = createDnsService(namespace, "api");
+        cloudMapService.registerInstance(cloudMapSvc.getId(), "by-hand", null,
+                Map.of("AWS_INSTANCE_IPV4", "10.0.1.5"), REGION);
+
+        registrar.evictUnrecordedInstances(task("10.0.1.5", "api", 8080, 8080), List.of(cloudMapSvc.getId()),
+                List.of(new EcsTaskAddress("10.0.1.5", null, "vpc-elsewhere")), REGION);
+        assertEquals(List.of("by-hand"), cloudMapService.listInstances(cloudMapSvc.getId()).stream()
+                .map(Instance::getInstanceId).toList(), "an instance in another VPC's namespace should stay");
+
+        registrar.evictUnrecordedInstances(task("10.0.1.5", "api", 8080, 8080), List.of(cloudMapSvc.getId()),
+                List.of(new EcsTaskAddress("10.0.1.5", null, "vpc-svcdisc")), REGION);
+        assertTrue(cloudMapService.listInstances(cloudMapSvc.getId()).isEmpty(),
+                "an instance at the task's ENI address in its own VPC should be evicted");
+    }
+
+    /** Stands in for the process dying between the registration and anything after it. */
+    private static final class ProcessKilled extends Error {
+    }
+
     private Service createDnsService(String namespaceName, String serviceName) {
         Operation operation = cloudMapService.createPrivateDnsNamespace(
                 namespaceName, "vpc-svcdisc", null, null, Map.of(), REGION);
@@ -165,6 +270,12 @@ class EcsServiceDiscoveryRegistrarTest {
         task.setTaskArn("arn:aws:ecs:" + REGION + ":000000000000:task/c/" + uniqueName("task"));
         task.setPrivateIpAddress(privateIpAddress);
         task.setContainers(List.of(container));
+        return task;
+    }
+
+    private EcsTask taskInCluster(String privateIpAddress, String clusterName) {
+        EcsTask task = task(privateIpAddress, "web", 8080, 8080);
+        task.setClusterArn("arn:aws:ecs:" + REGION + ":000000000000:cluster/" + clusterName);
         return task;
     }
 

@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.dynamodb.backend;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.MissingNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.util.List;
 import java.util.Map;
@@ -42,6 +44,23 @@ public interface DynamoDbOperations {
     record Reply(int status, JsonNode body, Map<String, List<String>> headers) {
         public Reply {
             headers = headers == null ? Map.of() : Map.copyOf(headers);
+        }
+
+        /** The body of a 2xx reply; a non-2xx reply is thrown as the AwsException its AWS error body names. */
+        public JsonNode successBody() {
+            JsonNode replyBody = body == null ? MissingNode.getInstance() : body;
+            if (status >= 300) {
+                String type = text(replyBody, "__type");
+                String code = type == null ? "InternalServerError" : type.substring(type.lastIndexOf('#') + 1);
+                String message = text(replyBody, "message");
+                throw new AwsException(code, message != null ? message : text(replyBody, "Message"), status);
+            }
+            return replyBody;
+        }
+
+        private static String text(JsonNode node, String field) {
+            JsonNode value = node.get(field);
+            return value == null || value.isNull() ? null : value.asText();
         }
     }
 

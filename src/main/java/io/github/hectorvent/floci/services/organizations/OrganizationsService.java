@@ -1935,6 +1935,6 @@ public class OrganizationsService implements ScpProvider {
     }
 
     private static AwsException accessDenied(String message) {
-        return new AwsException("AccessDeniedException", message, 403);
+        return new AwsException("AccessDeniedException", message, 400);
     }
 }

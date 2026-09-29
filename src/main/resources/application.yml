@@ -289,6 +289,13 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
+    # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for every Docker call Floci makes. Each
+    # live Lambda container holds 2 connections for its whole lifetime (log follow + exit watcher),
+    # so the warm-container ceiling is about max-connections / 2; past it, create/start/stop/remove
+    # wait for a free connection and the emulator stalls. 1024 covers the 500 containers the
+    # runtime API port range allows. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.maxConnections: a value set here WINS over the annotation.
+    max-connections: 1024
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
@@ -315,6 +322,10 @@ floci:
       enabled: true
       vector-index-allocation-seconds: 4   # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS. Resource allocation phase of a vector index added by UpdateTable.
       vector-index-backfill-seconds: 10    # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS. Backfilling phase that follows it.
+      backend: native                      # FLOCI_SERVICES_DYNAMODB_BACKEND: native or local
+      # local-endpoint: http://dynamodb-local:8000   # FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT
+      local-connect-timeout-seconds: 2     # FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS
+      local-request-timeout-seconds: 10    # FLOCI_SERVICES_DYNAMODB_LOCAL_REQUEST_TIMEOUT_SECONDS
     sns:
       enabled: true
     lambda:
@@ -636,6 +647,8 @@ floci:
     eks:
       enabled: true
       mock: false
+      max-memory-mib: 0        # optional k3s container memory ceiling; 0 follows the node type
+      max-vcpus: 0             # optional k3s container CPU ceiling; 0 follows the node type
       provider: k3s
       default-image: "rancher/k3s:latest"
       # image-template: "myregistry.io/k3s:v%s" # optional custom image format template taking cluster version

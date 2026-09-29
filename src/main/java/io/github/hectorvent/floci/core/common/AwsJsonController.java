@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudcontrol.CloudControlJsonHandler;
 import io.github.hectorvent.floci.services.bcmpricingcalculator.BcmPricingCalculatorJsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbRequestShapes;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbResponses;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamsJsonHandler;
 import io.github.hectorvent.floci.services.networkfirewall.NetworkFirewallJsonHandler;
@@ -137,6 +138,7 @@ public class AwsJsonController {
                     if (targetMatch.prefix().startsWith("DynamoDBStreams_")) {
                         yield dynamoDbStreamsJsonHandler.handle(action, request, region);
                     }
+                    DynamoDbRequestShapes.check(action, request);
                     yield dynamoDbJsonHandler.handle(action, request, region);
                 }
                 case "sqs" -> sqsJsonHandler.handle(action, request, region);

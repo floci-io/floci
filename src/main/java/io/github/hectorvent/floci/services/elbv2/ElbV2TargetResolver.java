@@ -47,6 +47,14 @@ final class ElbV2TargetResolver {
         return addresses[0].getHostAddress();
     }
 
+    /** The {@code Host} header value for a target, bracketing an IPv6 literal as RFC 3986 requires. */
+    static String hostHeader(String host, int port) {
+        if (host.indexOf(':') >= 0 && !host.startsWith("[")) {
+            return "[" + host + "]:" + port;
+        }
+        return host + ":" + port;
+    }
+
     static boolean isIpLiteral(String host) {
         return host != null && (host.contains(":") || host.matches("[0-9.]+"));
     }

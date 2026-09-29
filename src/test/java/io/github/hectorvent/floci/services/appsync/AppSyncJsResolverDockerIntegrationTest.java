@@ -39,8 +39,10 @@ class AppSyncJsResolverDockerIntegrationTest {
 
     private static final String SCHEMA = """
             type Message { id: ID! name: String }
+            type VtlPipelineResult { value: String before: String }
             type Query {
               getMessages(orgNo: String!): [Message]
+              vtlPipeline(value: String!): VtlPipelineResult
               ping(x: String): String
               echoArg(x: String): String
               failing: String
@@ -205,6 +207,51 @@ class AppSyncJsResolverDockerIntegrationTest {
             // chain ran, not just that something returned.
             .body("data.getMessages.name", contains("Acme 556677", "Globex"))
             .body("data.getMessages.id", contains("1", "2"));
+    }
+
+    @Test
+    void aVtlPipelineRunsThroughTheGraphqlSidecar() {
+        String functionId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name":"Query_vtlPipeline_0","dataSourceName":"local",
+                 "functionVersion":"2018-05-29",
+                 "requestMappingTemplate":"%s",
+                 "responseMappingTemplate":"%s"}
+                """.formatted(escape("""
+                        {"version":"2018-05-29","payload":{
+                         "value":$util.toJson($ctx.stash.value),
+                         "before":$util.toJson($ctx.prev.result.before)}}
+                        """), escape("$util.toJson($ctx.result)")))
+        .when()
+            .post("/v1/apis/" + apiId + "/functions")
+        .then()
+            .statusCode(200)
+            .extract().path("functionConfiguration.functionId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"typeName":"Query","fieldName":"vtlPipeline","kind":"PIPELINE",
+                 "pipelineConfig":{"functions":["%s"]},
+                 "requestMappingTemplate":"%s",
+                 "responseMappingTemplate":"%s"}
+                """.formatted(functionId, escape("""
+                        #set($discard = $ctx.stash.put("value", $ctx.args.value))
+                        {"before":$util.toJson($ctx.args.value)}
+                        """), escape("$util.toJson($ctx.prev.result)")))
+        .when()
+            .post("/v1/apis/" + apiId + "/types/Query/resolvers")
+        .then()
+            .statusCode(200);
+
+        query("{ vtlPipeline(value: \\\"live\\\") { value before } }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.vtlPipeline.value", equalTo("live"))
+            .body("data.vtlPipeline.before", equalTo("live"));
     }
 
     @Test

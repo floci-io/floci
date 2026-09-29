@@ -28,7 +28,9 @@ public class MetricAlarm {
     private String namespace;
     private String statistic;
     private List<Dimension> dimensions = new ArrayList<>();
-    private int period;
+    /** Single-metric period; absent for alarms whose periods are defined in Metrics. */
+    private Integer period;
+    private List<AlarmMetricDataQuery> metrics = new ArrayList<>();
     private String unit;
     private int evaluationPeriods;
     /**
@@ -100,8 +102,13 @@ public class MetricAlarm {
     public List<Dimension> getDimensions() { return dimensions; }
     public void setDimensions(List<Dimension> dimensions) { this.dimensions = dimensions; }
 
-    public int getPeriod() { return period; }
-    public void setPeriod(int period) { this.period = period; }
+    public Integer getPeriod() { return period; }
+    public void setPeriod(Integer period) { this.period = period; }
+
+    public List<AlarmMetricDataQuery> getMetrics() { return metrics; }
+    public void setMetrics(List<AlarmMetricDataQuery> metrics) {
+        this.metrics = metrics == null ? new ArrayList<>() : new ArrayList<>(metrics);
+    }
 
     public String getUnit() { return unit; }
     public void setUnit(String unit) { this.unit = unit; }

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlEngine;
+import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceAuthorizer;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvoker;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvokers;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.LambdaDataSourceInvoker;
@@ -39,6 +40,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -59,8 +61,8 @@ class AppSyncResolverExecutorTest {
     private final RecordingInvoker lambdaInvoker = new RecordingInvoker(DataSourceType.AWS_LAMBDA);
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AppSyncResolverExecutor executor = new AppSyncResolverExecutor(appSync, jsRuntime,
-            new AppSyncDataSourceInvokers(List.of(invoker, noneInvoker, dynamoDbInvoker, lambdaInvoker)),
-            vtlEngine(), objectMapper);
+            new AppSyncDataSourceInvokers(List.of(invoker, noneInvoker, dynamoDbInvoker, lambdaInvoker),
+                    mock(AppSyncDataSourceAuthorizer.class)), vtlEngine(), objectMapper);
 
     private static AppSyncVtlEngine vtlEngine() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
@@ -639,7 +641,8 @@ class AppSyncResolverExecutorTest {
                 .thenReturn(new InvokeResult(200, null, "{\"id\":\"42\"}".getBytes(StandardCharsets.UTF_8),
                         null, "request-id"));
         AppSyncResolverExecutor lambdaExecutor = new AppSyncResolverExecutor(appSync, jsRuntime,
-                new AppSyncDataSourceInvokers(List.of(new LambdaDataSourceInvoker(lambdaService, objectMapper))),
+                new AppSyncDataSourceInvokers(List.of(new LambdaDataSourceInvoker(lambdaService, objectMapper)),
+                        mock(AppSyncDataSourceAuthorizer.class)),
                 vtlEngine(), objectMapper);
         Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
         resolver.setDataSourceName("accountFunction");
@@ -669,7 +672,8 @@ class AppSyncResolverExecutorTest {
                         null, "request-id"));
         AppSyncResolverExecutor lambdaExecutor = new AppSyncResolverExecutor(appSync, jsRuntime,
                 new AppSyncDataSourceInvokers(List.of(
-                        new LambdaDataSourceInvoker(lambdaService, objectMapper))),
+                        new LambdaDataSourceInvoker(lambdaService, objectMapper)),
+                        mock(AppSyncDataSourceAuthorizer.class)),
                 vtlEngine(), objectMapper);
         Resolver resolver = resolver(ResolverKind.UNIT, null);
         resolver.setDataSourceName("accountFunction");
@@ -894,23 +898,220 @@ class AppSyncResolverExecutorTest {
     }
 
     @Test
-    void aLaterVtlFunctionIsRejectedBeforeAnyPipelineStageRuns() {
-        when(appSync.getFunction(API_ID, "fn1"))
-                .thenReturn(function("fn1", "one", "accountDB", "fn1-code"));
-        when(appSync.getFunction(API_ID, "fn2")).thenReturn(vtlFunction("fn2"));
+    void vtlPipelineThreadsStashAndPreviousResultThroughItsFunctionAndAfterTemplate() {
+        when(appSync.getDataSource(API_ID, "accountTable"))
+                .thenReturn(dataSource("accountTable", DataSourceType.AMAZON_DYNAMODB));
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "accountTable", """
+                {"version":"2018-05-29","operation":"GetItem",
+                 "key":{"id":{"S":$util.toJson($ctx.stash.id)}}}
+                """, """
+                #set($discard = $ctx.stash.put("function", "seen"))
+                {"id":$util.toJson($ctx.result.id),
+                 "before":$util.toJson($ctx.prev.result.before)}
+                """));
+        dynamoDbInvoker.answer = Map.of("id", "42");
+        Resolver resolver = resolver(ResolverKind.PIPELINE, null);
+        resolver.setRequestMappingTemplate("""
+                #set($discard = $ctx.stash.put("id", $ctx.args.id))
+                {"before":$util.toJson($ctx.args.id)}
+                """);
+        resolver.setResponseMappingTemplate("""
+                {"last":$util.toJson($ctx.prev.result),
+                 "stash":$util.toJson($ctx.stash.function)}
+                """);
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of("id", "42")));
+
+        assertTrue(result.errors().isEmpty());
+        assertEquals(Map.of("last", Map.of("id", "42", "before", "42"),
+                "stash", "seen"), result.data());
+        assertEquals(1, dynamoDbInvoker.requests.size());
+        Map<?, ?> request = (Map<?, ?>) dynamoDbInvoker.requests.get(0);
+        assertEquals("2018-05-29", request.get("version"));
+        assertEquals("GetItem", request.get("operation"));
+    }
+
+    @Test
+    void vtlPipelineLambdaFunctionSendsOnlyPayloadToTheFunction() throws Exception {
+        String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";
+        DataSource lambdaDataSource = dataSource("accountFunction", DataSourceType.AWS_LAMBDA);
+        lambdaDataSource.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
+        when(appSync.getDataSource(API_ID, "accountFunction")).thenReturn(lambdaDataSource);
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "accountFunction", """
+                {"version":"2018-05-29","operation":"Invoke",
+                 "payload":{"id":$util.toJson($ctx.args.id)}}
+                """, "$util.toJson($ctx.result)"));
+        LambdaService lambdaService = mock(LambdaService.class);
+        when(lambdaService.invokeArn(eq(functionArn), any(byte[].class),
+                eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, null, "{}".getBytes(StandardCharsets.UTF_8),
+                        null, "request-id"));
+        AppSyncResolverExecutor lambdaExecutor = new AppSyncResolverExecutor(appSync, jsRuntime,
+                new AppSyncDataSourceInvokers(List.of(
+                        new LambdaDataSourceInvoker(lambdaService, objectMapper)),
+                        mock(AppSyncDataSourceAuthorizer.class)),
+                vtlEngine(), objectMapper);
+        Resolver resolver = resolver(ResolverKind.PIPELINE, null);
+        resolver.setRequestMappingTemplate("{}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+
+        ResolverOutcome result = lambdaExecutor.execute(resolver, invocation(Map.of("id", "42")));
+
+        assertTrue(result.errors().isEmpty());
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invokeArn(eq(functionArn), payload.capture(),
+                eq(InvocationType.RequestResponse));
+        assertEquals(Map.of("id", "42"), objectMapper.readValue(payload.getValue(), Map.class));
+    }
+
+    @Test
+    void vtlFunctionRequestReturnSkipsItsDataSourceAndContinuesThePipeline() {
+        when(appSync.getDataSource(API_ID, "local"))
+                .thenThrow(new AwsException("NotFoundException", "Data source not found", 404));
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "local",
+                "#return({\"cached\":true})", "$util.toJson($ctx.result)"));
+        when(appSync.getFunction(API_ID, "fn2"))
+                .thenReturn(function("fn2", "two", "accountDB", "fn2-code"));
         Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1", "fn2")));
-        jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(null));
-        jsRuntime.script("fn1-code", "request", (h, ctx) -> ok(Map.of()));
+        jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(Map.of()));
+        jsRuntime.script("fn2-code", "request", (h, ctx) -> {
+            assertEquals(Map.of("cached", true), ((Map<?, ?>) ctx.get("prev")).get("result"));
+            return ok(Map.of("statement", "select 1"));
+        });
+        jsRuntime.script("fn2-code", "response", (h, ctx) -> ok("continued"));
+        jsRuntime.script("pipeline-code", "response", (h, ctx) -> ok(ctx.get("result")));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals("continued", result.data());
+        assertTrue(result.errors().isEmpty());
+        assertTrue(noneInvoker.requests.isEmpty());
+        verify(appSync, never()).getDataSource(API_ID, "local");
+        assertEquals(List.of("pipeline-code#request", "fn2-code#request",
+                "fn2-code#response", "pipeline-code#response"), jsRuntime.calls);
+    }
+
+    @Test
+    void vtlFunctionRequestReturnCannotBypassUnsupportedFunctionVersion() {
+        FunctionConfiguration function = vtlFunction("fn1", "local",
+                "#return({\"cached\":true})", "$util.toJson($ctx.result)");
+        function.setFunctionVersion("2017-02-28");
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function);
+        Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+        jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(Map.of()));
 
         ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         assertEquals(1, result.errors().size());
-        assertTrue(result.errors().get(0).message().contains("VTL"),
-                result.errors().get(0).message());
         assertEquals("UnsupportedOperation", result.errors().get(0).errorType());
-        assertEquals(List.of("pipeline-code#request"), jsRuntime.calls);
+        assertTrue(result.errors().get(0).message().contains("2017-02-28"));
+        verify(appSync, never()).getDataSource(API_ID, "local");
+        assertTrue(noneInvoker.requests.isEmpty());
+    }
+
+    @Test
+    void vtlFunctionResponseReturnBecomesTheNextFunctionsPreviousResult() {
+        when(appSync.getDataSource(API_ID, "local"))
+                .thenReturn(dataSource("local", DataSourceType.NONE));
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "local",
+                "{\"version\":\"2018-05-29\",\"payload\":{\"id\":\"1\"}}",
+                "#return({\"from\":\"first\"})"));
+        when(appSync.getFunction(API_ID, "fn2")).thenReturn(vtlFunction("fn2", "local", """
+                {"version":"2018-05-29",
+                 "payload":{"previous":$util.toJson($ctx.prev.result.from)}}
+                """, "$util.toJson($ctx.result)"));
+        Resolver resolver = resolver(ResolverKind.PIPELINE, null);
+        resolver.setRequestMappingTemplate("{}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1", "fn2")));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(Map.of("previous", "first"), result.data());
+        assertTrue(result.errors().isEmpty());
+        assertEquals(2, noneInvoker.requests.size());
+    }
+
+    @Test
+    void vtlFunctionCanHandleADataSourceErrorAndContinueToTheAfterTemplate() {
+        when(appSync.getDataSource(API_ID, "accountFunction"))
+                .thenReturn(dataSource("accountFunction", DataSourceType.AWS_LAMBDA));
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "accountFunction",
+                "{\"version\":\"2018-05-29\",\"operation\":\"Invoke\",\"payload\":{}}", """
+                #if($ctx.error)
+                  {"handled":$util.toJson($ctx.error.type)}
+                #else
+                  $util.toJson($ctx.result)
+                #end
+                """));
+        lambdaInvoker.failure = new AwsException("LambdaExecutionException", "failed", 400);
+        Resolver resolver = resolver(ResolverKind.PIPELINE, null);
+        resolver.setRequestMappingTemplate("{}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(Map.of("handled", "LambdaExecutionException"), result.data());
+        assertTrue(result.errors().isEmpty());
+        lambdaInvoker.failure = null;
+    }
+
+    @Test
+    void vtlResolverBeforeReturnStopsTheWholePipelineBeforeFunctionLookup() {
+        Resolver resolver = resolver(ResolverKind.PIPELINE, null);
+        resolver.setRequestMappingTemplate("#return({\"cached\":true})");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+        resolver.setPipelineConfig(Map.of("functions", List.of("missing")));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(Map.of("cached", true), result.data());
+        assertTrue(result.errors().isEmpty());
         assertTrue(invoker.requests.isEmpty());
+    }
+
+    @Test
+    void unsupportedVtlFunctionVersionFailsBeforeDataSourceInvocation() {
+        when(appSync.getDataSource(API_ID, "local"))
+                .thenReturn(dataSource("local", DataSourceType.NONE));
+        FunctionConfiguration function = vtlFunction("fn1", "local",
+                "{\"payload\":{}}", "$util.toJson($ctx.result)");
+        function.setFunctionVersion("2017-02-28");
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(function);
+        Resolver resolver = resolver(ResolverKind.PIPELINE, "pipeline-code");
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+        jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(Map.of()));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(1, result.errors().size());
+        assertEquals("UnsupportedOperation", result.errors().get(0).errorType());
+        assertTrue(result.errors().get(0).message().contains("2017-02-28"));
+        assertTrue(noneInvoker.requests.isEmpty());
+    }
+
+    @Test
+    void vtlFunctionRequestWithoutVersionFailsBeforeDataSourceInvocation() {
+        when(appSync.getDataSource(API_ID, "local"))
+                .thenReturn(dataSource("local", DataSourceType.NONE));
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(vtlFunction("fn1", "local",
+                "{\"payload\":{}}", "$util.toJson($ctx.result)"));
+        Resolver resolver = resolver(ResolverKind.PIPELINE, null);
+        resolver.setRequestMappingTemplate("{}");
+        resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+        resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
+
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
+
+        assertEquals(1, result.errors().size());
+        assertEquals("MappingTemplate", result.errors().get(0).errorType());
+        assertTrue(noneInvoker.requests.isEmpty());
     }
 
     @Test
@@ -963,13 +1164,15 @@ class AppSyncResolverExecutorTest {
                 result.errors().get(0).errorType());
     }
 
-    private FunctionConfiguration vtlFunction(String id) {
+    private FunctionConfiguration vtlFunction(String id, String dataSourceName,
+                                              String requestTemplate, String responseTemplate) {
         FunctionConfiguration fn = new FunctionConfiguration();
         fn.setFunctionId(id);
         fn.setName("vtl-" + id);
-        fn.setDataSourceName("accountDB");
-        fn.setRequestMappingTemplate("{\"version\":\"2018-05-29\"}");
-        fn.setResponseMappingTemplate("$util.toJson($ctx.result)");
+        fn.setDataSourceName(dataSourceName);
+        fn.setFunctionVersion("2018-05-29");
+        fn.setRequestMappingTemplate(requestTemplate);
+        fn.setResponseMappingTemplate(responseTemplate);
         return fn;
     }
 

@@ -6,8 +6,8 @@
 # ECR Public counts anonymous transfer per runner IP, so an image is keyed on the classes that
 # start it whenever its package is spread over every shard (Lambda, ECS), and a key that names a
 # class is checked against src/test/java so a rename cannot silently turn the prefetch off. The
-# Docker library images the tests start come from Docker Hub, which GitHub-hosted runners pull
-# without a limit; TestImages says why they are not taken through the ECR Public mirror.
+# images the tests start come from Docker Hub wherever it carries them, which GitHub-hosted
+# runners pull without a limit; TestImages says why, and why the Lambda runtimes cannot.
 # Each pull writes one line to $PREFETCH_LOG (prefetch-images.log next to shard.txt by default):
 # "prefetched <image>" or "prefetch failed <image>: <last line of docker's output>", timestamped,
 # so a test that pulled the image itself can be told apart from a prefetch that failed or was
@@ -71,7 +71,11 @@ starts ContainerHostNetworkDockerIntegrationTest EcsServiceDiscoveryDockerIntegr
 PYTHON_ALPINE_IMAGE="$(test_image PYTHON_ALPINE)"
 starts ContainerCaBundleDockerIntegrationTest EcsCredentialsProxyDockerIntegrationTest SageMakerDockerIntegrationTest \
     && [ -n "$PYTHON_ALPINE_IMAGE" ] && pull "$PYTHON_ALPINE_IMAGE"
-# ECR Public images, in queue order: the Lambda runtimes by size, then the Firelens router.
+# The Firelens test names the log router image itself rather than taking it from config.
+FLUENT_BIT_IMAGE="$(test_image FLUENT_BIT)"
+starts EcsContainerManagerFirelensDockerIntegrationTest && [ -n "$FLUENT_BIT_IMAGE" ] && pull "$FLUENT_BIT_IMAGE"
+# ECR Public images, in queue order: the Lambda runtimes by size. They are the only images left
+# on ECR Public; everything Docker Hub also carries is pulled from there (see TestImages).
 # Lambda runtimes, measured from a full four-shard run by pairing each ImageCacheService
 # "Pulling image" / "Image already present locally" line with the class that logged it.
 # nodejs:20 is the runtime the API Gateway, ELBv2 and Lambda integration tests resolve and every
@@ -80,8 +84,6 @@ starts ContainerCaBundleDockerIntegrationTest EcsCredentialsProxyDockerIntegrati
 grep -qE '/apigateway/|/apigatewayv2/|/lambda/' "$SHARD_FILE" && ecr public.ecr.aws/lambda/nodejs:20
 starts SwfLambdaIntegrationTest && ecr public.ecr.aws/lambda/python:3.12
 starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/python:3.14
-# The Firelens test names the log router image itself rather than taking it from config.
-starts EcsContainerManagerFirelensDockerIntegrationTest && ecr public.ecr.aws/aws-observability/aws-for-fluent-bit:3
 
 # package token in shard.txt -> images its tests are known to launch
 # (measured inline pulls; update alongside image-catalog changes)

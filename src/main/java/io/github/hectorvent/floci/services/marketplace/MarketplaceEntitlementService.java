@@ -39,9 +39,9 @@ public class MarketplaceEntitlementService implements Resettable {
     }
 
     ObjectNode getEntitlements(JsonNode request, String region) {
-        if (region != null && !region.isBlank() && !"us-east-1".equals(region)) {
+        if (region != null && !region.isBlank() && !"us-east-1".equals(region)) { // partition-literal: AWS Marketplace is commercial-only and AWS pins its APIs to these regions
             throw new AwsException("InvalidParameterException",
-                    "AWS Marketplace Entitlement Service is available only in us-east-1.", 400);
+                    "AWS Marketplace Entitlement Service is available only in us-east-1.", 400); // partition-literal: AWS's message text
         }
         String productCode = requireText(request, "ProductCode", 1, 255);
         JsonNode filter = request == null ? null : request.get("Filter");
