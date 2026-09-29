@@ -745,6 +745,20 @@ class CloudFormationChangeSetDiffIntegrationTest {
                     "AvailabilityZones": ["us-east-1a"]
                   }
                 },
+                "DefaultAsg": {
+                  "Type": "AWS::AutoScaling::AutoScalingGroup",
+                  "Properties": {
+                    "AutoScalingGroupName": "cs-diff-default-asg",
+                    "LaunchTemplate": {
+                      "LaunchTemplateId": {"Ref": "Lt"},
+                      "Version": {"Fn::GetAtt": ["Lt", "DefaultVersionNumber"]}
+                    },
+                    "MinSize": 0,
+                    "MaxSize": 0,
+                    "DesiredCapacity": 0,
+                    "AvailabilityZones": ["us-east-1a"]
+                  }
+                },
                 "UnchangedQueue": {
                   "Type": "AWS::SQS::Queue",
                   "Properties": {
@@ -775,6 +789,20 @@ class CloudFormationChangeSetDiffIntegrationTest {
                     "LaunchTemplate": {
                       "LaunchTemplateId": {"Ref": "Lt"},
                       "Version": {"Fn::GetAtt": ["Lt", "LatestVersionNumber"]}
+                    },
+                    "MinSize": 0,
+                    "MaxSize": 0,
+                    "DesiredCapacity": 0,
+                    "AvailabilityZones": ["us-east-1a"]
+                  }
+                },
+                "DefaultAsg": {
+                  "Type": "AWS::AutoScaling::AutoScalingGroup",
+                  "Properties": {
+                    "AutoScalingGroupName": "cs-diff-default-asg",
+                    "LaunchTemplate": {
+                      "LaunchTemplateId": {"Ref": "Lt"},
+                      "Version": {"Fn::GetAtt": ["Lt", "DefaultVersionNumber"]}
                     },
                     "MinSize": 0,
                     "MaxSize": 0,
@@ -839,6 +867,10 @@ class CloudFormationChangeSetDiffIntegrationTest {
                 .orElseThrow();
         assertEquals("Modify", asgChange.get("Action"));
         assertEquals("False", asgChange.get("Replacement"));
+
+        boolean unchangedDefaultDependentIncluded = changes.stream()
+                .anyMatch(m -> "DefaultAsg".equals(m.get("LogicalResourceId")));
+        assertFalse(unchangedDefaultDependentIncluded);
 
         boolean unchangedQueueIncluded = changes.stream()
                 .anyMatch(m -> "UnchangedQueue".equals(m.get("LogicalResourceId")));

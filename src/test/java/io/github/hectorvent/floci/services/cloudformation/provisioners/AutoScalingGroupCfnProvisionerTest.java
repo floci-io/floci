@@ -293,6 +293,7 @@ class AutoScalingGroupCfnProvisionerTest {
         ArgumentCaptor<Integer> minSizeCaptor = ArgumentCaptor.forClass(Integer.class);
         ArgumentCaptor<Integer> maxSizeCaptor = ArgumentCaptor.forClass(Integer.class);
         ArgumentCaptor<String> versionCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<AsgOptionalFields> optionalFieldsCaptor = ArgumentCaptor.forClass(AsgOptionalFields.class);
 
         verify(autoScaling).updateAutoScalingGroup(
                 eq(REGION),
@@ -311,12 +312,19 @@ class AutoScalingGroupCfnProvisionerTest {
                 any(),
                 anyInt(),
                 any(),
-                any()
+                optionalFieldsCaptor.capture()
         );
 
         assertEquals("1", versionCaptor.getValue());
         assertEquals(1, minSizeCaptor.getValue());
         assertEquals(5, maxSizeCaptor.getValue());
+
+        AsgOptionalFields optionalFields = optionalFieldsCaptor.getValue();
+        assertEquals("units", optionalFields.desiredCapacityType());
+        assertEquals(Boolean.FALSE, optionalFields.capacityRebalance());
+        assertEquals(0, optionalFields.maxInstanceLifetime());
+        assertEquals(AsgOptionalFields.DEFAULT_INSTANCE_WARMUP_REMOVAL_SENTINEL,
+                optionalFields.defaultInstanceWarmup());
 
         // Subsequent rollback should return false since snapshot is spent
         assertFalse(provisioner.rollbackUpdate(r));

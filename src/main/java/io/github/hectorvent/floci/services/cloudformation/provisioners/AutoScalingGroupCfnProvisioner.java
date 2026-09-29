@@ -82,11 +82,15 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
             if (rawSnapshot != null) {
                 try {
                     AsgSnapshot snapshot = MAPPER.readValue(rawSnapshot, AsgSnapshot.class);
+                    // UpdateAutoScalingGroup treats null as "leave unchanged". Restore an unset
+                    // snapshot member with its API default instead; -1 removes DefaultInstanceWarmup.
                     AsgOptionalFields optionalFields = new AsgOptionalFields(
-                            snapshot.desiredCapacityType(),
-                            snapshot.capacityRebalance(),
-                            snapshot.maxInstanceLifetime(),
-                            snapshot.defaultInstanceWarmup()
+                            snapshot.desiredCapacityType() != null ? snapshot.desiredCapacityType() : "units",
+                            snapshot.capacityRebalance() != null ? snapshot.capacityRebalance() : false,
+                            snapshot.maxInstanceLifetime() != null ? snapshot.maxInstanceLifetime() : 0,
+                            snapshot.defaultInstanceWarmup() != null
+                                    ? snapshot.defaultInstanceWarmup()
+                                    : AsgOptionalFields.DEFAULT_INSTANCE_WARMUP_REMOVAL_SENTINEL
                     );
                     autoScalingService.updateAutoScalingGroup(
                             snapshot.region(),

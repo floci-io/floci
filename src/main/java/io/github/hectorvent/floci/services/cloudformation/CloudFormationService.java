@@ -3196,7 +3196,6 @@ public class CloudFormationService implements ResourceProvider {
         Set<String> changedAttrs = new HashSet<>();
         if ("AWS::EC2::LaunchTemplate".equals(resourceType)) {
             changedAttrs.add("LatestVersionNumber");
-            changedAttrs.add("DefaultVersionNumber");
         }
         JsonNode oldProps = oldDef != null ? oldDef.path("Properties") : null;
         JsonNode newProps = newDef != null ? newDef.path("Properties") : null;

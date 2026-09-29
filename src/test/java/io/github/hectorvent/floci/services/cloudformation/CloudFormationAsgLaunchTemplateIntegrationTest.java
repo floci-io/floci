@@ -543,7 +543,11 @@ class CloudFormationAsgLaunchTemplateIntegrationTest {
                         "MinSize": 0,
                         "MaxSize": 0,
                         "DesiredCapacity": 0,
-                        "AvailabilityZones": ["us-east-1a"]
+                        "AvailabilityZones": ["us-east-1a"],
+                        "DesiredCapacityType": "units",
+                        "CapacityRebalance": true,
+                        "MaxInstanceLifetime": 86400,
+                        "DefaultInstanceWarmup": 300
                       }
                     },
                     "Queue": {
@@ -566,6 +570,11 @@ class CloudFormationAsgLaunchTemplateIntegrationTest {
         String describe = describeStacks(stackName);
         assertThat(describe, containsString("<StackStatus>UPDATE_ROLLBACK_COMPLETE</StackStatus>"));
         // ASG must have rolled back to Version 1
-        assertThat(describeAutoScalingGroup(asgName), containsString("<Version>1</Version>"));
+        String asg = describeAutoScalingGroup(asgName);
+        assertThat(asg, containsString("<Version>1</Version>"));
+        assertThat(asg, containsString("<DesiredCapacityType>units</DesiredCapacityType>"));
+        assertThat(asg, containsString("<CapacityRebalance>false</CapacityRebalance>"));
+        assertThat(asg, containsString("<MaxInstanceLifetime>0</MaxInstanceLifetime>"));
+        assertThat(asg, not(containsString("<DefaultInstanceWarmup>")));
     }
 }
