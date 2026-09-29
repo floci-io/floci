@@ -20,7 +20,7 @@ final class HistoryChain {
     private final AtomicBoolean ended;
     private final HistoryChain parent;
     private volatile boolean abandoned;
-    private volatile String activeStateType;
+    private String activeStateType;
     private long lastEventId;
     private long tailEventId;
 
@@ -77,17 +77,47 @@ final class HistoryChain {
         abandoned = true;
     }
 
-    /** The type of the state this chain has entered and not yet exited, or null between states. */
-    String activeStateType() {
-        return activeStateType;
+    /*
+     * The state this chain is in is published together with the event that enters or exits it,
+     * and read together with the cut, all under this chain's lock. A cut therefore reports a state
+     * only when its Entered event is recorded and its Exited event never will be.
+     */
+
+    /** Publishes a state's Entered event and marks the chain as inside that state. */
+    synchronized long publishStateEntered(String stateType, String eventType, Map<String, Object> details) {
+        long id = publish(eventType, details);
+        activeStateType = stateType;
+        return id;
     }
 
-    void enterState(String type) {
-        activeStateType = type;
-    }
-
-    void exitState() {
+    /** Marks the chain as between states and publishes the state's Exited event. */
+    synchronized void publishStateExited(String eventType, Map<String, Object> details) {
         activeStateType = null;
+        publish(eventType, details);
+    }
+
+    /** Marks the chain as between states when a state ends without an Exited event. */
+    synchronized void leaveState() {
+        activeStateType = null;
+    }
+
+    /**
+     * Marks the chain as between states and publishes an aside event, as a Task whose own failure
+     * ends its branch records {@code TaskStateAborted}. A cut that lands first reports the state
+     * instead, and this event is then not recorded, so the state is reported aborted exactly once.
+     */
+    synchronized void leaveStateAside(String eventType, Map<String, Object> details) {
+        activeStateType = null;
+        publishAside(eventType, details);
+    }
+
+    /**
+     * Cuts the chain like {@link #abandon} and returns the type of the state it was in, or null
+     * when it was between states.
+     */
+    synchronized String abandonInState() {
+        abandoned = true;
+        return activeStateType;
     }
 
     private boolean isAbandoned() {

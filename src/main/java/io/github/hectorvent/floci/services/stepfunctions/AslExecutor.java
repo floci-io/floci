@@ -561,9 +561,21 @@ public class AslExecutor {
                                  StateMachine sm, String topLevelQueryLanguage, JsonNode context,
                                  ObjectNode variables, long executionDeadlineNanos) throws Exception {
         var type = stateDef.path("Type").asText();
-        var enteredEventId = chain.publish(stateEnteredEventType(type),
+        long enteredEventId = chain.publishStateEntered(type, stateEnteredEventType(type),
                 Map.of("name", name, "input", input.toString(), "inputDetails", Map.of("truncated", false)));
-        chain.enterState(type);
+        try {
+            return runEnteredState(chain, name, enteredEventId, type, stateDef, input, sm, topLevelQueryLanguage,
+                    context, variables, executionDeadlineNanos);
+        } finally {
+            // A state that ends by throwing publishes no Exited event, so the chain leaves it here.
+            chain.leaveState();
+        }
+    }
+
+    private StateResult runEnteredState(HistoryChain chain, String name, long enteredEventId, String type,
+                                        JsonNode stateDef, JsonNode input, StateMachine sm,
+                                        String topLevelQueryLanguage, JsonNode context, ObjectNode variables,
+                                        long executionDeadlineNanos) throws Exception {
         updateStateContext(context, name);
         var jsonata = isJsonata(stateDef, topLevelQueryLanguage);
         StateResult result;
@@ -590,13 +602,12 @@ public class AslExecutor {
             if (result == null) {
                 if (chain.isBranch() && "Task".equals(type) && !failure.isRuntimeError()) {
                     // AWS records this after TaskFailed when the failure ends the branch.
-                    chain.publishAside("TaskStateAborted", null);
+                    chain.leaveStateAside("TaskStateAborted", null);
                 }
                 throw failure;
             }
         }
-        chain.exitState();
-        chain.publish(stateExitedEventType(type),
+        chain.publishStateExited(stateExitedEventType(type),
                 Map.of("name", name, "output", result.output().toString(),
                        "outputDetails", Map.of("truncated", false)));
         return result;
@@ -2584,9 +2595,7 @@ public class AslExecutor {
             Thread.currentThread().interrupt();
             throw e;
         } catch (ExecutionException e) {
-            // Read before the cut, while each branch still reports the state it is in.
-            List<String> abortedEventTypes = abortedEventTypesOfCutBranches(branchChains, futures, joined);
-            abandon(branchChains, futures);
+            List<String> abortedEventTypes = cutAfterFailure(branchChains, futures, joined);
             chain.continueFrom(branchChains.get(joined).lastEventId());
             if (e.getCause() instanceof FailStateException failure && !failure.isRuntimeError()) {
                 for (String abortedEventType : abortedEventTypes) {
@@ -2629,24 +2638,25 @@ public class AslExecutor {
     }
 
     /**
-     * One {@code *StateAborted} event per branch that a failure in branch {@code failed} cuts while
-     * it is inside a Task or a Wait: the two state types AWS was measured recording it for (a
-     * {@code .sync} Task waiting on its job, and a Wait). A branch between states, or inside any
-     * other state, gets no event.
+     * Cuts every branch after branch {@code failed} failed, like {@link #abandon}, and returns one
+     * {@code *StateAborted} event type per other branch it cut inside a Task or a Wait: the two
+     * state types AWS was measured recording it for (a {@code .sync} Task waiting on its job, and a
+     * Wait). A branch between states, or inside any other state, gets no event. Each branch is read
+     * and cut in one step, so a state that exits before its cut is not reported, and one that is
+     * reported records no Exited event afterwards.
      */
-    private static List<String> abortedEventTypesOfCutBranches(List<HistoryChain> chains,
-                                                               List<? extends Future<?>> futures, int failed) {
-        List<String> types = new ArrayList<>();
+    private static List<String> cutAfterFailure(List<HistoryChain> chains, List<? extends Future<?>> futures,
+                                                int failed) {
+        List<String> abortedEventTypes = new ArrayList<>();
         for (int i = 0; i < chains.size(); i++) {
-            if (i == failed || futures.get(i).isDone()) {
-                continue;
-            }
-            String stateType = chains.get(i).activeStateType();
-            if ("Task".equals(stateType) || "Wait".equals(stateType)) {
-                types.add(stateType + "StateAborted");
+            String stateType = chains.get(i).abandonInState();
+            if (i != failed && !futures.get(i).isDone()
+                    && ("Task".equals(stateType) || "Wait".equals(stateType))) {
+                abortedEventTypes.add(stateType + "StateAborted");
             }
         }
-        return types;
+        futures.forEach(future -> future.cancel(true));
+        return abortedEventTypes;
     }
 
     private static void abandon(List<HistoryChain> chains, List<? extends Future<?>> futures) {
