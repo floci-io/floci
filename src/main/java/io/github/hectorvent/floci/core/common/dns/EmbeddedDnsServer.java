@@ -5,7 +5,9 @@ import io.github.hectorvent.floci.config.TlsConfigSource;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.quarkus.runtime.Startup;
+import io.vertx.core.Future;
 import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.datagram.DatagramSocket;
 import io.vertx.core.datagram.DatagramSocketOptions;
@@ -28,6 +30,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.SequencedSet;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -72,6 +75,11 @@ public class EmbeddedDnsServer {
     // Per-upstream timeout. Bounded so trying every upstream stays under a typical 5s client
     // resolver timeout even in the worst case.
     private static final int FORWARD_TIMEOUT_MS = 1500;
+    // Forwards block a thread for up to FORWARD_TIMEOUT_MS per target, so they get their own
+    // bounded pool: a burst of queries to a dead resolver must not take every thread of the
+    // shared worker pool that planQuery and the rest of the emulator also run on.
+    private static final String FORWARD_POOL_NAME = "floci-dns-forward";
+    private static final int FORWARD_POOL_SIZE = 8;
     public static final String DEFAULT_SUFFIX = "localhost.floci.io";
     public static final String LOCALSTACK_SUFFIX = "localhost.localstack.cloud";
     private static final Pattern EC2_PRIVATE_DNS_NAME =
@@ -88,6 +96,7 @@ public class EmbeddedDnsServer {
     private volatile String serverIp;
     private final SequencedSet<String> suffixes = new LinkedHashSet<>();
     private volatile List<String> upstreamDnsServers = List.of();
+    private volatile WorkerExecutor forwardPool;
     // Held as the Iterable a CDI Instance already is, so iterating resolves the beans lazily on
     // the packet path rather than at startup, where a source's storage must not be touched yet.
     private final Iterable<DnsRecordSource> recordSources;
@@ -576,7 +585,7 @@ public class EmbeddedDnsServer {
         if (upstreams.isEmpty()) {
             return;
         }
-        vertx.executeBlocking(() -> forwardToUpstreams(query, upstreams, DNS_PORT))
+        submitForward(forwardPool(vertx), () -> forwardToUpstreams(query, upstreams, DNS_PORT))
                 .onSuccess(response ->
                         socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {}))
                 .onFailure(e ->
@@ -597,7 +606,7 @@ public class EmbeddedDnsServer {
                                       String senderHost, int senderPort,
                                       List<DnsForwardingRule.Target> targets, String qname,
                                       short txId, int questionOffset, int questionEnd) {
-        vertx.executeBlocking(() -> forwardToTargets(query, shuffled(targets)))
+        submitForward(forwardPool(vertx), () -> forwardToTargets(query, shuffled(targets)))
                 .onSuccess(response ->
                         socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {}))
                 .onFailure(e -> {
@@ -607,6 +616,28 @@ public class EmbeddedDnsServer {
                                     buildServerFailureResponse(query, txId, questionOffset, questionEnd)),
                             senderPort, senderHost, v -> {});
                 });
+    }
+
+    /**
+     * Runs a blocking forward on the pool without Vert.x's per-context ordering, so one
+     * unresponsive upstream or rule target does not hold up forwarding for every other query.
+     */
+    static <T> Future<T> submitForward(WorkerExecutor pool, Callable<T> task) {
+        return pool.executeBlocking(task, false);
+    }
+
+    private WorkerExecutor forwardPool(Vertx vertx) {
+        WorkerExecutor pool = forwardPool;
+        if (pool == null) {
+            synchronized (this) {
+                pool = forwardPool;
+                if (pool == null) {
+                    pool = vertx.createSharedWorkerExecutor(FORWARD_POOL_NAME, FORWARD_POOL_SIZE);
+                    forwardPool = pool;
+                }
+            }
+        }
+        return pool;
     }
 
     private static List<DnsForwardingRule.Target> shuffled(List<DnsForwardingRule.Target> targets) {
