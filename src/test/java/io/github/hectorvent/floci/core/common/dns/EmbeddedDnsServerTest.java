@@ -698,4 +698,31 @@ class EmbeddedDnsServerTest {
         buf.putShort((short) 1); // class IN
         return buf.array();
     }
+
+    @Test
+    void forwardToTargets_discardsSpoofedDatagramBeforeRealAnswer() throws Exception {
+        // Catches: returns spoofed payload {9, 9, 9} instead of real payload {1, 2, 3}
+        try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"));
+             DatagramSocket spoof = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
+            byte[] query = buildQuery("db.corp.internal", (short) 7);
+            DnsForwardingRule.Target target = new DnsForwardingRule.Target("127.0.0.1", real.getLocalPort());
+
+            Thread t = new Thread(() -> {
+                try {
+                    byte[] reqBuf = new byte[4096];
+                    DatagramPacket req = new DatagramPacket(reqBuf, reqBuf.length);
+                    real.receive(req);
+                    spoof.send(new DatagramPacket(new byte[] {9, 9, 9}, 3, req.getAddress(), req.getPort()));
+                    real.send(new DatagramPacket(new byte[] {1, 2, 3}, 3, req.getAddress(), req.getPort()));
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            t.setDaemon(true);
+            t.start();
+
+            byte[] response = EmbeddedDnsServer.forwardToTargets(query, List.of(target));
+            assertArrayEquals(new byte[] {1, 2, 3}, response);
+        }
+    }
 }
