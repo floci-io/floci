@@ -704,7 +704,10 @@ class ServiceLastAccessedIntegrationTest {
             .formParam("JobId", jobId).formParam("Marker", "999").formParam("MaxItems", "0")
         .when().post("/").then()
             .statusCode(400)
-            .body(containsString("ValidationError"));
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value '0' at 'maxItems' failed to satisfy "
+                            + "constraint: Member must have value greater than or equal to 1"));
     }
 
     @Test
@@ -909,7 +912,13 @@ class ServiceLastAccessedIntegrationTest {
             .formParam("JobId", generateJobFor(arn)).formParam("MaxItems", "1001")
         .when().post("/").then()
             .statusCode(400)
-            .body(containsString("ValidationError"));
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            // IAM leads with the count, quotes the offending value, and names only the bound that
+            // broke: an over-large MaxItems says nothing about the minimum. Asserted on the parsed
+            // element because the raw body escapes the quotes as &apos;.
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value '1001' at 'maxItems' failed to satisfy "
+                            + "constraint: Member must have value less than or equal to 1000"));
     }
 
     /** serviceNamespaceListType allows at most 200 members. */
@@ -921,9 +930,16 @@ class ServiceLastAccessedIntegrationTest {
         for (int i = 1; i <= 201; i++) {
             request.formParam("ServiceNamespaces.member." + i, "svc" + i);
         }
-        request.when().post("/").then()
+        String body = request.when().post("/").then()
             .statusCode(400)
-            .body(containsString("ValidationError"));
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value at 'serviceNamespaces' failed to satisfy "
+                            + "constraint: Member must have length less than or equal to 200"))
+            .extract().asString();
+
+        // The list form does not quote the value, so a 201-member request must not echo them back.
+        assertTrue(!body.contains("svc201"), "expected the members not to be echoed, in: " + body);
     }
 
     /** An empty report is a valid answer, not a request that fails its own page-size check. */
