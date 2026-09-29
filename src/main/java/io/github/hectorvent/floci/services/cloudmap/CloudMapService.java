@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JacksonException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -604,12 +605,17 @@ public class CloudMapService {
         return config;
     }
 
+    /** The DnsConfig as an update must keep it: record types in any order, TTLs free to change. */
     private static JsonNode withoutTtls(JsonNode dnsConfig) {
         JsonNode copy = dnsConfig.deepCopy();
-        for (JsonNode record : copy.path("DnsRecords")) {
-            if (record instanceof ObjectNode object) {
-                object.remove("TTL");
+        if (copy instanceof ObjectNode object) {
+            List<String> types = new ArrayList<>();
+            for (JsonNode record : object.path("DnsRecords")) {
+                types.add(record.path("Type").asText());
             }
+            types.sort(Comparator.naturalOrder());
+            ArrayNode records = object.putArray("DnsRecords");
+            types.forEach(records::add);
         }
         return copy;
     }

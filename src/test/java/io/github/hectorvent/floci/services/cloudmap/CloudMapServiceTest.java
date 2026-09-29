@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -32,6 +33,21 @@ class CloudMapServiceTest {
                 "{\"RoutingPolicy\":\"MULTIVALUE\",\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":30}]}", null);
 
         assertTrue(cloudMapService.getService(service.getId()).getDnsConfig().contains("\"TTL\":30"));
+    }
+
+    @Test
+    void updateServiceAcceptsTheSameRecordsInAnotherOrder() {
+        Service service = createService(privateDnsNamespace(), "order", "original",
+                "{\"RoutingPolicy\":\"MULTIVALUE\",\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":60},"
+                        + "{\"Type\":\"AAAA\",\"TTL\":60}]}");
+
+        cloudMapService.updateService(service.getId(), "original",
+                "{\"RoutingPolicy\":\"MULTIVALUE\",\"DnsRecords\":[{\"Type\":\"AAAA\",\"TTL\":30},"
+                        + "{\"Type\":\"A\",\"TTL\":30}]}", null);
+
+        String stored = cloudMapService.getService(service.getId()).getDnsConfig();
+        assertTrue(stored.contains("\"TTL\":30"));
+        assertFalse(stored.contains("\"TTL\":60"));
     }
 
     @Test
