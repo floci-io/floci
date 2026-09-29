@@ -60,7 +60,8 @@ service rejects the tags, for example a reserved `floci:` key on an API key or
 a log group ARN with the trailing `:*`, the ARN appears in `FailedResourcesMap`
 with that service's error and no tags are stored for it. A log group ARN with
 the trailing `:*` is rejected this way whether or not the group exists, as in
-AWS. Every other ARN, including
+AWS, and so is any other ARN ending in `:*` whose service registers a tag
+handler, such as an SQS queue ARN. Every other ARN, including
 one the owning service does not list such as an API Gateway deployment ARN,
 goes to the tagging store and the owning service is not called.
 `UntagResources` routes the same way, and also removes the keys from the
