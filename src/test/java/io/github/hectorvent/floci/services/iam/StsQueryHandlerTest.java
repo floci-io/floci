@@ -327,6 +327,51 @@ class StsQueryHandlerTest {
     }
 
     @Test
+    void assumeRoleWithWebIdentityRejectsNonexistentRoleWhenTokenCannotBeVerified() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/NonexistentRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("WebIdentityToken", "opaque-token");
+
+        Response response = newHandler(null).handle("AssumeRoleWithWebIdentity", params);
+
+        assertEquals(403, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>AccessDenied</Code>"), body);
+        assertTrue(body.contains("Not authorized to perform sts:AssumeRoleWithWebIdentity on resource: "
+                + "arn:aws:iam::000000000000:role/NonexistentRole"), body);
+    }
+
+    @Test
+    void assumeRoleWithWebIdentitySucceedsWhenRoleExistsAndTokenCannotBeVerified() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("WebIdentityToken", "opaque-token");
+
+        Response response = newHandler().handle("AssumeRoleWithWebIdentity", params);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<AssumeRoleWithWebIdentityResult>"), body);
+        assertTrue(body.contains("<Arn>arn:aws:sts::000000000000:assumed-role/TestRole/test-session</Arn>"), body);
+    }
+
+    @Test
+    void assumeRoleWithWebIdentityRejectsRoleMismatchWhenTokenCannotBeVerified() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::111111111111:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("WebIdentityToken", "opaque-token");
+
+        Response response = newHandler().handle("AssumeRoleWithWebIdentity", params);
+
+        assertEquals(403, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>AccessDenied</Code>"), body);
+    }
+
+    @Test
     void assumeRoleWithSAMLRejectsDurationSecondsBelowMinimum() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");

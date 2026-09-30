@@ -2760,8 +2760,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return docs;
     }
 
-    private String iamArn(String resourceType, String path, String name) {
-        return AwsArnUtils.Arn.of("iam", "", regionResolver.getAccountId(), resourceType + path + name).toString();
+    String iamArn(String resourceType, String path, String name) {
+        return iamArn(resourceType, path, name, regionResolver.getAccountId());
+    }
+
+    String iamArn(String resourceType, String path, String name, String accountId) {
+        return AwsArnUtils.Arn.global(regionResolver.getPartition(), "iam", accountId,
+                resourceType + normalizePath(path) + name).toString();
     }
 
     private static <T> boolean containsNameIgnoreCase(StorageBackend<String, T> storage,
@@ -2783,11 +2788,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return storage.scan(key -> true).stream();
     }
 
-    private static String normalizePath(String path) {
-        if (path == null || path.isEmpty()) return "/";
+    static String normalizePath(String path) {
+        if (path == null || path.isEmpty()) {
+            return "/";
+        }
         String p = path;
-        if (!p.startsWith("/")) p = "/" + p;
-        if (!p.endsWith("/")) p = p + "/";
+        if (!p.startsWith("/")) {
+            p = "/" + p;
+        }
+        if (!p.endsWith("/")) {
+            p = p + "/";
+        }
         return p;
     }
 

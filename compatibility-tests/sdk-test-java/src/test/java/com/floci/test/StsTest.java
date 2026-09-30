@@ -81,6 +81,10 @@ class StsTest {
                 .roleName("short-lived-role")
                 .assumeRolePolicyDocument(OPEN_TRUST_POLICY)
                 .build());
+        iam.createRole(CreateRoleRequest.builder()
+                .roleName("web-identity-role")
+                .assumeRolePolicyDocument(OPEN_TRUST_POLICY)
+                .build());
 
         String issuer = "https://sdk-test.example.test/saml";
         String providerName = TestFixtures.uniqueName("sdk-saml");
@@ -108,6 +112,7 @@ class StsTest {
         safeDeleteRole("sdk-test-assumed-role");
         safeDeleteRole("my-role");
         safeDeleteRole("short-lived-role");
+        safeDeleteRole("web-identity-role");
         safeDeleteRole(allowedRoleName);
         if (iam != null) {
             iam.close();
@@ -248,6 +253,20 @@ class StsTest {
                 .roleArn("arn:aws:iam::000000000000:role/non-existent-role-" + UUID.randomUUID())
                 .roleSessionName("sdk-test-session")
                 .build()))
+                .isInstanceOf(StsException.class)
+                .extracting(e -> ((StsException) e).statusCode())
+                .isEqualTo(403);
+    }
+
+    @Test
+    void assumeRoleWithWebIdentityNonExistentRoleThrows403() {
+        assertThatThrownBy(() -> sts.assumeRoleWithWebIdentity(
+                AssumeRoleWithWebIdentityRequest.builder()
+                        .roleArn("arn:aws:iam::000000000000:role/non-existent-role-" + UUID.randomUUID())
+                        .roleSessionName("sdk-test-session")
+                        .webIdentityToken("eyJhbGciOiJSUzI1NiJ9.test-token")
+                        .durationSeconds(3600)
+                        .build()))
                 .isInstanceOf(StsException.class)
                 .extracting(e -> ((StsException) e).statusCode())
                 .isEqualTo(403);

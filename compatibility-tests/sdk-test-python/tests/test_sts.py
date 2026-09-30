@@ -26,7 +26,7 @@ class TestSTSAssumeRole:
     @pytest.fixture(autouse=True)
     def setup_roles(self, iam_client):
         trust_policy = '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}'
-        roles = ["pytest-assumed-role", "my-role"]
+        roles = ["pytest-assumed-role", "my-role", "web-identity-role"]
         for role in roles:
             try:
                 iam_client.create_role(
@@ -93,6 +93,16 @@ class TestSTSAssumeRole:
             "assumed-role/web-identity-role/web-session"
             in response["AssumedRoleUser"]["Arn"]
         )
+
+    def test_assume_role_with_web_identity_nonexistent_role_denied(self, sts_client):
+        """Test AssumeRoleWithWebIdentity returns 403 AccessDenied for nonexistent role."""
+        with pytest.raises(ClientError) as exc_info:
+            sts_client.assume_role_with_web_identity(
+                RoleArn="arn:aws:iam::000000000000:role/nonexistent-role-xyz",
+                RoleSessionName="web-session",
+                WebIdentityToken="dummy-token",
+            )
+        assert exc_info.value.response["Error"]["Code"] == "AccessDenied"
 
     def test_assume_role_missing_role_arn(self, sts_client):
         """Test AssumeRole validates required RoleArn parameter."""

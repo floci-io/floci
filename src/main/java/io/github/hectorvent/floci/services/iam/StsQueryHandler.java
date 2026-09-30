@@ -160,7 +160,7 @@ public class StsQueryHandler {
         String callerAccount = accountResolver.resolve(auth);
         String callerArn = iamService.resolveCallerArn(
                         auth == null ? null : accountResolver.extractAccessKeyId(auth))
-                .orElse(AwsArnUtils.Arn.of("iam", "", callerAccount, "root").toString());
+                .orElse(AwsArnUtils.Arn.global(regionResolver.getPartition(), "iam", callerAccount, "root").toString());
         boolean permitted = role.isPresent()
                 && roleArnMatches(roleArn, role.get())
                 && (!enforcement
@@ -178,15 +178,7 @@ public class StsQueryHandler {
         if (role.getArn() != null && AwsArnUtils.isArn(role.getArn())) {
             return role.getArn();
         }
-        String path = role.getPath() != null ? role.getPath() : "/";
-        if (!path.startsWith("/")) {
-            path = "/" + path;
-        }
-        if (!path.endsWith("/")) {
-            path = path + "/";
-        }
-        return AwsArnUtils.Arn.global(regionResolver.getPartition(), "iam", accountId,
-                "role" + path + roleName).toString();
+        return iamService.iamArn("role", role.getPath(), roleName, accountId);
     }
 
     private record AssumeRoleTrustOutcome(IamRole role, Response denial) {
@@ -216,14 +208,7 @@ public class StsQueryHandler {
                     && requested.region().equals(stored.region())
                     && requested.resource().equals(stored.resource());
         }
-        String path = role.getPath() != null ? role.getPath() : "/";
-        if (!path.startsWith("/")) {
-            path = "/" + path;
-        }
-        if (!path.endsWith("/")) {
-            path = path + "/";
-        }
-        String expectedResource = "role" + path + role.getRoleName();
+        String expectedResource = "role" + IamService.normalizePath(role.getPath()) + role.getRoleName();
         return requested.region().isEmpty() && requested.resource().equals(expectedResource);
     }
 
@@ -291,6 +276,9 @@ public class StsQueryHandler {
         IamRole role = outcome.role();
         if (role == null) {
             role = iamService.findRole(accountId, roleName).orElse(null);
+            if (role == null || !roleArnMatches(roleArn, role)) {
+                return accessDenied(roleArn);
+            }
         }
 
         String accessKeyId = "ASIA" + randomId(16);
@@ -298,7 +286,7 @@ public class StsQueryHandler {
         String sessionToken = randomSecret(200);
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
-        String sessionRoleArn = role == null ? roleArn : canonicalRoleArn(role, accountId, roleName);
+        String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         AwsArnUtils.Arn parsedRoleArn = AwsArnUtils.parse(sessionRoleArn);
         String assumedRoleArn = AwsArnUtils.Arn.global(parsedRoleArn.partition(), "sts", parsedRoleArn.accountId(),
                 "assumed-role/" + roleName + "/" + sessionName).toString();
@@ -398,7 +386,7 @@ public class StsQueryHandler {
         }
 
         Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
-        if (role.isEmpty()) {
+        if (role.isEmpty() || !roleArnMatches(roleArn, role.get())) {
             return WebIdentityOutcome.deny(accessDenied(roleArn));
         }
 
