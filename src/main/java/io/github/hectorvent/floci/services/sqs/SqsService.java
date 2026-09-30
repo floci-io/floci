@@ -1261,6 +1261,9 @@ public class SqsService implements Resettable, ResourceProvider {
         GuardedMessageQueue.Removal removal =
                 getOrCreateQueue(storageKey).removeByReceiptHandle(receiptHandle, queue.isFifo());
 
+        if (removal.result() == GuardedMessageQueue.HandleResult.HANDLE_NOT_ISSUED) {
+            throw handleNotValidForQueue(receiptHandle);
+        }
         if (removal.result() == GuardedMessageQueue.HandleResult.HANDLE_EXPIRED) {
             throw invalidReceiptHandle(receiptHandle, "The receipt handle has expired", inBatch);
         }
@@ -1291,6 +1294,9 @@ public class SqsService implements Resettable, ResourceProvider {
 
         GuardedMessageQueue.HandleResult result =
                 getOrCreateQueue(storageKey).changeVisibility(receiptHandle, visibilityTimeout, queue.isFifo());
+        if (result == GuardedMessageQueue.HandleResult.HANDLE_NOT_ISSUED) {
+            throw handleNotValidForQueue(receiptHandle);
+        }
         if (result == GuardedMessageQueue.HandleResult.HANDLE_EXPIRED) {
             throw invalidReceiptHandle(receiptHandle, "The receipt handle has expired", inBatch);
         }
@@ -1319,10 +1325,14 @@ public class SqsService implements Resettable, ResourceProvider {
             throw new AwsException("ReceiptHandleIsInvalid", "The input receipt handle is invalid.", 400);
         }
         if (!parsed.isIntact() || !parsed.belongsTo(storageKey)) {
-            throw new AwsException("ReceiptHandleIsInvalid",
-                    "The receipt handle \"" + receiptHandle + "\" is not valid for this queue.", 400);
+            throw handleNotValidForQueue(receiptHandle);
         }
         return parsed;
+    }
+
+    private static AwsException handleNotValidForQueue(String receiptHandle) {
+        return new AwsException("ReceiptHandleIsInvalid",
+                "The receipt handle \"" + receiptHandle + "\" is not valid for this queue.", 400);
     }
 
     public void purgeQueue(String queueUrl, String region) {

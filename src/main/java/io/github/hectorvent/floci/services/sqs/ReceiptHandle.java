@@ -6,8 +6,8 @@ import java.util.UUID;
 import java.util.zip.CRC32;
 
 /**
- * Floci's receipt handle. The fields are readable, and the checksum catches a handle edited by
- * hand, which AWS rejects as not valid for the queue.
+ * Floci's receipt handle. The fields are readable. The checksum catches a handle edited by
+ * mistake. It does not stop a forged handle. The receipts each message remembers do.
  */
 record ReceiptHandle(String region, String accountId, String queueName, String messageId, String receipt,
                      String checksum) {
@@ -15,7 +15,7 @@ record ReceiptHandle(String region, String accountId, String queueName, String m
     private static final String[] KEYS = {"region", "account", "queue", "messageId", "receipt", "checksum"};
 
     /** {@code storageKey} has the form {@code region::/accountId/queueName}. */
-    static String issue(String storageKey, String messageId) {
+    static ReceiptHandle issue(String storageKey, String messageId) {
         String region = "";
         String accountId = "";
         String queueName = "";
@@ -28,8 +28,13 @@ record ReceiptHandle(String region, String accountId, String queueName, String m
             accountId = slash < 0 ? "" : trimmed.substring(0, slash);
             queueName = trimmed.substring(slash + 1);
         }
-        String body = body(region, accountId, queueName, messageId, UUID.randomUUID().toString());
-        return body + ":checksum=" + crc32(body);
+        String receipt = UUID.randomUUID().toString();
+        String checksum = crc32(body(region, accountId, queueName, messageId, receipt));
+        return new ReceiptHandle(region, accountId, queueName, messageId, receipt, checksum);
+    }
+
+    String encode() {
+        return body(region, accountId, queueName, messageId, receipt) + ":checksum=" + checksum;
     }
 
     /** Returns null when {@code value} is not in this format. */

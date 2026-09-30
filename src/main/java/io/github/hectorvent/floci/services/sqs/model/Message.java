@@ -13,8 +13,10 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @RegisterForReflection
@@ -55,6 +57,8 @@ public class Message {
     private String receiptHandle;
     @JsonIgnore
     private Instant visibleAt;
+    @JsonIgnore
+    private final Set<String> issuedReceipts = new HashSet<>();
 
     public Message() {
         this.messageAttributes = new HashMap<>();
@@ -137,6 +141,10 @@ public class Message {
 
     public Instant getRetentionStartTimestamp() { return retentionStartTimestamp; }
     public void setRetentionStartTimestamp(Instant retentionStartTimestamp) { this.retentionStartTimestamp = retentionStartTimestamp; }
+
+    public void addIssuedReceipt(String receipt) { issuedReceipts.add(receipt); }
+
+    public boolean wasIssued(String receipt) { return issuedReceipts.contains(receipt); }
 
     @JsonIgnore
     public boolean isExpired(Instant cutoff) {

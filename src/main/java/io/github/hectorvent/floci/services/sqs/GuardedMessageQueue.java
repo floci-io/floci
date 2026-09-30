@@ -116,7 +116,9 @@ class GuardedMessageQueue {
             return false;
         }
 
-        msg.setReceiptHandle(ReceiptHandle.issue(storageKey, msg.getMessageId()));
+        ReceiptHandle handle = ReceiptHandle.issue(storageKey, msg.getMessageId());
+        msg.setReceiptHandle(handle.encode());
+        msg.addIssuedReceipt(handle.receipt());
         msg.setVisibleAt(Instant.now().plusSeconds(effectiveTimeout));
         claimed.add(msg);
         return true;
@@ -159,7 +161,7 @@ class GuardedMessageQueue {
         }
     }
 
-    enum HandleResult { APPLIED, MESSAGE_GONE, HANDLE_EXPIRED }
+    enum HandleResult { APPLIED, MESSAGE_GONE, HANDLE_NOT_ISSUED, HANDLE_EXPIRED }
 
     record Removal(HandleResult result, Message message) {
     }
@@ -177,6 +179,9 @@ class GuardedMessageQueue {
             for (Iterator<Message> it = messages.iterator(); it.hasNext(); ) {
                 Message m = it.next();
                 if (parsed.messageId().equals(m.getMessageId())) {
+                    if (!m.wasIssued(parsed.receipt())) {
+                        return new Removal(HandleResult.HANDLE_NOT_ISSUED, null);
+                    }
                     if (fifo && isExpiredFifoHandle(m, receiptHandle)) {
                         return new Removal(HandleResult.HANDLE_EXPIRED, null);
                     }
@@ -197,6 +202,9 @@ class GuardedMessageQueue {
         try (Guard _ = hold()) {
             for (Message msg : messages) {
                 if (parsed.messageId().equals(msg.getMessageId())) {
+                    if (!msg.wasIssued(parsed.receipt())) {
+                        return HandleResult.HANDLE_NOT_ISSUED;
+                    }
                     if (fifo && isExpiredFifoHandle(msg, receiptHandle)) {
                         return HandleResult.HANDLE_EXPIRED;
                     }

@@ -2234,6 +2234,27 @@ class SqsServiceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"delete", "changeVisibility"})
+    void receiptHandleThatWasNeverIssuedIsNotValidForTheQueue(String operation) {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-forged", null, region);
+        Message sent = sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        String forged = ReceiptHandle.issue(region + "::/000000000000/handle-forged", sent.getMessageId()).encode();
+
+        AwsException beforeReceive = assertThrows(AwsException.class,
+                () -> useReceiptHandle(operation, queue.getQueueUrl(), forged, region));
+        sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        AwsException afterReceive = assertThrows(AwsException.class,
+                () -> useReceiptHandle(operation, queue.getQueueUrl(), forged, region));
+
+        for (AwsException ex : List.of(beforeReceive, afterReceive)) {
+            assertEquals("ReceiptHandleIsInvalid", ex.getErrorCode());
+            assertEquals("The receipt handle \"" + forged + "\" is not valid for this queue.", ex.getMessage());
+        }
+        assertEquals(1, sqsService.peekMessages(queue.getQueueUrl(), region).size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"delete", "changeVisibility"})
     void receiptHandleOfAnotherQueueIsNotValidForTheQueue(String operation) {
         String region = "us-east-1";
         Queue origin = sqsService.createQueue("handle-origin", null, region);
