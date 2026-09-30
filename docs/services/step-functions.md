@@ -110,13 +110,14 @@ When the request sets `includeExecutionData` to false, the details objects stay 
 
 A few gaps remain. `TaskStarted`, `LambdaFunctionStarted`, and `ActivityStarted` fire at
 scheduling time, not when a worker actually picks up the task. `TaskSubmitted`, which real
-AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet. When a `Map`
-iteration fails, AWS records `MapIterationAborted` and `*StateAborted` events for the iterations
-it cuts; Floci cancels them without recording them, where a `Parallel` records the state of each
-branch it cuts, as above. A Distributed `Map` that declares no tolerance reports a failed item's
-own error rather than AWS's `States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed`
-with that error. A `Map` that declares one reports `States.ExceedToleratedFailureThreshold`, as
-AWS does.
+AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet. When an inline
+`Map` iteration fails, AWS records a `MapIterationAborted` for each iteration it cuts and the
+`*StateAborted` of the state that iteration was in, all chained to the failing iteration's last
+event and recorded before `MapIterationFailed` and `MapStateFailed`; Floci cancels the iterations
+without recording them, where a `Parallel` records the state of each branch it cuts, as above. A
+Distributed `Map` that declares no tolerance reports a failed item's own error rather than AWS's
+`States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that error. A `Map` that
+declares one reports `States.ExceedToleratedFailureThreshold`, as AWS does.
 
 ## Map concurrency
 
