@@ -21,6 +21,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
@@ -522,6 +523,67 @@ class GlueSchemaRegistryServiceTest {
             assertNull(deletion.get(5, TimeUnit.SECONDS).get(0).errorCode());
             assertEquals(versions.second().getSchemaVersionId(),
                     service.getSchemaByDefinition(versions.schemaId(), AVRO_V1, REGION).getSchemaVersionId());
+        } finally {
+            finishLookup.countDown();
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void lookupRehashesAfterSchemaIsRecreatedWithDifferentFormat() throws Exception {
+        String definition = "{\"type\":\"string\",\"x-note\":\"both formats\"}";
+        assertTrue(service.checkSchemaVersionValidity("AVRO", definition).valid());
+        assertTrue(service.checkSchemaVersionValidity("JSON", definition).valid());
+        assertLookupFindsRecreatedSchema(definition, definition);
+    }
+
+    @Test
+    void lookupFindsDefinitionInvalidForOldFormatAfterRecreation() throws Exception {
+        String jsonDefinition = "{ \"type\": \"object\", \"properties\": { \"k\": { \"type\": \"string\" } } }";
+        assertFalse(service.checkSchemaVersionValidity("AVRO", jsonDefinition).valid());
+        assertTrue(service.checkSchemaVersionValidity("JSON", jsonDefinition).valid());
+        assertFalse(jsonDefinition.equals(SchemaCompatibilityChecker.canonicalize(jsonDefinition, "JSON")));
+        assertLookupFindsRecreatedSchema(AVRO_V1, jsonDefinition);
+    }
+
+    private void assertLookupFindsRecreatedSchema(String oldDefinition, String replacementDefinition) throws Exception {
+        CountDownLatch firstSchemaRead = new CountDownLatch(1);
+        CountDownLatch finishLookup = new CountDownLatch(1);
+        AtomicBoolean paused = new AtomicBoolean();
+        AtomicReference<Thread> lookupThread = new AtomicReference<>();
+        InMemoryStorage<String, Schema> schemaStore = new InMemoryStorage<>() {
+            @Override
+            public Optional<Schema> get(String key) {
+                Optional<Schema> schema = super.get(key);
+                if (Thread.currentThread() == lookupThread.get()
+                        && key.equals("reg:users") && paused.compareAndSet(false, true)) {
+                    firstSchemaRead.countDown();
+                    awaitRelease(finishLookup);
+                }
+                return schema;
+            }
+        };
+        service = new GlueSchemaRegistryService(new InMemoryStorage<>(), schemaStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new RegionResolver(REGION, ACCOUNT_ID));
+        service.createRegistry("reg", null, null, REGION);
+        SchemaId schemaId = new SchemaId("reg", "users", null);
+        service.createSchema(new RegistryId("reg", null), "users", "AVRO", "BACKWARD",
+                null, oldDefinition, null, REGION);
+
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<SchemaVersion> lookup = pool.submit(() -> {
+                lookupThread.set(Thread.currentThread());
+                return service.getSchemaByDefinition(schemaId, replacementDefinition, REGION);
+            });
+            assertTrue(firstSchemaRead.await(5, TimeUnit.SECONDS));
+            service.deleteSchema(schemaId, REGION);
+            SchemaVersion replacement = service.createSchema(new RegistryId("reg", null),
+                    "users", "JSON", "BACKWARD", null, replacementDefinition, null, REGION).firstVersion();
+
+            finishLookup.countDown();
+            assertEquals(replacement.getSchemaVersionId(), lookup.get(5, TimeUnit.SECONDS).getSchemaVersionId());
         } finally {
             finishLookup.countDown();
             pool.shutdownNow();

@@ -43,6 +43,7 @@ public class GlueSchemaRegistryService {
     private static final int DEFAULT_MAX_RESULTS = 100;
     private static final int MAX_MAX_RESULTS = 100;
     private static final int MAX_DELETE_SCHEMA_VERSIONS = 25;
+    private static final int MAX_LOOKUP_FORMAT_ATTEMPTS = 4;
     private static final int MAX_SCHEMA_DEFINITION_LENGTH = 170_000;
 
     private static final Set<String> DATA_FORMATS = Set.of("AVRO", "JSON", "PROTOBUF");
@@ -646,18 +647,31 @@ public class GlueSchemaRegistryService {
         validateDefinitionRequired(definition);
         Schema schema = resolveSchema(schemaId, region);
         String schemaKey = schemaKey(schema.getRegistryName(), schema.getSchemaName());
-        String hash = canonicalHash(definition, schema.getDataFormat());
-        synchronized (this) {
-            Map<String, String> hashIndex = versionByDefinitionHash.get(schemaKey);
-            String id = hashIndex != null ? hashIndex.get(hash) : null;
-            if (id == null) {
-                throw new AwsException("EntityNotFoundException",
-                        "Schema version is not found. Definition not found in " + schemaKey, 400);
+        String dataFormat = schema.getDataFormat();
+        for (int attempt = 0; attempt < MAX_LOOKUP_FORMAT_ATTEMPTS; attempt++) {
+            String hash = canonicalHash(definition, dataFormat);
+            synchronized (this) {
+                String currentFormat = schemaStore.get(schemaKey)
+                        .orElseThrow(() -> new AwsException("EntityNotFoundException",
+                                "Schema is not found. " + schema.getRegistryName() + "/" + schema.getSchemaName(), 400))
+                        .getDataFormat();
+                if (!dataFormat.equals(currentFormat)) {
+                    dataFormat = currentFormat;
+                    continue;
+                }
+                Map<String, String> hashIndex = versionByDefinitionHash.get(schemaKey);
+                String id = hashIndex != null ? hashIndex.get(hash) : null;
+                if (id == null) {
+                    throw new AwsException("EntityNotFoundException",
+                            "Schema version is not found. Definition not found in " + schemaKey, 400);
+                }
+                return versionStore.get(id)
+                        .orElseThrow(() -> new AwsException("EntityNotFoundException",
+                                "Schema version vanished: " + id, 400));
             }
-            return versionStore.get(id)
-                    .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                            "Schema version vanished: " + id, 400));
         }
+        throw new AwsException("ConcurrentModificationException",
+                "Schema format changed repeatedly during definition lookup: " + schemaKey, 400);
     }
 
     // ---- Helpers ---------------------------------------------------------
