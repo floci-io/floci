@@ -3,13 +3,13 @@ package io.github.hectorvent.floci.services.codepipeline;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
-import com.sun.net.httpserver.HttpServer;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 import org.apache.commons.compress.archivers.zip.ZipFile;
@@ -25,16 +25,17 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.zip.CRC32;
 import java.util.zip.Inflater;
 import java.util.zip.InflaterInputStream;
 import java.util.zip.ZipEntry;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -273,12 +274,14 @@ class CodePipelineGitHubSourceServiceTest {
         createPipeline("github-custom", "Custom", "1", "awslabs", "lza", "main");
 
         String executionId = start("github-custom");
-        Thread.sleep(400);
 
-        assertEquals(List.of(), fetched);
-        assertEquals("InProgress", service.handle("GetPipelineExecution", mapper.createObjectNode()
-                        .put("pipelineName", "github-custom").put("pipelineExecutionId", executionId),
-                REGION, ACCOUNT).path("pipelineExecution").path("status").asText());
+        // The action must stay with its worker for a sustained window: no codeload fetch, execution still InProgress.
+        await().during(Duration.ofMillis(400)).atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            assertEquals(List.of(), fetched);
+            assertEquals("InProgress", service.handle("GetPipelineExecution", mapper.createObjectNode()
+                            .put("pipelineName", "github-custom").put("pipelineExecutionId", executionId),
+                    REGION, ACCOUNT).path("pipelineExecution").path("status").asText());
+        });
     }
 
     @Test
@@ -429,20 +432,12 @@ class CodePipelineGitHubSourceServiceTest {
                 .path("pipelineExecutionId").asText();
     }
 
-    private JsonNode awaitStatus(String pipelineName, String executionId, String expected) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        JsonNode execution;
-        do {
-            execution = service.handle("GetPipelineExecution", mapper.createObjectNode()
-                            .put("pipelineName", pipelineName).put("pipelineExecutionId", executionId),
-                    REGION, ACCOUNT).path("pipelineExecution");
-            if (expected.equals(execution.path("status").asText())) {
-                return execution;
-            }
-            Thread.sleep(25);
-        } while (System.nanoTime() < deadline);
-        throw new AssertionError("Pipeline did not reach " + expected
-                + "; last status was " + execution.path("status").asText());
+    private JsonNode awaitStatus(String pipelineName, String executionId, String expected) {
+        return await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(25))
+                .until(() -> service.handle("GetPipelineExecution", mapper.createObjectNode()
+                                .put("pipelineName", pipelineName).put("pipelineExecutionId", executionId),
+                        REGION, ACCOUNT).path("pipelineExecution"),
+                        execution -> expected.equals(execution.path("status").asText()));
     }
 
     private ZipFile deployedArtifact(String objectKey) throws Exception {
