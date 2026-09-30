@@ -474,8 +474,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return new ResolvedAuthorization(servingScope, servingScope + ":" + queryAction);
         }
 
-        if (claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST
-                && resourceInfo != null && resourceInfo.getResourceClass() != null) {
+        boolean rest = claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST;
+        if (rest && resourceInfo != null && resourceInfo.getResourceClass() != null) {
             ServiceDescriptor descriptor = catalog.byResourceClass(resourceInfo.getResourceClass()).orElse(null);
             if (descriptor != null) {
                 ResolvedAuthorization routeAuthorization = resolveRestAuthorization(descriptor, ctx);
@@ -485,8 +485,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
 
+        // A REST request is authorized by its route alone, never by an X-Amz-Target it carries.
         String servingScope = servingCredentialScope(claimedScope, ctx);
-        return new ResolvedAuthorization(servingScope, actionRegistry.resolve(servingScope, ctx));
+        return new ResolvedAuthorization(servingScope, rest
+                ? actionRegistry.resolveRoute(servingScope, ctx)
+                : actionRegistry.resolve(servingScope, ctx));
     }
 
     private ResolvedAuthorization resolveRestAuthorization(ServiceDescriptor descriptor,
@@ -495,7 +498,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 .map(catalog::canonicalCredentialScope)
                 .distinct()
                 .sorted()
-                .map(scope -> new ResolvedAuthorization(scope, actionRegistry.resolve(scope, ctx)))
+                .map(scope -> new ResolvedAuthorization(scope, actionRegistry.resolveRoute(scope, ctx)))
                 .filter(authorization -> authorization.action() != null)
                 .findFirst()
                 .orElse(null);

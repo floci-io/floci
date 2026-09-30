@@ -561,6 +561,11 @@ requests. REST-JSON requests return HTTP 403 `AccessDeniedException`; AWS Query 
 requests retain HTTP 403 XML `AccessDenied` responses. The routed protocol determines
 the status, not just the request's content type.
 
+A REST request is authorized as the operation of the route it reached. An `X-Amz-Target` header or
+a Query `Action` field on it does not change the action it is checked as, and its path is matched
+still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
+the route's rule miss.
+
 ### Resource-based policies
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries registered `ResourcePolicyProvider` SPI implementations (such as S3 bucket policies) during request authorization:

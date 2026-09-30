@@ -445,3 +445,14 @@ Identity, identity-policy, template, custom-verification-template, configuration
 `ListTemplates`, `ListEmailTemplates` and `ListExportJobs` page with `PageSize` (`MaxItems` on v1) and `NextToken`, newest first, with the page-size bounds and error messages real SES answers (probed 2026-09-25). A token belongs to the kind of resource listed, as on AWS: a v1 `ListTemplates` token continues a v2 `ListEmailTemplates` list and the other way round, while any other list refuses it. Without a page size the template lists serve 10, and a v1 `MaxItems` outside 1 to 100 is served 100 rather than refused, both as on AWS. Floci's own choice: `ListExportJobs` without a `PageSize` serves 100, since AWS documents no default for it.
 
 DKIM follows AWS's domain-centric model. A **domain** identity carries DKIM tokens (generated at verification, stable across `VerifyDomainDkim` calls); its `DkimVerificationStatus` tracks **DNS record detection** — it transitions to `Success` when the expected `<token>._domainkey.<domain>` CNAMEs are present in the Route53 emulation, not when DKIM is enabled. An **email** identity has no DKIM of its own: its `DkimAttributes` (`SigningEnabled`, `Status`, `Tokens`) are inherited from its parent domain identity when one is registered. The parent is the exact domain after the `@` (verified against AWS): a verified `example.com` covers `user@example.com` but not `user@mail.example.com` unless `mail.example.com` is itself a registered identity. `SetIdentityDkimEnabled` / `PutEmailIdentityDkimAttributes` only toggle the signing flag (they no longer force the verification status); `PutEmailIdentityDkimSigningAttributes` sets the signing origin (`AWS_SES` Easy DKIM — regenerating tokens when the key length changes — or `EXTERNAL` BYODKIM).
+
+### IAM enforcement
+
+With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, every SES v2 operation is authorized as the `ses:`
+action AWS's service reference lists for it, which is always `ses:<Operation>`, in the `ses` namespace
+v1 and v2 share. The v1 Query API resolves the same way from its `Action`. Both are evaluated with
+resource `*`, so a policy that limits `ses:` actions to an identity, configuration set or template ARN
+does not grant them yet. The other actions the service reference lists for some operations are not
+checked: `ses:TagResource` for the create operations, and `iam:PassRole` (with `iam:PassedToService`
+`ses.amazonaws.com`) for creating or updating an event destination. A v2 `SendEmail` is authorized as
+`ses:SendEmail` whatever its content: `ses:SendRawEmail` is a v1 action.
