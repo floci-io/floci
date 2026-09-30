@@ -155,11 +155,24 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
         // Tags go first: the service refuses a tag change that adds a reserved tag key, and refusing
         // it before the patch leaves the key exactly as the stack last committed it.
         ApiKey key = existing;
+        Map<String, String> priorTags = new HashMap<>(existing.getTags());
         if (tagsChanged) {
             key = apiGatewayService.replaceApiKeyTags(ctx.region(), existing.getId(), desiredTags);
         }
         if (!patches.isEmpty()) {
-            key = apiGatewayService.updateApiKey(ctx.region(), existing.getId(), patches);
+            try {
+                key = apiGatewayService.updateApiKey(ctx.region(), existing.getId(), patches);
+            } catch (RuntimeException failure) {
+                if (tagsChanged) {
+                    // The stack skips rollbackUpdate for a resource whose own update failed, so undo the tags here.
+                    try {
+                        apiGatewayService.replaceApiKeyTags(ctx.region(), existing.getId(), priorTags);
+                    } catch (RuntimeException restoreFailure) {
+                        failure.addSuppressed(restoreFailure);
+                    }
+                }
+                throw failure;
+            }
         }
         record(r, key);
     }

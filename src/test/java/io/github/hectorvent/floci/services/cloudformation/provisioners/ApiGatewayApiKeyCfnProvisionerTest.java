@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.HashMap;
 import java.util.List;
@@ -19,6 +20,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -27,6 +29,7 @@ import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -328,6 +331,32 @@ class ApiGatewayApiKeyCfnProvisionerTest {
         assertThrows(AwsException.class, () -> provisioner.provision(resource("abc123"), props, ctx("abc123")));
 
         verify(apiGateway, never()).updateApiKey(any(), any(), anyList());
+    }
+
+    @Test
+    void aFailedPatchPutsTheReplacedTagsBack() {
+        ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of("team", "core"));
+        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
+        // The service swaps the tag map on the stored key object, which is the one findApiKey returned.
+        when(apiGateway.replaceApiKeyTags(eq(REGION), eq("abc123"), anyMap())).thenAnswer(inv -> {
+            Map<String, String> replaced = inv.getArgument(2);
+            existing.setTags(new HashMap<>(replaced));
+            return existing;
+        });
+        AwsException failure = new AwsException("NotFoundException", "Invalid API Key identifier specified", 404);
+        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenThrow(failure);
+        ObjectNode props = tags("team", "platform")
+                .put("Name", "my-key")
+                .put("Description", "new")
+                .put("Enabled", "true");
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("abc123"), props, ctx("abc123")));
+
+        assertSame(failure, thrown);
+        InOrder order = inOrder(apiGateway);
+        order.verify(apiGateway).replaceApiKeyTags(REGION, "abc123", Map.of("team", "platform"));
+        order.verify(apiGateway).replaceApiKeyTags(REGION, "abc123", Map.of("team", "core"));
     }
 
     @Test
