@@ -431,14 +431,24 @@ more than syntax:
 
 | Resource | Child type | A child that fails | Result |
 | --- | --- | --- | --- |
-| `arn:aws:states:::states:startExecution` | Standard | not awaited | `{executionArn, startDate}` |
-| `arn:aws:states:::states:startExecution.sync` | Standard | fails the calling task | execution envelope, `output` as a JSON string |
-| `arn:aws:states:::states:startExecution.sync:2` | Standard | fails the calling task | the child output, parsed |
-| `arn:aws:states:::aws-sdk:sfn:startExecution` | Standard | not awaited | `{ExecutionArn, StartDate}` |
+| `arn:aws:states:::states:startExecution` | Standard | not awaited | `{ExecutionArn, StartDate}`, `StartDate` in epoch milliseconds |
+| `arn:aws:states:::states:startExecution.sync` | Standard | fails the calling task | execution envelope, `Input` and `Output` as JSON strings |
+| `arn:aws:states:::states:startExecution.sync:2` | Standard | fails the calling task | execution envelope, `Input` and `Output` as JSON values |
+| `arn:aws:states:::aws-sdk:sfn:startExecution` | Standard | not awaited | `{ExecutionArn, StartDate}`, `StartDate` as an ISO-8601 string |
 | `arn:aws:states:::aws-sdk:sfn:startSyncExecution` | Express | reported through `Status` | PascalCase envelope, `Output` as a JSON string |
 
 `states:startExecution` and `aws-sdk:sfn:startExecution` are the same API through two different
-integrations, and only the casing of the result tells them apart.
+integrations, and only the format of `StartDate` tells their results apart. AWS also adds
+`SdkHttpMetadata` and `SdkResponseMetadata` to the `states:startExecution` result, which Floci
+omits.
+
+The execution envelope of the two `.sync` modes is the child's `DescribeExecution` response,
+PascalCase with its keys in alphabetical order and dates in epoch milliseconds: `ExecutionArn`,
+`Input`, `InputDetails`, `Name`, `Output`, `OutputDetails`, `RedriveCount`, `RedriveStatus`,
+`RedriveStatusReason`, `StartDate`, `StateMachineArn`, `Status` and `StopDate`. So the child's
+output is at `$.Output` in both modes: a JSON string through `.sync`, to read with
+`States.StringToJson`, and a JSON value through `.sync:2`, to read directly, for example with a
+`ResultSelector` or `OutputPath` of `$.Output`.
 
 `startSyncExecution` is the only one that does not fail the calling task when the child fails: the
 SDK call itself succeeded, so the task result carries `Status`, `Error` and `Cause` and the parent

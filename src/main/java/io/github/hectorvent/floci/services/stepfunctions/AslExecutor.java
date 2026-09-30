@@ -1446,10 +1446,10 @@ public class AslExecutor {
     }
 
     /**
-     * AWS SDK integration for {@code sfn:startExecution}. Unlike the optimized
-     * {@code states:startExecution}, which returns {@code executionArn} and {@code startDate} in
-     * the casing of the wire response, this one returns the SDK's own {@code ExecutionArn} and an
-     * ISO-8601 {@code StartDate}. Neither waits for the child.
+     * AWS SDK integration for {@code sfn:startExecution}. Both this and the optimized
+     * {@code states:startExecution} return {@code ExecutionArn} and {@code StartDate}; the
+     * optimized one carries {@code StartDate} in epoch milliseconds, this one as an ISO-8601
+     * string. Neither waits for the child.
      */
     private JsonNode invokeAwsSdkSfnStartExecution(JsonNode input, String region) throws Exception {
         String smArn = input.path("StateMachineArn").asText(null);
@@ -1634,9 +1634,9 @@ public class AslExecutor {
     /**
      * AWS SDK integration for {@code sfn:startSyncExecution}, the way an EXPRESS child workflow is
      * called. It differs from the optimized {@code states:startExecution.sync} integration in three
-     * ways: the child must be EXPRESS, the response envelope uses PascalCase field names with
-     * {@code Output} as a JSON string, and a child execution that fails is reported through
-     * {@code Status} rather than failing the calling task.
+     * ways: the child must be EXPRESS, the response envelope is the SDK's StartSyncExecution
+     * response rather than the DescribeExecution one, and a child execution that fails is reported
+     * through {@code Status} rather than failing the calling task.
      */
     private JsonNode invokeAwsSdkSfnStartSyncExecution(JsonNode input, String region) throws Exception {
         String smArn = input.path("StateMachineArn").asText(null);
@@ -1717,19 +1717,16 @@ public class AslExecutor {
         }
         String execArn = exec.getExecutionArn();
 
-        if ("".equals(mode)) {
-            // Fire-and-forget: return { executionArn, startDate }
-            ObjectNode result = objectMapper.createObjectNode();
-            result.put("executionArn", execArn);
-            result.put("startDate", exec.getStartDate());
-            return result;
-        }
-
-        // The job is submitted: AWS records the StartExecution response here, before the wait
-        // (measured: PascalCase, StartDate in epoch milliseconds).
+        // The StartExecution response as this integration reports it (measured: PascalCase,
+        // StartDate in epoch milliseconds). Request-response returns it as the Task result.
         ObjectNode startResponse = objectMapper.createObjectNode();
         startResponse.put("ExecutionArn", execArn);
         startResponse.put("StartDate", Math.round(exec.getStartDate() * 1000));
+        if ("".equals(mode)) {
+            return startResponse;
+        }
+
+        // The job is submitted: AWS records the same response here, before the wait.
         try {
             jobSubmitted.accept(startResponse);
         } catch (RuntimeException e) {
@@ -1769,70 +1766,74 @@ public class AslExecutor {
                 continue;
             }
             if ("SUCCEEDED".equals(status)) {
-                if (".sync:2".equals(mode)) {
-                    String out = current.getOutput();
-                    return objectMapper.readTree(out != null ? out : "null");
-                }
-                // .sync — full execution envelope; output field is a JSON string
-                ObjectNode envelope = objectMapper.createObjectNode();
-                envelope.put("executionArn", current.getExecutionArn());
-                envelope.put("stateMachineArn", current.getStateMachineArn());
-                envelope.put("name", current.getName());
-                envelope.put("status", current.getStatus());
-                envelope.put("startDate", current.getStartDate());
-                if (current.getStopDate() != null) {
-                    envelope.put("stopDate", current.getStopDate());
-                }
-                if (current.getInput() != null) {
-                    envelope.put("input", current.getInput());
-                }
-                if (current.getOutput() != null) {
-                    envelope.put("output", current.getOutput());
-                }
-                return envelope;
+                // Both modes return the envelope (measured); .sync:2 differs only in carrying
+                // Input and Output as JSON values where .sync carries them as JSON strings.
+                return nestedExecutionEnvelope(current, true, ".sync:2".equals(mode));
             }
             // However the child ended, FAILED, TIMED_OUT or ABORTED, and whatever its own error, the
             // parent sees States.TaskFailed (measured), so a Catch on the child's error never fires.
-            throw new FailStateException("States.TaskFailed", nestedExecutionFailureCause(current));
+            throw new FailStateException("States.TaskFailed",
+                    nestedExecutionEnvelope(current, false, false).toString());
         }
     }
 
     /**
-     * The cause of a {@code .sync} Task whose child ended other than SUCCEEDED, as measured on AWS
-     * for {@code .sync} and {@code .sync:2} alike: the child's DescribeExecution response in
-     * PascalCase with its keys in alphabetical order, {@code Cause} and {@code Error} only when the
-     * child has them, {@code StateMachineAliasArn} and {@code StateMachineVersionArn} only when it
-     * was started through an alias or a version (an alias carries both), dates in epoch
-     * milliseconds, and no {@code Output}. Floci does not implement
-     * redrive, so the two redrive fields carry what AWS reports for a child never redriven.
+     * The child's DescribeExecution response as a {@code .sync} or {@code .sync:2} Task reports it
+     * (measured on AWS): PascalCase with its keys in alphabetical order, dates in epoch
+     * milliseconds, {@code StateMachineAliasArn} and {@code StateMachineVersionArn} only when the
+     * child was started through an alias or a version (an alias carries both).
+     *
+     * <p>A child that SUCCEEDED is the Task result: it carries {@code Output}, {@code OutputDetails}
+     * and {@code RedriveStatusReason}, and {@code .sync:2} carries {@code Input} and {@code Output}
+     * as JSON values ({@code payloadsAsJson}) where {@code .sync} carries JSON strings. A child that
+     * ended any other way is the cause of the failed Task, the same for both modes: {@code Cause}
+     * and {@code Error} only when the child has them, and no {@code Output}. Floci does not
+     * implement redrive, so the redrive fields carry what AWS reports for a child never redriven.
      */
-    private String nestedExecutionFailureCause(Execution child) {
-        ObjectNode cause = objectMapper.createObjectNode();
-        if (child.getCause() != null) {
-            cause.put("Cause", child.getCause());
+    private ObjectNode nestedExecutionEnvelope(Execution child, boolean succeeded, boolean payloadsAsJson)
+            throws JsonProcessingException {
+        ObjectNode envelope = objectMapper.createObjectNode();
+        if (!succeeded && child.getCause() != null) {
+            envelope.put("Cause", child.getCause());
         }
-        if (child.getError() != null) {
-            cause.put("Error", child.getError());
+        if (!succeeded && child.getError() != null) {
+            envelope.put("Error", child.getError());
         }
-        cause.put("ExecutionArn", child.getExecutionArn());
-        cause.put("Input", child.getInput() != null ? child.getInput() : "{}");
-        cause.putObject("InputDetails").put("Included", true);
-        cause.put("Name", child.getName());
-        cause.put("RedriveCount", 0);
-        cause.put("RedriveStatus", "REDRIVABLE");
-        cause.put("StartDate", Math.round(child.getStartDate() * 1000));
+        envelope.put("ExecutionArn", child.getExecutionArn());
+        String input = child.getInput() != null ? child.getInput() : "{}";
+        if (payloadsAsJson) {
+            envelope.set("Input", objectMapper.readTree(input));
+        } else {
+            envelope.put("Input", input);
+        }
+        envelope.putObject("InputDetails").put("Included", true);
+        envelope.put("Name", child.getName());
+        if (succeeded && child.getOutput() != null) {
+            if (payloadsAsJson) {
+                envelope.set("Output", objectMapper.readTree(child.getOutput()));
+            } else {
+                envelope.put("Output", child.getOutput());
+            }
+            envelope.putObject("OutputDetails").put("Included", true);
+        }
+        envelope.put("RedriveCount", 0);
+        envelope.put("RedriveStatus", succeeded ? "NOT_REDRIVABLE" : "REDRIVABLE");
+        if (succeeded) {
+            envelope.put("RedriveStatusReason", "Execution is SUCCEEDED and cannot be redriven");
+        }
+        envelope.put("StartDate", Math.round(child.getStartDate() * 1000));
         if (child.getStateMachineAliasArn() != null) {
-            cause.put("StateMachineAliasArn", child.getStateMachineAliasArn());
+            envelope.put("StateMachineAliasArn", child.getStateMachineAliasArn());
         }
-        cause.put("StateMachineArn", child.getStateMachineArn());
+        envelope.put("StateMachineArn", child.getStateMachineArn());
         if (child.getStateMachineVersionArn() != null) {
-            cause.put("StateMachineVersionArn", child.getStateMachineVersionArn());
+            envelope.put("StateMachineVersionArn", child.getStateMachineVersionArn());
         }
-        cause.put("Status", child.getStatus());
+        envelope.put("Status", child.getStatus());
         if (child.getStopDate() != null) {
-            cause.put("StopDate", Math.round(child.getStopDate() * 1000));
+            envelope.put("StopDate", Math.round(child.getStopDate() * 1000));
         }
-        return cause.toString();
+        return envelope;
     }
 
     /**
