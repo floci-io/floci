@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -376,6 +377,48 @@ class GlueSchemaRegistryServiceTest {
 
         assertEquals(v1.getSchemaVersionId(), same.getSchemaVersionId());
         assertEquals(1L, same.getVersionNumber());
+    }
+
+    @Test
+    void legacyAvroDuplicatesPreferEarliestVersionAndSurviveDeletion() {
+        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
+        InMemoryStorage<String, Registry> registryStore = new InMemoryStorage<>();
+        InMemoryStorage<String, Schema> schemaStore = new InMemoryStorage<>();
+        InMemoryStorage<String, SchemaVersion> versionStore = new InMemoryStorage<>() {
+            @Override
+            public List<SchemaVersion> scan(Predicate<String> keyFilter) {
+                List<SchemaVersion> versions = super.scan(keyFilter);
+                versions.sort((left, right) -> left.getVersionNumber().compareTo(right.getVersionNumber()));
+                return versions;
+            }
+        };
+        service = new GlueSchemaRegistryService(registryStore, schemaStore, versionStore,
+                new InMemoryStorage<>(), regionResolver);
+        service.createRegistry("reg", null, null, REGION);
+        SchemaVersion first = service.createSchema(new RegistryId("reg", null),
+                "users", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION).firstVersion();
+        SchemaId schemaId = new SchemaId("reg", "users", null);
+        SchemaVersion second = service.registerSchemaVersion(schemaId, AVRO_V2_BACKWARD_OK, REGION);
+        String withCustomAttribute = AVRO_V1.replace("\"type\":\"long\"",
+                "\"type\":\"long\",\"x-field\":\"legacy\"");
+        second.setSchemaDefinition(withCustomAttribute);
+        versionStore.put(second.getSchemaVersionId(), second);
+
+        service = new GlueSchemaRegistryService(registryStore, schemaStore, versionStore,
+                new InMemoryStorage<>(), regionResolver);
+        service.afterCdiInit();
+
+        assertEquals(first.getSchemaVersionId(),
+                service.getSchemaByDefinition(schemaId, withCustomAttribute, REGION).getSchemaVersionId());
+        assertEquals(first.getSchemaVersionId(),
+                service.registerSchemaVersion(schemaId, withCustomAttribute, REGION).getSchemaVersionId());
+
+        service.updateSchema(schemaId, null, null, 2L, REGION);
+        assertNull(service.deleteSchemaVersions(schemaId, "1", REGION).get(0).errorCode());
+        assertEquals(second.getSchemaVersionId(),
+                service.getSchemaByDefinition(schemaId, AVRO_V1, REGION).getSchemaVersionId());
+        assertEquals(second.getSchemaVersionId(),
+                service.registerSchemaVersion(schemaId, AVRO_V1, REGION).getSchemaVersionId());
     }
 
     @Test

@@ -424,8 +424,15 @@ public class GlueSchemaRegistryService {
             byNumber.remove(v);
             if (hash != null) {
                 Map<String, String> hashIndex = versionByDefinitionHash.get(key);
-                if (hashIndex != null) {
-                    hashIndex.remove(hash);
+                if (hashIndex != null && hashIndex.remove(hash, id)) {
+                    for (String remainingId : byNumber.values()) {
+                        SchemaVersion remaining = versionStore.get(remainingId).orElse(null);
+                        if (remaining != null && hash.equals(canonicalHash(
+                                remaining.getSchemaDefinition(), remaining.getDataFormat()))) {
+                            hashIndex.putIfAbsent(hash, remainingId);
+                            break;
+                        }
+                    }
                 }
             }
             if (v.equals(latestRemaining)) {
@@ -933,7 +940,7 @@ public class GlueSchemaRegistryService {
         String hash = canonicalHash(version.getSchemaDefinition(), version.getDataFormat());
         versionByDefinitionHash
                 .computeIfAbsent(schemaKey, k -> new ConcurrentHashMap<>())
-                .put(hash, version.getSchemaVersionId());
+                .putIfAbsent(hash, version.getSchemaVersionId());
     }
 
     private void rebuildVersionIndexes() {
@@ -943,7 +950,9 @@ public class GlueSchemaRegistryService {
         for (Schema s : schemaStore.scan(k -> true)) {
             arnToSchemaKey.put(s.getSchemaArn(), schemaKey(s.getRegistryName(), s.getSchemaName()));
         }
-        for (SchemaVersion v : versionStore.scan(k -> true)) {
+        List<SchemaVersion> versions = new ArrayList<>(versionStore.scan(k -> true));
+        versions.sort(Comparator.comparing(SchemaVersion::getVersionNumber));
+        for (SchemaVersion v : versions) {
             String schemaKey = arnToSchemaKey.get(v.getSchemaArn());
             if (schemaKey == null) {
                 continue;
