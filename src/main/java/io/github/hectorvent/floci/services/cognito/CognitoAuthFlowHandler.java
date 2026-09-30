@@ -523,62 +523,79 @@ final class CognitoAuthFlowHandler {
     }
 
     /**
-     * The USER_AUTH challenges managed login's choice-based sign-in can offer {@code username}. An
-     * unknown user is offered every factor the pool allows, as USER_AUTH's simulated challenge is, so
-     * the page does not tell who has an account.
-     */
-    List<String> managedLoginChallenges(UserPool pool, String username) {
-        CognitoUser user;
-        try {
-            user = service.adminGetUser(pool.getId(), username);
-        } catch (AwsException exception) {
-            if (!"UserNotFoundException".equals(exception.getErrorCode())) {
-                throw exception;
-            }
-            return configuredUserAuthChallenges(pool);
-        }
-        requireSignInEligible(user);
-        return allowedUserAuthChallenges(pool, user);
-    }
-
-    /**
      * Emails {@code username} a code, as answering SELECT_CHALLENGE with EMAIL_OTP does, and returns
-     * the USER_AUTH session that {@link #completeManagedLoginEmailOtp} answers. An unknown user gets
-     * a session that no code completes, and no message.
+     * the USER_AUTH session that {@link #completeManagedLoginEmailOtp} answers. A user who is unknown,
+     * cannot sign in, or has no verified email gets a session that no code completes, and no message,
+     * so the page answers every username alike. Asking again before a new code may be sent gets a
+     * session for the code already sent.
      */
     String startManagedLoginEmailOtp(UserPool pool, UserPoolClient client, String username) {
-        CognitoUser user;
-        try {
-            user = service.adminGetUser(pool.getId(), username);
-        } catch (AwsException exception) {
-            if (!"UserNotFoundException".equals(exception.getErrorCode())) {
-                throw exception;
-            }
+        CognitoUser user = emailOtpRecipient(pool, username);
+        if (user == null) {
             return (String) userAuthChallengeResponse(pool, client, username, "EMAIL_OTP", null,
                     Map.of("USERNAME", username), false).get("Session");
         }
-        requireSignInEligible(user);
-        return (String) startUserAuthChallenge(pool, client, user, "EMAIL_OTP", allowedUserAuthChallenges(pool, user),
-                false, Map.of(), Map.of()).get("Session");
+        try {
+            return (String) startUserAuthChallenge(pool, client, user, "EMAIL_OTP",
+                    allowedUserAuthChallenges(pool, user), false, Map.of(), Map.of()).get("Session");
+        } catch (AwsException exception) {
+            if (!"LimitExceededException".equals(exception.getErrorCode())) {
+                throw exception;
+            }
+            // The code sent moments ago is still live, and this session takes it. Refusing would tell
+            // this user from an unknown one, who is never sent a code and so never reaches the limit.
+            return (String) userAuthChallengeResponse(pool, client, user, "EMAIL_OTP", null,
+                    Map.of("USERNAME", user.getUsername())).get("Session");
+        }
+    }
+
+    /**
+     * The user {@code username} names when an emailed code may sign them in, or null for a user who is
+     * unknown, cannot sign in, or has no verified email.
+     */
+    private CognitoUser emailOtpRecipient(UserPool pool, String username) {
+        CognitoUser user;
+        try {
+            user = service.adminGetUser(pool.getId(), username);
+        } catch (AwsException exception) {
+            if (!"UserNotFoundException".equals(exception.getErrorCode())) {
+                throw exception;
+            }
+            return null;
+        }
+        try {
+            requireSignInEligible(user);
+        } catch (AwsException expected) {
+            // Why a user cannot sign in shows only after a correct code, which this user is not sent.
+            return null;
+        }
+        return allowedUserAuthChallenges(pool, user).contains("EMAIL_OTP") ? user : null;
     }
 
     /**
      * Managed login's answer to its EMAIL_OTP challenge: checks the code and returns the signed-in
      * user, issuing no tokens, as {@link #authenticateManagedLogin} does for a password. Unlike
-     * RespondToAuthChallenge, a wrong code leaves the session for another try, since the page asks
-     * again; the code itself stops working after too many wrong ones.
+     * RespondToAuthChallenge, a wrong or expired code ({@code CodeMismatchException} or
+     * {@code ExpiredCodeException}) leaves the session for another try, since the page asks again; the
+     * code itself stops working after too many wrong ones. After any other failure the session is spent
+     * or gone. Why a user cannot sign in shows only after a correct code.
      */
     CognitoUser completeManagedLoginEmailOtp(UserPool pool, UserPoolClient client, String session, String code) {
-        UserAuthSession state = findUserAuthSession(pool, client, session, "EMAIL_OTP");
-        if (!state.userExists()) {
-            throw new AwsException("CodeMismatchException", CODE_MISMATCH, 400);
-        }
-        CognitoUser user = service.adminGetUser(pool.getId(), state.username());
-        requireSignInEligible(user);
-        service.consumeSignInOtp(pool.getId(), user.getUsername(), VerificationCode.Purpose.EMAIL_OTP, code);
+        String username;
+        // The code is checked and the session spent under the lock that every read and removal of a
+        // session takes, RespondToAuthChallenge's included, so of several requests answering one session
+        // with its code, one signs in and the others find the session spent.
         synchronized (userAuthSessionLock) {
-            userAuthSessions.remove(session, state);
+            UserAuthSession state = findUserAuthSession(pool, client, session, "EMAIL_OTP");
+            if (!state.userExists()) {
+                throw new AwsException("CodeMismatchException", CODE_MISMATCH, 400);
+            }
+            service.consumeSignInOtp(pool.getId(), state.username(), VerificationCode.Purpose.EMAIL_OTP, code);
+            userAuthSessions.remove(session);
+            username = state.username();
         }
+        CognitoUser user = service.adminGetUser(pool.getId(), username);
+        requireSignInEligible(user);
         if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
             throw new AwsException("NotAuthorizedException", MANAGED_LOGIN_NEW_PASSWORD, 400);
         }
@@ -692,6 +709,15 @@ final class CognitoAuthFlowHandler {
 
     private static String buildSessionToken(String poolId, String username, String clientId) {
         String raw = poolId + "|" + username + "|" + clientId + "|" + UUID.randomUUID();
+        return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * A USER_AUTH session token. Unlike {@link #buildSessionToken} it does not carry the username, or a
+     * simulated challenge's token would tell an unknown or ineligible user from one who can sign in.
+     */
+    private static String userAuthSessionToken(String poolId, String clientId) {
+        String raw = poolId + "|" + clientId + "|" + UUID.randomUUID();
         return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
@@ -1001,7 +1027,7 @@ final class CognitoAuthFlowHandler {
                                                             String challengeName, List<String> available,
                                                             Map<String, String> challengeParameters,
                                                             boolean userExists) {
-        String session = buildSessionToken(pool.getId(), username, client.getClientId());
+        String session = userAuthSessionToken(pool.getId(), client.getClientId());
         synchronized (userAuthSessionLock) {
             Instant issuedAt = clock.instant();
             // Each entry uses its own client's lifetime, even after a clock rollback.
@@ -1044,7 +1070,10 @@ final class CognitoAuthFlowHandler {
         return checkUserAuthSession(pool, client, state, expectedChallenge);
     }
 
-    /** As {@link #consumeUserAuthSession}, but leaves the session in place for its caller to remove. */
+    /**
+     * As {@link #consumeUserAuthSession}, but leaves the session in place, for a caller that checks its
+     * answer and removes it while holding {@code userAuthSessionLock}.
+     */
     private UserAuthSession findUserAuthSession(UserPool pool, UserPoolClient client, String session,
                                                 String expectedChallenge) {
         UserAuthSession state;

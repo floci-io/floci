@@ -413,24 +413,32 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
 
 Choice-based sign-in applies when the pool's `SignInPolicy.AllowedFirstAuthFactors` includes
 `EMAIL_OTP` and the client's `ExplicitAuthFlows` includes `ALLOW_USER_AUTH` (on a pool above the
-Lite tier). The page then takes one step per `POST /cognito-idp/login`:
+Lite tier). The page then takes one step per `POST /cognito-idp/login`. Up to the password or the
+code, every username gets the same pages, so they do not tell who has an account, which factors
+they have, or whether they can sign in:
 
-1. The username. The page looks up the `USER_AUTH` challenges the user has, as `InitiateAuth`
-   would offer them, and keeps `PASSWORD` (for either password challenge) and `EMAIL_OTP`.
-2. The factor, as buttons that post `challenge=PASSWORD` or `challenge=EMAIL_OTP`, when the user
-   has both. A user with one factor goes straight to it.
-3. For `PASSWORD`, the username and password form. For `EMAIL_OTP`, the page sends a code
-   through the `USER_AUTH` `EMAIL_OTP` challenge, so it arrives in Floci's SES (readable at
-   `/_aws/ses`), and shows a code field. The username and the challenge's `Session` travel in
-   hidden fields. A correct code signs the user in as the password does: the session cookie,
-   and a redirect to the callback with `code` and `state`. A wrong code shows the code field
-   again with `Invalid verification code provided, please try again.` and the same session, so
-   the user can try again until the session (the client's `AuthSessionValidity`) or the code runs out.
+1. The username.
+2. The factor, as buttons that post `challenge=PASSWORD` or `challenge=EMAIL_OTP`, when the policy
+   allows both. When it allows only `EMAIL_OTP`, every username goes straight to the code.
+3. For `PASSWORD`, the username and password form, where a user without a password fails as a
+   wrong password does. For `EMAIL_OTP`, the page sends a code through the `USER_AUTH` `EMAIL_OTP`
+   challenge, so it arrives in Floci's SES (readable at `/_aws/ses`), and shows a code field. The
+   username and the challenge's `Session` travel in hidden fields. A correct code signs the user
+   in as the password does: the session cookie, and a redirect to the callback with `code` and
+   `state`. A wrong code shows the code field again with
+   `Invalid verification code provided, please try again.` and the same session, so the user can
+   try again until the session (the client's `AuthSessionValidity`) or the code runs out.
 
-An unknown user is offered the policy's factors and asked for a code like anyone else, but no
-message is sent and no code signs them in. A password posted to a pool whose policy leaves out
-`PASSWORD` is refused. Without choice-based sign-in, the page is the username and password form
-above, whatever the policy says.
+Only a user who can sign in and has a verified email is sent a code. Anyone else, an unknown user
+included, gets the same code field, but no message is sent and every code is wrong. Asking again
+within 30 seconds, before Floci sends another code, shows the code field for the code already
+sent. Why a user cannot sign in (disabled, unconfirmed, a password reset or a new password
+required) shows only after a correct code. A correct code uses up the session, so when the user
+cannot sign in or the post authentication trigger fails, the page goes back to the username with
+the reason. Of several requests that answer one session with its code at once, one signs in and
+the others go back to the username. A password posted to a pool whose policy leaves out `PASSWORD`
+is refused. Without choice-based sign-in, the page is the username and password form above,
+whatever the policy says.
 
 PKCE follows AWS: `code_challenge_method` must be `S256`, and discovery advertises
 `code_challenge_methods_supported: ["S256"]`. A code issued with a `code_challenge` is

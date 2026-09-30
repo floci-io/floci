@@ -187,7 +187,8 @@ public class CognitoOAuthController {
                     "Your sign-in page expired. Sign in again.", username);
         }
         if (!choiceFactors.isEmpty() && !formParams.containsKey("password")) {
-            return continueChoiceBasedSignIn(requestContext, request, check.client(), username, formParams);
+            return continueChoiceBasedSignIn(requestContext, request, check.client(), choiceFactors, username,
+                    formParams);
         }
         String password = formParams.getFirst("password");
         if (trimToNull(username) == null || password == null || password.isEmpty()) {
@@ -209,12 +210,13 @@ public class CognitoOAuthController {
     }
 
     /**
-     * One step of choice-based sign-in, which takes the username, then the factor when the user has
-     * more than one, then the password or the emailed code. The username travels between the steps in
-     * a hidden field, and the code step's USER_AUTH session with it.
+     * One step of choice-based sign-in, which takes the username, then the factor when the policy offers
+     * more than one, then the password or the emailed code. Every username gets the same steps, so they
+     * do not tell who has an account, which factors they have, or whether they can sign in. The username
+     * travels between the steps in a hidden field, and the code step's USER_AUTH session with it.
      */
     private Response continueChoiceBasedSignIn(ContainerRequestContext requestContext, AuthorizationRequest request,
-                                               UserPoolClient client, String username,
+                                               UserPoolClient client, List<String> factors, String username,
                                                MultivaluedMap<String, String> formParams) {
         if (trimToNull(username) == null) {
             return usernamePage(requestContext, request, Response.Status.BAD_REQUEST, "Enter your username.", null);
@@ -222,12 +224,6 @@ public class CognitoOAuthController {
         if (formParams.containsKey("code")) {
             return signInWithEmailCode(requestContext, request, client, username, formParams.getFirst("session"),
                     formParams.getFirst("code"));
-        }
-        List<String> factors;
-        try {
-            factors = managedLoginService.factorsFor(client, username);
-        } catch (AwsException e) {
-            return usernamePage(requestContext, request, Response.Status.BAD_REQUEST, signInError(e), username);
         }
         String factor = formParams.getFirst("challenge");
         if (factor == null && factors.size() == 1) {
@@ -253,8 +249,9 @@ public class CognitoOAuthController {
     }
 
     /**
-     * The code step of choice-based sign-in. A wrong code shows the code form again with the same
-     * session; a session that is gone or expired sends the user back to the username.
+     * The code step of choice-based sign-in. A wrong or expired code shows the code form again with the
+     * same session. Any other failure sends the user back to the username: the session is gone or expired,
+     * or the code was right and has spent it, as when the user cannot sign in or PostAuthentication fails.
      */
     private Response signInWithEmailCode(ContainerRequestContext requestContext, AuthorizationRequest request,
                                          UserPoolClient client, String username, String userAuthSession,
@@ -271,11 +268,11 @@ public class CognitoOAuthController {
         try {
             sessionId = managedLoginService.signInWithEmailCode(client, userAuthSession, code.trim());
         } catch (AwsException e) {
-            if ("NotAuthorizedException".equals(e.getErrorCode())) {
-                return usernamePage(requestContext, request, Response.Status.BAD_REQUEST, e.getMessage(), username);
+            if ("CodeMismatchException".equals(e.getErrorCode()) || "ExpiredCodeException".equals(e.getErrorCode())) {
+                return codePage(requestContext, request, Response.Status.BAD_REQUEST, e.getMessage(), username,
+                        userAuthSession);
             }
-            return codePage(requestContext, request, Response.Status.BAD_REQUEST, e.getMessage(), username,
-                    userAuthSession);
+            return usernamePage(requestContext, request, Response.Status.BAD_REQUEST, signInError(e), username);
         }
         return completeSignIn(requestContext, request, client, true, sessionId, username);
     }

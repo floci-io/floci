@@ -11,7 +11,6 @@ import org.jboss.logging.Logger;
 
 import java.time.Clock;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -55,10 +54,10 @@ public class CognitoManagedLoginService {
     }
 
     /**
-     * The factors the sign-in page lets a user choose from after their username, or an empty list when
-     * the page is the plain username and password form. Choice-based sign-in applies when the pool's
-     * sign-in policy allows EMAIL_OTP and the client allows USER_AUTH; the page offers the policy's
-     * PASSWORD and EMAIL_OTP.
+     * The factors the sign-in page offers after the username, the same for every username, or an empty
+     * list when the page is the plain username and password form. Choice-based sign-in applies when the
+     * pool's sign-in policy allows EMAIL_OTP and the client allows USER_AUTH; the page offers the
+     * policy's PASSWORD and EMAIL_OTP.
      */
     public List<String> choiceBasedFactors(UserPoolClient client) {
         List<String> allowed = cognitoService.managedLoginFirstFactors(client);
@@ -69,28 +68,9 @@ public class CognitoManagedLoginService {
     }
 
     /**
-     * The factors {@code username} can choose from in choice-based sign-in: PASSWORD when USER_AUTH
-     * would offer them a password challenge, and EMAIL_OTP.
-     *
-     * @throws AwsException when the user cannot sign in, or has no factor the page offers
-     */
-    public List<String> factorsFor(UserPoolClient client, String username) {
-        List<String> challenges = cognitoService.managedLoginChallenges(client, username);
-        List<String> factors = new ArrayList<>();
-        if (challenges.contains("PASSWORD") || challenges.contains("PASSWORD_SRP")) {
-            factors.add("PASSWORD");
-        }
-        if (challenges.contains("EMAIL_OTP")) {
-            factors.add("EMAIL_OTP");
-        }
-        if (factors.isEmpty()) {
-            throw new AwsException("NotAuthorizedException", "No sign-in method is available for this user.", 400);
-        }
-        return factors;
-    }
-
-    /**
-     * Emails the user a sign-in code through the USER_AUTH EMAIL_OTP challenge.
+     * Emails the user a sign-in code through the USER_AUTH EMAIL_OTP challenge. A username that no code
+     * can sign in, because it is unknown, cannot sign in, or has no verified email, is sent nothing but
+     * gets a session all the same.
      *
      * @return the USER_AUTH session that {@link #signInWithEmailCode} answers
      */
@@ -100,7 +80,9 @@ public class CognitoManagedLoginService {
 
     /**
      * Signs the user of a USER_AUTH EMAIL_OTP session in with the code they were sent, and opens a
-     * session for them. A wrong code leaves the USER_AUTH session for another try.
+     * session for them. Only a wrong or expired code ({@code CodeMismatchException} or
+     * {@code ExpiredCodeException}) leaves the USER_AUTH session for another try; after any other
+     * failure it is spent or gone.
      *
      * @return the session's id, the value of the browser's session cookie
      * @throws AwsException when the code is wrong or the user cannot sign in, with the reason in its message

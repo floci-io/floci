@@ -3437,6 +3437,67 @@ class CognitoServiceTest {
         assertEquals("NotAuthorizedException", replayed.getErrorCode(), "a session that signed in is spent");
     }
 
+    /**
+     * Requests answering one session with its code at the same moment, from the sign-in page or from
+     * RespondToAuthChallenge, sign in once, and the others find the session spent. The mocked code check
+     * passes for every caller and takes a moment, as the real one can for requests that read the code
+     * together, so only spending the session stands between them and a second sign-in.
+     */
+    @Test
+    void managedLoginEmailOtpSignsInOnceWhenTheSameCodeArrivesConcurrently() throws Exception {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenReturn("654321");
+        doAnswer(invocation -> {
+            Thread.sleep(20);
+            return null;
+        }).when(verificationCodeService).consume(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), eq("654321"));
+        CognitoService serviceWithVerification = serviceWithVerification(verificationCodeService);
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, null);
+        int callers = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(callers);
+        try {
+            for (int round = 0; round < 10; round++) {
+                String session = serviceWithVerification.startManagedLoginEmailOtp(client, "alice");
+                CountDownLatch ready = new CountDownLatch(callers);
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Boolean>> outcomes = new ArrayList<>();
+                for (int caller = 0; caller < callers; caller++) {
+                    boolean throughTheApi = caller % 2 == 1;
+                    outcomes.add(executor.submit(() -> {
+                        ready.countDown();
+                        start.await();
+                        try {
+                            if (throughTheApi) {
+                                serviceWithVerification.respondToAuthChallenge(client.getClientId(), "EMAIL_OTP",
+                                        session, Map.of("USERNAME", "alice", "EMAIL_OTP_CODE", "654321"));
+                            } else {
+                                serviceWithVerification.completeManagedLoginEmailOtp(client, session, "654321");
+                            }
+                            return true;
+                        } catch (AwsException e) {
+                            assertEquals("NotAuthorizedException", e.getErrorCode(), e.getMessage());
+                            return false;
+                        }
+                    }));
+                }
+                assertTrue(ready.await(10, TimeUnit.SECONDS));
+                start.countDown();
+                int signedIn = 0;
+                for (Future<Boolean> outcome : outcomes) {
+                    if (outcome.get(10, TimeUnit.SECONDS)) {
+                        signedIn++;
+                    }
+                }
+                assertEquals(1, signedIn, "round " + round);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     /** A service whose EMAIL_OTP code is always {@code code}, with delivery mocked out. */
     private CognitoService serviceWithEmailOtpCode(String code) {
         VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);

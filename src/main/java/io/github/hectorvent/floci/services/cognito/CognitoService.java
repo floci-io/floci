@@ -2947,11 +2947,6 @@ public class CognitoService implements ResourceProvider {
         return authFlowHandler.managedLoginFirstFactors(describeUserPool(client.getUserPoolId()), client);
     }
 
-    /** See {@link CognitoAuthFlowHandler#managedLoginChallenges}. */
-    List<String> managedLoginChallenges(UserPoolClient client, String username) {
-        return authFlowHandler.managedLoginChallenges(describeUserPool(client.getUserPoolId()), username);
-    }
-
     /** See {@link CognitoAuthFlowHandler#startManagedLoginEmailOtp}. */
     String startManagedLoginEmailOtp(UserPoolClient client, String username) {
         return authFlowHandler.startManagedLoginEmailOtp(describeUserPool(client.getUserPoolId()), client, username);
