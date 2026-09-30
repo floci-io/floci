@@ -189,6 +189,7 @@ public class RdsService implements Resettable, ResourceProvider {
     // Null when a test constructs the service without CloudWatch; auto-pause then reports no metrics.
     private final CloudWatchMetricsService metricsService;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
+    private final Set<String> reportedMemberRelayFailures = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
     private static final int SERVERLESS_V2_DEFAULT_AUTO_PAUSE_SECONDS = 300;
@@ -415,6 +416,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     public void clear() {
         usedPorts.clear();
+        reportedMemberRelayFailures.clear();
     }
 
     // ── DB Instances ──────────────────────────────────────────────────────────
@@ -3205,6 +3207,7 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setStatus(DbInstanceStatus.AVAILABLE);
         }
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
+        reportedMemberRelayFailures.remove(instance.getDbInstanceArn());
         LOG.infov("Backing database container for DB instance {0} started on retry", id);
         return instance;
     }
@@ -3341,7 +3344,9 @@ public class RdsService implements Resettable, ResourceProvider {
                 } catch (RuntimeException persistFailure) {
                     e.addSuppressed(persistFailure);
                 }
-                LOG.debugv(e, "Failed to restore RDS cluster member {0}; its relay can be retried", memberId);
+                Logger.Level level = reportedMemberRelayFailures.add(member.getDbInstanceArn())
+                        ? Logger.Level.WARN : Logger.Level.DEBUG;
+                LOG.logv(level, e, "Failed to restore RDS cluster member {0}; its relay can be retried", memberId);
                 if (restart) {
                     if (restartFailure == null) {
                         restartFailure = e;
@@ -3437,6 +3442,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
         releaseProxyPort(instance.getProxyPort());
         deleteInstanceForScope(currentAccountId(), effectiveRegion, id);
+        reportedMemberRelayFailures.remove(instance.getDbInstanceArn());
         LOG.infov("DB instance {0} deleted", id);
     }
 
