@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
+import io.github.hectorvent.floci.services.cognito.verification.SlowVerificationCodeStore;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeException;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
@@ -47,7 +48,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -3440,20 +3441,14 @@ class CognitoServiceTest {
 
     /**
      * Requests answering one session with its code at the same moment, from the sign-in page or from
-     * RespondToAuthChallenge, sign in once, and the others find the session spent. The mocked code check
-     * passes for every caller and takes a moment, as the real one can for requests that read the code
-     * together, so only spending the session stands between them and a second sign-in.
+     * RespondToAuthChallenge, sign in once: the code store redeems the code once, and the others find it
+     * used or the session spent. The store reads the code a moment late, so they would all find it unused
+     * if redeeming it were not one step.
      */
     @Test
     void managedLoginEmailOtpSignsInOnceWhenTheSameCodeArrivesConcurrently() throws Exception {
-        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
-        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
-                .thenReturn("654321");
-        doAnswer(invocation -> {
-            Thread.sleep(20);
-            return null;
-        }).when(verificationCodeService).consume(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), eq("654321"));
-        CognitoService serviceWithVerification = serviceWithVerification(verificationCodeService);
+        AtomicReference<String> sentCode = new AtomicReference<>();
+        CognitoService serviceWithVerification = serviceWithSlowCodeStore(Clock.systemUTC(), sentCode);
         UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         createUserWithVerifiedEmail(serviceWithVerification, pool, null);
@@ -3462,6 +3457,7 @@ class CognitoServiceTest {
         try {
             for (int round = 0; round < 10; round++) {
                 String session = serviceWithVerification.startManagedLoginEmailOtp(client, "alice");
+                String code = sentCode.get();
                 CountDownLatch ready = new CountDownLatch(callers);
                 CountDownLatch start = new CountDownLatch(1);
                 List<Future<Boolean>> outcomes = new ArrayList<>();
@@ -3473,13 +3469,14 @@ class CognitoServiceTest {
                         try {
                             if (throughTheApi) {
                                 serviceWithVerification.respondToAuthChallenge(client.getClientId(), "EMAIL_OTP",
-                                        session, Map.of("USERNAME", "alice", "EMAIL_OTP_CODE", "654321"));
+                                        session, Map.of("USERNAME", "alice", "EMAIL_OTP_CODE", code));
                             } else {
-                                serviceWithVerification.completeManagedLoginEmailOtp(client, session, "654321");
+                                serviceWithVerification.completeManagedLoginEmailOtp(client, session, code);
                             }
                             return true;
                         } catch (AwsException e) {
-                            assertEquals("NotAuthorizedException", e.getErrorCode(), e.getMessage());
+                            assertTrue(Set.of("CodeMismatchException", "NotAuthorizedException")
+                                    .contains(e.getErrorCode()), e.getErrorCode() + ": " + e.getMessage());
                             return false;
                         }
                     }));
@@ -3500,10 +3497,9 @@ class CognitoServiceTest {
     }
 
     /**
-     * Every live EMAIL_OTP or SMS_OTP session of a user takes the user's one code, so two of them answered
-     * with it at once through RespondToAuthChallenge sign in once. The mocked code store reads the code and
-     * marks it used a moment later, as the real one reads it and then deletes it, so both sessions pass the
-     * check unless it runs under a lock.
+     * Every live EMAIL_OTP or SMS_OTP session of a user takes the user's latest code, so two of them answered
+     * with it at once through RespondToAuthChallenge sign in once: the code store redeems it once. The store
+     * reads the code a moment late, so both would find it unused if redeeming it were not one step.
      */
     @ParameterizedTest
     @CsvSource({"EMAIL_OTP, EMAIL_OTP_CODE, email, alice@example.com",
@@ -3511,20 +3507,9 @@ class CognitoServiceTest {
     void respondToAuthChallengeRedeemsASignInCodeOnceAcrossSessions(String challenge, String codeParameter,
                                                                     String attribute, String destination)
             throws Exception {
-        VerificationCode.Purpose purpose = VerificationCode.Purpose.valueOf(challenge);
-        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
-        when(verificationCodeService.issue(any(), any(), eq(purpose), any())).thenReturn("654321");
-        AtomicBoolean redeemed = new AtomicBoolean();
-        doAnswer(invocation -> {
-            boolean used = redeemed.get();
-            Thread.sleep(20);
-            if (used) {
-                throw new VerificationCodeException(VerificationCodeException.Kind.NOT_FOUND, "used");
-            }
-            redeemed.set(true);
-            return null;
-        }).when(verificationCodeService).consume(any(), any(), eq(purpose), eq("654321"));
-        CognitoService serviceWithVerification = serviceWithVerification(verificationCodeService);
+        MutableClock clock = new MutableClock();
+        AtomicReference<String> sentCode = new AtomicReference<>();
+        CognitoService serviceWithVerification = serviceWithSlowCodeStore(clock, sentCode);
         UserPool pool = poolWithFirstFactors(serviceWithVerification, challenge);
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
@@ -3532,12 +3517,14 @@ class CognitoServiceTest {
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
             for (int round = 0; round < 10; round++) {
-                redeemed.set(false);
                 List<String> sessions = new ArrayList<>();
                 while (sessions.size() < 2) {
                     sessions.add((String) serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
                             Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", challenge)).get("Session"));
+                    // Past the resend limit, the next session's code replaces this one's, and both take it.
+                    clock.advance(Duration.ofSeconds(31));
                 }
+                String code = sentCode.get();
                 CountDownLatch ready = new CountDownLatch(sessions.size());
                 CountDownLatch start = new CountDownLatch(1);
                 List<Future<Boolean>> outcomes = new ArrayList<>();
@@ -3547,7 +3534,7 @@ class CognitoServiceTest {
                         start.await();
                         try {
                             serviceWithVerification.respondToAuthChallenge(client.getClientId(), challenge, session,
-                                    Map.of("USERNAME", "alice", codeParameter, "654321"));
+                                    Map.of("USERNAME", "alice", codeParameter, code));
                             return true;
                         } catch (AwsException e) {
                             assertEquals("CodeMismatchException", e.getErrorCode(), e.getMessage());
@@ -3570,6 +3557,56 @@ class CognitoServiceTest {
         }
     }
 
+    /**
+     * Redeeming a code holds up no other user: while one user's code is slow to redeem, from the sign-in page
+     * or from RespondToAuthChallenge, another user starts a USER_AUTH sign-in and answers it with their code.
+     */
+    @ParameterizedTest
+    @CsvSource({"page", "api"})
+    void slowCodeRedemptionForOneUserDoesNotHoldUpAnotherUsersSignIn(String aliceAnswersThrough) throws Exception {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenReturn("654321");
+        CountDownLatch aliceRedeeming = new CountDownLatch(1);
+        CountDownLatch releaseAlice = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            aliceRedeeming.countDown();
+            assertTrue(releaseAlice.await(10, TimeUnit.SECONDS));
+            return null;
+        }).when(verificationCodeService).consume(any(), eq("alice"), eq(VerificationCode.Purpose.EMAIL_OTP), any());
+        CognitoService serviceWithVerification = serviceWithVerification(verificationCodeService);
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        for (String username : List.of("alice", "bob")) {
+            serviceWithVerification.adminCreateUser(pool.getId(), username,
+                    Map.of("email", username + "@example.com", "email_verified", "true"), null);
+        }
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            String aliceSession = serviceWithVerification.startManagedLoginEmailOtp(client, "alice");
+            Future<Object> alice = executor.submit(() -> "page".equals(aliceAnswersThrough)
+                    ? serviceWithVerification.completeManagedLoginEmailOtp(client, aliceSession, "654321")
+                    : serviceWithVerification.respondToAuthChallenge(client.getClientId(), "EMAIL_OTP",
+                            aliceSession, Map.of("USERNAME", "alice", "EMAIL_OTP_CODE", "654321")));
+            assertTrue(aliceRedeeming.await(10, TimeUnit.SECONDS));
+
+            Future<Map<String, Object>> bob = executor.submit(() -> {
+                String bobSession = (String) serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                        Map.of("USERNAME", "bob", "PREFERRED_CHALLENGE", "EMAIL_OTP")).get("Session");
+                return serviceWithVerification.respondToAuthChallenge(client.getClientId(), "EMAIL_OTP", bobSession,
+                        Map.of("USERNAME", "bob", "EMAIL_OTP_CODE", "654321"));
+            });
+
+            assertNotNull(bob.get(5, TimeUnit.SECONDS).get("AuthenticationResult"),
+                    "bob signs in while alice's code is still being redeemed");
+            releaseAlice.countDown();
+            assertNotNull(alice.get(10, TimeUnit.SECONDS));
+        } finally {
+            releaseAlice.countDown();
+            executor.shutdownNow();
+        }
+    }
+
     /** A service whose EMAIL_OTP code is always {@code code}, with delivery mocked out. */
     private CognitoService serviceWithEmailOtpCode(String code) {
         VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
@@ -3579,6 +3616,11 @@ class CognitoServiceTest {
     }
 
     private CognitoService serviceWithVerification(VerificationCodeService verificationCodeService) {
+        return serviceWithVerification(verificationCodeService, mock(CognitoMessageDispatcher.class));
+    }
+
+    private CognitoService serviceWithVerification(VerificationCodeService verificationCodeService,
+                                                   CognitoMessageDispatcher messageDispatcher) {
         return new CognitoService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -3594,9 +3636,23 @@ class CognitoServiceTest {
                 null,
                 acmService,
                 verificationCodeService,
-                mock(CognitoMessageDispatcher.class),
+                messageDispatcher,
                 mock(TlsCertificateManager.class)
         );
+    }
+
+    /**
+     * A service with the real code store over a {@link SlowVerificationCodeStore}, keeping its codes' time by
+     * {@code clock}, that puts each code it sends in {@code sentCode}.
+     */
+    private CognitoService serviceWithSlowCodeStore(Clock clock, AtomicReference<String> sentCode) {
+        CognitoMessageDispatcher dispatcher = mock(CognitoMessageDispatcher.class);
+        doAnswer(invocation -> {
+            sentCode.set(invocation.getArgument(3));
+            return null;
+        }).when(dispatcher).dispatch(any(), any(), any(), anyString(), any(), any());
+        return serviceWithVerification(new VerificationCodeService(SlowVerificationCodeStore.factory(), clock),
+                dispatcher);
     }
 
     private static UserPool poolWithFirstFactors(CognitoService service, String... factors) {

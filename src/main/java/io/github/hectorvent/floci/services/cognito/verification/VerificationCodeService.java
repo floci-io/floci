@@ -41,10 +41,17 @@ public final class VerificationCodeService {
     private static final Duration RATE_LIMIT_WINDOW = Duration.ofSeconds(30);
     private static final int MAX_ATTEMPTS = 5;
     private static final int SALT_BYTES = 16;
+    private static final int CONSUME_LOCK_STRIPES = 256;
 
     private final StorageBackend<String, VerificationCode> store;
     private final Clock clock;
     private final SecureRandom random;
+    /**
+     * Stripes, by storage key, that make {@link #consume} one step per code: only codes whose keys share a
+     * stripe wait on each other. Nothing but this service's store is called under one, never a Lambda
+     * trigger or a Cognito lock, so no lock a caller holds around consume() can form a cycle with it.
+     */
+    private final Object[] consumeLocks = newConsumeLocks();
 
     public VerificationCodeService(StorageFactory storageFactory, Clock clock) {
         this.store = storageFactory.create(
@@ -96,14 +103,19 @@ public final class VerificationCodeService {
      * {@code ConfirmSignUp} or {@code ConfirmForgotPassword}. On any failure, throws
      * {@link VerificationCodeException} with the specific {@link VerificationCodeException.Kind}.
      *
-     * <p>Note: not thread-safe under concurrent {@code consume()} of the same
-     * (poolId, username, purpose) key — two racing wrong-code calls may
-     * decrement the attempts counter by 1 instead of 2. Acceptable for the
-     * single-user local-dev profile; revisit if floci grows multi-tenant.
+     * <p>Concurrent calls for the same (poolId, username, purpose) key take turns, so a code
+     * is redeemed once however many requests present it at the same moment, and every wrong
+     * attempt counts.
      */
     public void consume(String userPoolId, String username,
                         VerificationCode.Purpose purpose, String code) {
         String key = VerificationCode.storageKey(userPoolId, username, purpose);
+        synchronized (consumeLocks[Math.floorMod(key.hashCode(), CONSUME_LOCK_STRIPES)]) {
+            consumeUnderLock(key, purpose, code);
+        }
+    }
+
+    private void consumeUnderLock(String key, VerificationCode.Purpose purpose, String code) {
         VerificationCode vc = store.get(key).orElseThrow(() -> new VerificationCodeException(
             VerificationCodeException.Kind.NOT_FOUND,
             "Invalid verification code provided, please try again"));
@@ -173,6 +185,14 @@ public final class VerificationCodeService {
             .filter(k -> store.get(k).map(c -> userPoolId.equals(c.getUserPoolId())).orElse(false))
             .toList()
             .forEach(store::delete);
+    }
+
+    private static Object[] newConsumeLocks() {
+        Object[] locks = new Object[CONSUME_LOCK_STRIPES];
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new Object();
+        }
+        return locks;
     }
 
     private byte[] randomBytes(int n) {

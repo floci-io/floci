@@ -435,10 +435,11 @@ within 30 seconds, before Floci sends another code, shows the code field for the
 sent. Why a user cannot sign in (disabled, unconfirmed, a password reset or a new password
 required) shows only after a correct code. A correct code uses up the session, so when the user
 cannot sign in or the post authentication trigger fails, the page goes back to the username with
-the reason. Of several requests that answer one session with its code at once, one signs in and
-the others go back to the username. A password posted to a pool whose policy leaves out `PASSWORD`
-is refused. Without choice-based sign-in, the page is the username and password form above,
-whatever the policy says.
+the reason. A code signs in once: of several requests that answer with it at once, from one session
+or several, one signs in and the others are told the code is wrong, or go back to the username if
+their session is already spent. A password posted to a pool whose policy leaves out `PASSWORD` is
+refused. Without choice-based sign-in, the page is the username and password form above, whatever
+the policy says.
 
 PKCE follows AWS: `code_challenge_method` must be `S256`, and discovery advertises
 `code_challenge_methods_supported: ["S256"]`. A code issued with a `code_challenge` is

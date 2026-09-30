@@ -67,8 +67,8 @@ final class CognitoAuthFlowHandler {
     private final ConcurrentHashMap<String, CustomAuthToken> customAuthSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, TotpSession> totpSessions = new ConcurrentHashMap<>();
     /**
-     * Guards both USER_AUTH session maps and every check of an EMAIL_OTP or SMS_OTP sign-in code, which
-     * the code store reads and only then deletes. Nothing held under it may call a Lambda trigger.
+     * Guards both USER_AUTH session maps and nothing else: no storage I/O or Lambda trigger runs under it,
+     * so one user's sign-in cannot hold up another's. The code store redeems sign-in codes, once, outside it.
      */
     private final Object userAuthSessionLock = new Object();
     private final LinkedHashMap<String, UserAuthSession> userAuthSessions = new LinkedHashMap<>();
@@ -585,20 +585,19 @@ final class CognitoAuthFlowHandler {
      * or gone. Why a user cannot sign in shows only after a correct code.
      */
     CognitoUser completeManagedLoginEmailOtp(UserPool pool, UserPoolClient client, String session, String code) {
-        String username;
-        // The code is checked and the session spent under the lock that every read and removal of a
-        // session takes, RespondToAuthChallenge's included, so of several requests answering one session
-        // with its code, one signs in and the others find the session spent.
-        synchronized (userAuthSessionLock) {
-            UserAuthSession state = findUserAuthSession(pool, client, session, "EMAIL_OTP");
-            if (!state.userExists()) {
-                throw new AwsException("CodeMismatchException", CODE_MISMATCH, 400);
-            }
-            service.consumeSignInOtp(pool.getId(), state.username(), VerificationCode.Purpose.EMAIL_OTP, code);
-            userAuthSessions.remove(session);
-            username = state.username();
+        UserAuthSession state = findUserAuthSession(pool, client, session, "EMAIL_OTP");
+        if (!state.userExists()) {
+            throw new AwsException("CodeMismatchException", CODE_MISMATCH, 400);
         }
-        CognitoUser user = service.adminGetUser(pool.getId(), username);
+        // The code store redeems a code once, so of the requests answering this session, or another of the
+        // user's sessions, with the code at once, one gets past here and the rest get CodeMismatchException.
+        service.consumeSignInOtp(pool.getId(), state.username(), VerificationCode.Purpose.EMAIL_OTP, code);
+        // RespondToAuthChallenge may have spent the session since it was found. The code is what signs in;
+        // removing the session only stops it being answered again.
+        synchronized (userAuthSessionLock) {
+            userAuthSessions.remove(session, state);
+        }
+        CognitoUser user = service.adminGetUser(pool.getId(), state.username());
         requireSignInEligible(user);
         if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
             throw new AwsException("NotAuthorizedException", MANAGED_LOGIN_NEW_PASSWORD, 400);
@@ -1006,12 +1005,8 @@ final class CognitoAuthFlowHandler {
         validateSecretHash(client, responses, username);
         CognitoUser user = service.adminGetUser(pool.getId(), username);
         requireSignInEligible(user);
-        // Each of the user's live sessions takes this code, so of two answered with it at once, only the
-        // first to check it under the lock signs in.
-        synchronized (userAuthSessionLock) {
-            service.consumeSignInOtp(pool.getId(), user.getUsername(),
-                    isEmail ? VerificationCode.Purpose.EMAIL_OTP : VerificationCode.Purpose.SMS_OTP, code);
-        }
+        service.consumeSignInOtp(pool.getId(), user.getUsername(),
+                isEmail ? VerificationCode.Purpose.EMAIL_OTP : VerificationCode.Purpose.SMS_OTP, code);
 
         if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
             return buildNewPasswordRequiredChallenge(pool, client, user);
@@ -1079,8 +1074,8 @@ final class CognitoAuthFlowHandler {
     }
 
     /**
-     * As {@link #consumeUserAuthSession}, but leaves the session in place, for a caller that checks its
-     * answer and removes it while holding {@code userAuthSessionLock}.
+     * As {@link #consumeUserAuthSession}, but leaves the session in place, for a caller that removes it only
+     * once its answer is right.
      */
     private UserAuthSession findUserAuthSession(UserPool pool, UserPoolClient client, String session,
                                                 String expectedChallenge) {
