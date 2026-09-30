@@ -95,6 +95,103 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     }
 
     @Test
+    void copySourceReadHonorsSignedPrincipalGlobalCondition() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-global-source-" + suffix;
+        String destBucket = "copy-global-dest-" + suffix;
+        String userName = "copy-global-user-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putObjectAsRoot(sourceBucket, "source.txt", "copy source");
+
+        UserCredentials caller = createUser(userName);
+        putUserPolicy(userName, "ConditionalSourceRead", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/*",
+                   "Condition":{"Bool":{"aws:PrincipalIsAWSService":"false"}}},
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%2$s/*"}
+                ]} """.formatted(sourceBucket, destBucket));
+
+        given()
+                .filter(caller.signer())
+        .when()
+                .get("/" + sourceBucket + "/source.txt")
+        .then()
+                .statusCode(200);
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/source.txt")
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(200);
+
+        String uploadId = initiateMultipartUploadAsRoot(destBucket, "multipart.txt");
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/source.txt")
+                .queryParam("uploadId", uploadId)
+                .queryParam("partNumber", 1)
+        .when()
+                .put("/" + destBucket + "/multipart.txt")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
+    void jsonBooleanSourcePolicyDenyAppliesToDirectAndCopiedReads() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "copy-bool-source-" + suffix;
+        String destBucket = "copy-bool-dest-" + suffix;
+        String userName = "copy-bool-user-" + suffix;
+
+        createBucketAsRoot(sourceBucket);
+        createBucketAsRoot(destBucket);
+        putObjectAsRoot(sourceBucket, "source.txt", "protected source");
+        putBucketPolicyAsRoot(sourceBucket, """
+                {"Version":"2012-10-17","Statement":[{
+                  "Effect":"Deny","Principal":"*","Action":"s3:GetObject",
+                  "Resource":"arn:aws:s3:::%s/*",
+                  "Condition":{"Bool":{"aws:PrincipalIsAWSService":false}}
+                }]}""".formatted(sourceBucket));
+
+        UserCredentials caller = createUser(userName);
+        putUserPolicy(userName, "SourceReadDestWrite", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/*"},
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%2$s/*"}
+                ]}""".formatted(sourceBucket, destBucket));
+
+        given()
+                .filter(caller.signer())
+        .when()
+                .get("/" + sourceBucket + "/source.txt")
+        .then()
+                .statusCode(403);
+
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/source.txt")
+        .when()
+                .put("/" + destBucket + "/copied.txt")
+        .then()
+                .statusCode(403);
+
+        String uploadId = initiateMultipartUploadAsRoot(destBucket, "multipart.txt");
+        given()
+                .filter(caller.signer())
+                .header("x-amz-copy-source", "/" + sourceBucket + "/source.txt")
+                .queryParam("uploadId", uploadId)
+                .queryParam("partNumber", 1)
+        .when()
+                .put("/" + destBucket + "/multipart.txt")
+        .then()
+                .statusCode(403);
+    }
+
+    @Test
     void copyObjectSucceedsWhenSourceBucketPolicyAllowsCaller() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String sourceBucket = "copy-resource-allow-source-" + suffix;

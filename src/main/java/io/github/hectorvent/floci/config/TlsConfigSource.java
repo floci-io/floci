@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import org.bouncycastle.asn1.x509.Extension;
 import org.eclipse.microprofile.config.spi.ConfigSource;
 import org.jboss.logging.Logger;
 
@@ -434,6 +435,11 @@ public class TlsConfigSource implements ConfigSource {
             X509Certificate cert = new CertificateGenerator().parseCertificate(Files.readString(certFile));
             if (!ca.isIssuedByUs(cert)) {
                 LOG.infov("TLS: existing server certificate was not issued by the local CA; regenerating");
+                return false;
+            }
+            if (cert.getExtensionValue(Extension.subjectKeyIdentifier.getId()) == null
+                    || cert.getExtensionValue(Extension.authorityKeyIdentifier.getId()) == null) {
+                LOG.info("TLS: existing server certificate lacks key identifiers; regenerating");
                 return false;
             }
             cert.checkValidity();

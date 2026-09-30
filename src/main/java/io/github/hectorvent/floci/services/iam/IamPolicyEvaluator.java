@@ -1230,8 +1230,12 @@ public class IamPolicyEvaluator {
         Map<String, Map<String, List<String>>> result = new LinkedHashMap<>();
         condNode.fields().forEachRemaining(opEntry -> {
             Map<String, List<String>> kvMap = new LinkedHashMap<>();
-            opEntry.getValue().fields().forEachRemaining(kvEntry ->
-                    kvMap.put(kvEntry.getKey(), nodeToList(kvEntry.getValue())));
+            boolean boolOperator = "Bool".equals(parseOperator(opEntry.getKey()).baseOp());
+            opEntry.getValue().fields().forEachRemaining(kvEntry -> {
+                JsonNode value = kvEntry.getValue();
+                kvMap.put(kvEntry.getKey(), boolOperator && value.isBoolean()
+                        ? List.of(value.asText()) : nodeToList(value));
+            });
             result.put(opEntry.getKey(), kvMap);
         });
         return result.isEmpty() ? null : result;

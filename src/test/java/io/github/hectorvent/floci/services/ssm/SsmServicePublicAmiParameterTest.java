@@ -41,7 +41,7 @@ class SsmServicePublicAmiParameterTest {
         ssmService = new SsmService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                5, new RegionResolver(REGION, "000000000000"), new Ec2ImageCatalog());
+                5, new RegionResolver(REGION, "000000000000"), new Ec2ImageCatalog(), null);
     }
 
     @Test
@@ -84,7 +84,7 @@ class SsmServicePublicAmiParameterTest {
         ssmService.putParameter("/app/ami", "ami-custom", "String", null, false, REGION);
 
         List<Parameter> params = ssmService.getParameters(
-                List.of("/app/ami", AL2023_DEFAULT, "/app/missing"), REGION);
+                List.of("/app/ami", AL2023_DEFAULT, "/app/missing"), false, REGION);
 
         assertEquals(List.of("/app/ami", AL2023_DEFAULT), params.stream().map(Parameter::getName).toList());
     }

@@ -1892,12 +1892,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * The addresses at which a Cloud Map instance resolves to a running task: its ENI address,
      * within the task's VPC only, and each container's address on Docker, on any port since a
-     * DNS answer carries none. A loopback address counts only on the task's host ports.
+     * DNS answer carries none. A loopback address counts only on the task's host ports. An
+     * awsvpc task's containers count at the address each holds on its Docker network, which is
+     * where {@link EcsServiceDiscoveryRegistrar} registers them, even when Floci runs natively.
      */
     private Set<EcsTaskAddress> instanceAddresses(EcsTask task, String region) {
         Set<EcsTaskAddress> addresses = new LinkedHashSet<>();
         String eniAddress = task.getPrivateIpAddress();
-        if (eniAddress != null && !eniAddress.isBlank() && !EcsTaskAddress.isLoopback(eniAddress)) {
+        boolean awsvpc = eniAddress != null && !eniAddress.isBlank();
+        if (awsvpc && !EcsTaskAddress.isLoopback(eniAddress)) {
             String vpcId = containerManager.taskVpcId(task, region);
             if (vpcId != null) {
                 addresses.add(new EcsTaskAddress(eniAddress, null, vpcId));
@@ -1907,7 +1910,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             return addresses;
         }
         for (Container container : task.getContainers()) {
-            String host = containerManager.resolveContainerHost(container);
+            String host = awsvpc
+                    ? containerManager.resolvePeerAddress(container).orElse(null)
+                    : containerManager.resolveContainerHost(container);
             if (host == null || host.isBlank()) {
                 continue;
             }

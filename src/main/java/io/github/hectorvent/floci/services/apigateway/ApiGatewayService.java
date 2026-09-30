@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -36,6 +37,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Stage;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigateway.model.VpcLink;
+import io.swagger.parser.OpenAPIParser;
 import io.swagger.v3.core.util.Json;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
@@ -108,17 +110,25 @@ public class ApiGatewayService {
     private final Object domainNameLock = new Object();
     private final TlsCertificateManager certificateManager;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
 
     // Constants
     private static final String EPC_KEY = "endpointConfiguration";
     private static final String EPC_TYPES_KEY = "types";
     private static final String EPC_VPC_IDS_KEY = "vpcEndpointIds";
 
+    ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
+                      TlsCertificateManager certificateManager) {
+        this(storageFactory, config, certificateManager,
+                new RegionResolver(config.defaultRegion(), config.defaultAccountId()));
+    }
+
     @Inject
     public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
-                             TlsCertificateManager certificateManager) {
+                             TlsCertificateManager certificateManager, RegionResolver regionResolver) {
         this.certificateManager = certificateManager;
         this.config = config;
+        this.regionResolver = regionResolver;
         this.apiStore = storageFactory.create("apigateway", "apigateway-apis.json",
                 new TypeReference<>() {
                 });
@@ -2681,7 +2691,7 @@ public class ApiGatewayService {
     }
 
     public RestApi importRestApi(String region, String specBody, boolean failOnWarnings) {
-        ParsedOpenApi parsed = parseOpenApiSpec(specBody, failOnWarnings);
+        ParsedOpenApi parsed = parseOpenApiSpec(region, specBody, failOnWarnings);
         OpenAPI openAPI = parsed.openAPI();
 
         String name = openAPI.getInfo() != null ? openAPI.getInfo().getTitle() : "Imported API";
@@ -2717,7 +2727,7 @@ public class ApiGatewayService {
             throw new AwsException("BadRequestException",
                     "Invalid mode specified. Valid modes are 'merge' and 'overwrite'.", 400);
         }
-        ParsedOpenApi parsed = parseOpenApiSpec(specBody, failOnWarnings);
+        ParsedOpenApi parsed = parseOpenApiSpec(region, specBody, failOnWarnings);
         RestApiSnapshot snapshot = snapshotRestApi(region, apiId);
         try {
             RestApi api = mode == null || "merge".equals(mode)
@@ -2731,6 +2741,16 @@ public class ApiGatewayService {
             restoreRestApi(region, apiId, snapshot);
             throw e;
         }
+    }
+
+    private String resolveOpenApiAwsVariables(String region, String value) {
+        if (value == null) {
+            return null;
+        }
+        return value
+                .replace("${AWS::Region}", region)
+                .replace("${AWS::AccountId}", regionResolver.getAccountId())
+                .replace("${AWS::Partition}", regionResolver.partitionForRegion(region));
     }
 
     private RestApi overwriteRestApi(String region, String apiId, OpenAPI openAPI) {
@@ -2830,8 +2850,9 @@ public class ApiGatewayService {
 
     private record ParsedOpenApi(OpenAPI openAPI, List<String> warnings) {}
 
-    private ParsedOpenApi parseOpenApiSpec(String specBody, boolean failOnWarnings) {
-        SwaggerParseResult result = new io.swagger.parser.OpenAPIParser().readContents(specBody, null, null);
+    private ParsedOpenApi parseOpenApiSpec(String region, String specBody, boolean failOnWarnings) {
+        SwaggerParseResult result = new OpenAPIParser()
+                .readContents(resolveOpenApiAwsVariables(region, specBody), null, null);
         if (result.getOpenAPI() == null) {
             String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
             throw new AwsException("BadRequestException", "Failed to parse OpenAPI spec: " + errors, 400);

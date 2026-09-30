@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.runtime.ShutdownEvent;
@@ -219,7 +220,7 @@ public class CloudTrailLogWriter {
                     .key(objectKey)
                     .accessKeyId(null)
                     .sourceIp(null)
-                    .userAgent("cloudtrail.amazonaws.com")
+                    .userAgent(ServicePrincipals.of("cloudtrail"))
                     .bytesIn(payload.length)
                     .bytesOut(0)
                     .errorCode(null)

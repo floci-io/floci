@@ -4,6 +4,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.ssm.model.ParameterStringFilter;
@@ -13,6 +16,7 @@ import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -26,6 +30,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class SsmServiceTest {
 
@@ -137,7 +143,7 @@ class SsmServiceTest {
         ssmService.putParameter("/b", "2", "String", null, false, region);
         ssmService.putParameter("/c", "3", "String", null, false, region);
 
-        List<Parameter> params = ssmService.getParameters(List.of("/a", "/c", "/missing"), region);
+        List<Parameter> params = ssmService.getParameters(List.of("/a", "/c", "/missing"), false, region);
         assertEquals(2, params.size());
     }
 
@@ -434,7 +440,7 @@ class SsmServiceTest {
         ssmService.putParameter("/app/key", "v1", "String", null, false, region);
         ssmService.putParameter("/app/key", "v2", "String", null, true, region);
 
-        List<Parameter> found = ssmService.getParameters(List.of("/app/key:1", "/app/key:9"), region);
+        List<Parameter> found = ssmService.getParameters(List.of("/app/key:1", "/app/key:9"), false, region);
         assertEquals(1, found.size());
         assertEquals("v1", found.getFirst().getValue());
     }
@@ -1210,6 +1216,51 @@ class SsmServiceTest {
         assertFilterError("InvalidFilterOption", filter("Path", "Equals", "/app"));
         assertFilterError("InvalidFilterValue", filter("Path", null, "app"));
         assertFilterError("InvalidFilterValue", new ParameterStringFilter("Type", null, List.of()));
+    }
+
+    @Test
+    void secretReferenceCarriesTheGetSecretValueResultAsAwsFormatsIt() {
+        String arn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app-AbCdEf";
+        Secret described = new Secret();
+        described.setArn(arn);
+        described.setName("app");
+        SecretVersion current = new SecretVersion();
+        current.setVersionId("4aa4a0d4-4321-4661-9288-c9e2aeffd37a");
+        current.setSecretString("{\"k\":\"v\"}");
+        current.setVersionStages(List.of("AWSCURRENT"));
+        current.setCreatedDate(Instant.parse("2026-09-28T16:47:31.824Z"));
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        when(secrets.describeSecret("app", "us-east-1")).thenReturn(described);
+        when(secrets.getSecretValue(arn, null, null, "us-east-1")).thenReturn(current);
+        SsmService service = new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), 5, new RegionResolver("us-east-1", "000000000000"), null, secrets);
+
+        assertEquals("{\"ARN\":\"" + arn + "\",\"name\":\"app\",\"versionId\":\"4aa4a0d4-4321-4661-9288-c9e2aeffd37a\","
+                        + "\"secretString\":\"{\\\"k\\\":\\\"v\\\"}\",\"versionStages\":[\"AWSCURRENT\"],"
+                        + "\"createdDate\":\"Sep 28, 2026, 4:47:31 PM\"}",
+                service.getParameter("/aws/reference/secretsmanager/app", true, "us-east-1").getSourceResult());
+    }
+
+    @Test
+    void secretReplacedWhileReferenceIsReadIsNotReturnedUnderTheOldArn() {
+        String oldArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app-AAAAAA";
+        Secret described = new Secret();
+        described.setArn(oldArn);
+        SecretVersion replacement = new SecretVersion();
+        replacement.setSecretString("replacement");
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        when(secrets.describeSecret("app", "us-east-1")).thenReturn(described);
+        when(secrets.getSecretValue("app", null, null, "us-east-1")).thenReturn(replacement);
+        when(secrets.getSecretValue(oldArn, null, null, "us-east-1")).thenThrow(new AwsException(
+                "ResourceNotFoundException", "Secrets Manager can't find the specified secret.", 400));
+        SsmService service = new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), 5, new RegionResolver("us-east-1", "000000000000"), null, secrets);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.getParameter("/aws/reference/secretsmanager/app", true, "us-east-1"));
+        assertEquals("ParameterNotFound", ex.getErrorCode());
     }
 
     private List<String> describedNames(List<ParameterStringFilter> filters, String region) {

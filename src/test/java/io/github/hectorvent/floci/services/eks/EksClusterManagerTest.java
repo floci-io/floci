@@ -511,7 +511,7 @@ class EksClusterManagerTest {
             verify(portAllocator, never()).release(6441);
             verify(dockerClient).stopContainerCmd("cid-old");
             verify(lifecycleManager, Mockito.times(2))
-                    .removeIfExistsStrict("floci-eks-demo.capacity-backup");
+                    .removeIfExistsStrict("floci-aws-eks-capacity-backup.demo");
         }
 
         @Test
@@ -537,9 +537,79 @@ class EksClusterManagerTest {
             assertFalse("foo.capacity-backup".matches(EksService.CLUSTER_NAME_REGEX));
             assertEquals("floci-eks-foo-capacity-backup", manager.clusterResourceName(other));
             verify(lifecycleManager, Mockito.times(3))
-                    .removeIfExistsStrict("floci-eks-foo.capacity-backup");
+                    .removeIfExistsStrict("floci-aws-eks-capacity-backup.foo");
             verify(lifecycleManager, never()).removeIfExistsStrict(other.getDockerName());
             verify(lifecycleManager, never()).stopAndRemove("cid-other", null);
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"floci-eks-", "floci-aws-eks-"})
+        void deletingNumericClusterDoesNotRemoveAnotherAccountsCluster(String prefix) {
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            Cluster cluster = cluster();
+            cluster.setAccountId("000000000000");
+            cluster.setName("999999999999");
+            cluster.setDockerName(prefix + cluster.getName());
+            cluster.setContainerId("cid-numeric");
+            String otherClusterName = "capacity-backup";
+            String otherDockerName = prefix + "999999999999." + otherClusterName;
+
+            assertTrue(cluster.getName().matches(EksService.CLUSTER_NAME_REGEX));
+            assertTrue(otherClusterName.matches(EksService.CLUSTER_NAME_REGEX));
+
+            manager.stopCluster(cluster);
+
+            verify(lifecycleManager).stopAndRemove("cid-numeric", null);
+            verify(lifecycleManager).removeIfExistsStrict("floci-aws-eks-capacity-backup.999999999999");
+            verify(lifecycleManager, never()).removeIfExistsStrict(otherDockerName);
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"floci-eks-", "floci-aws-eks-"})
+        void replacingNumericClusterDoesNotRemoveAnotherAccountsCluster(String prefix) {
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            stubFreshStart("cid-new", 6441);
+            Cluster cluster = cluster();
+            cluster.setAccountId("000000000000");
+            cluster.setName("999999999999");
+            cluster.setDockerName(prefix + cluster.getName());
+            cluster.setContainerId("cid-numeric");
+            cluster.setHostPort(6441);
+            cluster.setNodeInstanceType("t3.medium");
+            String otherDockerName = prefix + "999999999999.capacity-backup";
+
+            assertTrue(manager.restartForNodeCapacity(cluster, "m5.large"));
+
+            assertEquals("cid-new", cluster.getContainerId());
+            verify(lifecycleManager, Mockito.times(2))
+                    .removeIfExistsStrict("floci-aws-eks-capacity-backup.999999999999");
+            verify(dockerClient.renameContainerCmd("cid-numeric"))
+                    .withName("floci-aws-eks-capacity-backup.999999999999");
+            verify(lifecycleManager, never()).removeIfExistsStrict(otherDockerName);
+            verify(dockerClient.renameContainerCmd("cid-numeric"), never()).withName(otherDockerName);
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"000000000000", "111111111111", "999999999999"})
+        void capacityBackupsRespectAccountAndResourceNamespace(String accountId) {
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            EmulatorConfig.DockerConfig docker = Mockito.mock(EmulatorConfig.DockerConfig.class);
+            when(config.docker()).thenReturn(docker);
+            when(docker.resourceNamespace()).thenReturn(Optional.of("isolated"));
+            Cluster cluster = cluster();
+            cluster.setAccountId(accountId);
+            cluster.setName("demo");
+            cluster.setDockerName(manager.clusterResourceName(cluster));
+            cluster.setContainerId("cid-node");
+            String qualifiedName = accountId.equals("000000000000")
+                    ? cluster.getName() : accountId + "." + cluster.getName();
+
+            manager.stopCluster(cluster);
+
+            verify(lifecycleManager).removeIfExistsStrict(
+                    "floci-aws-isolated-eks-capacity-backup." + qualifiedName);
+            verify(lifecycleManager, never()).removeIfExistsStrict(cluster.getDockerName() + ".capacity-backup");
+            assertEquals("floci-aws-isolated-eks-" + qualifiedName, cluster.getDockerName());
         }
 
         @Test
@@ -574,7 +644,7 @@ class EksClusterManagerTest {
                     .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
             stubFreshStart("cid-new", 6440);
             Mockito.doNothing().doThrow(new IllegalStateException("Docker cleanup failed"))
-                    .when(lifecycleManager).removeIfExistsStrict("floci-eks-demo.capacity-backup");
+                    .when(lifecycleManager).removeIfExistsStrict("floci-aws-eks-capacity-backup.demo");
 
             Cluster cluster = cluster();
             manager.restoreCluster(cluster);
@@ -648,7 +718,7 @@ class EksClusterManagerTest {
             cluster.setDockerName("floci-eks-demo");
             cluster.setContainerId("cid-new");
             Mockito.doThrow(new IllegalStateException("Docker cleanup failed"))
-                    .when(lifecycleManager).removeIfExistsStrict("floci-eks-demo.capacity-backup");
+                    .when(lifecycleManager).removeIfExistsStrict("floci-aws-eks-capacity-backup.demo");
 
             assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
 
@@ -2585,6 +2655,10 @@ class EksClusterManagerTest {
 
             manager.startCluster(cluster);
             assertEquals(mockAuditHandle, manager.getLogHandle(cluster));
+            verify(logStreamer).execLogCallbackForAccount(
+                    "000000000000", "/aws/eks/audit-cluster/cluster",
+                    "kube-apiserver-audit-container-id-1234567890123456789",
+                    "us-east-1", "eks-audit:audit-cluster", false);
 
             manager.stopCluster(cluster);
             verify(lifecycleManager).stopAndRemove("container-id-123456789012345678901234567890", mockAuditHandle);

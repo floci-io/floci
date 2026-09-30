@@ -28,14 +28,14 @@ import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -490,6 +490,37 @@ class CognitoLambdaTriggersTest {
     // =========================================================================
     // PreTokenGeneration
     // =========================================================================
+
+    @Test
+    void newPasswordMfaSetupPreservesPreTokenGenerationSource() throws Exception {
+        MutableClock clock = new MutableClock();
+        service = serviceWithClock(clock);
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "Temp1234!");
+        service.setUserPoolMfaConfig(pool.getId(), "ON", true, false);
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of()));
+
+        Map<String, Object> login = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Temp1234!"));
+        assertEquals("NEW_PASSWORD_REQUIRED", login.get("ChallengeName"));
+        Map<String, Object> setup = service.respondToAuthChallenge(client.getClientId(),
+                "NEW_PASSWORD_REQUIRED", (String) login.get("Session"),
+                Map.of("USERNAME", "alice", "NEW_PASSWORD", "Perm1234!"));
+        assertEquals("MFA_SETUP", setup.get("ChallengeName"));
+        Map<String, Object> associated = service.associateSoftwareToken(null, (String) setup.get("Session"));
+        String code = CognitoTotp.code((String) associated.get("SecretCode"), clock.instant());
+        Map<String, Object> verified = service.verifySoftwareToken(null, (String) associated.get("Session"), code);
+        Map<String, Object> tokens = service.respondToAuthChallenge(client.getClientId(),
+                "MFA_SETUP", (String) verified.get("Session"), Map.of("USERNAME", "alice"));
+        assertNotNull(tokens.get("AuthenticationResult"));
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payload.capture(), any());
+        Map<String, Object> event = MAPPER.readValue(payload.getValue(), new TypeReference<>() {});
+        assertEquals("TokenGeneration_NewPasswordChallenge", event.get("triggerSource"));
+    }
 
     @Test
     @SuppressWarnings("unchecked")
@@ -983,6 +1014,30 @@ class CognitoLambdaTriggersTest {
     // =========================================================================
     // CUSTOM_AUTH triggers (already covered indirectly; check triggerSource wiring)
     // =========================================================================
+
+    @Test
+    void customPasswordChallengeRequiresTotpBeforeIssuingTokens() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of(
+                "DefineAuthChallenge", "arn:aws:lambda:::define",
+                "CreateAuthChallenge", "arn:aws:lambda:::create"));
+        seedUser(pool, "alice", "Perm1234!");
+        service.setUserPoolMfaConfig(pool.getId(), "ON", true, false);
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("challengeName", "PASSWORD_VERIFIER")))
+                .thenReturn(ok(Map.of("issueTokens", true)));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of()));
+
+        Map<String, Object> started = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "alice"));
+        assertEquals("PASSWORD_VERIFIER", started.get("ChallengeName"));
+        Map<String, Object> completed = service.respondToAuthChallenge(client.getClientId(),
+                "PASSWORD_VERIFIER", (String) started.get("Session"),
+                Map.of("USERNAME", "alice", "ANSWER", "Perm1234!"));
+        assertEquals("MFA_SETUP", completed.get("ChallengeName"));
+        assertFalse(completed.containsKey("AuthenticationResult"));
+    }
 
     @Test
     @SuppressWarnings("unchecked")

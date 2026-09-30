@@ -268,6 +268,7 @@ class ElastiCacheServiceTest {
 
         assertEquals(16390, group.getProxyPort(),
                 "A free, in-range requested Port must be the port the group reports");
+        assertEquals(16390, group.getConfigurationEndpoint().port());
     }
 
     @Test
@@ -279,31 +280,54 @@ class ElastiCacheServiceTest {
     }
 
     @Test
-    void requestedPortAlreadyInUseIsRejected() {
-        // floci multiplexes every group's proxy onto one host, so two groups cannot share a port.
-        // Substituting a different one would hand back the drift honoring Port exists to remove,
-        // and it could only ever hit a caller who did pin a port.
+    void aSecondGroupOnATakenPortIsServedElsewhereRatherThanRefused() {
+        // AWS gives each cache a DNS name of its own, so 6379 is shared routinely and two groups
+        // on it coexist. Floci has one host and one port namespace, so the second group cannot
+        // have the port; refusing it diverged from AWS on an ordinary request, and reporting the
+        // pinned port while listening elsewhere would point its endpoint at the FIRST group's
+        // listener. It is served on a port of its own, and reports that port.
         service.createReplicationGroup(singleNodeRequest("grp1", 16390));
 
-        AwsException thrown = assertThrows(AwsException.class,
-                () -> service.createReplicationGroup(singleNodeRequest("grp2", 16390)));
+        ReplicationGroup second = service.createReplicationGroup(singleNodeRequest("grp2", 16390));
 
-        assertEquals("InvalidParameterValue", thrown.getErrorCode());
-        assertTrue(thrown.getMessage().contains("16390"));
+        assertEquals(16379, second.getProxyPort(),
+                "The second group takes a free port rather than being refused");
+        assertEquals(second.getProxyPort(), second.getConfigurationEndpoint().port(),
+                "and its endpoint reports the port it is actually on, never the other group's");
     }
 
     @Test
-    void requestedPortOutsideTheProxyRangeIsRejected() {
+    void aPortOutsideTheProxyRangeIsServedElsewhereRatherThanRefused() {
+        // The range bounds what Floci may listen on. It never bounded what AWS accepts.
+        ReplicationGroup group = service.createReplicationGroup(singleNodeRequest("grp", 9999));
+
+        assertEquals(16379, group.getProxyPort());
+        assertEquals(16379, group.getConfigurationEndpoint().port(),
+                "An endpoint never advertises a port nothing is listening on");
+    }
+
+    // Both arms of the one range check that is left. The bound is RdsService's, applied to the
+    // same argument; nothing here establishes it is ElastiCache's real AWS limit.
+    @Test
+    void aPortBelowTheAcceptedRangeIsRejected() {
         AwsException thrown = assertThrows(AwsException.class,
-                () -> service.createReplicationGroup(singleNodeRequest("grp", 9999)));
+                () -> service.createReplicationGroup(singleNodeRequest("grp", 80)));
 
         assertEquals("InvalidParameterValue", thrown.getErrorCode());
-        assertTrue(thrown.getMessage().contains("9999"));
+        assertTrue(thrown.getMessage().contains("1150"));
+    }
+
+    @Test
+    void aPortAboveTheAcceptedRangeIsRejected() {
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup(singleNodeRequest("grp", 70000)));
+
+        assertEquals("InvalidParameterValue", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("65535"));
     }
 
     @Test
     void anUnpinnedCreateStillFallsBackWhenTheBasePortIsTaken() {
-        // The fallback survives for callers that named no port: only an explicit one is refused.
         service.createReplicationGroup(singleNodeRequest("grp1", 16379));
 
         ReplicationGroup second = service.createReplicationGroup(singleNodeRequest("grp2", null));

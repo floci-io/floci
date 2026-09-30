@@ -199,7 +199,21 @@ further divergences, both deliberate:
 |--------|-------------|
 | InitiateAuth | Authenticates app-client users through supported user-password and SRP-style flows. |
 | AdminInitiateAuth | Starts an admin authentication flow for a user pool user. |
-| RespondToAuthChallenge | Responds to supported Cognito auth challenges. |
+| RespondToAuthChallenge | Responds to supported Cognito auth challenges, including TOTP setup and software-token MFA. |
+| AssociateSoftwareToken | Creates a TOTP secret for a user identified by an MFA setup session or access token. |
+| VerifySoftwareToken | Verifies the TOTP code and enables the user's software token. |
+
+With `MfaConfiguration=ON` and software-token MFA enabled, a successful password or SRP
+first factor returns `MFA_SETUP` instead of tokens for a user without a verified token.
+Call `AssociateSoftwareToken` with that session, then `VerifySoftwareToken` with the
+returned session and a six-digit TOTP code. Finish with `RespondToAuthChallenge`
+(`MFA_SETUP`) to receive tokens. Later sign-ins return `SOFTWARE_TOKEN_MFA`, which
+requires a fresh code in `SOFTWARE_TOKEN_MFA_CODE`. Both token-management actions
+also accept an access token for an already authenticated user. Sessions expire with
+the app client's `AuthSessionValidity` and cannot be replayed after completion.
+
+This flow currently covers software-token MFA required by a pool. Optional MFA
+preferences, SMS/email MFA challenges, and managed-login MFA are not emulated.
 
 ### User Listing
 

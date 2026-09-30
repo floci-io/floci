@@ -36,7 +36,7 @@ import java.util.concurrent.ThreadLocalRandom;
 @Path("/v1/credentials")
 public class EksPodIdentityCredentialsController {
 
-    private static final String POD_IDENTITY_AUDIENCE = "pods.eks.amazonaws.com";
+    private static final String POD_IDENTITY_AUDIENCE = "pods.eks.amazonaws.com"; // partition-literal: pod-identity token audience; no source outside the commercial partition (P9)
     private static final String SERVICE_ACCOUNT_PREFIX = "system:serviceaccount:";
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";

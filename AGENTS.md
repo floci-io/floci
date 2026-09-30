@@ -129,6 +129,9 @@ run `make partition-baseline` and commit the smaller baseline.
 - Mint ARNs through `AwsArnUtils.Arn.of(...)` / `RegionResolver.buildArn(...)`, recognise
   them with `AwsArnUtils.isArn` / `PARTITION_REGEX`, and derive hosts from the region's
   DNS suffix (`AwsRegions.dnsSuffixFor`).
+- A service principal is `ServicePrincipals.of("<service>")`, never a literal: it is
+  `<service>.amazonaws.com` in every partition, and `ServicePrincipals.canonical` folds the
+  legacy per-partition forms a policy may still use before matching.
 - A literal that is genuinely partition-invariant (an XML namespace URI, an S3 canned-ACL
   grantee URI) goes in `tools/partition/allowlist.yaml` with a reason, or ends its line
   with `// partition-literal: <reason>`. Both are printed by `make partition-audit`.

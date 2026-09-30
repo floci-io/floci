@@ -229,7 +229,7 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Backfill**: Existing persisted clusters created before this feature was introduced are automatically backfilled on startup with default disabled logging.
 - **CloudWatch Logs delivery**:
   - When the `api` log type is enabled on a cluster, Floci creates the CloudWatch Logs log group `/aws/eks/<cluster-name>/cluster` and streams control plane container output to a log stream named `kube-apiserver-<hash>`, where `<hash>` is the first 32 characters of the container ID.
-  - When the `audit` log type is enabled on a cluster, Floci configures k3s with the Amazon EKS control plane audit policy, writes audit logs to `/var/log/audit.log` inside the container, and streams audit records to a log stream named `kube-apiserver-audit-<hash>`.
+  - When the `audit` log type is enabled on a cluster, Floci configures k3s with the Amazon EKS control plane audit policy, writes audit logs to `/var/log/audit.log` inside the container, and streams audit records to a log stream named `kube-apiserver-audit-<hash>`. Audit records are available in CloudWatch Logs and are not echoed to the Floci console.
   - When both `api` and `audit` are enabled, both streams are created and populated under `/aws/eks/<cluster-name>/cluster`. When neither is enabled, no log group or streams are created.
 - **Component streams deviation**: AWS EKS provisions separate log streams for each component (`kube-apiserver-*`, `kube-apiserver-audit-*`, `kube-controller-manager-*`, `kube-scheduler-*`, `authenticator-*`). Because Floci runs clusters on k3s, which embeds the Kubernetes API server, controller manager, and scheduler within a single process, control plane container logs are delivered to the single `kube-apiserver-<hash>` stream when `api` is enabled, and API server audit logs are delivered to `kube-apiserver-audit-<hash>` when `audit` is enabled. Other control plane log types (`authenticator`, `controllerManager`, `scheduler`) do not provision separate streams.
 - **Authenticator logs**: Authenticator webhook authentication events are logged directly by Floci.
@@ -417,8 +417,15 @@ container until the replacement starts and restarts it if replacement fails. Thi
 containers started before resource limits were available. If Docker cannot remove the stopped
 backup after a successful replacement, the new node keeps running and cluster deletion retries
 the backup cleanup after stopping the live node. If cleanup still fails, deletion reports the
-error and can be retried before the data volume is removed. Backup container names end in
-`.capacity-backup`, which cannot match an EKS cluster name.
+error and can be retried before the data volume is removed. Backup container names put the
+`capacity-backup.` marker before the account-qualified cluster name, for example
+`floci-aws-eks-capacity-backup.demo` for the default account and
+`floci-aws-eks-capacity-backup.999999999999.demo` for another account. The configured Docker resource
+namespace applies to backups too. This keeps backup names outside both accounts' live-container
+namespaces without changing existing cluster container names or data volumes.
+Cleanup only targets this backup namespace; it does not look up old suffix-form names, which can
+identify another account's live cluster. Verify ownership before manually removing leftover stopped
+backups after upgrading.
 
 #### Cluster node provider ID and topology labels
 

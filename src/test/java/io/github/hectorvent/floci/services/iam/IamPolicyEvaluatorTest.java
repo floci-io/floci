@@ -650,6 +650,24 @@ class IamPolicyEvaluatorTest {
     }
 
     @Test
+    void booleanResourcePolicyConditionAcceptsJsonBooleanValue() {
+        String denySignedPrincipal = """
+                {"Version":"2012-10-17","Statement":[{
+                  "Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"*",
+                  "Condition":{"Bool":{"aws:PrincipalIsAWSService":false}}
+                }]}""";
+        String principal = "arn:aws:iam::123456789012:user/alice";
+        String resource = "arn:aws:s3:::bucket/key";
+
+        assertEquals(ResourcePolicyDecision.EXPLICIT_DENY, evaluator.evaluateResourcePolicy(
+                List.of(denySignedPrincipal), principal, "s3:GetObject", resource,
+                Map.of("aws:PrincipalIsAWSService", List.of("false"))));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateResourcePolicy(
+                List.of(denySignedPrincipal), principal, "s3:GetObject", resource,
+                Map.of("aws:PrincipalIsAWSService", List.of("true"))));
+    }
+
+    @Test
     void crossAccountEvaluationRequiresBothIdentityAndResourcePolicies() {
         String bucketPolicy = """
             {"Version":"2012-10-17","Statement":[{

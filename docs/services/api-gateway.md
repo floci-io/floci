@@ -70,6 +70,11 @@ operation-level `security: []` leaves that method without authorization.
 For a same-name Cognito authorizer, merge also keeps its existing pool ARNs when the incoming
 definition provides no new `providerARNs`; an explicit list replaces them, including `[]`.
 
+REST OpenAPI imports resolve `${AWS::Region}`, `${AWS::AccountId}`, and `${AWS::Partition}`
+throughout the definition before parsing it. Values come from the request region and
+account, so the same definition can be imported across regions and partitions. This
+includes mapping templates and applies to both `ImportRestApi` and `PutRestApi`.
+
 ### Supported Operations
 
 | Category | Operations |

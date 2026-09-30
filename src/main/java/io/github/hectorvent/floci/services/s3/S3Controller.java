@@ -81,6 +81,14 @@ public class S3Controller {
     /** The one region S3 treats specially in every partition: no LocationConstraint, idempotent CreateBucket. */
     private static final String US_EAST_1 = "us-east-1"; // partition-literal: S3's own global-endpoint rule
 
+    private static final Set<String> BUCKET_NAME_ERROR_CODES = Set.of(
+            "NoSuchBucket", "BucketNotEmpty", "BucketAlreadyOwnedByYou", "InvalidBucketName",
+            "NoSuchTagSet", "NoSuchBucketPolicy", "NoSuchLifecycleConfiguration",
+            "NoSuchCORSConfiguration",
+            "NoSuchPublicAccessBlockConfiguration", "NoSuchWebsiteConfiguration",
+            "ObjectLockConfigurationNotFoundError", "OwnershipControlsNotFoundError",
+            "ReplicationConfigurationNotFoundError");
+
     private static final Logger LOG = Logger.getLogger(S3Controller.class);
     private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
             .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
@@ -440,7 +448,7 @@ public class S3Controller {
                     .header("Location", "/" + bucket)
                     .build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -533,7 +541,7 @@ public class S3Controller {
             s3Service.deleteBucket(bucket);
             return Response.noContent().build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -756,7 +764,7 @@ public class S3Controller {
             return Response.ok(body).build();
         } catch (AwsException e) {
             emitCloudTrailEvent("ListObjects", bucket, null, 0L, 0L, e.getErrorCode(), e.getMessage());
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -901,7 +909,7 @@ public class S3Controller {
             return resp.build();
         } catch (AwsException e) {
             emitCloudTrailEvent("PutObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -980,7 +988,7 @@ public class S3Controller {
                     return Response.ok(aclXml).build();
                 } catch (AwsException e) {
                     emitCloudTrailEvent("GetObjectAcl", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
-                    return xmlErrorResponse(e);
+                    return xmlErrorResponse(e, bucket);
                 }
             }
             if (hasQueryParam(uriInfo, "attributes")) {
@@ -1033,7 +1041,7 @@ public class S3Controller {
                     return websiteError;
                 }
             }
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -1237,7 +1245,7 @@ public class S3Controller {
                     return headOnlyResponse(websiteError);
                 }
             }
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -1365,7 +1373,7 @@ public class S3Controller {
             return resp.build();
         } catch (AwsException e) {
             emitCloudTrailEvent("DeleteObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -1404,7 +1412,7 @@ public class S3Controller {
             return xmlErrorResponse(new AwsException("InvalidArgument",
                     "POST on bucket requires ?delete parameter.", 400));
         } catch (AwsException e) {
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -1520,7 +1528,7 @@ public class S3Controller {
             return xmlErrorResponse(new AwsException("InvalidArgument",
                     "POST requires either ?uploads, ?uploadId, ?restore or ?select parameter.", 400));
         } catch (AwsException e) {
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -1856,7 +1864,7 @@ public class S3Controller {
             xml.end("NotificationConfiguration");
             return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -1887,7 +1895,7 @@ public class S3Controller {
             s3Service.putBucketNotificationConfiguration(bucket, config);
             return Response.ok().build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -2322,7 +2330,7 @@ public class S3Controller {
             return response.build();
         } catch (AwsException e) {
             emitCloudTrailEvent("PutObjectAnnotation", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -2350,7 +2358,7 @@ public class S3Controller {
             return response.build();
         } catch (AwsException e) {
             emitCloudTrailEvent("GetObjectAnnotation", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -2410,7 +2418,7 @@ public class S3Controller {
             return response.build();
         } catch (AwsException e) {
             emitCloudTrailEvent("ListObjectAnnotations", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -2430,7 +2438,7 @@ public class S3Controller {
             return response.build();
         } catch (AwsException e) {
             emitCloudTrailEvent("DeleteObjectAnnotation", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 
@@ -3080,7 +3088,7 @@ public class S3Controller {
             return renderWebsiteResolution(bucket,
                     s3Service.resolveWebsiteError(bucket, authorization, cause.getHttpStatus()), null, true);
         } catch (AwsException websiteException) {
-            return xmlErrorResponse(websiteException);
+            return xmlErrorResponse(websiteException, bucket);
         }
     }
 
@@ -3169,13 +3177,13 @@ public class S3Controller {
     }
 
     private Response xmlErrorResponse(AwsException e) {
+        return xmlErrorResponse(e, null);
+    }
+
+    private Response xmlErrorResponse(AwsException e, String bucketName) {
         String condition = e instanceof S3PreconditionFailedException preconditionFailedException
                 ? preconditionFailedException.condition()
                 : null;
-        return xmlErrorResponse(e, condition);
-    }
-
-    private Response xmlErrorResponse(AwsException e, String condition) {
         if (e.getMessage() == null) {
             return Response.status(e.getHttpStatus()).build();
         }
@@ -3184,6 +3192,9 @@ public class S3Controller {
                 .start("Error")
                 .elem("Code", e.getErrorCode())
                 .elem("Message", e.getMessage());
+        if (bucketName != null && BUCKET_NAME_ERROR_CODES.contains(e.getErrorCode())) {
+            xmlBuilder.elem("BucketName", bucketName);
+        }
         if (condition != null) {
             xmlBuilder.elem("Condition", condition);
         }
@@ -3281,8 +3292,7 @@ public class S3Controller {
     }
 
     private Response preconditionFailedResponse(String condition) {
-        return xmlErrorResponse(new AwsException("PreconditionFailed",
-                S3PreconditionFailedException.MESSAGE, 412), condition);
+        return xmlErrorResponse(new S3PreconditionFailedException(condition));
     }
 
     private boolean eTagMatches(String headerValue, String eTag) {
@@ -3328,7 +3338,7 @@ public class S3Controller {
         } catch (AwsException e) {
             // Presigned POST errors must be returned as XML (matching LocalStack/AWS),
             // not JSON which is what the global AwsExceptionMapper would produce.
-            return xmlErrorResponse(e);
+            return xmlErrorResponse(e, bucket);
         }
     }
 

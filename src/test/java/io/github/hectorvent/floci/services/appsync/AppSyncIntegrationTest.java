@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
@@ -24,7 +25,7 @@ import static org.hamcrest.Matchers.*;
  * {@code StartSchemaCreation} validates against it, so it needs to be up.
  */
 @QuarkusTest
-@TestProfile(AppSyncGraphqlSidecarProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class AppSyncIntegrationTest {
 
@@ -37,7 +38,7 @@ class AppSyncIntegrationTest {
 
     @BeforeAll
     static void configureRestAssured() {
-        AppSyncGraphqlSidecarProfile.requireDockerAndTheSidecarImage();
+        SidecarContainersProfile.requireDockerAndImage("floci.services.appsync.graphql-image");
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 

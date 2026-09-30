@@ -1221,7 +1221,8 @@ public class CloudFormationService implements ResourceProvider {
                 return;
             }
             try {
-                resolved.put(e.getKey(), ssmService.getParameter(parameterName, region).getValue());
+                // A plaintext type: a Secrets Manager reference needs decryption, so it is refused.
+                resolved.put(e.getKey(), ssmService.getParameter(parameterName, false, region).getValue());
             } catch (AwsException ex) {
                 missing.add(parameterName);
             }

@@ -22,6 +22,7 @@ import org.bouncycastle.asn1.x9.X962Parameters;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.X509v3CertificateBuilder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.cert.jcajce.JcaX509ExtensionUtils;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.openssl.PEMKeyPair;
 import org.bouncycastle.openssl.PEMParser;
@@ -181,7 +182,8 @@ public class CertificateGenerator {
             X500Name subject = new X500Name("CN=" + domainName);
             X500Name issuerDn = X500Name.getInstance(issuer.certificate().getSubjectX500Principal().getEncoded());
             X509Certificate cert = signCertificate(subject, keyPair.getPublic(), issuerDn, issuer.key(),
-                    withDomainFirst(domainName, sans), false, usage, Instant.now(), notAfter);
+                    withDomainFirst(domainName, sans), false, usage, Instant.now(), notAfter,
+                    issuer.certificate().getPublicKey());
             cert.verify(issuer.certificate().getPublicKey());
             return toGenerated(cert, keyPair.getPrivate(), subject.toString(),
                     issuer.certificate().getSubjectX500Principal().getName());
@@ -258,9 +260,27 @@ public class CertificateGenerator {
     public X509Certificate signCertificate(X500Name subject, PublicKey subjectKey, X500Name issuerDn,
                                            PrivateKey issuerKey, List<String> sans, boolean asCa,
                                            LeafUsage usage, Instant notBefore, Instant notAfter) throws Exception {
+        PublicKey issuerPublicKey = asCa && subject.equals(issuerDn) ? subjectKey : null;
+        return signCertificate(subject, subjectKey, issuerDn, issuerKey, sans, asCa, usage,
+                notBefore, notAfter, issuerPublicKey);
+    }
+
+    /** Supply the issuer's public key for CA-signed leaves so their AKI matches the CA's SKI. */
+    public X509Certificate signCertificate(X500Name subject, PublicKey subjectKey, X500Name issuerDn,
+                                           PrivateKey issuerKey, List<String> sans, boolean asCa,
+                                           LeafUsage usage, Instant notBefore, Instant notAfter,
+                                           PublicKey issuerPublicKey) throws Exception {
         BigInteger serial = new BigInteger(128, SECURE_RANDOM);
         X509v3CertificateBuilder certBuilder = new JcaX509v3CertificateBuilder(
                 issuerDn, serial, Date.from(notBefore), Date.from(notAfter), subject, subjectKey);
+
+        JcaX509ExtensionUtils extensionUtils = new JcaX509ExtensionUtils();
+        certBuilder.addExtension(Extension.subjectKeyIdentifier, false,
+                extensionUtils.createSubjectKeyIdentifier(subjectKey));
+        if (issuerPublicKey != null) {
+            certBuilder.addExtension(Extension.authorityKeyIdentifier, false,
+                    extensionUtils.createAuthorityKeyIdentifier(issuerPublicKey));
+        }
 
         if (sans != null && !sans.isEmpty()) {
             List<GeneralName> sanList = new ArrayList<>();

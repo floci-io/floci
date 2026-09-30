@@ -43,6 +43,8 @@ public class SnsQueryHandler {
             case "ListTopics" -> handleListTopics(params, region);
             case "GetTopicAttributes" -> handleGetTopicAttributes(params, region);
             case "SetTopicAttributes" -> handleSetTopicAttributes(params, region);
+            case "SetSMSAttributes" -> handleSetSmsAttributes(params, region);
+            case "GetSMSAttributes" -> handleGetSmsAttributes(params, region);
             case "Subscribe" -> handleSubscribe(params, region);
             case "Unsubscribe" -> handleUnsubscribe(params, region);
             case "ListSubscriptions" -> handleListSubscriptions(params, region);
@@ -130,6 +132,33 @@ public class SnsQueryHandler {
         } catch (AwsException e) {
             return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
+    }
+
+    private Response handleSetSmsAttributes(MultivaluedMap<String, String> params, String region) {
+        Map<String, String> attributes = extractSnsAttributes(params, "attributes");
+        if (attributes.isEmpty()) {
+            return xmlErrorResponse("InvalidParameter", "SMS attributes are required.", 400);
+        }
+        snsService.setSmsAttributes(attributes, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetSMSAttributes", AwsNamespaces.SNS)).build();
+    }
+
+    private Response handleGetSmsAttributes(MultivaluedMap<String, String> params, String region) {
+        List<String> names = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = getParam(params, "attributes.member." + i);
+            if (name == null) {
+                break;
+            }
+            names.add(name);
+        }
+        Map<String, String> attributes = snsService.getSmsAttributes(names, region);
+        XmlBuilder xml = new XmlBuilder().start("attributes");
+        for (Map.Entry<String, String> entry : attributes.entrySet()) {
+            xml.start("entry").elem("key", entry.getKey()).elem("value", entry.getValue()).end("entry");
+        }
+        xml.end("attributes");
+        return Response.ok(AwsQueryResponse.envelope("GetSMSAttributes", AwsNamespaces.SNS, xml.build())).build();
     }
 
     private Response handleSubscribe(MultivaluedMap<String, String> params, String region) {

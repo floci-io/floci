@@ -4,6 +4,10 @@ import io.github.hectorvent.floci.services.acm.CertificateGenerator.GeneratedCer
 import io.github.hectorvent.floci.services.acm.CertificateGenerator.Issuer;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator.LeafUsage;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import org.bouncycastle.asn1.ASN1OctetString;
+import org.bouncycastle.asn1.x509.AuthorityKeyIdentifier;
+import org.bouncycastle.asn1.x509.Extension;
+import org.bouncycastle.asn1.x509.SubjectKeyIdentifier;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -16,6 +20,7 @@ import java.security.cert.X509Certificate;
 import java.security.spec.ECGenParameterSpec;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -58,6 +63,7 @@ class CertificateGeneratorIssuerTest {
         assertNull(cert.getExtendedKeyUsage(), "a CA carries no EKU");
         assertNull(cert.getSubjectAlternativeNames(), "a CA carries no SAN");
         cert.verify(cert.getPublicKey());
+        assertArrayEquals(subjectKeyIdentifier(cert), authorityKeyIdentifier(cert));
         assertEquals(ca.subject(), ca.issuer());
     }
 
@@ -89,6 +95,20 @@ class CertificateGeneratorIssuerTest {
         assertEquals("CN=api.example.test", leaf.subject());
         assertEquals(issuer.certificate().getSubjectX500Principal().getName(), leaf.issuer());
         cert.verify(issuer.certificate().getPublicKey());
+        assertTrue(cert.getExtensionValue(Extension.subjectKeyIdentifier.getId()) != null);
+        assertArrayEquals(subjectKeyIdentifier(issuer.certificate()), authorityKeyIdentifier(cert));
+    }
+
+    private static byte[] subjectKeyIdentifier(X509Certificate certificate) throws Exception {
+        byte[] encoded = ASN1OctetString.getInstance(
+                certificate.getExtensionValue(Extension.subjectKeyIdentifier.getId())).getOctets();
+        return SubjectKeyIdentifier.getInstance(encoded).getKeyIdentifier();
+    }
+
+    private static byte[] authorityKeyIdentifier(X509Certificate certificate) throws Exception {
+        byte[] encoded = ASN1OctetString.getInstance(
+                certificate.getExtensionValue(Extension.authorityKeyIdentifier.getId())).getOctets();
+        return AuthorityKeyIdentifier.getInstance(encoded).getKeyIdentifier();
     }
 
     @Test

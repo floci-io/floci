@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -167,7 +168,9 @@ class EcsServiceRestartLeftoversTest {
             task.setPrivateIpAddress("10.0.1.5");
             return new EcsTaskHandle(task.getTaskArn(), Map.of("web", "docker-id"), Map.of());
         });
-        when(containerManager.resolveContainerHost(any())).thenReturn("172.19.0.4");
+        // Floci running natively: targets reach the task on loopback, Cloud Map registers its Docker address.
+        when(containerManager.resolveContainerHost(any())).thenReturn("127.0.0.1");
+        when(containerManager.resolvePeerAddress(any())).thenReturn(Optional.of("172.19.0.4"));
         when(containerManager.taskVpcId(any(), anyString())).thenReturn("vpc-app");
         EcsLoadBalancerRegistrar lbRegistrar = mock(EcsLoadBalancerRegistrar.class);
         EcsServiceDiscoveryRegistrar discoveryRegistrar = mock(EcsServiceDiscoveryRegistrar.class);
@@ -194,7 +197,7 @@ class EcsServiceRestartLeftoversTest {
         assertEquals("RUNNING", task.getLastStatus());
         // A target only on the ports the container serves, and never at the VPC-scoped ENI address.
         verify(lbRegistrar).evictUnrecordedTargets(task, Set.of(TARGET_GROUP_ARN),
-                Set.of(new EcsTaskAddress("172.19.0.4", 80)), REGION);
+                Set.of(new EcsTaskAddress("127.0.0.1", 80)), REGION);
         verify(discoveryRegistrar).evictUnrecordedInstances(task, Set.of("srv-alpha"),
                 Set.of(new EcsTaskAddress("10.0.1.5", null, "vpc-app"), new EcsTaskAddress("172.19.0.4", null)),
                 REGION);

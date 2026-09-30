@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
@@ -43,7 +44,7 @@ import java.util.regex.Pattern;
 public class StackSetService {
 
     private static final Logger LOG = Logger.getLogger(StackSetService.class);
-    private static final String STACKSETS_SERVICE_PRINCIPAL = "stacksets.cloudformation.amazonaws.com";
+    private static final String STACKSETS_SERVICE_PRINCIPAL = ServicePrincipals.of("stacksets.cloudformation");
     private static final String INSTANCE_CHANGE_SET = "stackset-instance";
     private static final String UPDATE_CHANGE_SET = "stackset-update";
     private static final String ORGANIZATIONS_ACCESS_KEY = "organizations-access";

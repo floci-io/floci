@@ -711,8 +711,11 @@ public class EksClusterManager
         }
     }
 
-    private static String capacityBackupName(Cluster cluster) {
-        return cluster.getDockerName() + ".capacity-backup";
+    private String capacityBackupName(Cluster cluster) {
+        // The marker must precede the account qualifier: no account ID can be capacity-backup,
+        // and no cluster name can contain a dot. A suffix can collide with another account's node.
+        return ContainerStorageHelper.resourceName(config, "eks", null,
+                "capacity-backup." + accountQualifiedClusterName(cluster));
     }
 
     /**
@@ -1037,7 +1040,7 @@ public class EksClusterManager
         return dockerClient
                 .execStartCmd(execCreate.getId())
                 .exec(logStreamer.execLogCallbackForAccount(
-                        accountId, logGroup, logStream, region, "eks-audit:" + clusterName));
+                        accountId, logGroup, logStream, region, "eks-audit:" + clusterName, false));
     }
 
     Closeable getLogHandle(Cluster cluster) {
@@ -1072,10 +1075,13 @@ public class EksClusterManager
      * default-account name.
      */
     private String accountQualifiedName(Cluster cluster) {
+        return ContainerStorageHelper.resourceName(config, "eks", null, accountQualifiedClusterName(cluster));
+    }
+
+    private String accountQualifiedClusterName(Cluster cluster) {
         String accountId = cluster.getAccountId();
         boolean defaultAccount = accountId == null || accountId.equals(config.defaultAccountId());
-        return ContainerStorageHelper.resourceName(config, "eks", null,
-                defaultAccount ? cluster.getName() : accountId + "." + cluster.getName());
+        return defaultAccount ? cluster.getName() : accountId + "." + cluster.getName();
     }
 
     /**

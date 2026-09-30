@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedEventSelector;
@@ -44,7 +45,7 @@ public class CloudTrailService {
     private static final Logger LOG = Logger.getLogger(CloudTrailService.class);
 
     private static final String EVENT_VERSION = "1.11";
-    private static final String S3_EVENT_SOURCE = "s3.amazonaws.com";
+    private static final String S3_EVENT_SOURCE = ServicePrincipals.of("s3");
     static final int MAX_PENDING_RECORDS_PER_TRAIL = 1024;
     static final long MAX_PENDING_BYTES_PER_TRAIL = 4L * 1024L * 1024L;
 

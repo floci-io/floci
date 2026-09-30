@@ -356,7 +356,7 @@ class SsmCommandServiceDirectExecutionTest {
 
         SsmCommandService commandService = new SsmCommandService(
                 new SingleCommandStoreFactory(commandStore), objectMapper, regionResolver, executor);
-        SsmJsonHandler jsonHandler = new SsmJsonHandler(mock(SsmService.class), commandService, objectMapper);
+        SsmJsonHandler jsonHandler = new SsmJsonHandler(mock(SsmService.class), commandService, objectMapper, null);
 
         Command command = commandService.sendCommand(objectMapper.readTree("""
                 {
@@ -374,7 +374,7 @@ class SsmCommandServiceDirectExecutionTest {
         ObjectNode listRequest = objectMapper.createObjectNode().put("CommandId", command.getCommandId());
         AtomicBoolean listReturned = new AtomicBoolean(false);
         Thread listThread = new Thread(() -> {
-            jsonHandler.handle("ListCommands", listRequest, "us-west-2");
+            jsonHandler.handle("ListCommands", listRequest, "us-west-2", null);
             listReturned.set(true);
         });
         listThread.start();
