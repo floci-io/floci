@@ -96,7 +96,7 @@ class GuardedMessageQueueTest {
         ClaimResult claimed = queue.claimVisibleMessages(1, 30, false, -1, null);
         String handle = claimed.claimed().get(0).getReceiptHandle();
 
-        assertEquals(HandleResult.APPLIED, queue.removeByReceiptHandle(handle, false).result());
+        assertEquals(HandleResult.APPLIED, queue.removeByReceiptHandle(ReceiptHandle.parse(handle), false).result());
 
         // Message should be gone even with visibility timeout 0
         ClaimResult result = queue.claimVisibleMessages(1, 0, false, -1, null);
@@ -105,7 +105,7 @@ class GuardedMessageQueueTest {
 
     @Test
     void removeByReceiptHandleInvalidReturnsEmpty() {
-        assertEquals(HandleResult.MESSAGE_GONE, queue.removeByReceiptHandle("nonexistent", false).result());
+        assertEquals(HandleResult.MESSAGE_GONE, queue.removeByReceiptHandle(ReceiptHandle.issue(null, "nonexistent"), false).result());
     }
 
     @Test
@@ -116,7 +116,7 @@ class GuardedMessageQueueTest {
         String handle = claimed.claimed().get(0).getReceiptHandle();
 
         // Set visibility to 0 — message becomes visible immediately
-        assertEquals(HandleResult.APPLIED, queue.changeVisibility(handle, 0, false));
+        assertEquals(HandleResult.APPLIED, queue.changeVisibility(ReceiptHandle.parse(handle), 0, false));
 
         ClaimResult reClaimed = queue.claimVisibleMessages(1, 30, false, -1, null);
         assertEquals(1, reClaimed.claimed().size());
@@ -124,7 +124,7 @@ class GuardedMessageQueueTest {
 
     @Test
     void changeVisibilityInvalidReturnsFalse() {
-        assertEquals(HandleResult.MESSAGE_GONE, queue.changeVisibility("nonexistent", 0, false));
+        assertEquals(HandleResult.MESSAGE_GONE, queue.changeVisibility(ReceiptHandle.issue(null, "nonexistent"), 0, false));
     }
 
     @Test
@@ -390,7 +390,7 @@ class GuardedMessageQueueTest {
                         ClaimResult result = queue.claimVisibleMessages(messageCount, 30, false, -1, null);
                         claimedCount.addAndGet(result.claimed().size());
                         for (Message m : result.claimed()) {
-                            queue.removeByReceiptHandle(m.getReceiptHandle(), false);
+                            queue.removeByReceiptHandle(ReceiptHandle.parse(m.getReceiptHandle()), false);
                         }
                     } else {
                         ClaimResult result = queue.claimVisibleMessages(messageCount, 30, false, -1, null);

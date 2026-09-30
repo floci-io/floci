@@ -1256,17 +1256,11 @@ public class SqsService implements Resettable, ResourceProvider {
         Queue queue = getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
-        checkReceiptHandle(storageKey, receiptHandle, inBatch);
+        ReceiptHandle handle = checkReceiptHandle(storageKey, receiptHandle, inBatch);
 
         GuardedMessageQueue.Removal removal =
-                getOrCreateQueue(storageKey).removeByReceiptHandle(receiptHandle, queue.isFifo());
-
-        if (removal.result() == GuardedMessageQueue.HandleResult.HANDLE_NOT_ISSUED) {
-            throw handleNotValidForQueue(receiptHandle);
-        }
-        if (removal.result() == GuardedMessageQueue.HandleResult.HANDLE_EXPIRED) {
-            throw invalidReceiptHandle(receiptHandle, "The receipt handle has expired", inBatch);
-        }
+                getOrCreateQueue(storageKey).removeByReceiptHandle(handle, queue.isFifo());
+        rejectUnusableHandle(removal.result(), receiptHandle, inBatch);
         // AWS reports success for a message that is already gone.
         if (removal.result() == GuardedMessageQueue.HandleResult.MESSAGE_GONE) {
             LOG.debugv("No message for receipt handle {0}", receiptHandle);
@@ -1290,19 +1284,24 @@ public class SqsService implements Resettable, ResourceProvider {
         Queue queue = queueStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
-        checkReceiptHandle(storageKey, receiptHandle, inBatch);
+        ReceiptHandle handle = checkReceiptHandle(storageKey, receiptHandle, inBatch);
 
         GuardedMessageQueue.HandleResult result =
-                getOrCreateQueue(storageKey).changeVisibility(receiptHandle, visibilityTimeout, queue.isFifo());
+                getOrCreateQueue(storageKey).changeVisibility(handle, visibilityTimeout, queue.isFifo());
+        rejectUnusableHandle(result, receiptHandle, inBatch);
+        if (result == GuardedMessageQueue.HandleResult.MESSAGE_GONE) {
+            throw invalidReceiptHandle(receiptHandle,
+                    "Message does not exist or is not available for visibility timeout change", inBatch);
+        }
+    }
+
+    private static void rejectUnusableHandle(GuardedMessageQueue.HandleResult result, String receiptHandle,
+                                             boolean inBatch) {
         if (result == GuardedMessageQueue.HandleResult.HANDLE_NOT_ISSUED) {
             throw handleNotValidForQueue(receiptHandle);
         }
         if (result == GuardedMessageQueue.HandleResult.HANDLE_EXPIRED) {
             throw invalidReceiptHandle(receiptHandle, "The receipt handle has expired", inBatch);
-        }
-        if (result == GuardedMessageQueue.HandleResult.MESSAGE_GONE) {
-            throw invalidReceiptHandle(receiptHandle,
-                    "Message does not exist or is not available for visibility timeout change", inBatch);
         }
     }
 
