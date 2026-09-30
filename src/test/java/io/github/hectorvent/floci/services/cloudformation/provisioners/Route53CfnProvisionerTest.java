@@ -21,6 +21,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -564,6 +565,36 @@ class Route53CfnProvisionerTest {
         ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
         verify(service).changeResourceRecordSets(eq("Z1"), captor.capture(), any());
         assertEquals("UPSERT", captor.getValue().get(0).get("action"));
+    }
+
+    @Test
+    void anUpdateWithABlankSetIdentifierKeepsTheRecordWithoutOne() {
+        Route53Service service = mock(Route53Service.class);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode props = mapper.createObjectNode()
+                .put("HostedZoneId", "Z1")
+                .put("Name", "www.example.com")
+                .put("Type", "A")
+                .put("SetIdentifier", "");
+        ProvisionContext context = new ProvisionContext(recordEngine(), "us-east-1", "623666680275",
+                "dns-stack", "www.example.com");
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Www");
+        resource.setResourceType("AWS::Route53::RecordSet");
+        resource.setPhysicalId("www.example.com");
+        resource.getAttributes().put("__FlociRoute53RecordZoneId", "Z1");
+        resource.getAttributes().put("__FlociRoute53RecordType", "A");
+
+        new Route53CfnProvisioner(service).provision(resource, props, context);
+
+        // Route 53 requires a set identifier of at least one character, so a blank one is no
+        // identifier: the record is the one the last provision wrote, re-applied in place.
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(service).changeResourceRecordSets(eq("Z1"), captor.capture(), any());
+        Map<String, Object> change = captor.getValue().get(0);
+        assertEquals("UPSERT", change.get("action"));
+        assertNull(((ResourceRecordSet) change.get("rrs")).getSetIdentifier());
     }
 
     @Test

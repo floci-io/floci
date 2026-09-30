@@ -23,15 +23,16 @@ import java.util.Set;
 /**
  * Provisions {@code AWS::Route53::HostedZone} and {@code AWS::Route53::RecordSet}.
  *
- * <p>A record set is written into its hosted zone through {@code ChangeResourceRecordSets}: a record
- * the resource does not own yet is sent as a CREATE, so a record another owner holds fails the stack,
- * and an update that re-applies the record it already wrote is sent as an UPSERT. {@code Ref} is the
- * record name, and stack delete removes the record with a matching DELETE change. The schema-required
- * {@code Type} and {@code Name} are validated, and the zone is taken from {@code HostedZoneId} (or
- * resolved from {@code HostedZoneName}), since a record cannot be written without one. No
- * {@code Fn::GetAtt} attribute is published: the registry lists {@code Id} as read-only, but the
- * type has no registry handlers and the resource specification gives it no attributes, so
- * {@code Ref} is its only reference.
+ * <p>A record set is written into its hosted zone through {@code ChangeResourceRecordSets}. On stack
+ * create, and on an update that changes the record's identity (zone, Name, Type or SetIdentifier), the
+ * record is sent as a CREATE, so a record another owner already holds at that identity fails the
+ * stack. An update that keeps the identity is sent as an UPSERT, which replaces whatever record holds
+ * that identity. {@code Ref} is the record name, and stack delete removes the record with a matching
+ * DELETE change. The schema-required {@code Type} and {@code Name} are validated, and the zone is
+ * taken from {@code HostedZoneId} (or resolved from {@code HostedZoneName}), since a record cannot be
+ * written without one. No {@code Fn::GetAtt} attribute is published: the registry lists {@code Id} as
+ * read-only, but the type has no registry handlers and the resource specification gives it no
+ * attributes, so {@code Ref} is its only reference.
  */
 @ApplicationScoped
 public class Route53CfnProvisioner implements CfnResourceProvisioner {
@@ -97,15 +98,17 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
                         "AWS::Route53::RecordSet TTL must be an integer: " + ttl, 400);
             }
         }
-        String setIdentifier = ctx.resolveOptional(props, "SetIdentifier");
+        // Route 53 requires a set identifier of at least one character, so a blank one means none.
+        String setIdentifier = ctx.resolveOrDefault(props, "SetIdentifier", null);
         rrs.setSetIdentifier(setIdentifier);
         rrs.setRecords(parseResourceRecords(props, ctx));
         rrs.setAliasTarget(parseAliasTarget(props, ctx));
 
         // The record's identity is Name + Type + SetIdentifier within a zone. Re-applying the identity
-        // this resource wrote last time is an UPSERT. Any other identity, on stack create or on an
-        // update that changes it, is a record the stack does not own yet, so it is a CREATE: a record
-        // another owner already holds under that identity fails the stack instead of being taken over.
+        // this resource wrote last time is an UPSERT, which replaces whatever record holds that
+        // identity. Any other identity, on stack create or on an update that changes it, is a record
+        // the stack does not own yet, so it is a CREATE: a record another owner already holds under
+        // that identity fails the stack instead of being taken over.
         boolean sameIdentity = isPriorIdentity(ctx, priorAttributes, zoneId, name, type, setIdentifier);
         Map<String, Object> change = new HashMap<>();
         change.put("action", sameIdentity ? "UPSERT" : "CREATE");
