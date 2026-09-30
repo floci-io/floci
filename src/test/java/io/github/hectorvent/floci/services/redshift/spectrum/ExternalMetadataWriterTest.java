@@ -104,6 +104,26 @@ class ExternalMetadataWriterTest {
     }
 
     @Test
+    void refreshSqlPreservesExplicitlyEmptyPartitionSerdeParameters() throws Exception {
+        StorageDescriptor tableDescriptor = new StorageDescriptor();
+        tableDescriptor.setSerdeInfo(serdeInfo("table-serde", Map.of("field.delim", "|")));
+        Table table = new Table();
+        table.setName("events");
+        table.setStorageDescriptor(tableDescriptor);
+
+        StorageDescriptor partitionDescriptor = new StorageDescriptor();
+        partitionDescriptor.setSerdeInfo(serdeInfo("partition-serde", Map.of()));
+        Partition partition = new Partition();
+        partition.setValues(List.of("2024-01-01"));
+        partition.setStorageDescriptor(partitionDescriptor);
+
+        String sql = writer.refreshSql(BINDING, List.of(table), Map.of("events", List.of(partition)));
+        JsonNode partitionRow = refreshPayload(sql).path("partitions").get(0);
+
+        assertEquals("{}", partitionRow.path("serde_parameters").asText());
+    }
+
+    @Test
     void purgeCallsPrivilegedWriterForOneSchema() {
         String sql = writer.purgeSql("analytics");
         assertThat(sql, containsString("SELECT floci_internal.purge_external_schema('analytics')"));

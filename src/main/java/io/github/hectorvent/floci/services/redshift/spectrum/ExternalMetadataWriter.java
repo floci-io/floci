@@ -130,7 +130,7 @@ public class ExternalMetadataWriter {
             serializationLibrary = serdeLibrary(tableDescriptor);
         }
         Map<String, String> parameters = serdeParameters(descriptor);
-        if (parameters.isEmpty()) {
+        if (parameters == null) {
             parameters = serdeParameters(tableDescriptor);
         }
         Boolean compressedValue = descriptor == null ? null : descriptor.getCompressed();
@@ -156,8 +156,7 @@ public class ExternalMetadataWriter {
 
     private static Map<String, String> serdeParameters(StorageDescriptor descriptor) {
         return descriptor == null || descriptor.getSerdeInfo() == null
-                || descriptor.getSerdeInfo().getParameters() == null
-                ? Map.of() : descriptor.getSerdeInfo().getParameters();
+                ? null : descriptor.getSerdeInfo().getParameters();
     }
 
     private String json(Object value) {
