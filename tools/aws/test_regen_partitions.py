@@ -4,6 +4,7 @@ Run with: pytest tools/aws -q  (or: make aws-data-test)
 """
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
@@ -255,6 +256,17 @@ def test_collect_signing_names_keeps_only_the_services_whose_signing_name_differ
     (tmp_path / "partitions.json").write_text("{}")
 
     assert r.collect_signing_names(tmp_path) == {"bedrock": ["bedrock-agent", "bedrock-runtime"], "ecr": ["api.ecr"]}
+
+
+def test_collect_signing_names_reads_the_gzipped_models_the_botocore_wheel_ships(tmp_path):
+    # The pip package ships service-2.json.gz; the checkout ships it plain. Both must agree, or
+    # aws-data-check fails in CI, which resolves botocore to the installed package.
+    target = tmp_path / "ecr" / "2015-09-21" / "service-2.json.gz"
+    target.parent.mkdir(parents=True)
+    with gzip.open(target, "wt", encoding="utf-8") as handle:
+        json.dump({"metadata": {"endpointPrefix": "api.ecr", "signingName": "ecr"}}, handle)
+
+    assert r.collect_signing_names(tmp_path) == {"ecr": ["api.ecr"]}
 
 
 def test_build_refuses_a_partition_missing_from_endpoints_json():

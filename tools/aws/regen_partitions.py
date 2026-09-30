@@ -34,6 +34,7 @@ Run from anywhere in the repo:
 from __future__ import annotations
 
 import argparse
+import gzip
 import importlib
 import json
 import re
@@ -88,6 +89,22 @@ def load_json(path: Path) -> dict:
         return json.load(handle)
 
 
+def service_model(version_dir: Path) -> Path | None:
+    """A version directory's `service-2.json`, plain as the botocore checkout has it or gzipped
+    as the botocore wheel ships it, or None when the directory holds neither."""
+    for name in ("service-2.json", "service-2.json.gz"):
+        if (version_dir / name).is_file():
+            return version_dir / name
+    return None
+
+
+def load_model(path: Path) -> dict:
+    if path.suffix == ".gz":
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            return json.load(handle)
+    return load_json(path)
+
+
 def parse_cdk_entities(text: str) -> list[str]:
     """The ordered `AWS_REGIONS_AND_RULES` entries: region ids and RULE_ markers, in file order."""
     entries: list[str] = []
@@ -137,10 +154,10 @@ def collect_signing_names(botocore_data: Path) -> dict[str, list[str]]:
     """Signing name -> endpoint prefixes, for the services where the two differ."""
     by_signing_name: dict[str, set[str]] = {}
     for service_dir in sorted(p for p in botocore_data.iterdir() if p.is_dir()):
-        versions = sorted(v for v in service_dir.iterdir() if (v / "service-2.json").is_file())
+        versions = sorted(v for v in service_dir.iterdir() if service_model(v) is not None)
         if not versions:
             continue
-        metadata = load_json(versions[-1] / "service-2.json").get("metadata", {})
+        metadata = load_model(service_model(versions[-1])).get("metadata", {})
         endpoint_prefix = metadata.get("endpointPrefix")
         signing_name = metadata.get("signingName") or endpoint_prefix
         if endpoint_prefix and signing_name != endpoint_prefix:
