@@ -1,28 +1,32 @@
 package io.github.hectorvent.floci.services.sqs;
 
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
 import java.util.HexFormat;
 import java.util.UUID;
-import java.util.zip.CRC32;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
- * Floci's receipt handle. The fields are readable. The checksum catches a handle edited by
- * mistake. It does not stop a forged handle. The receipts each message remembers do.
+ * Floci's receipt handle. The fields are readable, and the signature rejects a handle that was
+ * edited or built by hand, as AWS does.
  */
 record ReceiptHandle(String region, String accountId, String queueName, String messageId, String receipt,
-                     String checksum) {
+                     String signature) {
 
-    private static final String[] KEYS = {"region", "account", "queue", "messageId", "receipt", "checksum"};
+    static final String DEFAULT_SECRET = "local-emulator-secret";
 
-    static ReceiptHandle issue(String storageKey, String messageId) {
+    private static final String[] KEYS = {"region", "account", "queue", "messageId", "receipt", "signature"};
+
+    static ReceiptHandle issue(String storageKey, String messageId, String secret) {
         String[] queue = queueParts(storageKey);
         String receipt = UUID.randomUUID().toString();
-        String checksum = crc32(body(queue[0], queue[1], queue[2], messageId, receipt));
-        return new ReceiptHandle(queue[0], queue[1], queue[2], messageId, receipt, checksum);
+        String signature = sign(body(queue[0], queue[1], queue[2], messageId, receipt), secret);
+        return new ReceiptHandle(queue[0], queue[1], queue[2], messageId, receipt, signature);
     }
 
     String encode() {
-        return body(region, accountId, queueName, messageId, receipt) + ":checksum=" + checksum;
+        return body(region, accountId, queueName, messageId, receipt) + ":signature=" + signature;
     }
 
     /** Returns null when {@code value} is not in this format. */
@@ -42,8 +46,8 @@ record ReceiptHandle(String region, String accountId, String queueName, String m
         return new ReceiptHandle(values[0], values[1], values[2], values[3], values[4], values[5]);
     }
 
-    boolean isIntact() {
-        return checksum.equals(crc32(body(region, accountId, queueName, messageId, receipt)));
+    boolean isSignedWith(String secret) {
+        return signature.equals(sign(body(region, accountId, queueName, messageId, receipt), secret));
     }
 
     boolean belongsTo(String storageKey) {
@@ -71,9 +75,13 @@ record ReceiptHandle(String region, String accountId, String queueName, String m
                 + ":messageId=" + messageId + ":receipt=" + receipt;
     }
 
-    private static String crc32(String value) {
-        CRC32 crc = new CRC32();
-        crc.update(value.getBytes(StandardCharsets.UTF_8));
-        return HexFormat.of().toHexDigits((int) crc.getValue());
+    private static String sign(String value, String secret) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            return HexFormat.of().formatHex(mac.doFinal(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("HmacSHA256 is not available", e);
+        }
     }
 }

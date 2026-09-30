@@ -314,6 +314,7 @@ floci:
       default-visibility-timeout: 30
       max-message-size: 1048576
       clear-fifo-deduplication-cache-on-purge: false
+      receipt-handle-secret: local-emulator-secret
     s3:
       enabled: true
       enforce-auth: false

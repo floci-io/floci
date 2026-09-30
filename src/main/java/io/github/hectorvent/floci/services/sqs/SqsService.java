@@ -270,6 +270,7 @@ public class SqsService implements Resettable, ResourceProvider {
     private final boolean clearFifoDeduplicationCacheOnPurge;
     private final SnsService snsService;
     private final Clock clock;
+    private final String receiptHandleSecret;
 
     public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                       SnsService snsService) {
@@ -298,7 +299,8 @@ public class SqsService implements Resettable, ResourceProvider {
                 regionResolver,
                 config.services().sqs().clearFifoDeduplicationCacheOnPurge(),
                 snsService,
-                clock
+                clock,
+                config.services().sqs().receiptHandleSecret()
         );
     }
 
@@ -349,6 +351,17 @@ public class SqsService implements Resettable, ResourceProvider {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
                RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
                SnsService snsService, Clock clock) {
+        this(queueStore, messageStore, dedupStore, dedupIdentityStore, defaultVisibilityTimeout, maxMessageSize,
+                baseUrl, regionResolver, clearFifoDeduplicationCacheOnPurge, snsService, clock,
+                ReceiptHandle.DEFAULT_SECRET);
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
+               StorageBackend<String, Map<String, Long>> dedupStore,
+               StorageBackend<String, Map<String, Map<String, String>>> dedupIdentityStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
+               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
+               SnsService snsService, Clock clock, String receiptHandleSecret) {
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
@@ -361,6 +374,7 @@ public class SqsService implements Resettable, ResourceProvider {
         this.clearFifoDeduplicationCacheOnPurge = clearFifoDeduplicationCacheOnPurge;
         this.snsService = snsService;
         this.clock = clock;
+        this.receiptHandleSecret = receiptHandleSecret;
         this.moveTasksByHandle = new MoveTaskStore(clock);
         loadPersistedMessages();
         loadPersistedDedup();
@@ -391,11 +405,12 @@ public class SqsService implements Resettable, ResourceProvider {
         }
         if (messageStore instanceof AccountAwareStorageBackend<List<Message>> aware) {
             aware.scanAllAccountsAsMap().forEach((key, msgs) ->
-                    messagesByQueue.put(key, new GuardedMessageQueue(msgs, messageStore, key)));
+                    messagesByQueue.put(key, new GuardedMessageQueue(msgs, messageStore, key, receiptHandleSecret)));
         } else {
             for (String key : messageStore.keys()) {
                 messageStore.get(key).ifPresent(msgs ->
-                        messagesByQueue.put(key, new GuardedMessageQueue(msgs, messageStore, key)));
+                        messagesByQueue.put(key,
+                                new GuardedMessageQueue(msgs, messageStore, key, receiptHandleSecret)));
             }
         }
     }
@@ -467,7 +482,7 @@ public class SqsService implements Resettable, ResourceProvider {
 
     private GuardedMessageQueue getOrCreateQueue(String storageKey) {
         return messagesByQueue.computeIfAbsent(storageKey,
-                k -> new GuardedMessageQueue(messageStore, k));
+                k -> new GuardedMessageQueue(new ArrayList<>(), messageStore, k, receiptHandleSecret));
     }
 
     private void persistDedup(String storageKey) {
@@ -623,7 +638,8 @@ public class SqsService implements Resettable, ResourceProvider {
         }
 
         queueStore.put(storageKey, queue);
-        messagesByQueue.put(storageKey, new GuardedMessageQueue(messageStore, storageKey));
+        messagesByQueue.put(storageKey,
+                new GuardedMessageQueue(new ArrayList<>(), messageStore, storageKey, receiptHandleSecret));
         LOG.infov("Created {0} queue: {1} in region {2}", queue.isFifo() ? "FIFO" : "standard", queueName, region);
         return queue;
     }
@@ -1297,9 +1313,6 @@ public class SqsService implements Resettable, ResourceProvider {
 
     private static void rejectUnusableHandle(GuardedMessageQueue.HandleResult result, String receiptHandle,
                                              boolean inBatch) {
-        if (result == GuardedMessageQueue.HandleResult.HANDLE_NOT_ISSUED) {
-            throw handleNotValidForQueue(receiptHandle);
-        }
         if (result == GuardedMessageQueue.HandleResult.HANDLE_EXPIRED) {
             throw invalidReceiptHandle(receiptHandle, "The receipt handle has expired", inBatch);
         }
@@ -1314,7 +1327,7 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     /** A batch entry reports every receipt handle error under the ReceiptHandleIsInvalid code. */
-    private static ReceiptHandle checkReceiptHandle(String storageKey, String receiptHandle, boolean inBatch) {
+    private ReceiptHandle checkReceiptHandle(String storageKey, String receiptHandle, boolean inBatch) {
         if (receiptHandle == null || receiptHandle.isEmpty()) {
             throw new AwsException(inBatch ? "ReceiptHandleIsInvalid" : "MissingParameter",
                     "The request must contain the parameter ReceiptHandle.", 400);
@@ -1323,7 +1336,7 @@ public class SqsService implements Resettable, ResourceProvider {
         if (parsed == null) {
             throw new AwsException("ReceiptHandleIsInvalid", "The input receipt handle is invalid.", 400);
         }
-        if (!parsed.isIntact() || !parsed.belongsTo(storageKey)) {
+        if (!parsed.isSignedWith(receiptHandleSecret) || !parsed.belongsTo(storageKey)) {
             throw handleNotValidForQueue(receiptHandle);
         }
         return parsed;

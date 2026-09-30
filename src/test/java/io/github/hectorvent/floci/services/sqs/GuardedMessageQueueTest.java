@@ -105,7 +105,7 @@ class GuardedMessageQueueTest {
 
     @Test
     void removeByReceiptHandleInvalidReturnsEmpty() {
-        assertEquals(HandleResult.MESSAGE_GONE, queue.removeByReceiptHandle(ReceiptHandle.issue(null, "nonexistent"), false).result());
+        assertEquals(HandleResult.MESSAGE_GONE, queue.removeByReceiptHandle(ReceiptHandle.issue(null, "nonexistent", ReceiptHandle.DEFAULT_SECRET), false).result());
     }
 
     @Test
@@ -124,7 +124,7 @@ class GuardedMessageQueueTest {
 
     @Test
     void changeVisibilityInvalidReturnsFalse() {
-        assertEquals(HandleResult.MESSAGE_GONE, queue.changeVisibility(ReceiptHandle.issue(null, "nonexistent"), 0, false));
+        assertEquals(HandleResult.MESSAGE_GONE, queue.changeVisibility(ReceiptHandle.issue(null, "nonexistent", ReceiptHandle.DEFAULT_SECRET), 0, false));
     }
 
     @Test

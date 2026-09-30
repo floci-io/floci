@@ -132,6 +132,7 @@ floci:
       enabled: true
       default-visibility-timeout: 30
       max-message-size: 1048576
+      receipt-handle-secret: test-secret
     s3:
       enabled: true
       enforce-auth: false

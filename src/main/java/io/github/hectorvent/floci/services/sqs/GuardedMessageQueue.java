@@ -23,6 +23,7 @@ class GuardedMessageQueue {
     private final List<Message> messages;
     private final StorageBackend<String, List<Message>> messageStore;
     private final String storageKey;
+    private final String receiptHandleSecret;
     private volatile boolean closed;
 
     @FunctionalInterface
@@ -37,13 +38,19 @@ class GuardedMessageQueue {
     }
 
     GuardedMessageQueue(StorageBackend<String, List<Message>> messageStore, String storageKey) {
-        this(new ArrayList<>(), messageStore, storageKey);
+        this(new ArrayList<>(), messageStore, storageKey, ReceiptHandle.DEFAULT_SECRET);
     }
 
     GuardedMessageQueue(List<Message> initial, StorageBackend<String, List<Message>> messageStore, String storageKey) {
+        this(initial, messageStore, storageKey, ReceiptHandle.DEFAULT_SECRET);
+    }
+
+    GuardedMessageQueue(List<Message> initial, StorageBackend<String, List<Message>> messageStore, String storageKey,
+                        String receiptHandleSecret) {
         this.messages = new ArrayList<>(initial);
         this.messageStore = messageStore;
         this.storageKey = storageKey;
+        this.receiptHandleSecret = receiptHandleSecret;
     }
 
     record ClaimResult(List<Message> claimed, List<Message> dlqCandidates) {
@@ -114,9 +121,7 @@ class GuardedMessageQueue {
             return false;
         }
 
-        ReceiptHandle handle = ReceiptHandle.issue(storageKey, msg.getMessageId());
-        msg.setReceiptHandle(handle.encode());
-        msg.addIssuedReceipt(handle.receipt());
+        msg.setReceiptHandle(ReceiptHandle.issue(storageKey, msg.getMessageId(), receiptHandleSecret).encode());
         msg.setVisibleAt(Instant.now().plusSeconds(effectiveTimeout));
         claimed.add(msg);
         return true;
@@ -159,7 +164,7 @@ class GuardedMessageQueue {
         }
     }
 
-    enum HandleResult { APPLIED, MESSAGE_GONE, HANDLE_NOT_ISSUED, HANDLE_EXPIRED }
+    enum HandleResult { APPLIED, MESSAGE_GONE, HANDLE_EXPIRED }
 
     record Removal(HandleResult result, Message message) {
     }
@@ -205,9 +210,6 @@ class GuardedMessageQueue {
     private static HandleResult checkHandle(Message msg, ReceiptHandle handle, boolean fifo) {
         if (msg == null) {
             return HandleResult.MESSAGE_GONE;
-        }
-        if (!msg.wasIssued(handle.receipt())) {
-            return HandleResult.HANDLE_NOT_ISSUED;
         }
         if (fifo && (!handle.encode().equals(msg.getReceiptHandle()) || msg.isVisible())) {
             return HandleResult.HANDLE_EXPIRED;

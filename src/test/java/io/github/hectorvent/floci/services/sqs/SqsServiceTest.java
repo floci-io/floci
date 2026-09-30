@@ -2186,7 +2186,7 @@ class SqsServiceTest {
 
         assertTrue(handle.startsWith("region=us-east-1:account=000000000000:queue=handle-format:messageId="
                 + sent.getMessageId() + ":receipt="), handle);
-        assertTrue(handle.matches(".*:checksum=[0-9a-f]{8}"), handle);
+        assertTrue(handle.matches(".*:signature=[0-9a-f]{64}"), handle);
     }
 
     @ParameterizedTest
@@ -2234,11 +2234,12 @@ class SqsServiceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"delete", "changeVisibility"})
-    void receiptHandleThatWasNeverIssuedIsNotValidForTheQueue(String operation) {
+    void receiptHandleSignedWithAnotherSecretIsNotValidForTheQueue(String operation) {
         String region = "us-east-1";
         Queue queue = sqsService.createQueue("handle-forged", null, region);
         Message sent = sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
-        String forged = ReceiptHandle.issue(region + "::/000000000000/handle-forged", sent.getMessageId()).encode();
+        String forged = ReceiptHandle.issue(region + "::/000000000000/handle-forged", sent.getMessageId(),
+                "another-secret").encode();
 
         AwsException beforeReceive = assertThrows(AwsException.class,
                 () -> useReceiptHandle(operation, queue.getQueueUrl(), forged, region));
@@ -2380,6 +2381,25 @@ class SqsServiceTest {
 
         assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty());
         assertDoesNotThrow(() -> sqsService.deleteMessage(queue.getQueueUrl(), handle, region));
+    }
+
+    @Test
+    void receiptHandleStillWorksAfterARestart() {
+        String region = "us-east-1";
+        InMemoryStorage<String, Queue> queueStore = new InMemoryStorage<>();
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>();
+        RegionResolver regionResolver = new RegionResolver(region, "000000000000");
+        SqsService before = new SqsService(queueStore, messageStore, new InMemoryStorage<>(),
+                30, 1048576, BASE_URL, regionResolver);
+        Queue queue = before.createQueue("handle-restart", null, region);
+        before.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        String handle = before.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).get(0).getReceiptHandle();
+
+        SqsService after = new SqsService(queueStore, messageStore, new InMemoryStorage<>(),
+                30, 1048576, BASE_URL, regionResolver);
+        after.deleteMessage(queue.getQueueUrl(), handle, region);
+
+        assertTrue(after.peekMessages(queue.getQueueUrl(), region).isEmpty());
     }
 
     private void useReceiptHandle(String operation, String queueUrl, String receiptHandle, String region) {
