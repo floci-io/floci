@@ -696,6 +696,47 @@ class SsmCommandServiceDirectExecutionTest {
         assertTrue(service.getMessages("i-container", "request-id", 30).isEmpty());
     }
 
+    @Test
+    void invocationCancelledDuringDirectExecutionStaysCancelledWhenExecutionFinishes() throws Exception {
+        SsmDirectCommandExecutor executor = mock(SsmDirectCommandExecutor.class);
+        CountDownLatch executing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<Thread> executionThread = new AtomicReference<>();
+        Instant start = Instant.parse("2026-06-07T00:00:00Z");
+        Instant end = Instant.parse("2026-06-07T00:00:01Z");
+        when(executor.supports(any(), eq("i-container"), eq("AWS-RunShellScript"))).thenReturn(true);
+        when(executor.executeIfSupported(any(), eq("i-container"), eq("AWS-RunShellScript"), any(), eq(60)))
+                .thenAnswer(invocation -> {
+                    executionThread.set(Thread.currentThread());
+                    executing.countDown();
+                    assertTrue(release.await(10, TimeUnit.SECONDS), "test did not release execution in time");
+                    return Optional.of(new SsmDirectCommandExecutor.ExecutionResult(
+                            "Success", "done\n", "", 0, start, end));
+                });
+
+        SsmCommandService service = new SsmCommandService(
+                new InMemoryStorageFactory(), objectMapper, regionResolver, executor);
+
+        Command command = service.sendCommand(objectMapper.readTree("""
+                {
+                  "InstanceIds": ["i-container"],
+                  "DocumentName": "AWS-RunShellScript",
+                  "Parameters": {
+                    "commands": ["sleep 60"]
+                  },
+                  "TimeoutSeconds": 60
+                }
+                """), "us-west-2");
+
+        assertTrue(executing.await(10, TimeUnit.SECONDS), "direct execution did not start");
+        service.cancelCommand(command.getCommandId(), null, "us-west-2");
+        release.countDown();
+        assertTrue(executionThread.get().join(Duration.ofSeconds(10)), "direct execution did not finish");
+
+        assertEquals("Cancelled",
+                service.getCommandInvocation(command.getCommandId(), "i-container", "us-west-2").getStatus());
+    }
+
     private static String waitForCommandStatus(SsmCommandService service, String commandId, String region) throws InterruptedException {
         for (int i = 0; i < 50; i++) {
             Command command = service.listCommands(commandId, null, region).getFirst();

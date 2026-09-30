@@ -577,6 +577,9 @@ public class SsmCommandService implements Resettable {
                 return;
             }
             synchronized (invocation) {
+                if (!"InProgress".equals(invocation.getStatus())) {
+                    return;
+                }
                 applyDirectResult(invocation, result);
                 invocationStore.put(invKey, invocation);
             }
