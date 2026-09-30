@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -495,22 +496,22 @@ class StepFunctionsExecutionHistoryIntegrationTest {
                 .post("/");
         response.then().statusCode(200);
 
-        var events = MAPPER.readTree(response.body().asString()).path("events");
-        var types = new ArrayList<String>();
+        JsonNode events = MAPPER.readTree(response.body().asString()).path("events");
+        List<String> types = new ArrayList<>();
         events.forEach(event -> types.add(event.path("type").asText()));
         assertEquals(List.of("ExecutionStarted", "TaskStateEntered", "TaskScheduled", "TaskStarted",
                 "TaskSubmitted", "TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"), types);
-        var expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L, 7L);
-        for (var i = 0; i < events.size(); i++) {
+        List<Long> expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L, 7L);
+        for (int i = 0; i < events.size(); i++) {
             assertEquals(i + 1L, events.get(i).path("id").asLong());
             assertEquals(expectedPreviousEventIds.get(i), events.get(i).path("previousEventId").asLong());
         }
 
-        var submitted = events.get(4).path("taskSubmittedEventDetails");
+        JsonNode submitted = events.get(4).path("taskSubmittedEventDetails");
         assertEquals("states", submitted.path("resourceType").asText());
         assertEquals("startExecution.sync:2", submitted.path("resource").asText());
         assertFalse(submitted.path("outputDetails").path("truncated").asBoolean(true));
-        var output = MAPPER.readTree(submitted.path("output").asText());
+        JsonNode output = MAPPER.readTree(submitted.path("output").asText());
         assertEquals(List.of("ExecutionArn", "StartDate"), fieldNames(output));
         String childExecutionPrefix = childArn.replace(":stateMachine:", ":execution:") + ":";
         assertTrue(output.path("ExecutionArn").asText().startsWith(childExecutionPrefix), output.toString());
@@ -521,7 +522,7 @@ class StepFunctionsExecutionHistoryIntegrationTest {
         assertEquals("startExecution.sync:2", events.get(5).path("taskSucceededEventDetails").path("resource").asText());
     }
 
-    private static List<String> fieldNames(com.fasterxml.jackson.databind.JsonNode node) {
+    private static List<String> fieldNames(JsonNode node) {
         List<String> names = new ArrayList<>();
         node.fieldNames().forEachRemaining(names::add);
         return names;
