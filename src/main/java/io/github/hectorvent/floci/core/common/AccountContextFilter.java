@@ -168,10 +168,14 @@ public class AccountContextFilter implements ContainerRequestFilter {
         String partitionId = partition.get().id();
         LOG.infov("Rejecting request signed for {0} in partition {1}, which publishes no endpoint for it: {2} {3}",
                 signingName, partitionId, ctx.getMethod(), ctx.getUriInfo().getPath());
-        ctx.abortWith(AwsProtocolClaimFilter.unknownOperationResponse(404,
-                "Service " + signingName + " has no endpoint in partition " + partitionId
-                        + ": on AWS the host does not resolve there (the SDKs report an UnknownHostException). "
-                        + "Floci is running with floci.partitions.strict=true."));
+        String message = "Service " + signingName + " has no endpoint in partition " + partitionId
+                + ": on AWS the host does not resolve there (the SDKs report an UnknownHostException). "
+                + "Floci is running with floci.partitions.strict=true.";
+        if (isFormEncoded(ctx.getMediaType())) {
+            ctx.abortWith(AwsQueryResponse.error("UnknownOperationException", message, null, 404));
+            return;
+        }
+        ctx.abortWith(AwsProtocolClaimFilter.unknownOperationResponse(404, message));
     }
 
     /**

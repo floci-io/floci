@@ -44,14 +44,17 @@ class PartitionStrictModeIntegrationTest {
             .body("message", containsString("cloudfront has no endpoint in partition aws-us-gov"));
     }
 
+    /** IAM speaks the Query protocol, so the refusal is the Query XML error a Query client parses. */
     @Test
-    void iamIsRefusedInEusc() {
+    void iamIsRefusedInEuscWithAQueryError() {
         given()
             .header("Authorization", PartitionMatrix.sigV4Auth("eusc-de-east-1", "iam"))
             .formParam("Action", "ListRoles")
             .formParam("Version", "2010-05-08")
         .when().post("/").then().statusCode(404)
-            .body("message", containsString("iam has no endpoint in partition aws-eusc"));
+            .contentType(containsString("xml"))
+            .body("ErrorResponse.Error.Code", equalTo("UnknownOperationException"))
+            .body("ErrorResponse.Error.Message", containsString("iam has no endpoint in partition aws-eusc"));
     }
 
     @Test

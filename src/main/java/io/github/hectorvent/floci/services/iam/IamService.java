@@ -2646,8 +2646,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 sessionName = session.getEc2InstanceId() != null
                         ? session.getEc2InstanceId() : "floci-session";
             }
-            return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/"
-                    + sessionName).toString());
+            // The session lives in the role's partition, the one its ARN names, whatever region a
+            // later call is signed for: AssumeRole issued the same partition for it.
+            String partition = AwsArnUtils.isArn(roleArn)
+                    ? AwsArnUtils.parse(roleArn).partition() : regionResolver.getPartition();
+            return Optional.of(AwsArnUtils.Arn.global(partition, "sts", accountId,
+                    "assumed-role/" + roleName + "/" + sessionName).toString());
         }
 
         return Optional.empty();
