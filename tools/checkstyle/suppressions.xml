@@ -219,8 +219,8 @@
     <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbImportIntegrationTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbIntegrationTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbItemSize\.java$"/>
-    <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbJsonHandler\.java$"/>
-    <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbJsonHandlerTest\.java$"/>
+    <suppress id="NoVar" files="/floci/services/dynamodb/NativeDynamoDbJsonHandler\.java$"/>
+    <suppress id="NoVar" files="/floci/services/dynamodb/NativeDynamoDbJsonHandlerTest\.java$"/>
     <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbNumberUtils\.java$"/>
     <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbPartiQLParser\.java$"/>
     <suppress id="NoVar" files="/floci/services/dynamodb/DynamoDbPartiQLParserTest\.java$"/>
