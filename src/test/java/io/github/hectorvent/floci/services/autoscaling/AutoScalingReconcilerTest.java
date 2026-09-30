@@ -26,6 +26,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.anyList;
 import static org.mockito.Mockito.eq;
@@ -108,6 +109,7 @@ class AutoScalingReconcilerTest {
         version.setLatestVersionNumber("1");
         version.getData().setImageId("ami-version-1");
         version.getData().setInstanceType("t3.micro");
+        version.getData().setEncodedUserData("IyEvYmluL2Jhc2gKZWNobyBoaQo=");
         version.getData().setIamInstanceProfile(new LaunchTemplateData.IamInstanceProfile(
                 "arn:aws:iam::000000000000:instance-profile/app-profile", null));
         when(ec2Service.iamInstanceProfileArn(version.getData()))
@@ -126,7 +128,8 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                anyList(), eq(null), eq("arn:aws:iam::000000000000:instance-profile/app-profile"), eq(null))).thenReturn(reservation);
+                anyList(), eq("#!/bin/bash\necho hi\n"),
+                eq("arn:aws:iam::000000000000:instance-profile/app-profile"), eq(null))).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
@@ -137,7 +140,9 @@ class AutoScalingReconcilerTest {
         ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.captor();
         verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                tags.capture(), eq(null), eq("arn:aws:iam::000000000000:instance-profile/app-profile"), eq(null));
+                tags.capture(), eq("#!/bin/bash\necho hi\n"),
+                eq("arn:aws:iam::000000000000:instance-profile/app-profile"), eq(null));
+        assertNull(version.getData().getUserData());
         assertEquals(propagatedTags.size(), tags.getValue().size());
         assertEquals("app.ClusterId", tags.getValue().get(0).getKey());
         assertEquals("development", tags.getValue().get(0).getValue());
@@ -306,6 +311,7 @@ class AutoScalingReconcilerTest {
         version.setLatestVersionNumber("3");
         version.getData().setImageId("ami-version-3");
         version.getData().setInstanceType("t3.micro");
+        version.getData().setEncodedUserData("IyEvYmluL2Jhc2gKZWNobyBoaQo=");
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
                 .thenReturn(List.of(launchTemplate));
         when(ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("3")))
@@ -316,7 +322,7 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-3"), eq("t3.small"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(List.of()), eq(null), eq(null), eq(null))).thenReturn(reservation);
+                eq(List.of()), eq("#!/bin/bash\necho hi\n"), eq(null), eq(null))).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
@@ -327,7 +333,8 @@ class AutoScalingReconcilerTest {
         assertEquals("t3.small", asg.getInstances().getFirst().getInstanceType());
         verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-version-3"), eq("t3.small"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(List.of()), eq(null), eq(null), eq(null));
+                eq(List.of()), eq("#!/bin/bash\necho hi\n"), eq(null), eq(null));
+        assertNull(version.getData().getUserData());
     }
 
     @Test

@@ -6576,7 +6576,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 launchTemplate,
                 version,
                 launchTemplate.getDefaultVersionNumber());
-        return new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
+        LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
+        data.setUserData(Ec2UserDataDecoder.decodeIfMissing(data.getUserData(), data.getEncodedUserData()));
+        return data;
     }
 
     public LaunchTemplate deleteLaunchTemplate(String region, String id, String name) {

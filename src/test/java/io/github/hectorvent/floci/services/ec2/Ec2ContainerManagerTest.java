@@ -566,18 +566,15 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
-    void userDataShellScriptsBoundsAggregateConcurrentDecompression() throws Exception {
-        // Each launch decodes its UserData independently on Ec2ContainerManager's unbounded
-        // cached launch executor, so the per-payload 10 MB cap alone does not stop many
-        // concurrent launches from each decompressing near that limit at once (Greptile's
-        // follow-up on the gzip-bomb fix). Drive real concurrent decompressions through the
-        // public entry point and use the test hook to prove no more than
-        // MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS (4) ever run at the same instant, while still
-        // exercising genuine concurrency rather than serialized calls.
+    void ec2UserDataPathsShareAggregateConcurrentDecompressionBudget() throws Exception {
+        // API decoding and guest execution share the same budget. The hook must see every
+        // decompression, and no more than four may run at once across both entry points.
         int concurrentLaunches = 12;
+        AtomicInteger totalDecompressions = new AtomicInteger(0);
         AtomicInteger active = new AtomicInteger(0);
         AtomicInteger peakActive = new AtomicInteger(0);
         UserDataPipeline.userDataDecompressionTestHook = () -> {
+            totalDecompressions.incrementAndGet();
             int now = active.incrementAndGet();
             peakActive.accumulateAndGet(now, Math::max);
             try {
@@ -598,7 +595,11 @@ class Ec2ContainerManagerTest {
 
             List<Future<List<String>>> futures = new ArrayList<>();
             for (int i = 0; i < concurrentLaunches; i++) {
-                futures.add(pool.submit(() -> Ec2ContainerManager.userDataShellScripts(gzipped)));
+                if (i % 2 == 0) {
+                    futures.add(pool.submit(() -> Ec2ContainerManager.userDataShellScripts(gzipped)));
+                } else {
+                    futures.add(pool.submit(() -> List.of(Ec2UserDataDecoder.decode(gzipped))));
+                }
             }
             for (Future<List<String>> future : futures) {
                 results.add(future.get(30, TimeUnit.SECONDS));
@@ -609,6 +610,7 @@ class Ec2ContainerManagerTest {
         }
 
         assertEquals(concurrentLaunches, results.size());
+        assertEquals(concurrentLaunches, totalDecompressions.get());
         assertTrue(peakActive.get() <= 4,
                 "peak concurrent UserData decompressions was " + peakActive.get() + ", expected <= 4");
         assertTrue(peakActive.get() >= 2,
