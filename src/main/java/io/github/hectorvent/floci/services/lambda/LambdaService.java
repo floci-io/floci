@@ -1079,20 +1079,27 @@ public class LambdaService implements ResourceProvider {
     }
 
     public InvokeResult invoke(String region, String functionName, byte[] payload, InvocationType type) {
-        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionName);
-        enforceRegion(region, ref);
+        return invoke(region, functionName, null, payload, type);
+    }
+
+    /**
+     * Invokes a function, reconciling a qualifier carried on the name with Invoke's {@code Qualifier} query parameter.
+     */
+    public InvokeResult invoke(String region, String functionName, String qualifier, byte[] payload,
+                               InvocationType type) {
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
         String name = ref.name();
-        String qualifier = ref.qualifier();
+        String resolvedQualifier = ref.qualifier();
         LambdaFunction fn;
         if (functionName.startsWith("arn:")) {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
-            fn = targetResolver.resolveInvokeTargetForAccount(arn.accountId(), region, name, qualifier);
+            fn = targetResolver.resolveInvokeTargetForAccount(arn.accountId(), region, name, resolvedQualifier);
         } else {
-            fn = targetResolver.resolveInvokeTarget(region, name, qualifier);
+            fn = targetResolver.resolveInvokeTarget(region, name, resolvedQualifier);
         }
         reportCustomResourceLiveness(payload);
         InvokeResult result = executorService.invoke(fn, payload, type,
-                LambdaInvocationChain.currentDepth(), qualifier);
+                LambdaInvocationChain.currentDepth(), resolvedQualifier);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }

@@ -239,6 +239,7 @@ public class LambdaController {
     @Consumes(MediaType.WILDCARD)
     public Response invoke(@Context HttpHeaders headers,
                            @PathParam("functionName") String functionName,
+                           @QueryParam("Qualifier") String qualifier,
                            byte[] payload) {
         String region = regionResolver.resolveRegion(headers);
         String invocationTypeHeader = headers.getHeaderString("X-Amz-Invocation-Type");
@@ -258,7 +259,7 @@ public class LambdaController {
                     .build();
         }
 
-        InvokeResult result = lambdaService.invoke(region, functionName, payload, type);
+        InvokeResult result = lambdaService.invoke(region, functionName, qualifier, payload, type);
 
         if (type != InvocationType.Event
                 && result.getPayload() != null
