@@ -73,9 +73,12 @@ subsequent unqualified `GetFunction` responses.
 
 An asynchronous invocation (`InvocationType: Event`) answers `202` immediately and runs on the background
 pool. If the invocation fails, it is retried up to `MaximumRetryAttempts` (default: 2, total 3 attempts)
-unless the event age exceeds `MaximumEventAgeInSeconds` (default: 21600 seconds, 6 hours). In Floci,
-retries run back to back without the delays of live AWS (which waits roughly one minute and then two) to keep
-local test runs fast.
+unless the event age exceeds `MaximumEventAgeInSeconds` (default: 21600 seconds, 6 hours). As in AWS, the
+first retry waits one minute and the second two. `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` sets the
+first wait (the second is twice it), and `0` retries back to back for fast local test runs. A wait never runs
+past `MaximumEventAgeInSeconds`, so an event that expires while waiting is reported then. A retry that finds the
+function's concurrency in use tries again every second until the event expires, where AWS backs off for up to
+five minutes.
 
 When retries are exhausted or event age is exceeded:
 
@@ -121,8 +124,9 @@ type `Lambda Function Invocation Result - Failure`, a `condition` of `RetriesExh
 `functionError` member is present only on a failure record. The `approximateInvokeCount` field reflects
 the actual number of attempts executed before completion or exhaustion.
 
-An alias-specific destination configuration is used when the alias is invoked. If the alias has
-none, Floci checks the configuration on the version that the alias resolves to.
+An alias-specific destination configuration is used when the alias is invoked, whether the alias is named
+in `Qualifier` or on the function name. If the alias has none, Floci checks the configuration on the
+version that the alias resolves to.
 
 Two limits are worth knowing:
 
@@ -363,6 +367,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT` | `12499` | Last port in the Lambda Runtime API range. One port is held per running container, so the range width caps concurrent executions. Each running container also holds two Docker connections, so a wider range needs a matching `FLOCI_DOCKER_MAX_CONNECTIONS` |
 | `FLOCI_SERVICES_LAMBDA_CODE_PATH` | `./data/lambda-code` | Directory where Lambda ZIP files are stored |
 | `FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS` | `1000` | Event-source mapping poll interval (milliseconds) |
+| `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` | `60` | Wait before the first retry of a failed asynchronous invocation (seconds); the second waits twice this, `0` retries back to back |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` | `300` | Idle container shutdown timeout (seconds) |
 | `FLOCI_SERVICES_LAMBDA_REGION_CONCURRENCY_LIMIT` | `1000` | Maximum concurrent executions per region |
 | `FLOCI_SERVICES_LAMBDA_UNRESERVED_CONCURRENCY_MIN` | `100` | Minimum unreserved capacity `PutFunctionConcurrency` must leave |
