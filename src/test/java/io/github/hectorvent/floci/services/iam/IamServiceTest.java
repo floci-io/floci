@@ -50,6 +50,12 @@ class IamServiceTest {
 
     private static IamService iamService(boolean seedDeployerPrincipal, StorageBackend<String, AccessKey> accessKeys,
                                          StorageBackend<String, SessionCredential> sessions) {
+        return iamService(seedDeployerPrincipal, accessKeys, sessions, new RegionResolver("us-east-1", "000000000000"));
+    }
+
+    private static IamService iamService(boolean seedDeployerPrincipal, StorageBackend<String, AccessKey> accessKeys,
+                                         StorageBackend<String, SessionCredential> sessions,
+                                         RegionResolver regionResolver) {
         return new IamService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -58,9 +64,20 @@ class IamServiceTest {
                 accessKeys,
                 new InMemoryStorage<>(),
                 sessions,
-                new RegionResolver("us-east-1", "000000000000"),
+                regionResolver,
                 seedDeployerPrincipal
         );
+    }
+
+    /** The STS global endpoint, and so the token version it reports, exists only in the commercial partition. */
+    @Test
+    void accountSummaryReportsTheGlobalEndpointTokenVersionOnlyWhereStsHasAGlobalHost() {
+        assertEquals(1L, iamService.getAccountSummary().get("GlobalEndpointTokenVersion"));
+
+        IamService china = iamService(false, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("cn-north-1", "000000000000"));
+        assertFalse(china.getAccountSummary().containsKey("GlobalEndpointTokenVersion"));
+        assertEquals(0L, china.getAccountSummary().get("Users"));
     }
 
     @Test

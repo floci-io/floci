@@ -44,7 +44,9 @@ public final class AwsPartitions {
                    Map<String, AwsPartition> byRegion,
                    Map<String, AwsPartition> byPseudoRegion,
                    Set<String> regionIds,
-                   List<String> dnsSuffixesLongestFirst) {
+                   List<String> dnsSuffixesLongestFirst,
+                   Map<String, Set<String>> endpointPrefixesBySigningName,
+                   Set<String> signingNamesPublishedSomewhere) {
     }
 
     private static final class Holder {
@@ -80,6 +82,28 @@ public final class AwsPartitions {
 
     public static Set<String> ids() {
         return Holder.CATALOG.byId().keySet();
+    }
+
+    /**
+     * The {@code endpoints.json} service keys a SigV4 signing name covers when the two differ
+     * ({@code ecr} signs for {@code api.ecr}, {@code bedrock} for {@code bedrock-runtime} and
+     * its siblings), or an empty set when the signing name is its own endpoint prefix.
+     */
+    public static Set<String> endpointPrefixes(String signingName) {
+        if (signingName == null) {
+            return Set.of();
+        }
+        return Holder.CATALOG.endpointPrefixesBySigningName().getOrDefault(signingName, Set.of());
+    }
+
+    /**
+     * True when at least one published partition lists the service {@code signingName} signs
+     * for. {@code endpoints.json} does not cover every service (the newer ones ship only an
+     * endpoint ruleset), so a false answer means the data says nothing about the service, not
+     * that AWS lacks it.
+     */
+    public static boolean publishesSomewhere(String signingName) {
+        return signingName != null && Holder.CATALOG.signingNamesPublishedSomewhere().contains(signingName);
     }
 
     /**
@@ -225,8 +249,27 @@ public final class AwsPartitions {
         }
         List<String> suffixesLongestFirst = new ArrayList<>(dnsSuffixes);
         suffixesLongestFirst.sort(Comparator.comparingInt(String::length).reversed().thenComparing(Comparator.naturalOrder()));
+        Map<String, Set<String>> endpointPrefixesBySigningName = new LinkedHashMap<>();
+        JsonNode signingNames = root.path("signingNames");
+        signingNames.fieldNames().forEachRemaining(signingName -> {
+            Set<String> prefixes = new LinkedHashSet<>();
+            for (JsonNode prefix : signingNames.get(signingName)) {
+                prefixes.add(prefix.asText());
+            }
+            endpointPrefixesBySigningName.put(signingName, Set.copyOf(prefixes));
+        });
+        Set<String> publishedSomewhere = new LinkedHashSet<>();
+        for (AwsPartition partition : partitions) {
+            publishedSomewhere.addAll(partition.services());
+        }
+        endpointPrefixesBySigningName.forEach((signingName, prefixes) -> {
+            if (prefixes.stream().anyMatch(publishedSomewhere::contains)) {
+                publishedSomewhere.add(signingName);
+            }
+        });
         return new Catalog(List.copyOf(partitions), Map.copyOf(byId), Map.copyOf(byRegion),
-                Map.copyOf(byPseudoRegion), Set.copyOf(regionIds), List.copyOf(suffixesLongestFirst));
+                Map.copyOf(byPseudoRegion), Set.copyOf(regionIds), List.copyOf(suffixesLongestFirst),
+                Map.copyOf(endpointPrefixesBySigningName), Set.copyOf(publishedSomewhere));
     }
 
     private static AwsPartition parsePartition(JsonNode node) {

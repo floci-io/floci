@@ -302,6 +302,8 @@ class EventBridgeSchedulerIntegrationTest {
                     public Optional<String> id() { return Optional.empty(); }
                     @Override
                     public boolean allowUnknownRegions() { return false; }
+                    @Override
+                    public boolean strict() { return false; }
                 };
             }
             @Override

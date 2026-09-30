@@ -131,7 +131,8 @@ public class StsQueryHandler {
             return trustDenied;
         }
 
-        String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
+        String assumedRoleArn = regionResolver.buildGlobalArn("sts", accountId,
+                "assumed-role/" + roleName + "/" + sessionName);
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
         // Register session so IAM enforcement can resolve the role's policies, RDS/ElastiCache
@@ -179,7 +180,7 @@ public class StsQueryHandler {
         String callerAccount = regionResolver.getAccountId();
         String accessKeyId = auth == null ? null : accountResolver.extractAccessKeyId(auth);
         String callerArn = iamService.resolveCallerArn(accessKeyId)
-                .orElse(AwsArnUtils.Arn.of("iam", "", callerAccount, "root").toString());
+                .orElse(regionResolver.buildGlobalArn("iam", callerAccount, "root"));
         String principalArn = iamService.resolvePrincipalArn(accessKeyId).orElse(callerArn);
         Map<String, List<String>> requestContext = IamConditionContextResolver.withGlobalContext(
                 null, roleArn, regionResolver.getRegion(), callerAccount, roleAccountId);
@@ -202,7 +203,7 @@ public class StsQueryHandler {
         String authorization = headers == null ? null : headers.getHeaderString("Authorization");
         String accessKeyId = authorization == null ? null : accountResolver.extractAccessKeyId(authorization);
         String arn = iamService.resolveCallerArn(accessKeyId)
-                .orElse(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
+                .orElse(regionResolver.buildGlobalArn("iam", accountId, "root"));
         String userId = iamService.resolveCallerUserId(accessKeyId).orElse(accountId);
         String result = new XmlBuilder()
                 .elem("UserId", userId)
@@ -260,7 +261,8 @@ public class StsQueryHandler {
         String sessionToken = randomSecret(200);
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
-        String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
+        String assumedRoleArn = regionResolver.buildGlobalArn("sts", accountId,
+                "assumed-role/" + roleName + "/" + sessionName);
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
         String provider = verified != null ? verified.issuer()
@@ -343,8 +345,8 @@ public class StsQueryHandler {
         }
 
         String issuerKeyPrefix = stripScheme(issuer.get());
-        String oidcProviderArn = AwsArnUtils.Arn.of("iam", "", roleAccountId,
-                "oidc-provider/" + issuerKeyPrefix).toString();
+        String oidcProviderArn = regionResolver.buildGlobalArn("iam", roleAccountId,
+                "oidc-provider/" + issuerKeyPrefix);
         Map<String, List<String>> conditionClaims = Map.of(
                 "sub", List.of(claims.subject()),
                 "aud", claims.audiences());
@@ -430,7 +432,8 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
+        String assumedRoleArn = regionResolver.buildGlobalArn("sts", accountId,
+                "assumed-role/" + roleName + "/" + sessionName);
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
         iamService.registerSession(accessKeyId, secretKey, sessionToken, roleArn, expiration, null,
@@ -461,7 +464,7 @@ public class StsQueryHandler {
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
         String accountId = regionResolver.getAccountId();
         String federatedUserId = accountId + ":" + name;
-        String federatedUserArn = AwsArnUtils.Arn.of("sts", "", accountId, "federated-user/" + name).toString();
+        String federatedUserArn = regionResolver.buildGlobalArn("sts", accountId, "federated-user/" + name);
 
         String sessionPolicy = getParam(params, "Policy");
         // Register federation token so enforcement can scope its policies via session policy.

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
@@ -1182,7 +1183,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         summary.put("AccountAccessKeysPresent", 0L);
         summary.put("AccountSigningCertificatesPresent", 0L);
         summary.put("AccountPasswordPresent", 0L);
-        summary.put("GlobalEndpointTokenVersion", 1L);
+        // The STS global endpoint (and so the v1/v2 token choice it reports) exists only where
+        // the partition publishes one: aws today. Elsewhere AWS has no such entry to report.
+        if (AwsPartitions.byId(regionResolver.getPartition()).hasGlobalSts()) {
+            summary.put("GlobalEndpointTokenVersion", 1L);
+        }
         return summary;
     }
 

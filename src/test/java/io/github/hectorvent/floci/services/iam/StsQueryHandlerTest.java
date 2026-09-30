@@ -5,11 +5,14 @@ import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
+import io.github.hectorvent.floci.testing.PartitionMatrix;
+import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.regex.Matcher;
@@ -29,7 +32,13 @@ class StsQueryHandlerTest {
     private static final Pattern SESSION_TOKEN =
             Pattern.compile("<SessionToken>([^<]+)</SessionToken>");
 
+    private static final Pattern ARN = Pattern.compile("<Arn>([^<]+)</Arn>");
+
     private static StsQueryHandler newHandler() {
+        return newHandler(new RegionResolver(REGION, "000000000000"));
+    }
+
+    private static StsQueryHandler newHandler(RegionResolver regionResolver) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iam = mock(EmulatorConfig.IamServiceConfig.class);
@@ -40,7 +49,7 @@ class StsQueryHandlerTest {
         return new StsQueryHandler(
                 mock(IamService.class),
                 mock(AccountResolver.class),
-                new RegionResolver(REGION, "000000000000"),
+                regionResolver,
                 config,
                 mock(AssumeRolePolicyEvaluator.class),
                 mock(WebIdentityTrustPolicyEvaluator.class),
@@ -223,6 +232,34 @@ class StsQueryHandlerTest {
         String body = (String) response.getEntity();
         assertTrue(body.contains("ValidationError"), body);
         assertTrue(body.contains("greater than or equal to 900"), body);
+    }
+
+    /** The root ARN GetCallerIdentity falls back to carries the deployment's partition, not {@code aws}. */
+    @ParameterizedTest
+    @MethodSource("io.github.hectorvent.floci.testing.PartitionMatrix#cases")
+    void getCallerIdentityMintsTheRootArnInTheDeploymentsPartition(PartitionCase partitionCase) {
+        Response response = newHandler(PartitionMatrix.regionResolver(partitionCase))
+                .handle("GetCallerIdentity", new MultivaluedHashMap<>());
+
+        assertEquals(200, response.getStatus());
+        String arn = extract(ARN, (String) response.getEntity());
+        assertEquals("arn:" + partitionCase.partition() + ":iam::" + PartitionMatrix.ACCOUNT + ":root", arn);
+        PartitionMatrix.assertGlobalArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.github.hectorvent.floci.testing.PartitionMatrix#cases")
+    void getFederationTokenMintsTheFederatedUserArnInTheDeploymentsPartition(PartitionCase partitionCase) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Name", "bob");
+
+        Response response = newHandler(PartitionMatrix.regionResolver(partitionCase))
+                .handle("GetFederationToken", params);
+
+        assertEquals(200, response.getStatus());
+        String arn = extract(ARN, (String) response.getEntity());
+        assertEquals("arn:" + partitionCase.partition() + ":sts::" + PartitionMatrix.ACCOUNT
+                + ":federated-user/bob", arn);
     }
 
     private static String extract(Pattern pattern, String body) {
