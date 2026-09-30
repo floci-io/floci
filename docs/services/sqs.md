@@ -104,6 +104,8 @@ aws sqs set-queue-attributes \
 
 A message older than the queue's `MessageRetentionPeriod` is no longer returned or counted, including a message in flight. A shorter period applies to messages already in the queue. A message moved to a FIFO dead-letter queue, or moved by `StartMessageMoveTask`, starts its retention period over. A message moved to a standard dead-letter queue keeps its original enqueue time. Expired messages are freed from memory and storage every 60 seconds.
 
+`CreateQueue` and `SetQueueAttributes` reject a `MessageRetentionPeriod` outside 60 to 1209600 seconds with `InvalidAttributeValue`.
+
 ## Configuration
 
 | Variable | Default | Description |

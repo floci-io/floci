@@ -182,6 +182,39 @@ class SqsServiceTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"59", "1209601", "abc", "60.5", "", "-1", " 60", "60 ", "99999999999"})
+    void messageRetentionPeriodOutsideAwsRangeIsRejected(String invalid) {
+        String region = "eu-west-1";
+        AwsException onCreate = assertThrows(AwsException.class,
+                () -> sqsService.createQueue("retention-range", Map.of("MessageRetentionPeriod", invalid), region));
+        assertEquals("InvalidAttributeValue", onCreate.getErrorCode());
+        assertEquals("Invalid value for the parameter MessageRetentionPeriod.", onCreate.getMessage());
+
+        Queue queue = sqsService.createQueue("retention-range", null, region);
+        AwsException onSet = assertThrows(AwsException.class,
+                () -> sqsService.setQueueAttributes(queue.getQueueUrl(),
+                        Map.of("MessageRetentionPeriod", invalid), region));
+        assertEquals("InvalidAttributeValue", onSet.getErrorCode());
+        assertEquals("Invalid value for the parameter MessageRetentionPeriod.", onSet.getMessage());
+        assertEquals("345600", sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("MessageRetentionPeriod"), region).get("MessageRetentionPeriod"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"60, 60", "1209600, 1209600", "060, 60", "+60, 60"})
+    void messageRetentionPeriodIsStoredInCanonicalForm(String value, String stored) {
+        String region = "eu-west-1";
+        Queue created = sqsService.createQueue("retention-created", Map.of("MessageRetentionPeriod", value), region);
+        assertEquals(stored, sqsService.getQueueAttributes(created.getQueueUrl(),
+                List.of("MessageRetentionPeriod"), region).get("MessageRetentionPeriod"));
+
+        Queue updated = sqsService.createQueue("retention-updated", null, region);
+        sqsService.setQueueAttributes(updated.getQueueUrl(), Map.of("MessageRetentionPeriod", value), region);
+        assertEquals(stored, sqsService.getQueueAttributes(updated.getQueueUrl(),
+                List.of("MessageRetentionPeriod"), region).get("MessageRetentionPeriod"));
+    }
+
     @Test
     void createQueue_acceptsTheAwsCeilingWhenTheConfiguredMaximumIsLower() {
         String region = "eu-west-1";

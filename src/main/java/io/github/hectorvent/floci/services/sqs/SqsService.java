@@ -66,6 +66,8 @@ public class SqsService implements Resettable, ResourceProvider {
     private static final int MIN_MAXIMUM_MESSAGE_SIZE = 1024;
     private static final int AWS_MAXIMUM_MESSAGE_SIZE = 1048576;
     private static final int DEFAULT_MESSAGE_RETENTION_PERIOD_SECONDS = 345600;
+    private static final int MIN_MESSAGE_RETENTION_PERIOD_SECONDS = 60;
+    private static final int MAX_MESSAGE_RETENTION_PERIOD_SECONDS = 1209600;
 
     private final StorageBackend<String, Queue> queueStore;
     private final StorageBackend<String, List<Message>> messageStore;
@@ -571,6 +573,7 @@ public class SqsService implements Resettable, ResourceProvider {
         }
 
         validateMaximumMessageSize(attributes);
+        attributes = validateMessageRetentionPeriod(attributes);
 
         String accountId = regionResolver.getAccountId();
         String queueUrl = baseUrl + "/" + accountId + "/" + queueName;
@@ -949,6 +952,30 @@ public class SqsService implements Resettable, ResourceProvider {
         }
     }
 
+    /** AWS stores a valid value in canonical form, so "060" and "+60" read back as "60". */
+    private static Map<String, String> validateMessageRetentionPeriod(Map<String, String> attributes) {
+        if (attributes == null || !attributes.containsKey("MessageRetentionPeriod")) {
+            return attributes;
+        }
+        int parsed;
+        try {
+            parsed = Integer.parseInt(attributes.get("MessageRetentionPeriod"));
+        } catch (NumberFormatException ignored) {
+            throw invalidMessageRetentionPeriod();
+        }
+        if (parsed < MIN_MESSAGE_RETENTION_PERIOD_SECONDS || MAX_MESSAGE_RETENTION_PERIOD_SECONDS < parsed) {
+            throw invalidMessageRetentionPeriod();
+        }
+        Map<String, String> normalized = new HashMap<>(attributes);
+        normalized.put("MessageRetentionPeriod", String.valueOf(parsed));
+        return normalized;
+    }
+
+    private static AwsException invalidMessageRetentionPeriod() {
+        return new AwsException("InvalidAttributeValue",
+                "Invalid value for the parameter MessageRetentionPeriod.", 400);
+    }
+
     private AwsException invalidMaximumMessageSize() {
         return new AwsException("InvalidAttributeValue",
                 "Invalid value for the parameter MaximumMessageSize.", 400);
@@ -1276,6 +1303,7 @@ public class SqsService implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
         validateMaximumMessageSize(attributes);
+        attributes = validateMessageRetentionPeriod(attributes);
         if (attributes != null) {
             for (Map.Entry<String, String> entry : attributes.entrySet()) {
                 if (entry.getValue() == null || entry.getValue().isEmpty()) {
