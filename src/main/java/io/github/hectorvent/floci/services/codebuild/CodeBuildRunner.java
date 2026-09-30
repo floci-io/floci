@@ -59,6 +59,7 @@ import java.util.zip.ZipOutputStream;
 public class CodeBuildRunner implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(CodeBuildRunner.class);
+    private static final int FAILURE_OUTPUT_CHARS = 512;
 
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
@@ -588,7 +589,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         return tar;
     }
 
-    private PhaseResult runPhase(String containerId, String workDir, List<String> env,
+    PhaseResult runPhase(String containerId, String workDir, List<String> env,
                                  List<String> commands, int timeoutMinutes, AtomicBoolean stopFlag) {
         if (commands.isEmpty()) {
             return PhaseResult.ofSuccess();
@@ -611,13 +612,13 @@ public class CodeBuildRunner implements ContainerTeardown {
                     .getId();
 
             CountDownLatch latch = new CountDownLatch(1);
-            ByteArrayOutputStream outputCapture = new ByteArrayOutputStream();
+            OutputTail outputCapture = new OutputTail();
 
             dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
                 @Override
                 public void onNext(Frame frame) {
                     if (frame.getPayload() != null) {
-                        try { outputCapture.write(frame.getPayload()); } catch (IOException ignored) {}
+                        outputCapture.write(frame.getPayload());
                     }
                 }
                 @Override
@@ -636,11 +637,10 @@ public class CodeBuildRunner implements ContainerTeardown {
 
             Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
             if (exitCode != null && exitCode != 0) {
-                String output = outputCapture.toString(StandardCharsets.UTF_8);
+                String output = outputCapture.asString().stripTrailing();
                 String msg = "Exit code " + exitCode;
                 if (!output.isBlank()) {
-                    int start = Math.max(0, output.length() - 512);
-                    msg += ": " + output.stripTrailing().substring(start);
+                    msg += ": " + output.substring(Math.max(0, output.length() - FAILURE_OUTPUT_CHARS));
                 }
                 return PhaseResult.ofFailure(msg);
             }
@@ -867,9 +867,63 @@ public class CodeBuildRunner implements ContainerTeardown {
         return "text/plain";
     }
 
+    /**
+     * The last bytes a phase printed. Only the tail reaches the failure message, so a phase that
+     * prints gigabytes of logs does not hold them all in the heap. Trailing whitespace is held
+     * apart until more output follows it, so a long run of blank lines cannot push the last
+     * error out of the tail before the message strips it. The tail keeps eight bytes for every
+     * character of the message, so it always decodes to more than {@link #FAILURE_OUTPUT_CHARS}
+     * characters and a character cut in half at its start never reaches the message.
+     */
+    private static final class OutputTail {
+        private final ByteTail content = new ByteTail(FAILURE_OUTPUT_CHARS * 8);
+        private final ByteTail trailingWhitespace = new ByteTail(FAILURE_OUTPUT_CHARS * 8);
+
+        synchronized void write(byte[] bytes) {
+            int contentEnd = bytes.length;
+            while (contentEnd > 0 && Character.isWhitespace(bytes[contentEnd - 1])) {
+                contentEnd--;
+            }
+            if (contentEnd > 0) {
+                content.append(trailingWhitespace.buffer, 0, trailingWhitespace.length);
+                trailingWhitespace.length = 0;
+                content.append(bytes, 0, contentEnd);
+            }
+            trailingWhitespace.append(bytes, contentEnd, bytes.length - contentEnd);
+        }
+
+        synchronized String asString() {
+            return new String(content.buffer, 0, content.length, StandardCharsets.UTF_8);
+        }
+    }
+
+    private static final class ByteTail {
+        private final byte[] buffer;
+        private int length;
+
+        ByteTail(int capacity) {
+            buffer = new byte[capacity];
+        }
+
+        void append(byte[] bytes, int offset, int count) {
+            if (count >= buffer.length) {
+                System.arraycopy(bytes, offset + count - buffer.length, buffer, 0, buffer.length);
+                length = buffer.length;
+                return;
+            }
+            int overflow = length + count - buffer.length;
+            if (overflow > 0) {
+                System.arraycopy(buffer, overflow, buffer, 0, length - overflow);
+                length -= overflow;
+            }
+            System.arraycopy(bytes, offset, buffer, length, count);
+            length += count;
+        }
+    }
+
     private enum PhaseStatus { SUCCEEDED, FAILED, STOPPED }
 
-    private record PhaseResult(PhaseStatus status, String errorMessage) {
+    record PhaseResult(PhaseStatus status, String errorMessage) {
         boolean succeeded() { return status == PhaseStatus.SUCCEEDED; }
         boolean failed() { return status == PhaseStatus.FAILED; }
         boolean stopped() { return status == PhaseStatus.STOPPED; }

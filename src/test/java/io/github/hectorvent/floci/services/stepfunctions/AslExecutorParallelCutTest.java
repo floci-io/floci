@@ -22,10 +22,12 @@ import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -50,7 +52,12 @@ import static org.mockito.Mockito.when;
  * cause below, and records one {@code TaskStateAborted} (or {@code WaitStateAborted}) per cut
  * branch, each chained to the failing branch's last event and recorded before
  * {@code ParallelStateFailed}, which is chained to that same event. When the execution's budget
- * cuts the Parallel instead, the child is aborted as well and no such event is recorded.
+ * cuts the Parallel instead, the child is aborted as well and no such event is recorded. The
+ * failure is seen the moment it happens, whichever branch is listed first: the branches are
+ * joined as they complete, and the outputs still come back in declaration order. An
+ * iteration of an inline Map that fails cuts the other iterations the same way, and the job one of
+ * them waits on is aborted too (measured: within about 0.15 s, with the same cause, whether or not
+ * a Catch on the Map keeps the execution going).
  *
  * <p>The failing branch pauses in a Wait that the sleeper holds until every other branch is
  * parked on its own wait, so the cut always lands while the others are mid-state.
@@ -81,6 +88,28 @@ class AslExecutorParallelCutTest {
             {"StartAt":"Done","States":{"Done":{"Type":"Pass","End":true}}}""";
     private static final String LONG_WAIT_BRANCH = """
             {"StartAt":"Long","States":{"Long":{"Type":"Wait","Seconds":20,"End":true}}}""";
+    /**
+     * An inline Map whose "fail" item runs the failing branch, whose "wait" item runs the long Wait,
+     * whose "done" item is a Pass, and whose other items run the nested Task.
+     */
+    private static final String MAP_WITH_A_FAILING_ITERATION = """
+            {"Type":"Map","End":true,"ItemProcessor":{"ProcessorConfig":{"Mode":"INLINE"},
+              "StartAt":"Route","States":{
+              "Route":{"Type":"Choice","Default":"Nest",
+                "Choices":[{"Variable":"$.kind","StringEquals":"fail","Next":"Pause"},
+                           {"Variable":"$.kind","StringEquals":"wait","Next":"Long"},
+                           {"Variable":"$.kind","StringEquals":"done","Next":"Done"}]},
+              "Pause":{"Type":"Wait","Seconds":1,"Next":"Boom"},
+              "Boom":{"Type":"Fail","Error":"Boom","Cause":"sibling failed"},
+              "Long":{"Type":"Wait","Seconds":20,"End":true},
+              "Done":{"Type":"Pass","End":true},
+              "Nest":{"Type":"Task","Resource":"arn:aws:states:::states:startExecution.sync:2",
+                "Parameters":{"StateMachineArn":"%s"},"End":true}}}}""".formatted(CHILD_SM_ARN);
+    private static final String SLOW_RESULT_BRANCH = """
+            {"StartAt":"Slow","States":{"Slow":{"Type":"Wait","Seconds":1,"Next":"Out"},
+              "Out":{"Type":"Pass","Result":"slow","End":true}}}""";
+    private static final String FAST_RESULT_BRANCH = """
+            {"StartAt":"Out","States":{"Out":{"Type":"Pass","Result":"fast","End":true}}}""";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private StepFunctionsService sfnService;
@@ -113,6 +142,47 @@ class AslExecutorParallelCutTest {
         assertEquals(failure, parallelFailed.getPreviousEventId().longValue());
         assertTrue(aborted.get(0).getId() < parallelFailed.getId());
         verify(sfnService, timeout(5_000)).stopExecution(eq(CHILD_ARN), eq(ABORT_CAUSE), isNull());
+    }
+
+    /** Fails against a declaration-order join after the default 300 s Task timeout; the limit ends it sooner. */
+    @Test
+    @Timeout(20)
+    void aFailureInALaterBranchCutsAnEarlierBranchStillWaitingOnItsJob() {
+        Execution execution = run(parallel(NESTED_SYNC_BRANCH, FAILING_BRANCH), 1, 0);
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Boom", execution.getError());
+        long failure = eventOfType("FailStateEntered").getId();
+        HistoryEvent aborted = eventOfType("TaskStateAborted");
+        assertEquals(failure, aborted.getPreviousEventId().longValue());
+        assertEquals(failure, eventOfType("ParallelStateFailed").getPreviousEventId().longValue());
+        assertTrue(aborted.getId() < eventOfType("ParallelStateFailed").getId());
+        verify(sfnService, timeout(5_000)).stopExecution(eq(CHILD_ARN), eq(ABORT_CAUSE), isNull());
+    }
+
+    /** The earlier branch's Wait really sleeps 20 s; a declaration-order join sees the failure only then. */
+    @Test
+    @Timeout(10)
+    void aFailureInALaterBranchIsSeenWhileAnEarlierWaitStillRuns() {
+        Execution execution = run(parallel(LONG_WAIT_BRANCH, FAILING_BRANCH), 1, 0);
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Boom", execution.getError());
+        long failure = eventOfType("FailStateEntered").getId();
+        assertEquals(failure, eventOfType("WaitStateAborted").getPreviousEventId().longValue());
+        // The failing branch's own Pause exits; the cut Long never does.
+        List<String> exitedWaits = eventsOfType("WaitStateExited").stream()
+                .map(event -> String.valueOf(event.getDetails().get("name"))).toList();
+        assertEquals(List.of("Pause"), exitedWaits, types().toString());
+    }
+
+    @Test
+    void outputsStayInDeclarationOrderWhenAnEarlierBranchFinishesLast() throws Exception {
+        AslExecutor.Sleeper sleeper = nanos -> TimeUnit.MILLISECONDS.sleep(200);
+        Execution execution = run(parallel(SLOW_RESULT_BRANCH, FAST_RESULT_BRANCH), sleeper, 0);
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        assertEquals(objectMapper.readTree("[\"slow\",\"fast\"]"), objectMapper.readTree(execution.getOutput()));
     }
 
     @Test
@@ -149,6 +219,142 @@ class AslExecutorParallelCutTest {
         assertEquals("FAILED", execution.getStatus());
         assertTrue(types().contains("PassStateExited"), types().toString());
         assertTrue(types().stream().noneMatch(type -> type.endsWith("StateAborted")), types().toString());
+    }
+
+    @Test
+    void aMapIterationFailureAbortsTheChildAnotherIterationWaitsOn() {
+        Execution execution = run(MAP_WITH_A_FAILING_ITERATION, sleeper(1), 0,
+                "[{\"kind\":\"nest\"},{\"kind\":\"fail\"}]");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Boom", execution.getError());
+        assertEquals("sibling failed", execution.getCause());
+        assertEquals(1, eventsOfType("MapIterationFailed").size(), types().toString());
+        verify(sfnService, timeout(5_000)).stopExecution(eq(CHILD_ARN), eq(ABORT_CAUSE), isNull());
+    }
+
+    /**
+     * Measured on AWS: a failing iteration records, for each iteration it cuts, MapIterationAborted
+     * and then the *StateAborted of the state it was in, all chained to the failing iteration's last
+     * event and ahead of MapIterationFailed and MapStateFailed, which point at that same event.
+     */
+    @Test
+    void aMapIterationCutInsideItsTaskRecordsMapIterationAbortedAndTaskStateAborted() {
+        Execution execution = run(MAP_WITH_A_FAILING_ITERATION, sleeper(1), 0,
+                "[{\"kind\":\"nest\"},{\"kind\":\"fail\"}]");
+
+        assertEquals("FAILED", execution.getStatus());
+        HistoryEvent failure = eventOfType("FailStateEntered");
+        List<HistoryEvent> tail = history.subList(history.indexOf(failure) + 1, history.size());
+        assertEquals(List.of("MapIterationAborted", "TaskStateAborted", "MapIterationFailed", "MapStateFailed",
+                "ExecutionFailed"), tail.stream().map(HistoryEvent::getType).toList(), types().toString());
+        for (HistoryEvent event : tail.subList(0, 4)) {
+            assertEquals(failure.getId(), event.getPreviousEventId().longValue(), event.getType());
+        }
+        assertEquals(Map.of("name", "P", "index", 0), tail.get(0).getDetails());
+        assertNull(tail.get(1).getDetails());
+        assertEquals(Map.of("name", "P", "index", 1), tail.get(2).getDetails());
+        assertEquals(tail.get(3).getId(), tail.get(4).getPreviousEventId().longValue());
+        verify(sfnService, timeout(5_000)).stopExecution(eq(CHILD_ARN), eq(ABORT_CAUSE), isNull());
+    }
+
+    @Test
+    void aMapIterationCutInsideItsWaitRecordsMapIterationAbortedAndWaitStateAborted() {
+        Execution execution = run(MAP_WITH_A_FAILING_ITERATION, sleeper(1), 0,
+                "[{\"kind\":\"fail\"},{\"kind\":\"wait\"}]");
+
+        assertEquals("FAILED", execution.getStatus());
+        long failure = eventOfType("FailStateEntered").getId();
+        HistoryEvent aborted = eventOfType("MapIterationAborted");
+        assertEquals(Map.of("name", "P", "index", 1), aborted.getDetails());
+        assertEquals(failure, aborted.getPreviousEventId().longValue());
+        HistoryEvent waitAborted = eventOfType("WaitStateAborted");
+        assertEquals(failure, waitAborted.getPreviousEventId().longValue());
+        assertTrue(aborted.getId() < waitAborted.getId());
+        assertTrue(waitAborted.getId() < eventOfType("MapIterationFailed").getId());
+        assertEquals(List.of("Pause"), eventsOfType("WaitStateExited").stream()
+                .map(event -> String.valueOf(event.getDetails().get("name"))).toList(), types().toString());
+    }
+
+    /**
+     * Each event follows the rule of the one it accompanies. A States.Runtime failure in an
+     * iteration records no MapIterationFailed; when what ends the Map is the tolerance it exceeded,
+     * MapStateFailed is recorded, and so are the iterations that failure cut, right before it.
+     */
+    @Test
+    void aRuntimeFailureThatExceedsTheToleranceRecordsTheOnesItCutButNotItself() {
+        String map = MAP_WITH_A_FAILING_ITERATION.replace("\"Type\":\"Map\",", "\"Type\":\"Map\",\"ToleratedFailureCount\":0,")
+                .replace("\"Default\":\"Nest\",", "");
+        Execution execution = run(map, sleeper(1), 0, "[{\"kind\":\"wait\"},{\"kind\":\"nomatch\"}]");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.ExceedToleratedFailureThreshold", execution.getError());
+        assertTrue(types().stream().noneMatch("MapIterationFailed"::equals), types().toString());
+        int stateFailed = types().indexOf("MapStateFailed");
+        assertEquals(List.of("MapIterationAborted", "WaitStateAborted"), types().subList(stateFailed - 2, stateFailed),
+                types().toString());
+    }
+
+    /**
+     * A States.Runtime failure that ends the Map records no MapStateFailed, and nothing for the
+     * iterations it cut either.
+     */
+    @Test
+    void aRuntimeFailureThatEndsTheMapRecordsNothingForTheOnesItCut() {
+        String map = MAP_WITH_A_FAILING_ITERATION.replace("\"Default\":\"Nest\",", "");
+        Execution execution = run(map, sleeper(1), 0, "[{\"kind\":\"wait\"},{\"kind\":\"nomatch\"}]");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.Runtime", execution.getError());
+        assertTrue(types().stream().noneMatch(type -> type.contains("Aborted") || type.endsWith("Failed")
+                && !type.equals("ExecutionFailed")), types().toString());
+    }
+
+    /**
+     * An ItemSelector that fails does so before its iteration starts, so there is no
+     * MapIterationFailed to record, but the Map fails with the expression's error and the
+     * iterations it cut are recorded before MapStateFailed. Which state the other iteration had
+     * reached by then is a race the test does not fix, so it asserts the invariant over many runs:
+     * an iteration is recorded cut exactly when its start is recorded and its end is not.
+     */
+    @Test
+    void anItemSelectorFailureRecordsTheIterationsItCutOnlyOnceTheyStarted() {
+        String map = """
+                {"Type":"Map","End":true,"QueryLanguage":"JSONata","Items":"{% $states.input %}",
+                  "ItemSelector":{"kind":"{% $states.context.Map.Item.Value.kind %}",
+                                  "v":"{% $states.context.Map.Item.Value.v %}"},
+                  "ItemProcessor":{"ProcessorConfig":{"Mode":"INLINE"},"StartAt":"Long","States":{
+                    "Long":{"Type":"Wait","Seconds":20,"End":true}}}}""";
+        for (int round = 0; round < 40; round++) {
+            Execution execution = run(map, nanos -> TimeUnit.NANOSECONDS.sleep(nanos), 0,
+                    "[{\"kind\":\"wait\",\"v\":1},{\"kind\":\"selector\"}]");
+
+            assertEquals("FAILED", execution.getStatus(), types().toString());
+            assertEquals("States.QueryEvaluationError", execution.getError(), types().toString());
+            assertTrue(types().contains("MapStateFailed"), types().toString());
+            assertTrue(types().stream().noneMatch("MapIterationFailed"::equals), types().toString());
+            boolean started = types().contains("MapIterationStarted");
+            boolean ended = types().contains("MapIterationSucceeded");
+            assertEquals(started && !ended, types().contains("MapIterationAborted"), "round " + round + ": " + types());
+            boolean inWait = types().contains("WaitStateEntered") && !types().contains("WaitStateExited");
+            assertEquals(started && !ended && inWait, types().contains("WaitStateAborted"), "round " + round + ": " + types());
+            if (types().contains("MapIterationAborted")) {
+                assertTrue(types().indexOf("MapIterationAborted") < types().indexOf("MapStateFailed"), types().toString());
+            }
+        }
+    }
+
+    @Test
+    void aMapIterationThatFinishedBeforeTheFailureRecordsNoAbortedEvent() {
+        AslExecutor.Sleeper sleeper = nanos -> TimeUnit.MILLISECONDS.sleep(200);
+        Execution execution = run(MAP_WITH_A_FAILING_ITERATION, sleeper, 0,
+                "[{\"kind\":\"done\"},{\"kind\":\"fail\"}]");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals(1, eventsOfType("MapIterationSucceeded").size(), types().toString());
+        assertTrue(types().stream().noneMatch(type -> type.contains("Aborted")), types().toString());
+        assertEquals(eventOfType("FailStateEntered").getId(),
+                eventOfType("MapIterationFailed").getPreviousEventId().longValue());
     }
 
     @Test
@@ -228,10 +434,15 @@ class AslExecutorParallelCutTest {
     }
 
     private Execution run(String parallelState, AslExecutor.Sleeper sleeper, int executionTimeoutSeconds) {
+        return run(parallelState, sleeper, executionTimeoutSeconds, "{}");
+    }
+
+    private Execution run(String state, AslExecutor.Sleeper sleeper, int executionTimeoutSeconds,
+                          String input) {
         String budget = executionTimeoutSeconds > 0
                 ? "\"TimeoutSeconds\":%d,".formatted(executionTimeoutSeconds)
                 : "";
-        String definition = "{" + budget + "\"StartAt\":\"P\",\"States\":{\"P\":" + parallelState + "}}";
+        String definition = "{" + budget + "\"StartAt\":\"P\",\"States\":{\"P\":" + state + "}}";
 
         StateMachine stateMachine = new StateMachine();
         stateMachine.setName("parent");
@@ -243,7 +454,7 @@ class AslExecutorParallelCutTest {
         execution.setName("parent-run");
         execution.setExecutionArn(PARENT_ARN);
         execution.setStateMachineArn(stateMachine.getStateMachineArn());
-        execution.setInput("{}");
+        execution.setInput(input);
 
         history = new ArrayList<>();
         newExecutor(sleeper).executeSync(stateMachine, execution, history, (updated, events) -> { });

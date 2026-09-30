@@ -733,6 +733,9 @@ Validation matches AWS behavior:
 | RequestSpotInstances | Requests spot instances from a launch specification; returns the created spot instance requests. |
 | DescribeSpotInstanceRequests | Lists spot instance requests, optionally filtered by id. |
 | CancelSpotInstanceRequests | Cancels the named spot instance requests, returning each id with its new state. |
+| DescribeSpotPriceHistory | Returns synthetic spot price history for known instance types across modeled availability zones. |
+
+Spot prices returned by `DescribeSpotPriceHistory` are synthetic and derived deterministically from instance type specifications: `((vcpu * 0.0016) + (memoryGiB * 0.0012)) * (1.0 + (azOffset * 0.03))`, formatted to six decimal places. They bear no relation to real AWS spot prices and are intended for testing cost-aware schedulers rather than spend estimation. Supported filters are `availability-zone`, `availability-zone-id`, `instance-type`, `product-description`, `spot-price`, and `timestamp`. Pagination is supported via `MaxResults` and `NextToken`.
 
 ### VPN Gateways
 

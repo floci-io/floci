@@ -154,7 +154,7 @@ public abstract class AbstractRedisAuthProxy {
                     return;
                 }
                 if (cmd[0].equalsIgnoreCase("HELLO")) {
-                    if (authRequired()) {
+                    if (authRequired() || hasAuthOption(cmd)) {
                         if (handleHello(client, cmd)) {
                             return;
                         }
@@ -199,7 +199,7 @@ public abstract class AbstractRedisAuthProxy {
             return;
         }
 
-        boolean authenticated = !authRequired() || authenticate(username, password);
+        boolean authenticated = authenticate(username, password);
         if (!authenticated) {
             writeResponse(client, INVALID_AUTH_RESPONSE);
             closeQuietly(client);
@@ -267,7 +267,7 @@ public abstract class AbstractRedisAuthProxy {
             writeResponse(client, HELLO_NOAUTH_RESPONSE);
             return false;
         }
-        if (authRequired() && !authenticate(username, password)) {
+        if (authProvided && !authenticate(username, password)) {
             writeResponse(client, WRONGPASS_RESPONSE);
             return false;
         }
@@ -389,5 +389,14 @@ public abstract class AbstractRedisAuthProxy {
             out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
         }
         out.flush();
+    }
+
+    private static boolean hasAuthOption(String[] cmd) {
+        for (int i = 2; i < cmd.length; i++) {
+            if ("AUTH".equalsIgnoreCase(cmd[i])) {
+                return true;
+            }
+        }
+        return false;
     }
 }

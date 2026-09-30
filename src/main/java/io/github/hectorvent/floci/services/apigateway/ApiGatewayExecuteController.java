@@ -168,6 +168,13 @@ public class ApiGatewayExecuteController {
 
     private static final String CONNECTIONS_PREFIX = "@connections/";
 
+    private boolean isWebSocketConnectionRequest(String apiId, String proxy) {
+        if (proxy == null || !proxy.startsWith(CONNECTIONS_PREFIX) || routeContext.isRestApiRoute()) {
+            return false;
+        }
+        return apiGatewayV2Service.hasWebSocketApi(apiId);
+    }
+
     private String decodeConnectionId(String rawConnectionId) {
         return URLDecoder.decode(rawConnectionId, StandardCharsets.UTF_8);
     }
@@ -230,7 +237,7 @@ public class ApiGatewayExecuteController {
                               @PathParam("apiId") String apiId,
                               @PathParam("stageName") String stageName,
                               @PathParam("proxy") String proxy) {
-        if (proxy != null && proxy.startsWith(CONNECTIONS_PREFIX)) {
+        if (isWebSocketConnectionRequest(apiId, proxy)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handleGetConnectionInfo(connectionId);
         }
@@ -245,7 +252,7 @@ public class ApiGatewayExecuteController {
                                @PathParam("stageName") String stageName,
                                @PathParam("proxy") String proxy,
                                byte[] body) {
-        if (proxy != null && proxy.startsWith(CONNECTIONS_PREFIX)) {
+        if (isWebSocketConnectionRequest(apiId, proxy)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handlePostToConnection(connectionId, body);
         }
@@ -270,7 +277,7 @@ public class ApiGatewayExecuteController {
                                  @PathParam("apiId") String apiId,
                                  @PathParam("stageName") String stageName,
                                  @PathParam("proxy") String proxy) {
-        if (proxy != null && proxy.startsWith(CONNECTIONS_PREFIX)) {
+        if (isWebSocketConnectionRequest(apiId, proxy)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handleDeleteConnection(connectionId);
         }

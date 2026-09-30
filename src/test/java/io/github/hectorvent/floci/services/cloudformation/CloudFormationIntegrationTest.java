@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
@@ -49,6 +50,7 @@ class CloudFormationIntegrationTest {
     private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String SM_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String COGNITO_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String TAGGING_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Inject
@@ -1092,6 +1094,292 @@ class CloudFormationIntegrationTest {
             .body("Configuration.FunctionName", equalTo(functionName))
             .body("Configuration.Timeout", equalTo(9))
             .body("Configuration.Environment.Variables.STAGE", equalTo("green"));
+    }
+
+    @Test
+    void updateStack_lambdaFunctionTagsFollowTheTemplate() {
+        String stackName = "cfn-lambda-tags-stack";
+        String functionName = "cfn-lambda-tags-func";
+        String functionArn = "arn:aws:lambda:us-east-1:000000000000:function:" + functionName;
+        String template = """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role"%s
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(functionName, """
+                ,
+                    "Tags": [{"Key": "a", "Value": "1"}, {"Key": "b", "Value": "2"}]"""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/2017-03-31/tags/" + functionArn)
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(2))
+            .body("Tags.a", equalTo("1"))
+            .body("Tags.b", equalTo("2"));
+
+        given()
+            .header("X-Amz-Target", "ResourceGroupsTaggingAPI_20170126.GetResources")
+            .contentType(TAGGING_CONTENT_TYPE)
+            .body("""
+                {"ResourceTypeFilters": ["lambda:function"], "TagFilters": [{"Key": "a", "Values": ["1"]}]}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResourceTagMappingList.ResourceARN", hasItem(functionArn));
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {"Tags": {"oob": "x"}}
+                """)
+        .when()
+            .post("/2017-03-31/tags/" + functionArn)
+        .then()
+            .statusCode(204);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(functionName, """
+                ,
+                    "Tags": [{"Key": "a", "Value": "1"}, {"Key": "c", "Value": "3"}]"""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/2017-03-31/tags/" + functionArn)
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(3))
+            .body("Tags.a", equalTo("1"))
+            .body("Tags.c", equalTo("3"))
+            .body("Tags.oob", equalTo("x"));
+    }
+
+    @Test
+    void updateStack_ssmParameterTagsFollowTheTemplate() {
+        String stackName = "cfn-ssm-tags-stack";
+        String parameterName = "/cfn/ssm-tags-param";
+
+        createSsmParameterStackWithOutOfTemplateTag(stackName, parameterName);
+        updateSsmParameterStack(stackName, parameterName, """
+            ,
+                    "Tags": {"a": "changed"}""");
+
+        ssmParameterTags(parameterName)
+            .body("TagList.size()", equalTo(2))
+            .body("TagList.find { it.Key == 'a' }.Value", equalTo("changed"))
+            .body("TagList.find { it.Key == 'ext' }.Value", equalTo("x"));
+    }
+
+    @Test
+    void updateStack_ssmParameterTagsPropertyRemovedKeepsOutOfTemplateTags() {
+        String stackName = "cfn-ssm-tags-removed-stack";
+        String parameterName = "/cfn/ssm-tags-removed-param";
+
+        createSsmParameterStackWithOutOfTemplateTag(stackName, parameterName);
+        updateSsmParameterStack(stackName, parameterName, "");
+
+        ssmParameterTags(parameterName)
+            .body("TagList.size()", equalTo(1))
+            .body("TagList.find { it.Key == 'ext' }.Value", equalTo("x"));
+    }
+
+    @Test
+    void updateStack_ssmParameterInvalidTagKeyFailsBeforeWritingANewVersion() {
+        String stackName = "cfn-ssm-invalid-tag-stack";
+        String parameterName = "/cfn/ssm-invalid-tag-param";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", ssmParameterTemplate(parameterName, ""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", ssmParameterTemplate(parameterName, "v2", """
+                ,
+                    "Tags": {"a,b": "x"}"""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        awaitStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {"Name": "%s"}
+                """.formatted(parameterName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Value", equalTo("v"))
+            .body("Parameter.Version", equalTo(1));
+    }
+
+    @Test
+    void updateStack_lambdaInvalidTagKeyFailsBeforeChangingTheFunction() {
+        String stackName = "cfn-lambda-invalid-tag-stack";
+        String functionName = "cfn-lambda-invalid-tag-func";
+        String template = """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role",
+                    "Description": "%s"%s
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(functionName, "before", ""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted(functionName, "after", """
+                ,
+                    "Tags": [{"Key": "a,b", "Value": "x"}]"""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        awaitStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + functionName)
+        .then()
+            .statusCode(200)
+            .body("Configuration.Description", equalTo("before"));
+    }
+
+    private static String ssmParameterTemplate(String parameterName, String tagsProperty) {
+        return ssmParameterTemplate(parameterName, "v", tagsProperty);
+    }
+
+    private static String ssmParameterTemplate(String parameterName, String value, String tagsProperty) {
+        return """
+            {
+              "Resources": {
+                "MyParameter": {
+                  "Type": "AWS::SSM::Parameter",
+                  "Properties": {
+                    "Name": "%s",
+                    "Type": "String",
+                    "Value": "%s"%s
+                  }
+                }
+              }
+            }
+            """.formatted(parameterName, value, tagsProperty);
+    }
+
+    private static void createSsmParameterStackWithOutOfTemplateTag(String stackName, String parameterName) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", ssmParameterTemplate(parameterName, """
+                ,
+                    "Tags": {"a": "1", "b": "2"}"""))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        ssmParameterTags(parameterName)
+            .body("TagList.size()", equalTo(2))
+            .body("TagList.find { it.Key == 'a' }.Value", equalTo("1"))
+            .body("TagList.find { it.Key == 'b' }.Value", equalTo("2"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.AddTagsToResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {"ResourceType": "Parameter", "ResourceId": "%s", "Tags": [{"Key": "ext", "Value": "x"}]}
+                """.formatted(parameterName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private static void updateSsmParameterStack(String stackName, String parameterName, String tagsProperty) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", ssmParameterTemplate(parameterName, tagsProperty))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private static ValidatableResponse ssmParameterTags(String parameterName) {
+        return given()
+            .header("X-Amz-Target", "AmazonSSM.ListTagsForResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {"ResourceType": "Parameter", "ResourceId": "%s"}
+                """.formatted(parameterName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test

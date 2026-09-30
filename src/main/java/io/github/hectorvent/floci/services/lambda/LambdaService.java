@@ -85,6 +85,8 @@ public class LambdaService implements ResourceProvider {
             "^arn:(aws[a-zA-Z-]*)?:iam::\\d{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+$");
     private static final Pattern HANDLER_PATTERN = Pattern.compile("^[^\\s]+$");
     private static final int MAX_HANDLER_LENGTH = 128;
+    private static final Pattern TAG_KEY_PATTERN = Pattern.compile("([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)");
+    private static final int MAX_TAG_KEY_LENGTH = 128;
     private static final Pattern KMS_KEY_ARN_PATTERN = Pattern.compile(
             "^(arn:(aws[a-zA-Z-]*)?:[a-z0-9-.]+:.*)?$");
     private static final Pattern LAYER_VERSION_ARN_PATTERN = Pattern.compile(
@@ -436,6 +438,9 @@ public class LambdaService implements ResourceProvider {
         validateEnum(runtime, "runtime", RUNTIME_VALUES);
         validateMaxLength(description, "description", 256);
 
+        @SuppressWarnings("unchecked")
+        Map<String, String> tags = (Map<String, String>) request.get("Tags");
+        validateTagKeys(tags);
         if (functionStore.get(region, functionName).isPresent()) {
             throw new AwsException("ResourceConflictException",
                     "Function already exist: " + functionName, 409);
@@ -463,8 +468,6 @@ public class LambdaService implements ResourceProvider {
         }
 
         // Handle tags
-        @SuppressWarnings("unchecked")
-        Map<String, String> tags = (Map<String, String>) request.get("Tags");
         if (tags != null) fn.setTags(tags);
 
         if (architectures != null && !architectures.isEmpty()) {
@@ -3356,6 +3359,7 @@ public class LambdaService implements ResourceProvider {
     }
 
     public void tagResource(String functionArn, Map<String, String> tags) {
+        validateTagKeys(tags);
         EventSourceMapping esm = taggedEventSourceMapping(functionArn);
         if (esm != null) {
             esm.getTags().putAll(tags);
@@ -3367,6 +3371,26 @@ public class LambdaService implements ResourceProvider {
         if (fn.getTags() == null) fn.setTags(new HashMap<>());
         fn.getTags().putAll(tags);
         functionStore.save(target.region, fn);
+    }
+
+    /**
+     * The key constraint AWS checks before any lookup. AWS renders the whole map in the message, so
+     * {@code toString()} gives its {@code {key=value}} form.
+     */
+    public static void validateTagKeys(Map<String, String> tags) {
+        if (tags == null) {
+            return;
+        }
+        for (String key : tags.keySet()) {
+            if (key.isEmpty() || key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH
+                    || !TAG_KEY_PATTERN.matcher(key).matches()) {
+                throw new AwsException("ValidationException", "1 validation error detected: Value '" + tags
+                        + "' at 'tags' failed to satisfy constraint: Map keys must satisfy constraint: [Member"
+                        + " must have length less than or equal to " + MAX_TAG_KEY_LENGTH + ", Member must have"
+                        + " length greater than or equal to 1, Member must satisfy regular expression pattern: "
+                        + TAG_KEY_PATTERN.pattern() + "]", 400);
+            }
+        }
     }
 
     public void untagResource(String functionArn, List<String> tagKeys) {

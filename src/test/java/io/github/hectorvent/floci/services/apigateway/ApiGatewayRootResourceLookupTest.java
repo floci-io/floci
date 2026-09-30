@@ -53,7 +53,7 @@ class ApiGatewayRootResourceLookupTest {
             };
         });
         service = new ApiGatewayService(storageFactory, mock(EmulatorConfig.class),
-                mock(TlsCertificateManager.class));
+                mock(TlsCertificateManager.class), new RegionResolver(REGION, "000000000000"));
     }
 
     @Test

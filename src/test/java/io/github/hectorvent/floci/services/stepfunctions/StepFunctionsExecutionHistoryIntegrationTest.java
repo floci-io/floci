@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -457,6 +458,74 @@ class StepFunctionsExecutionHistoryIntegrationTest {
                         fail("Execution status was " + status);
                     }
                 });
+    }
+
+    /**
+     * A {@code .sync} Task records {@code TaskSubmitted} between {@code TaskStarted} and its terminal
+     * event, carrying the response of the call that started the job, as AWS does (measured in
+     * ap-northeast-1 on 2026-09-29: PascalCase, {@code StartDate} in epoch milliseconds).
+     */
+    @Test
+    void syncTaskRecordsTaskSubmittedWithTheStartExecutionResponse() throws Exception {
+        String childArn = createStateMachine("execution-history-task-submitted-child", """
+                {"StartAt": "Done", "States": {"Done": {"Type": "Pass", "End": true}}}
+                """);
+        String parentArn = createStateMachine("execution-history-task-submitted-parent", """
+                {
+                  "StartAt": "Nest",
+                  "States": {
+                    "Nest": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::states:startExecution.sync:2",
+                      "Parameters": {"StateMachineArn": "%s"},
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(childArn));
+        String executionArn = startExecution(parentArn);
+        waitForExecution(executionArn);
+
+        Response response = given()
+                .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        {"executionArn": "%s"}
+                        """, executionArn))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+
+        JsonNode events = MAPPER.readTree(response.body().asString()).path("events");
+        List<String> types = new ArrayList<>();
+        events.forEach(event -> types.add(event.path("type").asText()));
+        assertEquals(List.of("ExecutionStarted", "TaskStateEntered", "TaskScheduled", "TaskStarted",
+                "TaskSubmitted", "TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"), types);
+        List<Long> expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L, 7L);
+        for (int i = 0; i < events.size(); i++) {
+            assertEquals(i + 1L, events.get(i).path("id").asLong());
+            assertEquals(expectedPreviousEventIds.get(i), events.get(i).path("previousEventId").asLong());
+        }
+
+        JsonNode submitted = events.get(4).path("taskSubmittedEventDetails");
+        assertEquals("states", submitted.path("resourceType").asText());
+        assertEquals("startExecution.sync:2", submitted.path("resource").asText());
+        assertFalse(submitted.path("outputDetails").path("truncated").asBoolean(true));
+        JsonNode output = MAPPER.readTree(submitted.path("output").asText());
+        assertEquals(List.of("ExecutionArn", "StartDate"), fieldNames(output));
+        String childExecutionPrefix = childArn.replace(":stateMachine:", ":execution:") + ":";
+        assertTrue(output.path("ExecutionArn").asText().startsWith(childExecutionPrefix), output.toString());
+        assertTrue(output.path("StartDate").isIntegralNumber(), output.toString());
+        assertTrue(output.path("StartDate").asLong() > 1_000_000_000_000L, "epoch milliseconds: " + output);
+        // The same integration name on every event of the family, not startExecution.sync / 2.
+        assertEquals("startExecution.sync:2", events.get(2).path("taskScheduledEventDetails").path("resource").asText());
+        assertEquals("startExecution.sync:2", events.get(5).path("taskSucceededEventDetails").path("resource").asText());
+    }
+
+    private static List<String> fieldNames(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
     }
 
     private static String quote(String raw) {

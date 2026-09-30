@@ -1548,6 +1548,30 @@ class SsmIntegrationTest {
     }
 
     @Test
+    void addTagsToResourceWithAKeyOutsideTheAwsPatternReturns400BeforeTheLookup() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.AddTagsToResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                {
+                    "ResourceType": "Parameter",
+                    "ResourceId": "/demo/no-such-param-for-tag-validation",
+                    "Tags": [
+                        {"Key": "a,b", "Value": "x"}
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value at 'tags.1.member.key' failed to"
+                    + " satisfy constraint: Member must satisfy regular expression pattern:"
+                    + " ^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$"));
+    }
+
+    @Test
     @Order(20)
     void describeParametersAppliesParameterFilters() {
         putFilterFixture("/dpf/prod/db", "String", "");

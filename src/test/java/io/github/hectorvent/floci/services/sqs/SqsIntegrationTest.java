@@ -832,6 +832,37 @@ class SqsIntegrationTest {
         }
     }
 
+    @Test
+    void setQueueAttributesRejectsMessageRetentionPeriodOutsideTheAwsRange() {
+        String retentionQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-retention-range-queue")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SetQueueAttributes")
+                .formParam("QueueUrl", retentionQueueUrl)
+                .formParam("Attribute.1.Name", "MessageRetentionPeriod")
+                .formParam("Attribute.1.Value", "0")
+            .when().post("/").then()
+                .statusCode(400)
+                .body(containsString("<Code>InvalidAttributeValue</Code>"))
+                .body(containsString("<Message>Invalid value for the parameter MessageRetentionPeriod.</Message>"));
+
+            assertEquals("345600", allQueueAttributes(retentionQueueUrl).get("MessageRetentionPeriod"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", retentionQueueUrl)
+            .when().post("/");
+        }
+    }
+
     private static Map<String, String> allQueueAttributes(String url) {
         XmlPath xml = given()
             .contentType("application/x-www-form-urlencoded")

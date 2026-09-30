@@ -25,6 +25,7 @@ import java.util.List;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -957,7 +958,7 @@ class SesEventPublishingV2IntegrationTest {
 
     @Test
     @Order(22)
-    void eventBridge_unknownBusName_sendStillSucceeds() {
+    void eventBridge_unknownBusName_createRejected() {
         String csUnknown = "ses-events-eb-cs-unknown";
         String bogusBusArn =
                 "arn:aws:events:us-east-1:000000000000:event-bus/does-not-exist";
@@ -971,6 +972,8 @@ class SesEventPublishingV2IntegrationTest {
         .then()
                 .statusCode(200);
 
+        // SES only supports the account default event bus, so a custom bus ARN is
+        // rejected at create time and never stored.
         given()
                 .contentType("application/json")
                 .header("Authorization", SES_AUTH)
@@ -987,11 +990,16 @@ class SesEventPublishingV2IntegrationTest {
         .when()
                 .post("/v2/email/configuration-sets/" + csUnknown + "/event-destinations")
         .then()
-                .statusCode(200);
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
 
-        // putEvents records a failed entry for an unknown bus but does not throw — SES send
-        // must still return 200.
-        sendEmailToConfigSet(csUnknown, "recipient@example.com", "eb-unknown");
+        given()
+                .header("Authorization", SES_AUTH)
+        .when()
+                .get("/v2/email/configuration-sets/" + csUnknown + "/event-destinations")
+        .then()
+                .statusCode(200)
+                .body("EventDestinations", hasSize(0));
     }
 
     // ============================ CloudWatch =============================

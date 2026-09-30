@@ -99,6 +99,14 @@ includes mapping templates and applies to both `ImportRestApi` and `PutRestApi`.
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
 
+`TagResource`, `UntagResource` and `GetTags` also accept API key and usage plan ARNs,
+`arn:aws:apigateway:<region>::/apikeys/<id>` and `arn:aws:apigateway:<region>::/usageplans/<id>`.
+An ARN nested under `/restapis/<id>/` other than a stage, such as a deployment or resource, is rejected with `BadRequestException`.
+An ARN with an account segment is rejected with `BadRequestException` and an ARN from another region with `NotFoundException`, as on AWS.
+Tagged REST APIs, stages, API keys, usage plans and custom domain names are discoverable through the
+[Resource Groups Tagging API](resource-groups-tagging.md), whose `TagResources` and `UntagResources`
+write REST API, stage, API key, usage plan and custom domain name tags through to API Gateway.
+
 ### API Key Behaviour Notes
 
 #### `CreateApiKey` and `ImportApiKeys` share one route
@@ -267,7 +275,11 @@ These management-plane operations have no handler in v1. Calls will return `404`
 - Client Certificates (5 operations)
 - `GetExport` / `ImportDocumentationParts`
 
-The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`) is implemented separately and is not counted as management-plane operations. It supports these integration types; others return an error:
+The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`)
+is implemented separately and is not counted as management-plane operations. A deployed REST
+API is also available at `http://{apiId}.execute-api.localhost.floci.io:4566/{stage}/{path}`
+and `/execute-api/{apiId}/{stage}/{path}`. All three forms use the same method authorization
+and mappings. It supports these integration types; others return an error:
 
 | Type | Support |
 | --- | --- |

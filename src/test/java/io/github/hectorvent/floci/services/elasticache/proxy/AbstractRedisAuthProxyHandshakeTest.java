@@ -232,7 +232,7 @@ class AbstractRedisAuthProxyHandshakeTest {
         try (ServerSocket backendServer = new ServerSocket(0)) {
             TestProxy proxy = startProxy(backendServer, false, USERNAME, PASSWORD);
             try (Socket client = openClient(proxy.proxyPort())) {
-                byte[] command = respArray("HELLO", "3", "AUTH", "unused", "unused");
+                byte[] command = respArray("HELLO", "3", "SETNAME", "test-client");
                 write(client, command);
 
                 try (Socket backend = acceptBackend(backendServer)) {
@@ -242,6 +242,42 @@ class AbstractRedisAuthProxyHandshakeTest {
                     assertEquals("+HELLO\r\n", readLine(client));
                 }
                 assertEquals(0, proxy.authenticationAttempts());
+            } finally {
+                proxy.stop();
+            }
+        }
+    }
+
+    @Test
+    void helloWithAuthOnOpenCacheAuthenticatesAndStripsCredentials() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0)) {
+            TestProxy proxy = startProxy(backendServer, false, USERNAME, PASSWORD);
+            try (Socket client = openClient(proxy.proxyPort())) {
+                write(client, respArray("HELLO", "3", "AUTH", USERNAME, PASSWORD));
+
+                try (Socket backend = acceptBackend(backendServer)) {
+                    byte[] expected = respArray("HELLO", "3");
+                    assertArrayEquals(expected, backend.getInputStream().readNBytes(expected.length));
+
+                    write(backend, "+HELLO\r\n".getBytes(StandardCharsets.US_ASCII));
+                    assertEquals("+HELLO\r\n", readLine(client));
+                }
+                assertEquals(1, proxy.authenticationAttempts());
+            } finally {
+                proxy.stop();
+            }
+        }
+    }
+
+    @Test
+    void helloWithWrongAuthOnOpenCacheRejectsWithWrongPass() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0)) {
+            TestProxy proxy = startProxy(backendServer, false, USERNAME, PASSWORD);
+            try (Socket client = openClient(proxy.proxyPort())) {
+                write(client, respArray("HELLO", "3", "AUTH", USERNAME, "wrong"));
+                assertEquals("-WRONGPASS invalid username-password pair or user is disabled.\r\n",
+                        readLine(client));
+                assertEquals(1, proxy.authenticationAttempts());
             } finally {
                 proxy.stop();
             }

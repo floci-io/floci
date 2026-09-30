@@ -60,6 +60,7 @@ class SecretsManagerRotationInvokeAuthorizationTest {
             "rotator, arn:aws:lambda:us-east-1:000000000000:function:rotator",
             "rotator:live, arn:aws:lambda:us-east-1:000000000000:function:rotator:live",
             "111122223333:function:rotator, arn:aws:lambda:us-east-1:111122223333:function:rotator",
+            "111122223333:function:rotator:live, arn:aws:lambda:us-east-1:111122223333:function:rotator:live",
             "arn:aws:lambda:us-east-1:111122223333:function:rotator, arn:aws:lambda:us-east-1:111122223333:function:rotator"
     })
     void checkAndInvokeUseTheSameFullArn(String given, String expected) {
@@ -71,6 +72,18 @@ class SecretsManagerRotationInvokeAuthorizationTest {
         // Invoked by that ARN, not by the reference as given: Lambda resolves a name or partial ARN
         // in the ambient account, which on the rotation thread is not the one that was checked.
         verify(lambda, timeout(5000).atLeastOnce()).invoke(eq(REGION), eq(expected), any(byte[].class), any());
+    }
+
+    @Test
+    void referenceLambdaCannotReadIsRejectedBeforeTheCheck() {
+        List<String> checked = new ArrayList<>();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.rotateSecret("my-secret", TOKEN,
+                "us-east-1:111122223333:function:rotator", null, false, REGION, checked::add));
+
+        assertEquals("InvalidParameterValueException", e.getErrorCode());
+        assertEquals(List.of(), checked);
+        assertNull(service.describeSecret("my-secret", REGION).getRotationLambdaArn());
     }
 
     @Test
