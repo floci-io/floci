@@ -79,7 +79,8 @@ public final class EksClusterArgs {
             "auditlogpath",
             "auditlogmaxage",
             "auditlogmaxbackup",
-            "auditlogmaxsize"
+            "auditlogmaxsize",
+            "authorizationmode"
     );
 
     /**

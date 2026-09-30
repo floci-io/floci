@@ -2533,6 +2533,31 @@ class EksServiceTest {
     }
 
     @Test
+    void createClusterWithCollidingArgDoesNotLeakSecurityGroup() {
+        Ec2Service ec2 = realEc2Service();
+        ec2.ensureDefaultResources("us-east-1");
+        String vpcId = ec2.createVpc("us-east-1", "172.31.0.0/16", false).getVpcId();
+        String subnetId = ec2.createSubnet("us-east-1", vpcId, "172.31.1.0/24", "us-east-1a").getSubnetId();
+
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class));
+
+        CreateClusterRequest req = createTestClusterRequest("colliding-sg-leak");
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(subnetId));
+        req.setResourcesVpcConfig(vpcConfig);
+        req.setTags(Map.of("floci:kubelet-arg:provider-id", "my-id"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+
+        List<SecurityGroup> allSgs = ec2.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of());
+        boolean leaked = allSgs.stream().anyMatch(sg -> sg.getGroupName().startsWith("eks-cluster-sg-colliding-sg-leak-"));
+        assertFalse(leaked, "Cluster security group should not be created when argument validation fails");
+    }
+
+    @Test
     void tagResourceWithReservedTagThrowsValidationException() {
         createTestCluster("tag-resource-cluster");
         Cluster cluster = eksService.describeCluster("tag-resource-cluster");

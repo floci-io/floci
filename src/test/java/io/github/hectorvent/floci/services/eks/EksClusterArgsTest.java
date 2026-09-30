@@ -132,6 +132,8 @@ class EksClusterArgsTest {
             "audit-log-maxage",
             "audit-log-maxbackup",
             "audit-log-maxsize",
+            "authorization-mode",
+            "authorization-mode=AlwaysAllow",
             "--service-account-issuer=https://override.example.com",
             "auditPolicyFile=/custom/path"
     })

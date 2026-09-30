@@ -209,7 +209,7 @@ The supported component prefixes correspond to k3s server argument flags:
 
 Floci manages a specific set of flags required for container networking, IAM authentication, audit logging, and topology emulation. Passing a conflicting value for any of these flags causes `CreateCluster` to reject the request with `InvalidParameterException` (HTTP 400).
 
-Floci manages the following 14 flags:
+Floci manages the following 17 flags:
 - Kubelet:
   - `provider-id`: manages EC2 worker node identity.
   - `node-labels`: manages topology zones and instance types.
@@ -228,6 +228,7 @@ Floci manages the following 14 flags:
   - `audit-log-maxage`: audit log retention days.
   - `audit-log-maxbackup`: audit log file rotation count.
   - `audit-log-maxsize`: audit log rotation size.
+  - `authorization-mode`: Kubernetes RBAC and node authorization.
 
 ### Refused arguments
 
