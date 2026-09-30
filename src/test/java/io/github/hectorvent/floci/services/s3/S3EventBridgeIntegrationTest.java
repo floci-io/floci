@@ -17,6 +17,7 @@ class S3EventBridgeIntegrationTest {
 
     private static final String EB_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String EB_TARGET = "AWSEvents.";
+    private static final String VERSIONED_BUCKET = "eb-s3-versioned-test-bucket";
 
     private static String ruleArn;
     private static String queueUrl;
@@ -233,12 +234,11 @@ class S3EventBridgeIntegrationTest {
     @Test
     @Order(9)
     void deleteObjectVersion_eventBridgeDetailCarriesTheDeletedVersionId() {
-        String versionedBucket = "eb-s3-versioned-test-bucket";
-        given().when().put("/" + versionedBucket).then().statusCode(200);
+        given().when().put("/" + VERSIONED_BUCKET).then().statusCode(200);
         given()
             .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
         .when()
-            .put("/" + versionedBucket + "?versioning")
+            .put("/" + VERSIONED_BUCKET + "?versioning")
         .then()
             .statusCode(200);
 
@@ -246,11 +246,11 @@ class S3EventBridgeIntegrationTest {
             .contentType("text/plain")
             .body("v1")
         .when()
-            .put("/" + versionedBucket + "/k.txt")
+            .put("/" + VERSIONED_BUCKET + "/k.txt")
         .then()
             .statusCode(200)
             .extract().header("x-amz-version-id");
-        given().contentType("text/plain").body("v2").when().put("/" + versionedBucket + "/k.txt")
+        given().contentType("text/plain").body("v2").when().put("/" + VERSIONED_BUCKET + "/k.txt")
             .then().statusCode(200);
 
         // Enabled after the writes, so the version delete is the only event on the queue.
@@ -262,13 +262,13 @@ class S3EventBridgeIntegrationTest {
                 </NotificationConfiguration>
                 """)
         .when()
-            .put("/" + versionedBucket + "?notification")
+            .put("/" + VERSIONED_BUCKET + "?notification")
         .then()
             .statusCode(200);
 
         given()
         .when()
-            .delete("/" + versionedBucket + "/k.txt?versionId=" + olderVersionId)
+            .delete("/" + VERSIONED_BUCKET + "/k.txt?versionId=" + olderVersionId)
         .then()
             .statusCode(204);
 
@@ -290,6 +290,12 @@ class S3EventBridgeIntegrationTest {
     @Test
     @Order(100)
     void cleanup() {
+        given()
+            .contentType("application/xml")
+            .body("<NotificationConfiguration/>")
+        .when()
+            .put("/" + VERSIONED_BUCKET + "?notification");
+
         given()
             .contentType(EB_CONTENT_TYPE)
             .header("X-Amz-Target", EB_TARGET + "RemoveTargets")
