@@ -62,8 +62,10 @@ class SchedulerExpressionParserTest {
         assertEquals(300_000L, SchedulerExpressionParser.parseRateMillis("rate(5 minutes)"));
         assertEquals(3_600_000L, SchedulerExpressionParser.parseRateMillis("rate(1 hour)"));
         assertEquals(86_400_000L, SchedulerExpressionParser.parseRateMillis("rate(1 day)"));
+        assertEquals(604_800_000L, SchedulerExpressionParser.parseRateMillis("rate(1 week)"));
+        assertEquals(1_209_600_000L, SchedulerExpressionParser.parseRateMillis("rate(2 weeks)"));
         assertThrows(IllegalArgumentException.class,
-                () -> SchedulerExpressionParser.parseRateMillis("rate(1 week)"));
+                () -> SchedulerExpressionParser.validate("rate(1 week)", null));
     }
 
     @Test

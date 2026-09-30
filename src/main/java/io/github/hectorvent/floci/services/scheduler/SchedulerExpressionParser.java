@@ -22,7 +22,8 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li>{@code at(YYYY-MM-DDTHH:mm:ss)}: one-time fire at the given instant
  *       (interpreted in {@code scheduleExpressionTimezone}, default UTC).</li>
- *   <li>{@code rate(N unit)}: repeating fire every N minutes/hours/days.</li>
+ *   <li>{@code rate(N unit)}: repeating fire every N minutes/hours/days;
+ *       previously persisted week-based schedules remain readable.</li>
  *   <li>{@code cron(fields)}: six-field AWS EventBridge cron (minute hour DOM month DOW year).</li>
  * </ul>
  */
@@ -33,6 +34,10 @@ public final class SchedulerExpressionParser {
             Pattern.CASE_INSENSITIVE);
 
     private static final Pattern RATE_PATTERN = Pattern.compile(
+            "^rate\\(\\s*(\\d+)\\s+(minutes?|hours?|days?|weeks?)\\s*\\)$",
+            Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern AWS_RATE_PATTERN = Pattern.compile(
             "^rate\\(\\s*(\\d+)\\s+(minutes?|hours?|days?)\\s*\\)$",
             Pattern.CASE_INSENSITIVE);
 
@@ -65,7 +70,12 @@ public final class SchedulerExpressionParser {
     public static void validate(String expression, String timezone) {
         switch (classify(expression)) {
             case AT -> parseAt(expression, timezone);
-            case RATE -> parseRateMillis(expression);
+            case RATE -> {
+                if (!AWS_RATE_PATTERN.matcher(expression.trim()).matches()) {
+                    throw new IllegalArgumentException("Week-based rates are not supported by Scheduler");
+                }
+                parseRateMillis(expression);
+            }
             case CRON -> {
                 parseCron(expression);
                 resolveZone(timezone);
@@ -104,6 +114,7 @@ public final class SchedulerExpressionParser {
             case "minute", "minutes" -> Math.multiplyExact(value, 60_000L);
             case "hour", "hours" -> Math.multiplyExact(value, 3_600_000L);
             case "day", "days" -> Math.multiplyExact(value, 86_400_000L);
+            case "week", "weeks" -> Math.multiplyExact(value, 604_800_000L);
             default -> throw new IllegalArgumentException("Unknown rate unit: " + unit);
         };
     }

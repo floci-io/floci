@@ -225,11 +225,13 @@ class SchedulerServiceTest {
 
         ScheduleRequest valid = newRequest("existing", null, "rate(1 hour)", window, target);
         service.createSchedule(valid, REGION);
-        ScheduleRequest invalidUpdate = newRequest("existing", null, "cron(invalid)", window, target);
-        AwsException updateError = assertThrows(AwsException.class,
-                () -> service.updateSchedule(invalidUpdate, REGION));
-        assertEquals("ValidationException", updateError.getErrorCode());
-        assertEquals("rate(1 hour)", service.getSchedule("existing", null, REGION).getScheduleExpression());
+        for (String expression : List.of("cron(invalid)", "rate(1 week)")) {
+            ScheduleRequest invalidUpdate = newRequest("existing", null, expression, window, target);
+            AwsException updateError = assertThrows(AwsException.class,
+                    () -> service.updateSchedule(invalidUpdate, REGION), expression);
+            assertEquals("ValidationException", updateError.getErrorCode());
+            assertEquals("rate(1 hour)", service.getSchedule("existing", null, REGION).getScheduleExpression());
+        }
     }
 
     @Test
