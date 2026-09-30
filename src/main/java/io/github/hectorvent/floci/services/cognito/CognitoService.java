@@ -2003,6 +2003,7 @@ public class CognitoService implements ResourceProvider {
         }
 
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
         CognitoUser user;
@@ -3015,6 +3016,7 @@ public class CognitoService implements ResourceProvider {
 
     public void changePassword(String accessToken, String previousPassword, String proposedPassword) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -3082,6 +3084,7 @@ public class CognitoService implements ResourceProvider {
 
     public Map<String, Object> getUser(String accessToken) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -3110,7 +3113,7 @@ public class CognitoService implements ResourceProvider {
             }
             throw e;
         }
-        requireScope(accessToken, "aws.cognito.signin.user.admin");
+        requireScope(accessToken, USER_ADMIN_SCOPE);
 
         CognitoUser user = adminGetUser(token.poolId(), token.username());
         Map<String, Object> result = new LinkedHashMap<>();
@@ -3140,6 +3143,7 @@ public class CognitoService implements ResourceProvider {
             }
             throw e;
         }
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -3198,7 +3202,7 @@ public class CognitoService implements ResourceProvider {
             }
             throw e;
         }
-        requireScope(accessToken, "aws.cognito.signin.user.admin");
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -3245,6 +3249,7 @@ public class CognitoService implements ResourceProvider {
 
     public List<Map<String, Object>> updateUserAttributes(String accessToken, Map<String, String> attributes) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -3339,6 +3344,7 @@ public class CognitoService implements ResourceProvider {
 
     public void deleteUserAttributes(String accessToken, List<String> attributeNames) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -4667,10 +4673,10 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * AWS requires an access token carrying the given scope for some operations (for example
-     * VerifyUserAttribute requires aws.cognito.signin.user.admin), and refuses a token with no
-     * scope claim. Call after {@link #verifyAccessToken}, which already confirms the token is a
-     * valid, unexpired access token; this only adds the scope check on top.
+     * AWS requires an access token carrying the given scope for some operations (every operation
+     * authorized by the user's access token requires aws.cognito.signin.user.admin), and refuses a
+     * token with no scope claim. Call after {@link #verifyAccessToken}, which already confirms the
+     * token is a valid, unexpired access token; this only adds the scope check on top.
      */
     void requireScope(String accessToken, String requiredScope) {
         Set<String> scopes = extractScopesFromToken(accessToken);
@@ -5177,6 +5183,7 @@ public class CognitoService implements ResourceProvider {
             Boolean emailPreferred) {
 
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         synchronized (userLock(token.poolId(), token.username())) {
             setUserMFAPreferenceUnderUserLock(
                     token.poolId(), token.username(), emailEnabled, emailPreferred);

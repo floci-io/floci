@@ -310,6 +310,45 @@ class CognitoManagedLoginIntegrationTest {
     }
 
     /**
+     * {@code aws.cognito.signin.user.admin} is what lets an access token call the user's own API
+     * operations. A code-grant token requested without it is refused with AWS's message, and the
+     * refused calls change nothing.
+     */
+    @Test
+    void aCodeGrantTokenWithoutTheAdminScopeCannotCallTheUsersOwnOperations() throws Exception {
+        Pool pool = newPool(List.of("openid", "email", ADMIN_SCOPE));
+        String withoutAdmin = accessToken(pool, "openid email");
+        String withAdmin = accessToken(pool, "openid email " + ADMIN_SCOPE);
+        Map<String, String> requests = new LinkedHashMap<>();
+        requests.put("GetUser", "{\"AccessToken\":\"%s\"}");
+        requests.put("GetUserAuthFactors", "{\"AccessToken\":\"%s\"}");
+        requests.put("UpdateUserAttributes",
+                "{\"AccessToken\":\"%s\",\"UserAttributes\":[{\"Name\":\"given_name\",\"Value\":\"Changed\"}]}");
+        requests.put("DeleteUserAttributes", "{\"AccessToken\":\"%s\",\"UserAttributeNames\":[\"email\"]}");
+        requests.put("ChangePassword",
+                "{\"AccessToken\":\"%s\",\"PreviousPassword\":\"" + PASSWORD + "\",\"ProposedPassword\":\"Other1234!\"}");
+        requests.put("GetUserAttributeVerificationCode", "{\"AccessToken\":\"%s\",\"AttributeName\":\"email\"}");
+        requests.put("VerifyUserAttribute", "{\"AccessToken\":\"%s\",\"AttributeName\":\"email\",\"Code\":\"123456\"}");
+        requests.put("SetUserMFAPreference", "{\"AccessToken\":\"%s\",\"EmailMfaSettings\":{\"Enabled\":true}}");
+        requests.put("AssociateSoftwareToken", "{\"AccessToken\":\"%s\"}");
+        requests.put("VerifySoftwareToken", "{\"AccessToken\":\"%s\",\"UserCode\":\"123456\"}");
+        requests.put("GlobalSignOut", "{\"AccessToken\":\"%s\"}");
+
+        for (Map.Entry<String, String> request : requests.entrySet()) {
+            cognitoAction(request.getKey(), request.getValue().formatted(withoutAdmin))
+                    .then().statusCode(400)
+                    .body("__type", equalTo("NotAuthorizedException"))
+                    .body("message", equalTo("Access Token does not have required scopes"));
+        }
+
+        JsonNode user = cognitoJson("GetUser", "{\"AccessToken\":\"%s\"}".formatted(withAdmin));
+        assertEquals(pool.username(), user.path("Username").asText(), "the user was not signed out");
+        assertTrue(user.path("UserAttributes").toString().contains("\"email\""), user.toString());
+        assertFalse(user.path("UserAttributes").toString().contains("given_name"), user.toString());
+        code(signIn(null, pool, authorizeRequest(pool.clientId())));
+    }
+
+    /**
      * A V2 trigger's {@code scopesToAdd} and {@code scopesToSuppress} apply on top of the scopes the
      * request was granted, so a trigger can still give a token the scope that API calls need.
      */
@@ -329,23 +368,6 @@ class CognitoManagedLoginIntegrationTest {
         String accessToken = tokens.path("access_token");
         assertEquals(Set.of("openid", ADMIN_SCOPE), scopes(accessToken));
         cognitoAction("GetUser", "{\"AccessToken\":\"%s\"}".formatted(accessToken)).then().statusCode(200);
-    }
-
-    /**
-     * GetUserAuthFactors needs {@code aws.cognito.signin.user.admin} in the access token's scope,
-     * which a request for {@code openid email} is not granted.
-     */
-    @Test
-    void codeGrantAccessTokenWithoutTheAdminScopeCannotReadAuthFactors() throws Exception {
-        String accessToken = accessToken(newPool(), "openid email");
-        assertEquals(Set.of("openid", "email"), scopes(accessToken));
-
-        cognitoAction("GetUserAuthFactors", """
-                {"AccessToken":"%s"}
-                """.formatted(accessToken))
-                .then().statusCode(400)
-                .body("__type", equalTo("NotAuthorizedException"))
-                .body("message", equalTo("Access Token does not have required scopes"));
     }
 
     /** A trigger that suppresses every scope the request was granted leaves no scope claim, which grants nothing. */

@@ -198,6 +198,17 @@ further divergences, both deliberate:
 | ForgotPassword | Starts the local forgot-password flow for a user. |
 | ConfirmForgotPassword | Completes the forgot-password flow by setting a replacement password. |
 
+As on AWS, every operation authorized by the user's access token (`GetUser`,
+`GetUserAuthFactors`, `UpdateUserAttributes`, `DeleteUserAttributes`, `ChangePassword`,
+`GetUserAttributeVerificationCode`, `VerifyUserAttribute`, `SetUserMFAPreference`,
+`GlobalSignOut`, and `AssociateSoftwareToken` and `VerifySoftwareToken` with an `AccessToken`)
+requires the token's `scope` to include `aws.cognito.signin.user.admin`. Tokens from
+`InitiateAuth` and the other API sign-in flows always carry it; a token from the OAuth token
+endpoint carries it only when the authorization request asked for it, or asked for no scope and
+the client allows it. Without it the call fails with `NotAuthorizedException:
+Access Token does not have required scopes`, as it does for a token with no `scope` claim at all,
+which a pre token generation trigger leaves when it suppresses every scope.
+
 ### Authentication
 
 | Action | Description |
