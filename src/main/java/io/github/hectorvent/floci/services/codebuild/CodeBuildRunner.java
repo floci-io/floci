@@ -869,31 +869,55 @@ public class CodeBuildRunner implements ContainerTeardown {
 
     /**
      * The last bytes a phase printed. Only the tail reaches the failure message, so a phase that
-     * prints gigabytes of logs does not hold them all in the heap. The buffer is twice the four
-     * bytes a UTF-8 character can take, so {@link #FAILURE_OUTPUT_CHARS} characters survive after
-     * trailing whitespace is stripped.
+     * prints gigabytes of logs does not hold them all in the heap. Trailing whitespace is held
+     * apart until more output follows it, so a long run of blank lines cannot push the last
+     * error out of the tail before the message strips it. The tail keeps eight bytes for every
+     * character of the message, so it always decodes to more than {@link #FAILURE_OUTPUT_CHARS}
+     * characters and a character cut in half at its start never reaches the message.
      */
     private static final class OutputTail {
-        private final byte[] buffer = new byte[FAILURE_OUTPUT_CHARS * 8];
-        private int length;
+        private final ByteTail content = new ByteTail(FAILURE_OUTPUT_CHARS * 8);
+        private final ByteTail trailingWhitespace = new ByteTail(FAILURE_OUTPUT_CHARS * 8);
 
         synchronized void write(byte[] bytes) {
-            if (bytes.length >= buffer.length) {
-                System.arraycopy(bytes, bytes.length - buffer.length, buffer, 0, buffer.length);
+            int contentEnd = bytes.length;
+            while (contentEnd > 0 && Character.isWhitespace(bytes[contentEnd - 1])) {
+                contentEnd--;
+            }
+            if (contentEnd > 0) {
+                content.append(trailingWhitespace.buffer, 0, trailingWhitespace.length);
+                trailingWhitespace.length = 0;
+                content.append(bytes, 0, contentEnd);
+            }
+            trailingWhitespace.append(bytes, contentEnd, bytes.length - contentEnd);
+        }
+
+        synchronized String asString() {
+            return new String(content.buffer, 0, content.length, StandardCharsets.UTF_8);
+        }
+    }
+
+    private static final class ByteTail {
+        private final byte[] buffer;
+        private int length;
+
+        ByteTail(int capacity) {
+            buffer = new byte[capacity];
+        }
+
+        void append(byte[] bytes, int offset, int count) {
+            if (count >= buffer.length) {
+                System.arraycopy(bytes, offset + count - buffer.length, buffer, 0, buffer.length);
                 length = buffer.length;
                 return;
             }
-            int overflow = length + bytes.length - buffer.length;
+            int overflow = length + count - buffer.length;
             if (overflow > 0) {
                 System.arraycopy(buffer, overflow, buffer, 0, length - overflow);
                 length -= overflow;
             }
-            System.arraycopy(bytes, 0, buffer, length, bytes.length);
-            length += bytes.length;
-        }
-
-        synchronized String asString() {
-            return new String(buffer, 0, length, StandardCharsets.UTF_8);
+            System.arraycopy(bytes, offset, buffer, length, count);
+            length += count;
         }
     }
 

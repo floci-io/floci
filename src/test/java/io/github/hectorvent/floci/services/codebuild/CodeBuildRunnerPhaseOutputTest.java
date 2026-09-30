@@ -45,7 +45,7 @@ class CodeBuildRunnerPhaseOutputTest {
 
     @Test
     void failureMessageIgnoresLongTrailingWhitespace() {
-        DockerClient dockerClient = dockerClientStreaming(new byte[0], 0, "tests failed" + "\n".repeat(600), 1L);
+        DockerClient dockerClient = dockerClientStreaming(new byte[0], 0, "tests failed" + "\n".repeat(10_000), 1L);
         CodeBuildRunner runner = new CodeBuildRunner(dockerClient, null, null, null, null, null, null, null, null, null);
 
         CodeBuildRunner.PhaseResult result = runner.runPhase("container-1", "/src", List.of(),
