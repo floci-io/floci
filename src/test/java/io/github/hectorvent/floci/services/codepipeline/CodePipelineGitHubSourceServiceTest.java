@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import com.sun.net.httpserver.HttpServer;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 import org.apache.commons.compress.archivers.zip.ZipFile;
@@ -19,12 +20,14 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
@@ -54,10 +57,16 @@ class CodePipelineGitHubSourceServiceTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final S3Service s3Service = mock(S3Service.class);
     private final List<String> fetched = new ArrayList<>();
+    private final List<String> requestedPaths = new CopyOnWriteArrayList<>();
     private CodePipelineService service;
+    private HttpServer server;
+    private static final String SHA = "0123456789abcdef0123456789abcdef01234567";
 
     @AfterEach
     void shutDown() {
+        if (server != null) {
+            server.stop(0);
+        }
         if (service != null) {
             service.shutdown();
         }
@@ -79,8 +88,6 @@ class CodePipelineGitHubSourceServiceTest {
 
         assertEquals(List.of("https://codeload.github.com/awslabs/landing-zone-accelerator-on-aws"
                 + "/zip/refs/heads/release/v1.16.0"), fetched);
-        assertEquals("release/v1.16.0",
-                execution.path("artifactRevisions").get(0).path("revisionId").asText());
         assertEquals("github.com/awslabs/landing-zone-accelerator-on-aws@release/v1.16.0",
                 execution.path("artifactRevisions").get(0).path("revisionSummary").asText());
         try (ZipFile artifact = deployedArtifact("github-sourced-out.zip")) {
@@ -259,6 +266,111 @@ class CodePipelineGitHubSourceServiceTest {
         verifyNoInteractions(s3Service);
     }
 
+    @Test
+    void doesNotInterceptCustomActionsNamedGitHub() throws Exception {
+        // Catches: a Custom-owner Source action with provider GitHub downloaded from codeload instead of reaching its worker
+        service = serviceServing(zip(zos -> file(zos, "repo-main/a.txt", "a", 0, ZipEntry.DEFLATED)));
+        createPipeline("github-custom", "Custom", "1", "awslabs", "lza", "main");
+
+        String executionId = start("github-custom");
+        Thread.sleep(400);
+
+        assertEquals(List.of(), fetched);
+        assertEquals("InProgress", service.handle("GetPipelineExecution", mapper.createObjectNode()
+                        .put("pipelineName", "github-custom").put("pipelineExecutionId", executionId),
+                REGION, ACCOUNT).path("pipelineExecution").path("status").asText());
+    }
+
+    @Test
+    void recordsTheCommitFromTheArchiveCommentAsTheSourceRevision() throws Exception {
+        // Catches: the branch name reported as the revision, or no sourceRevisions entry for ListPipelineExecutions
+        service = serviceServing(zip(zos -> file(zos, "repo-main/a.txt", "a", 0, ZipEntry.DEFLATED)));
+        createPipeline("github-commit", "awslabs", "lza", "main");
+
+        JsonNode execution = awaitStatus("github-commit", start("github-commit"), "Succeeded");
+
+        JsonNode artifactRevision = execution.path("artifactRevisions").get(0);
+        assertEquals(SHA, artifactRevision.path("revisionId").asText());
+        assertEquals(SHA, artifactRevision.path("revisionChangeIdentifier").asText());
+        assertEquals("https://github.com/awslabs/lza/commit/" + SHA, artifactRevision.path("revisionUrl").asText());
+        JsonNode sourceRevision = service.handle("ListPipelineExecutions",
+                mapper.createObjectNode().put("pipelineName", "github-commit"), REGION, ACCOUNT)
+                .path("pipelineExecutionSummaries").get(0).path("sourceRevisions").get(0);
+        assertEquals("GitHubSource", sourceRevision.path("actionName").asText());
+        assertEquals(SHA, sourceRevision.path("revisionId").asText());
+        assertEquals("https://github.com/awslabs/lza/commit/" + SHA, sourceRevision.path("revisionUrl").asText());
+    }
+
+    @Test
+    void failsWhenTheArchiveCarriesNoCommitSha() throws Exception {
+        // Catches: a silent fallback to the branch name when the archive comment is not a commit SHA
+        service = serviceServing(zip(null, zos -> file(zos, "repo-main/a.txt", "a", 0, ZipEntry.DEFLATED)));
+        createPipeline("github-nosha", "awslabs", "lza", "main");
+
+        awaitStatus("github-nosha", start("github-nosha"), "Failed");
+
+        assertFailureMessage("github-nosha", "commit SHA");
+        verifyNoInteractions(s3Service);
+    }
+
+    @Test
+    void encodesBranchCharactersThatAreSpecialInAUri() throws Exception {
+        // Catches: a '#' branch turned into a URI fragment (downloading the wrong ref) or '%' breaking the URI
+        byte[] archive = zip(zos -> file(zos, "repo-main/a.txt", "a", 0, ZipEntry.DEFLATED));
+        startArchiveServer(archive, false);
+        createPipeline("github-hash", "awslabs", "lza", "feat#1/x%y");
+
+        awaitStatus("github-hash", start("github-hash"), "Succeeded");
+
+        assertEquals(List.of("/awslabs/lza/zip/refs/heads/feat%231/x%25y"), requestedPaths);
+    }
+
+    @Test
+    void abortsAChunkedDownloadThatExceedsTheCapWhileItIsRead() throws Exception {
+        // Catches: a response without Content-Length buffered in full before the size cap is applied
+        byte[] archive = zip(zos -> file(zos, "repo-main/big.bin", "x".repeat(4096), 0, ZipEntry.STORED));
+        startArchiveServer(archive, true);
+        service.maxArchiveBytes = 100;
+        createPipeline("github-chunked", "awslabs", "lza", "main");
+
+        awaitStatus("github-chunked", start("github-chunked"), "Failed");
+
+        assertFailureMessage("github-chunked", "maximum archive download size of 100 bytes");
+        verifyNoInteractions(s3Service);
+    }
+
+    @Test
+    void rejectsAnEntryWhoseContentDoesNotMatchItsRecordedChecksum() throws Exception {
+        // Catches: a corrupted entry re-checksummed by the repackaging and reported as a good source
+        byte[] archive = zip(zos -> file(zos, "repo-main/a.txt", "hello world", 0, ZipEntry.STORED));
+        String text = new String(archive, StandardCharsets.ISO_8859_1);
+        byte[] corrupt = text.replaceFirst("hello world", "jello world").getBytes(StandardCharsets.ISO_8859_1);
+        service = serviceServing(corrupt);
+        createPipeline("github-crc", "awslabs", "lza", "main");
+
+        awaitStatus("github-crc", start("github-crc"), "Failed");
+
+        assertFailureMessage("github-crc", "checksum");
+        verifyNoInteractions(s3Service);
+    }
+
+    private void startArchiveServer(byte[] archive, boolean chunked) throws Exception {
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            requestedPaths.add(exchange.getRequestURI().getRawPath());
+            exchange.sendResponseHeaders(200, chunked ? 0 : archive.length);
+            try (OutputStream body = exchange.getResponseBody()) {
+                body.write(archive);
+            } catch (IOException ignored) {
+                // the client aborts an oversized chunked download mid-stream
+            }
+        });
+        server.start();
+        service = new CodePipelineService(new InMemoryStorageFactory(), mapper, mock(CodeBuildService.class),
+                mock(CodeDeployService.class), mock(LambdaService.class), s3Service);
+        service.githubArchiveBaseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
+    }
+
     private void assertFailureMessage(String pipelineName, String expected) {
         JsonNode actions = service.handle("ListActionExecutions",
                 mapper.createObjectNode().put("pipelineName", pipelineName), REGION, ACCOUNT)
@@ -278,6 +390,11 @@ class CodePipelineGitHubSourceServiceTest {
     }
 
     private void createPipeline(String name, String owner, String repo, String branch) throws Exception {
+        createPipeline(name, "ThirdParty", "1", owner, repo, branch);
+    }
+
+    private void createPipeline(String name, String actionOwner, String actionVersion, String owner,
+                                String repo, String branch) throws Exception {
         service.handle("CreatePipeline", mapper.readTree("""
                 {"pipeline": {
                     "name": "%s",
@@ -287,7 +404,7 @@ class CodePipelineGitHubSourceServiceTest {
                         "name": "Fetch",
                         "actions": [{
                             "name": "GitHubSource",
-                            "actionTypeId": {"category": "Source", "owner": "ThirdParty", "provider": "GitHub", "version": "1"},
+                            "actionTypeId": {"category": "Source", "owner": "%s", "provider": "GitHub", "version": "%s"},
                             "configuration": {"Owner": "%s", "Repo": "%s", "Branch": "%s"},
                             "outputArtifacts": [{"name": "Source"}],
                             "runOrder": 1
@@ -303,7 +420,7 @@ class CodePipelineGitHubSourceServiceTest {
                         }]
                     }]
                 }}
-                """.formatted(name, owner, repo, branch, name)), REGION, ACCOUNT);
+                """.formatted(name, actionOwner, actionVersion, owner, repo, branch, name)), REGION, ACCOUNT);
     }
 
     private String start(String pipelineName) {
@@ -352,8 +469,15 @@ class CodePipelineGitHubSourceServiceTest {
     }
 
     private static byte[] zip(ZipWriter writer) throws Exception {
+        return zip(SHA, writer);
+    }
+
+    private static byte[] zip(String comment, ZipWriter writer) throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (ZipArchiveOutputStream zos = new ZipArchiveOutputStream(out)) {
+            if (comment != null) {
+                zos.setComment(comment);
+            }
             writer.write(zos);
         }
         return out.toByteArray();

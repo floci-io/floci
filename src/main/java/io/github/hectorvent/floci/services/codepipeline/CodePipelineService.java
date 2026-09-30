@@ -39,6 +39,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -52,6 +53,7 @@ import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -64,6 +66,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.CRC32;
 import java.util.zip.Inflater;
 import java.util.zip.InflaterInputStream;
 import java.util.zip.ZipEntry;
@@ -77,14 +80,15 @@ public class CodePipelineService {
     private static final long POLL_INTERVAL_MS = 100L;
     private static final String SOURCE_POLL_TYPE = "source-poll";
     private static final String MISSING_SOURCE_REVISION = "missing";
-    private static final long MAX_ARCHIVE_BYTES = 1L << 30;
-    private static final long MAX_UNCOMPRESSED_BYTES = 1L << 30;
+    private static final long MAX_ARCHIVE_BYTES = 128L << 20;
+    private static final long MAX_UNCOMPRESSED_BYTES = 128L << 20;
     private static final int MAX_ARCHIVE_ENTRIES = 100_000;
 
     // Instance-level so tests can use tiny caps instead of building 1 GiB archives.
     long maxArchiveBytes = MAX_ARCHIVE_BYTES;
     long maxUncompressedBytes = MAX_UNCOMPRESSED_BYTES;
     int maxEntries = MAX_ARCHIVE_ENTRIES;
+    String githubArchiveBaseUrl = "https://codeload.github.com";
 
     private final AccountAwareStorageBackend<CodePipelinePipeline> pipelineStore;
     private final AccountAwareStorageBackend<CodePipelineExecution> executionStore;
@@ -1365,7 +1369,8 @@ public class CodePipelineService {
             waitForApproval(execution, state);
             return;
         }
-        if ("Source".equals(category) && "GitHub".equals(provider)) {
+        if ("Source".equals(category) && "GitHub".equals(provider) && "ThirdParty".equals(owner)
+                && "1".equals(action.path("actionTypeId").path("version").asText())) {
             executeGitHubSource(execution, action, state);
             return;
         }
@@ -1445,27 +1450,69 @@ public class CodePipelineService {
                             + "and Branch must be non-empty with no leading '/', '..' or whitespace", 400);
         }
         byte[] archive = fetchGitHubArchive(URI.create(
-                "https://codeload.github.com/" + repoOwner + "/" + repo
-                        + "/zip/refs/heads/" + branch));
+                githubArchiveBaseUrl + "/" + repoOwner + "/" + repo
+                        + "/zip/refs/heads/" + encodeRefPath(branch)));
         if (archive.length > maxArchiveBytes) {
             throw archiveDownloadTooLarge();
         }
+        String commitSha = archiveCommitSha(archive);
         byte[] artifact = stripTopLevelDirectory(archive);
         for (JsonNode output : action.path("outputArtifacts")) {
             runtimeArtifacts.put(artifactKey(execution, output.path("name").asText()), artifact);
         }
         Map<String, Object> revision = new LinkedHashMap<>();
         revision.put("name", state.getActionName());
-        revision.put("revisionId", branch);
-        revision.put("revisionChangeIdentifier", branch);
-        revision.put("revisionSummary", "github.com/" + repoOwner + "/" + repo + "@" + branch);
-        revision.put("revisionUrl", "https://github.com/" + repoOwner + "/" + repo + "/tree/" + branch);
+        String summary = "github.com/" + repoOwner + "/" + repo + "@" + branch;
+        String commitUrl = "https://github.com/" + repoOwner + "/" + repo + "/commit/" + commitSha;
+        revision.put("revisionId", commitSha);
+        revision.put("revisionChangeIdentifier", commitSha);
+        revision.put("revisionSummary", summary);
+        revision.put("revisionUrl", commitUrl);
         revision.put("created", now());
+        Map<String, Object> sourceRevision = new LinkedHashMap<>();
+        sourceRevision.put("actionName", state.getActionName());
+        sourceRevision.put("revisionId", commitSha);
+        sourceRevision.put("revisionSummary", summary);
+        sourceRevision.put("revisionUrl", commitUrl);
         synchronized (execution) {
             execution.getArtifactRevisions().add(revision);
+            execution.getSourceRevisions().removeIf(
+                    existing -> state.getActionName().equals(existing.get("actionName")));
+            execution.getSourceRevisions().add(sourceRevision);
         }
-        state.setExternalExecutionId(branch);
+        state.setExternalExecutionId(commitSha);
         state.setExternalExecutionUrl("https://github.com/" + repoOwner + "/" + repo);
+    }
+
+    /** Percent-encodes each '/'-separated ref segment so '#', '%' and the like stay in the path. */
+    private static String encodeRefPath(String ref) {
+        List<String> segments = new ArrayList<>();
+        for (String segment : ref.split("/", -1)) {
+            segments.add(URLEncoder.encode(segment, StandardCharsets.UTF_8).replace("+", "%20"));
+        }
+        return String.join("/", segments);
+    }
+
+    /**
+     * codeload writes the commit SHA into the ZIP end-of-central-directory comment; that is the
+     * revision a GitHub source artifact reports. Anything else is not a codeload archive.
+     */
+    private static String archiveCommitSha(byte[] zip) {
+        int min = Math.max(0, zip.length - 22 - 0xFFFF);
+        for (int i = zip.length - 22; i >= min; i--) {
+            if (zip[i] == 0x50 && zip[i + 1] == 0x4b && zip[i + 2] == 0x05 && zip[i + 3] == 0x06) {
+                int len = (zip[i + 20] & 0xFF) | ((zip[i + 21] & 0xFF) << 8);
+                if (i + 22 + len <= zip.length) {
+                    String comment = new String(zip, i + 22, len, StandardCharsets.US_ASCII).trim();
+                    if (comment.matches("[0-9a-fA-F]{40}")) {
+                        return comment.toLowerCase(Locale.ROOT);
+                    }
+                }
+                break;
+            }
+        }
+        throw new AwsException("ActionExecutionFailed",
+                "GitHub source archive does not carry a commit SHA in its ZIP comment", 400);
     }
 
     /** repoOwner/repo path segments: no '/', no '..', non-empty. */
@@ -1572,6 +1619,7 @@ public class CodePipelineService {
                     zos.putArchiveEntry(copy);
                     boolean symlink = (entry.getUnixMode() & 0xF000) == 0xA000;
                     ByteArrayOutputStream linkTarget = new ByteArrayOutputStream();
+                    CRC32 crc = new CRC32();
                     try (InputStream in = openEntryStream(zipFile, entry)) {
                         byte[] chunk = new byte[8192];
                         int n;
@@ -1582,11 +1630,16 @@ public class CodePipelineService {
                                         "GitHub source archive exceeds the maximum uncompressed size of "
                                                 + maxUncompressedBytes + " bytes", 400);
                             }
+                            crc.update(chunk, 0, n);
                             if (symlink) {
                                 linkTarget.write(chunk, 0, n);
                             }
                             zos.write(chunk, 0, n);
                         }
+                    }
+                    if (entry.getCrc() != -1 && crc.getValue() != entry.getCrc()) {
+                        throw new AwsException("ActionExecutionFailed",
+                                "GitHub source archive entry fails its checksum: " + entry.getName(), 400);
                     }
                     if (symlink && isEscapingSymlink(stripped, linkTarget.toString(StandardCharsets.UTF_8))) {
                         throw new AwsException("ActionExecutionFailed",
