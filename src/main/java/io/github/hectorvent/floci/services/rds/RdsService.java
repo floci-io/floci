@@ -3336,6 +3336,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 if (restart) {
                     member.setStatus(DbInstanceStatus.AVAILABLE);
                     putInstanceForScope(accountId, region, memberId, member);
+                    reportedMemberRelayFailures.remove(member.getDbInstanceArn());
                 }
             } catch (RuntimeException e) {
                 member.setStatus(DbInstanceStatus.FAILED);

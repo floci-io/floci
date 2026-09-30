@@ -4287,6 +4287,42 @@ class RdsServiceTest {
                         afterRecoveryFailure), failures.stream().map(LogRecord::getThrown).toList());
     }
 
+    @Test
+    void clusterMemberRestartWithoutBackendResetsRelayWarning() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(null);
+        DbCluster cluster = rdsService.createDbCluster("restart-log-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        DbInstance member = rdsService.createDbInstance("restart-log-member", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", "db.serverless", 0, false, null, null,
+                "restart-log-cluster");
+        IllegalStateException firstFailure = new IllegalStateException("first relay failed");
+        IllegalStateException afterRestartFailure = new IllegalStateException("relay failed after restart");
+        doThrow(firstFailure).doThrow(afterRestartFailure)
+                .when(proxyManager).startProxy(eq("rds-resource:" + member.getDbInstanceArn()),
+                        any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
+        RdsContainerHandle handle = new RdsContainerHandle("restart-log-container",
+                cluster.getDbClusterArn(), "restart-log-cluster", "127.0.0.1", 15432);
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(handle, null, handle);
+
+        List<LogRecord> records = LogCapture.capture(RdsService.class, () -> {
+            rdsService.ensureClusterBackend("restart-log-cluster", "us-east-1");
+            assertEquals(DbInstanceStatus.FAILED, member.getStatus());
+            rdsService.rebootDbCluster("restart-log-cluster", "us-east-1");
+            assertEquals(DbInstanceStatus.AVAILABLE, member.getStatus());
+            assertNull(member.getContainerHost());
+            rdsService.ensureClusterBackend("restart-log-cluster", "us-east-1");
+        });
+        List<LogRecord> failures = records.stream()
+                .filter(record -> record.getMessage().contains("Failed to restore RDS cluster member"))
+                .toList();
+        assertEquals(List.of("WARN", "WARN"),
+                failures.stream().map(record -> record.getLevel().getName()).toList());
+        assertEquals(List.of(firstFailure, afterRestartFailure),
+                failures.stream().map(LogRecord::getThrown).toList());
+    }
+
     @ParameterizedTest
     @CsvSource({"true", "false"})
     void clusterControlPlaneReportsMemberFailureAfterTryingTheRemainingMembers(boolean reboot) {
