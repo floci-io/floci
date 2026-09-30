@@ -2987,15 +2987,15 @@ public class S3Controller {
 
     /**
      * Reads {@code x-amz-meta-*} user metadata from the request headers and, for presigned URLs
-     * whose SDK hoisted them there, from the query string. A header wins over a query parameter
-     * with the same key.
+     * whose SDK hoisted them there, from the query string. A query parameter wins over a header
+     * with the same key, because the presigned URL signature covers the query value.
      */
     private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders, UriInfo uriInfo) {
         Map<String, String> metadata = new LinkedHashMap<>();
-        addUserMetadata(metadata, httpHeaders.getRequestHeaders());
         if (uriInfo != null) {
             addUserMetadata(metadata, uriInfo.getQueryParameters());
         }
+        addUserMetadata(metadata, httpHeaders.getRequestHeaders());
         return metadata;
     }
 
