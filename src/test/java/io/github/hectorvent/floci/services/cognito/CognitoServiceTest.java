@@ -4998,7 +4998,7 @@ class CognitoServiceTest {
         AwsException ex = assertThrows(AwsException.class, () -> service.getUserAuthFactors(accessToken));
 
         assertEquals("NotAuthorizedException", ex.getErrorCode());
-        assertEquals("Access Token does not have the required scope", ex.getMessage());
+        assertEquals("Access Token does not have required scopes", ex.getMessage());
     }
 
     @Test
@@ -5014,7 +5014,7 @@ class CognitoServiceTest {
         AwsException ex = assertThrows(AwsException.class, () -> service.getUserAuthFactors(accessToken));
 
         assertEquals("NotAuthorizedException", ex.getErrorCode());
-        assertEquals("Access Token does not have the required scope", ex.getMessage());
+        assertEquals("Access Token does not have required scopes", ex.getMessage());
     }
 
     private void assertInvalidAccessToken(String token, String reason) {

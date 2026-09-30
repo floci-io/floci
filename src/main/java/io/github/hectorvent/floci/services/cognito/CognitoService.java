@@ -4625,7 +4625,7 @@ public class CognitoService implements ResourceProvider {
     void requireScope(String accessToken, String requiredScope) {
         Set<String> scopes = extractScopesFromToken(accessToken);
         if (!scopes.contains(requiredScope)) {
-            throw new AwsException("NotAuthorizedException", "Access Token does not have the required scope", 400);
+            throw new AwsException("NotAuthorizedException", "Access Token does not have required scopes", 400);
         }
     }
 

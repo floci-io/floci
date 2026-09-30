@@ -274,7 +274,7 @@ class CognitoManagedLoginIntegrationTest {
                 """.formatted(accessToken))
                 .then().statusCode(400)
                 .body("__type", equalTo("NotAuthorizedException"))
-                .body("message", equalTo("Access Token does not have the required scope"));
+                .body("message", equalTo("Access Token does not have required scopes"));
     }
 
     /** A trigger that suppresses the token's only scope leaves no scope claim, which grants nothing. */
@@ -289,7 +289,7 @@ class CognitoManagedLoginIntegrationTest {
                 """.formatted(accessToken))
                 .then().statusCode(400)
                 .body("__type", equalTo("NotAuthorizedException"))
-                .body("message", equalTo("Access Token does not have the required scope"));
+                .body("message", equalTo("Access Token does not have required scopes"));
     }
 
     @Test
@@ -303,7 +303,7 @@ class CognitoManagedLoginIntegrationTest {
                 """.formatted(accessToken))
                 .then().statusCode(400)
                 .body("__type", equalTo("NotAuthorizedException"))
-                .body("message", equalTo("Access Token does not have the required scope"));
+                .body("message", equalTo("Access Token does not have required scopes"));
     }
 
     @Test
