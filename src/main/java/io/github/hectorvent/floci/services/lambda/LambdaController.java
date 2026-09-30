@@ -238,9 +238,12 @@ public class LambdaController {
     @Path("/functions/{functionName}/invocations")
     @Consumes(MediaType.WILDCARD)
     public Response invoke(@Context HttpHeaders headers,
+                           @Context UriInfo uriInfo,
                            @PathParam("functionName") String functionName,
-                           @QueryParam("Qualifier") String qualifier,
                            byte[] payload) {
+        // Read from the query itself: @QueryParam reports a present but empty Qualifier as null, which
+        // would hide it from the Qualifier validation.
+        String qualifier = uriInfo.getQueryParameters().getFirst("Qualifier");
         String region = regionResolver.resolveRegion(headers);
         String invocationTypeHeader = headers.getHeaderString("X-Amz-Invocation-Type");
         InvocationType type = InvocationType.parse(invocationTypeHeader);

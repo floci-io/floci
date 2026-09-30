@@ -1102,6 +1102,7 @@ public class LambdaService implements ResourceProvider {
      */
     public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
                                InvocationType type) {
+        validateInvokeQualifier(queryQualifier);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, queryQualifier);
         String name = ref.name();
         String qualifier = ref.qualifier();
@@ -2685,6 +2686,13 @@ public class LambdaService implements ResourceProvider {
         validateNonEmpty(aliasName, "name", true);
         validateMaxLength(aliasName, "name", 128);
         validatePattern(aliasName, "name", ALIAS_NAME_PATTERN);
+    }
+
+    /** Invoke's Qualifier, when supplied: 1-128 characters matching {@link #QUALIFIER}. */
+    private static void validateInvokeQualifier(String qualifier) {
+        validateNonEmpty(qualifier, "qualifier", false);
+        validateMaxLength(qualifier, "qualifier", 128);
+        validatePattern(qualifier, "qualifier", QUALIFIER);
     }
 
     public void deleteAlias(String region, String functionName, String aliasName) {

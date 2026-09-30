@@ -133,4 +133,35 @@ class LambdaInvokeQualifierIntegrationTest {
         .when().post("/2015-03-31/functions/{functionArn}/invocations?Qualifier=1", functionArn)
         .then().statusCode(204).header("X-Amz-Executed-Version", "1");
     }
+
+    @Test
+    void anEmptyQualifierQueryParameterIsRejected() throws Exception {
+        String fn = createFunction("v1");
+
+        given().header("X-Amz-Invocation-Type", "DryRun").queryParam("Qualifier", "").body("{}")
+        .when().post("/2015-03-31/functions/" + fn + "/invocations")
+        .then().statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void aQualifierQueryParameterLongerThan128CharactersIsRejected() throws Exception {
+        String fn = createFunction("v1");
+
+        given().header("X-Amz-Invocation-Type", "DryRun").queryParam("Qualifier", "a".repeat(129)).body("{}")
+        .when().post("/2015-03-31/functions/" + fn + "/invocations")
+        .then().statusCode(400).body("__type", equalTo("ValidationException"));
+
+        given().header("X-Amz-Invocation-Type", "DryRun").queryParam("Qualifier", "a".repeat(128)).body("{}")
+        .when().post("/2015-03-31/functions/" + fn + "/invocations")
+        .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void aQualifierQueryParameterWithAnInvalidCharacterIsRejected() throws Exception {
+        String fn = createFunction("v1");
+
+        given().header("X-Amz-Invocation-Type", "DryRun").queryParam("Qualifier", " ").body("{}")
+        .when().post("/2015-03-31/functions/" + fn + "/invocations")
+        .then().statusCode(400).body("__type", equalTo("ValidationException"));
+    }
 }
