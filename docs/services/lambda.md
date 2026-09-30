@@ -78,7 +78,7 @@ first retry waits one minute and the second two. `FLOCI_SERVICES_LAMBDA_ASYNC_RE
 first wait (the second is twice it), and `0` retries back to back for fast local test runs. A wait never runs
 past `MaximumEventAgeInSeconds`, so an event that expires while waiting is reported then. A retry that finds the
 function's concurrency in use tries again every second until the event expires, where AWS backs off for up to
-five minutes.
+five minutes. Deleting the function drops its pending retries without delivering a record, as AWS does.
 
 When retries are exhausted or event age is exceeded:
 

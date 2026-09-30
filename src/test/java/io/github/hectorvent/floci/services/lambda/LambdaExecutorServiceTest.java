@@ -507,15 +507,37 @@ class LambdaExecutorServiceTest {
     @Test
     void eventInvocation_dropsThePendingRetryOfADeletedFunction() {
         AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
-        LambdaService lambdaService = eventInvokeConfig(2, 21600);
-        LambdaExecutorService retryExecutor = retryingExecutor(router, lambdaService, Duration.ZERO);
+        LambdaExecutorService retryExecutor = retryingExecutor(router, eventInvokeConfig(2, 21600), Duration.ZERO);
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
-        List<Long> enqueuedAt = failEveryAttempt(rtas, failedAttempt("req-deleted"));
-        when(lambdaService.functionDeleted(fn)).thenAnswer(invocation -> !enqueuedAt.isEmpty());
+        ContainerHandle handle = new ContainerHandle("cid-deleted", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        InvokeResult failure = failedAttempt("req-deleted");
+        doAnswer(invocation -> {
+            retryExecutor.dropPending(fn);
+            PendingInvocation pendingInvocation = invocation.getArgument(0);
+            pendingInvocation.getResultFuture().complete(failure);
+            return pendingInvocation.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
 
         retryExecutor.invoke(fn, "{}".getBytes(), InvocationType.Event);
 
         verify(router, after(1000).never()).route(any(), any(), any(), anyInt(), anyInt(), any());
+        verify(rtas, times(1)).enqueue(any(PendingInvocation.class));
+    }
+
+    @Test
+    void eventInvocation_dropsTheExpiringEventOfADeletedFunction() {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaExecutorService retryExecutor =
+                retryingExecutor(router, eventInvokeConfig(2, 1), Duration.ofSeconds(10));
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        List<Long> enqueuedAt = failEveryAttempt(rtas, failedAttempt("req-deleted-expiry"));
+
+        retryExecutor.invoke(fn, "{}".getBytes(), InvocationType.Event);
+        verify(rtas, timeout(5000)).enqueue(any(PendingInvocation.class));
+        retryExecutor.dropPending(fn);
+
+        verify(router, after(2000).never()).route(any(), any(), any(), anyInt(), anyInt(), any());
         assertEquals(1, enqueuedAt.size());
     }
 

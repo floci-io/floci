@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
@@ -19,8 +20,10 @@ import org.jboss.logging.Logger;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -65,6 +68,7 @@ public class LambdaExecutorService implements Resettable {
     private final long asyncRetryDelayMs;
     /** Moved on by a reset so that retries still waiting from before it are dropped. */
     private final AtomicLong generation = new AtomicLong();
+    private final Map<String, Long> deletions = new ConcurrentHashMap<>();
     private final ExecutorService asyncExecutor = new ThreadPoolExecutor(
             Math.max(4, Runtime.getRuntime().availableProcessors() * 2),
             Math.max(8, Runtime.getRuntime().availableProcessors() * 4),
@@ -192,7 +196,8 @@ public class LambdaExecutorService implements Resettable {
                     ? eventInvokeConfig.getMaximumEventAgeInSeconds() : 21600;
 
             AsyncEvent event = new AsyncEvent(fn, payload, requestId, chainDepth, invokedQualifier,
-                    maxRetries, clock.millis() + maxEventAgeSeconds * 1000L, generation.get());
+                    maxRetries, clock.millis() + maxEventAgeSeconds * 1000L, generation.get(),
+                    deletions.getOrDefault(functionKey(fn), 0L));
             try {
                 asyncExecutor.submit(() -> attempt(event, 1, null, permit));
             } catch (RuntimeException e) {
@@ -221,23 +226,18 @@ public class LambdaExecutorService implements Resettable {
 
     /**
      * Runs one attempt of an asynchronous event and either routes the outcome or schedules the next
-     * attempt. Retry n waits n times the configured delay, never past the event's maximum age, and a
-     * retry of a function deleted meanwhile is dropped. The concurrency permit covers only the
-     * attempt; {@code held} is the one the invoke itself took.
+     * attempt. Retry n waits n times the configured delay, never past the event's maximum age, and
+     * the pending event of a function deleted meanwhile is dropped, whether it was waiting to retry
+     * or to expire. The concurrency permit covers only the attempt; {@code held} is the one the
+     * invoke itself took.
      */
     private void attempt(AsyncEvent event, int attempt, InvokeResult previous,
                          LambdaConcurrencyLimiter.Permit held) {
-        if (event.generation() != generation.get() || clock.millis() >= event.expiresAtMs()) {
+        if (stale(event) || clock.millis() >= event.expiresAtMs()) {
             if (held != null) {
                 held.close();
             }
             route(event, previous, attempt - 1);
-            return;
-        }
-        LambdaService lambdaService = resolveLambdaService();
-        if (held == null && lambdaService != null && lambdaService.functionDeleted(event.fn())) {
-            LOG.infov("Dropping the pending asynchronous retry of {0}: the function was deleted",
-                    event.fn().getFunctionArn());
             return;
         }
         LambdaConcurrencyLimiter.Permit permit;
@@ -286,7 +286,7 @@ public class LambdaExecutorService implements Resettable {
     }
 
     private void route(AsyncEvent event, InvokeResult result, int attempts) {
-        if (destinationRouter == null || event.generation() != generation.get()) {
+        if (destinationRouter == null || stale(event)) {
             return;
         }
         // This Floci-only placeholder covers expiry before any attempt; AWS documents no payload.
@@ -342,6 +342,27 @@ public class LambdaExecutorService implements Resettable {
         }
     }
 
+    /**
+     * Drops the pending asynchronous events of a function being deleted: AWS runs no further attempt
+     * and delivers no record for them.
+     */
+    void dropPending(LambdaFunction fn) {
+        // ponytail: deleting a single published version does not drop its pending events; they fail
+        // to start and are reported as usual, which is rare locally.
+        deletions.merge(functionKey(fn), 1L, Long::sum);
+    }
+
+    /** Account, region and name, so every version of a function shares one deletion count. */
+    private static String functionKey(LambdaFunction fn) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.getFunctionArn());
+        return arn.accountId() + ":" + arn.region() + ":" + fn.getFunctionName();
+    }
+
+    private boolean stale(AsyncEvent event) {
+        return event.generation() != generation.get()
+                || event.deletions() != deletions.getOrDefault(functionKey(event.fn()), 0L);
+    }
+
     @PreDestroy
     public void shutdown() {
         generation.incrementAndGet();
@@ -351,10 +372,12 @@ public class LambdaExecutorService implements Resettable {
     @Override
     public void clear() {
         generation.incrementAndGet();
+        deletions.clear();
     }
 
     private record AsyncEvent(LambdaFunction fn, byte[] payload, String requestId, int chainDepth,
-                              String invokedQualifier, int maxRetries, long expiresAtMs, long generation) {}
+                              String invokedQualifier, int maxRetries, long expiresAtMs, long generation,
+                              long deletions) {}
 
     private byte[] buildErrorPayload(String message, String errorType) {
         try {

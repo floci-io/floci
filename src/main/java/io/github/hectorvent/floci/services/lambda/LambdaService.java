@@ -1001,6 +1001,9 @@ public class LambdaService implements ResourceProvider {
         functionName = fn.getFunctionName();
         String arn = fn.getFunctionArn();
         warmPool.drainFunction(functionName);
+        if (executorService != null) {
+            executorService.dropPending(fn);
+        }
         // Take the same per-function lock used by Put/DeleteFunctionConcurrency
         // so a concurrent concurrency mutation cannot interleave with the
         // limiter reset and store delete and leave the two views out of sync.
@@ -1131,12 +1134,6 @@ public class LambdaService implements ResourceProvider {
         InvokeResult result = executorService.invoke(fn, payload, type, chainDepth, ref.qualifier());
         result.setExecutedVersion(fn.getVersion());
         return result;
-    }
-
-    /** Whether {@code fn}, the target an asynchronous event was invoked on, has since been deleted. */
-    boolean functionDeleted(LambdaFunction fn) {
-        return functionStore.getForAccount(ownerAccount(fn), AwsArnUtils.parse(fn.getFunctionArn()).region(),
-                fn.getFunctionName(), fn.getVersion()).isEmpty();
     }
 
     /**
