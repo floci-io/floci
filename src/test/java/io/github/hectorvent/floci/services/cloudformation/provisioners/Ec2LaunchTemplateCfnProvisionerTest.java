@@ -12,6 +12,8 @@ import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
@@ -195,5 +197,22 @@ class Ec2LaunchTemplateCfnProvisionerTest {
                 captor.getValue().getIamInstanceProfile().getArn());
         assertNull(captor.getValue().getIamInstanceProfile().getName());
         assertEquals(List.of("sg-1", "sg-2"), captor.getValue().getSecurityGroupIds());
+    }
+
+    @Test
+    void provisionedUserDataIsDecodedForInstanceLaunch() {
+        when(ec2.createLaunchTemplate(any(), any(), any(), any())).thenReturn(template("lt-userdata"));
+        String script = "#!/bin/bash\necho from-cfn\n";
+        String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+        ObjectNode data = mapper.createObjectNode().put("UserData", encoded);
+        ObjectNode props = mapper.createObjectNode();
+        props.set("LaunchTemplateData", data);
+
+        provisioner.provision(resource("Lt"), props, ctx());
+
+        ArgumentCaptor<LaunchTemplateData> captor = ArgumentCaptor.forClass(LaunchTemplateData.class);
+        verify(ec2).createLaunchTemplate(eq("us-east-1"), anyString(), captor.capture(), isNull());
+        assertEquals(encoded, captor.getValue().getEncodedUserData());
+        assertEquals(script, captor.getValue().getUserData());
     }
 }

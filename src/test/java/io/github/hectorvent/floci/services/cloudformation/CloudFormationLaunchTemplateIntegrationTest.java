@@ -1,11 +1,20 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * End-to-end check that CloudFormation provisions AWS::EC2::LaunchTemplate for real
@@ -15,6 +24,9 @@ import static org.hamcrest.Matchers.not;
  */
 @QuarkusTest
 class CloudFormationLaunchTemplateIntegrationTest {
+
+    @Inject
+    Ec2Service ec2Service;
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
@@ -95,6 +107,7 @@ class CloudFormationLaunchTemplateIntegrationTest {
         String suffix = Long.toString(System.nanoTime(), 36);
         String templateName = "cfn-lt-" + suffix;
         String stackName = "cfn-lt-stack-" + suffix;
+        String encodedUserData = "IyEvYmluL2Jhc2gKZWNobyBoaQo=";
 
         String template = """
                 {
@@ -106,7 +119,7 @@ class CloudFormationLaunchTemplateIntegrationTest {
                         "LaunchTemplateData": {
                           "ImageId": "ami-12345678",
                           "InstanceType": "t3.micro",
-                          "UserData": "IyEvYmluL2Jhc2gKZWNobyBoaQo="
+                          "UserData": "%s"
                         }
                       }
                     }
@@ -116,7 +129,7 @@ class CloudFormationLaunchTemplateIntegrationTest {
                     "LatestVersion": {"Value": {"Fn::GetAtt": ["AppLaunchTemplate", "LatestVersionNumber"]}}
                   }
                 }
-                """.formatted(templateName);
+                """.formatted(templateName, encodedUserData);
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -155,6 +168,51 @@ class CloudFormationLaunchTemplateIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString(templateName));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", "DescribeLaunchTemplateVersions")
+            .formParam("LaunchTemplateName", templateName)
+            .formParam("Versions.1", "$Latest")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
+                    equalTo(encodedUserData));
+
+        LaunchTemplateData launchData = ec2Service.resolveLaunchTemplateData(
+                "us-east-1", null, templateName, null);
+        assertEquals("#!/bin/bash\necho hi\n", launchData.getUserData());
+        assertEquals(encodedUserData, launchData.getEncodedUserData());
+
+        String instanceId = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", "RunInstances")
+            .formParam("LaunchTemplate.LaunchTemplateName", templateName)
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        Instance instance = ec2Service.describeInstances("us-east-1", List.of(instanceId), Map.of())
+                .getFirst().getInstances().getFirst();
+        assertEquals(launchData.getUserData(), instance.getUserData());
+        assertEquals(encodedUserData, instance.getEncodedUserData());
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", "TerminateInstances")
+            .formParam("InstanceId.1", instanceId)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
 
         given()
             .contentType("application/x-www-form-urlencoded")

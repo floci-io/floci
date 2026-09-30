@@ -16,13 +16,10 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.zip.GZIPInputStream;
 
 @ApplicationScoped
 public class Ec2QueryHandler {
@@ -716,7 +713,7 @@ public class Ec2QueryHandler {
         String userDataEncoded = p.getFirst("UserData");
         String userData = null;
         if (userDataEncoded != null && !userDataEncoded.isBlank()) {
-            userData = decodeUserData(userDataEncoded);
+            userData = Ec2UserDataDecoder.decode(userDataEncoded);
         }
 
         String iamInstanceProfileArn = resolveIamInstanceProfileArn(p);
@@ -1435,7 +1432,7 @@ public class Ec2QueryHandler {
         // describes back exactly as sent.
         String userDataEncoded = p.getFirst("UserData.Value");
         if (userDataEncoded != null) {
-            service.modifyInstanceUserData(region, instanceId, decodeUserData(userDataEncoded), userDataEncoded);
+            service.modifyInstanceUserData(region, instanceId, Ec2UserDataDecoder.decode(userDataEncoded), userDataEncoded);
         }
         // Find which attribute is being modified
         for (String attr : List.of("InstanceType.Value", "SourceDestCheck.Value", "EbsOptimized.Value")) {
@@ -5202,7 +5199,7 @@ public class Ec2QueryHandler {
 
         String encodedUserData = p.getFirst(prefix + ".UserData");
         data.setEncodedUserData(encodedUserData);
-        data.setUserData(decodeUserData(encodedUserData));
+        data.setUserData(Ec2UserDataDecoder.decode(encodedUserData));
 
         String profileArn = p.getFirst(prefix + ".IamInstanceProfile.Arn");
         String profileName = p.getFirst(prefix + ".IamInstanceProfile.Name");
@@ -5545,27 +5542,6 @@ public class Ec2QueryHandler {
 
     private static String str(Object value) {
         return value != null ? String.valueOf(value) : null;
-    }
-
-    private String decodeUserData(String userDataEncoded) {
-        if (userDataEncoded == null || userDataEncoded.isBlank()) {
-            return null;
-        }
-        byte[] decoded;
-        try {
-            decoded = Base64.getDecoder().decode(userDataEncoded);
-        } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidParameterValue", "UserData is not valid base64 content.", 400);
-        }
-        if (decoded.length >= 2 && (decoded[0] & 0xff) == 0x1f && (decoded[1] & 0xff) == 0x8b) {
-            try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(decoded))) {
-                decoded = gzip.readAllBytes();
-            }
-            catch (IOException e) {
-                throw new AwsException("InvalidParameterValue", "UserData is not valid gzip content.", 400);
-            }
-        }
-        return new String(decoded, StandardCharsets.UTF_8);
     }
 
     private String vpcEndpointXml(VpcEndpoint endpoint) {
