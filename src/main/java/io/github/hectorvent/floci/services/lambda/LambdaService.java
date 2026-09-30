@@ -86,6 +86,8 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
     // UpdateFunctionCode S3Bucket (3-63 characters, [0-9A-Za-z\.\-_]*(?<!\.)) and S3Key (1-1024) shapes.
     private static final Pattern S3_BUCKET_PATTERN = Pattern.compile("[0-9A-Za-z\\.\\-_]*(?<!\\.)");
+    // Create/UpdateAlias FunctionVersion (VersionWithLatestPublished: 1-1024, pattern below) and Description (max 256).
+    private static final Pattern ALIAS_FUNCTION_VERSION_PATTERN = Pattern.compile("(\\$LATEST(\\.PUBLISHED)?|[0-9]+)");
     // The model's own Role pattern, which AWS quotes verbatim in its validation message; it
     // already accepts every partition.
     private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
@@ -2564,6 +2566,13 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
+    private static void validateAliasMembers(String functionVersion, String description) {
+        validateNonEmpty(functionVersion, "functionVersion", false);
+        validateMaxLength(functionVersion, "functionVersion", 1024);
+        validatePattern(functionVersion, "functionVersion", ALIAS_FUNCTION_VERSION_PATTERN);
+        validateMaxLength(description, "description", 256);
+    }
+
     private static void validateMaxItems(List<?> list, String field, int maxItems) {
         if (list.size() > maxItems) {
             throw new AwsException("ValidationException",
@@ -2702,6 +2711,7 @@ public class LambdaService implements ResourceProvider {
                                    String functionVersion, String description,
                                    java.util.Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
+        validateAliasMembers(functionVersion, description);
         LambdaFunction fn = getFunction(region, functionName);
         functionName = fn.getFunctionName();
         if (aliasStore != null && aliasStore.get(region, functionName, aliasName).isPresent()) {
@@ -2743,6 +2753,7 @@ public class LambdaService implements ResourceProvider {
                                    String functionVersion, String description,
                                    java.util.Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
+        validateAliasMembers(functionVersion, description);
         LambdaAlias alias = getAlias(region, functionName, aliasName);
         if (functionVersion != null) alias.setFunctionVersion(functionVersion);
         if (description != null) alias.setDescription(description);
