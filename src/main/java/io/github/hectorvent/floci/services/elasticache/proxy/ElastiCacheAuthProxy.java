@@ -77,7 +77,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
         return switch (authMode) {
             case IAM -> sigV4Validator.validate(password, groupId, effectiveUser);
             case PASSWORD -> passwordValidator.validatePassword(username, password);
-            case NO_AUTH -> true; // unreachable: authRequired() is false for NO_AUTH
+            case NO_AUTH -> true;
         };
     }
 

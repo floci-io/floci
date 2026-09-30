@@ -357,4 +357,43 @@ class ElastiCacheAuthProxyTest {
         assertTrue(proxy.authRequired(),
                 "authRequired must be true when group has members but no default member, even if replication group is NO_AUTH");
     }
+
+    @Test
+    void authRequiredIsTrueWhenDefaultMemberIsDisabled() {
+        SigV4Validator sigV4Validator = mock(SigV4Validator.class);
+        ElastiCacheAuthProxy.PasswordValidator validatorWithDisabledDefault = new ElastiCacheAuthProxy.PasswordValidator() {
+            @Override
+            public boolean validatePassword(String username, String password) {
+                if ("app-user".equals(username) && "secret-123".equals(password)) {
+                    return true;
+                }
+                return false;
+            }
+
+            @Override
+            public boolean hasMembers() {
+                return true;
+            }
+
+            @Override
+            public AuthMode memberAuthMode(String username) {
+                // Disabled default user returns null mode; active password user returns PASSWORD
+                return "app-user".equals(username) ? AuthMode.PASSWORD : null;
+            }
+        };
+
+        ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy("grp-disabled-default", AuthMode.NO_AUTH,
+                "127.0.0.1", 6379, validatorWithDisabledDefault, sigV4Validator);
+
+        assertTrue(proxy.authRequired(),
+                "authRequired must be true when default member is disabled, keeping auth required");
+        assertFalse(proxy.authenticate("default", "any-pass"),
+                "AUTH default <pass> must fail when default user is disabled");
+        assertFalse(proxy.authenticate(null, "any-pass"),
+                "AUTH <pass> must fail when default user is disabled");
+        assertFalse(proxy.authenticate("", "any-pass"),
+                "AUTH \"\" <pass> must fail when default user is disabled");
+        assertTrue(proxy.authenticate("app-user", "secret-123"),
+                "Configured password user must be able to authenticate");
+    }
 }

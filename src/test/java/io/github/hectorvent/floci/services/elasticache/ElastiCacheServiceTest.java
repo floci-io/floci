@@ -223,6 +223,36 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void disabledUserCannotAuthenticateAndHasNoMemberAuthMode() {
+        service.createReplicationGroup("grp-disabled", "test", AuthMode.IAM, null, "us-east-1");
+        service.createUser("u-def-off", "default", AuthMode.NO_AUTH, List.of(), "off -@all", null);
+        service.createUser("u-pass-off", "disabled-pass", AuthMode.PASSWORD, List.of("secret"), "off -@all", null);
+        service.createUser("u-iam-off", "disabled-iam", AuthMode.IAM, List.of(), "off -@all", null);
+        service.createUser("u-pass-on", "enabled-pass", AuthMode.PASSWORD, List.of("secret"), "on ~* +@all", null);
+        service.modifyReplicationGroup("grp-disabled",
+                List.of("u-def-off", "u-pass-off", "u-iam-off", "u-pass-on"), null);
+
+        assertTrue(service.hasMembers("grp-disabled"));
+
+        // Disabled users have no effective memberAuthMode
+        assertNull(service.memberAuthMode("grp-disabled", "default"));
+        assertNull(service.memberAuthMode("grp-disabled", null));
+        assertNull(service.memberAuthMode("grp-disabled", "disabled-pass"));
+        assertNull(service.memberAuthMode("grp-disabled", "disabled-iam"));
+
+        // Enabled user resolves normally
+        assertEquals(AuthMode.PASSWORD, service.memberAuthMode("grp-disabled", "enabled-pass"));
+
+        // Disabled users cannot validate password
+        assertFalse(service.validatePassword("grp-disabled", "default", "any-password"));
+        assertFalse(service.validatePassword("grp-disabled", null, "any-password"));
+        assertFalse(service.validatePassword("grp-disabled", "disabled-pass", "secret"));
+
+        // Enabled user validates password successfully
+        assertTrue(service.validatePassword("grp-disabled", "enabled-pass", "secret"));
+    }
+
+    @Test
     void deleteUserCleansUpGroupAssociationAndHasMembers() {
         service.createReplicationGroup("grp-stale", "test", AuthMode.NO_AUTH, null, "us-east-1");
         service.createUser("uid-stale", "user-stale", AuthMode.PASSWORD, List.of("pass123"), "on ~* +@all", null);

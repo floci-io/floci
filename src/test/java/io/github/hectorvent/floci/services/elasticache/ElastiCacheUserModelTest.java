@@ -6,6 +6,8 @@ import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Users persisted before the engine field existed must deserialize with the redis
@@ -25,5 +27,32 @@ class ElastiCacheUserModelTest {
                 """,
                 ElastiCacheUser.class);
         assertEquals("redis", user.getEngine());
+    }
+
+    @Test
+    void isAccessStringOnEvaluatesTokensCorrectly() {
+        assertTrue(ElastiCacheUser.isAccessStringOn("on ~* +@all"));
+        assertTrue(ElastiCacheUser.isAccessStringOn("on"));
+        assertTrue(ElastiCacheUser.isAccessStringOn("+@all on ~*"));
+        assertTrue(ElastiCacheUser.isAccessStringOn("off +@all on"));
+
+        assertFalse(ElastiCacheUser.isAccessStringOn("off -@all"));
+        assertFalse(ElastiCacheUser.isAccessStringOn("off"));
+        assertFalse(ElastiCacheUser.isAccessStringOn("on ~* off"));
+        assertFalse(ElastiCacheUser.isAccessStringOn("~* +@all"));
+        assertFalse(ElastiCacheUser.isAccessStringOn(null));
+        assertFalse(ElastiCacheUser.isAccessStringOn(""));
+        assertFalse(ElastiCacheUser.isAccessStringOn("   "));
+    }
+
+    @Test
+    void userIsEnabledReflectsAccessString() {
+        ElastiCacheUser enabledUser = new ElastiCacheUser();
+        enabledUser.setAccessString("on ~* +@all");
+        assertTrue(enabledUser.isEnabled());
+
+        ElastiCacheUser disabledUser = new ElastiCacheUser();
+        disabledUser.setAccessString("off -@all");
+        assertFalse(disabledUser.isEnabled());
     }
 }

@@ -687,6 +687,120 @@ class ElastiCacheIntegrationTest {
         }
     }
 
+    @Test
+    @Order(19)
+    void replicationGroupWithDisabledDefaultUserRequiresAuth() throws Exception {
+        String groupId = "it-ec-disabled-def";
+        String defUserId = "it-disabled-def-uid";
+        String passUserId = "it-pass-member-uid";
+        String passUserName = "member-user";
+        String password = "secret-pass-789";
+
+        // Create replication group with AuthMode.NO_AUTH
+        int proxyPort =
+                given()
+                    .formParam("Action", "CreateReplicationGroup")
+                    .formParam("ReplicationGroupId", groupId)
+                    .formParam("ReplicationGroupDescription", "Test group with disabled default user")
+                    .header("Authorization", AUTH_HEADER)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200)
+                    .extract()
+                    .xmlPath()
+                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port");
+
+        try {
+            // Create user "default" with no-password-required and access string "off -@all" (per ElastiCache guide)
+            given()
+                .formParam("Action", "CreateUser")
+                .formParam("UserId", defUserId)
+                .formParam("UserName", "default")
+                .formParam("Engine", "redis")
+                .formParam("AuthenticationMode.Type", "no-password-required")
+                .formParam("AccessString", "off -@all")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            // Create password user
+            given()
+                .formParam("Action", "CreateUser")
+                .formParam("UserId", passUserId)
+                .formParam("UserName", passUserName)
+                .formParam("Engine", "redis")
+                .formParam("AuthenticationMode.Type", "password")
+                .formParam("AuthenticationMode.Passwords.member.1", password)
+                .formParam("AccessString", "on ~* +@all")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            // Associate both users with the replication group
+            given()
+                .formParam("Action", "ModifyReplicationGroup")
+                .formParam("ReplicationGroupId", groupId)
+                .formParam("UserGroupIdsToAdd.member.1", defUserId)
+                .formParam("UserGroupIdsToAdd.member.2", passUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            // 1. Unauthenticated client sends PING directly without AUTH and is rejected with NOAUTH
+            String noAuthReply = sendCommand(proxyPort, respArray("PING"));
+            assertEquals("-NOAUTH Authentication required.\r\n", noAuthReply);
+
+            // 2. Client authenticating as disabled default user is rejected
+            String disabledAuthReply = sendCommand(proxyPort, respArray("AUTH", "default", "any-password"));
+            assertEquals("-ERR invalid username-password pair or user is disabled.\r\n", disabledAuthReply);
+
+            // 3. Single-arg AUTH targeting disabled default user is rejected
+            String singleArgReply = sendCommand(proxyPort, respArray("AUTH", "any-password"));
+            assertEquals("-ERR invalid username-password pair or user is disabled.\r\n", singleArgReply);
+
+            // 4. Password user with wrong password is rejected
+            String wrongPassReply = sendCommand(proxyPort, respArray("AUTH", passUserName, "wrong-pass"));
+            assertEquals("-ERR invalid username-password pair or user is disabled.\r\n", wrongPassReply);
+
+            // 5. Password user with correct password succeeds
+            try (Socket socket = openSocket(proxyPort)) {
+                write(socket, respArray("AUTH", passUserName, password));
+                assertEquals("+OK\r\n", readLine(socket));
+
+                write(socket, respArray("PING"));
+                assertEquals("+PONG\r\n", readLine(socket));
+            }
+        } finally {
+            given()
+                .formParam("Action", "DeleteReplicationGroup")
+                .formParam("ReplicationGroupId", groupId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/");
+
+            given()
+                .formParam("Action", "DeleteUser")
+                .formParam("UserId", defUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/");
+
+            given()
+                .formParam("Action", "DeleteUser")
+                .formParam("UserId", passUserId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/");
+        }
+    }
+
     static boolean isDockerAvailable() {
         try {
             Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")

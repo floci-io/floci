@@ -1620,7 +1620,7 @@ public class ElastiCacheService implements ResourceProvider {
                     .filter(u -> u != null && "default".equals(u.getUserName()))
                     .findFirst()
                     .orElse(null);
-            if (defaultUser == null) {
+            if (defaultUser == null || !defaultUser.isEnabled()) {
                 return false;
             }
             if (defaultUser.getAuthMode() == AuthMode.NO_AUTH) {
@@ -1638,7 +1638,7 @@ public class ElastiCacheService implements ResourceProvider {
                 .filter(u -> u != null && username.equals(u.getUserName()))
                 .findFirst()
                 .orElse(null);
-        if (targetUser == null) {
+        if (targetUser == null || !targetUser.isEnabled()) {
             return false;
         }
         if (targetUser.getAuthMode() == AuthMode.NO_AUTH) {
@@ -1666,7 +1666,7 @@ public class ElastiCacheService implements ResourceProvider {
         String target = (username == null || username.isEmpty()) ? "default" : username;
         return group.getAssociatedUserIds().stream()
                 .map(id -> users.get(id).orElse(null))
-                .filter(u -> u != null && target.equals(u.getUserName()))
+                .filter(u -> u != null && target.equals(u.getUserName()) && u.isEnabled())
                 .map(ElastiCacheUser::getAuthMode)
                 .findFirst()
                 .orElse(null);
