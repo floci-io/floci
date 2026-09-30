@@ -230,6 +230,37 @@ class AslExecutorEcsRunTaskModeTest {
         assertEquals(Map.of("truncated", false), submitted.getDetails().get("outputDetails"));
     }
 
+    /**
+     * When TaskSubmitted is the event that hits the 25,000-event limit, the wait that would stop
+     * the launched task is never entered, so it is stopped on the way out instead of running on.
+     */
+    @Test
+    void aTaskWhoseTaskSubmittedHitsTheHistoryLimitIsStopped() throws Exception {
+        launchOneTask();
+        when(ecsService.describeTasks(any(), any(), any())).thenReturn(List.of(task("RUNNING")));
+        List<HistoryEvent> recorded = new ArrayList<>();
+        for (int i = 0; i < 24_996; i++) {
+            recorded.add(new HistoryEvent());
+        }
+
+        Execution execution = runDefinition("""
+                {
+                  "StartAt": "RunTask",
+                  "States": {
+                    "RunTask": { "Type": "Task", "Resource": "arn:aws:states:::ecs:runTask.sync", "End": true }
+                  }
+                }
+                """, "{\"TaskDefinition\":\"my-task-def\"}", recorded);
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.Runtime", execution.getError());
+        assertEquals("TaskStarted", history.get(24_998).getType());
+        assertTrue(history.stream().noneMatch(event -> "TaskSubmitted".equals(event.getType())));
+        verify(ecsService).stopTask(any(), eq(task("RUNNING").getTaskArn()),
+                eq("The Task state in AWS Step Functions execution [" + execution.getExecutionArn()
+                        + "] which was managing this resource was aborted"), eq(REGION));
+    }
+
     @Test
     void requestResponseRecordsNoTaskSubmitted() throws Exception {
         launchOneTask();
@@ -396,6 +427,11 @@ class AslExecutorEcsRunTaskModeTest {
     }
 
     private Execution runDefinition(String definition, String input) {
+        return runDefinition(definition, input, new ArrayList<>());
+    }
+
+    /** {@code recorded} is the history the execution starts with, counted towards the event limit. */
+    private Execution runDefinition(String definition, String input, List<HistoryEvent> recorded) {
         StateMachine stateMachine = new StateMachine();
         stateMachine.setName("ecs-runtask-test");
         stateMachine.setStateMachineArn("arn:aws:states:%s:%s:stateMachine:ecs-runtask-test".formatted(REGION, ACCOUNT));
@@ -408,7 +444,7 @@ class AslExecutorEcsRunTaskModeTest {
         execution.setStateMachineArn(stateMachine.getStateMachineArn());
         execution.setInput(input);
 
-        history = new ArrayList<>();
+        history = recorded;
         executor.executeSync(stateMachine, execution, history, (updated, events) -> { });
         return execution;
     }

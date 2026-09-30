@@ -1730,7 +1730,14 @@ public class AslExecutor {
         ObjectNode startResponse = objectMapper.createObjectNode();
         startResponse.put("ExecutionArn", execArn);
         startResponse.put("StartDate", Math.round(exec.getStartDate() * 1000));
-        jobSubmitted.accept(startResponse);
+        try {
+            jobSubmitted.accept(startResponse);
+        } catch (RuntimeException e) {
+            // The event could not be recorded (the history-event limit): the child has started and
+            // the wait that would abort it is never entered, so it is aborted here.
+            abortChildExecution(execArn, executionArn);
+            throw e;
+        }
 
         // .sync or .sync:2 polls until terminal. Whatever else ends the wait aborts the child, the way
         // AWS does (measured: child ABORTED, no error, the cause below): the Task's own TimeoutSeconds,
@@ -1925,7 +1932,14 @@ public class AslExecutor {
         for (EcsTask t : launched) {
             submittedTasks.add(recaseKeys(objectMapper, ecsJsonHandler.taskNode(t), true));
         }
-        jobSubmitted.accept(runTaskResponse);
+        try {
+            jobSubmitted.accept(runTaskResponse);
+        } catch (RuntimeException e) {
+            // Same as the nested case: the tasks are running and the wait that would stop them is
+            // never entered, so they are stopped here.
+            stopEcsTasks(cluster, taskArns, executionArn, region);
+            throw e;
+        }
         while (true) {
             try {
                 sleepOrTimeOutTask(TimeUnit.MILLISECONDS.toNanos(SYNC_POLL_INTERVAL_MS),

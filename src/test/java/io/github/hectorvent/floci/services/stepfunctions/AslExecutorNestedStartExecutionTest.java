@@ -33,6 +33,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -95,6 +97,11 @@ class AslExecutorNestedStartExecutionTest {
     }
 
     private Execution runParent(String parentDefinition, String input) {
+        return runParent(parentDefinition, input, new ArrayList<>());
+    }
+
+    /** {@code recorded} is the history the execution starts with, counted towards the event limit. */
+    private Execution runParent(String parentDefinition, String input, List<HistoryEvent> recorded) {
         StateMachine sm = new StateMachine();
         sm.setName("parent");
         sm.setStateMachineArn("arn:aws:states:us-east-1:000000000000:stateMachine:parent");
@@ -105,7 +112,7 @@ class AslExecutorNestedStartExecutionTest {
         exec.setExecutionArn("arn:aws:states:us-east-1:000000000000:execution:parent:pe");
         exec.setStateMachineArn(sm.getStateMachineArn());
         exec.setInput(input);
-        history = new ArrayList<>();
+        history = recorded;
         executor.executeSync(sm, exec, history, (u, e) -> {
         });
         return exec;
@@ -318,6 +325,31 @@ class AslExecutorNestedStartExecutionTest {
             assertEquals("states", history.get(i).getDetails().get("resourceType"), history.get(i).getType());
             assertEquals("startExecution" + mode, history.get(i).getDetails().get("resource"), history.get(i).getType());
         }
+    }
+
+    /**
+     * TaskSubmitted is the first event after the child exists. When it is the one that hits the
+     * 25,000-event limit, the wait that would abort the child is never entered, so the child is
+     * aborted on the way out instead of running on.
+     */
+    @Test
+    void aChildWhoseTaskSubmittedHitsTheHistoryLimitIsAborted() {
+        List<HistoryEvent> recorded = new ArrayList<>();
+        for (int i = 0; i < 24_996; i++) {
+            recorded.add(new HistoryEvent());
+        }
+
+        Execution exec = runParent(parentMode(".sync:2"), "{}", recorded);
+
+        assertEquals("FAILED", exec.getStatus());
+        assertEquals("States.Runtime", exec.getError());
+        assertEquals("The execution reached the maximum number of history events (25000).", exec.getCause());
+        assertEquals("TaskStarted", history.get(24_998).getType());
+        assertFalse(types().contains("TaskSubmitted"), "the event that hit the limit is not recorded");
+        verify(childSfn).stopExecution(eq("arn:aws:states:us-east-1:000000000000:execution:child:e1"),
+                eq("The Task state in AWS Step Functions execution "
+                        + "[arn:aws:states:us-east-1:000000000000:execution:parent:pe]"
+                        + " which was managing this resource was aborted"), isNull());
     }
 
     @Test
