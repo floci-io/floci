@@ -2648,6 +2648,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return Optional.empty();
     }
 
+    /**
+     * The caller's {@code aws:PrincipalArn}. For an IAM user it is the user's ARN, as
+     * {@link #resolveCallerArn} returns. For a role session AWS reports the ARN of the role that
+     * was assumed, path included, rather than the assumed-role session ARN, which names the role
+     * without its path. That is the ARN the session recorded when it was issued, read back as is:
+     * looking the role up by name would hand an old session the ARN of a same-named role created
+     * after it.
+     */
+    public Optional<String> resolvePrincipalArn(String accessKeyId) {
+        Optional<String> callerArn = resolveCallerArn(accessKeyId);
+        if (callerArn.isEmpty() || accessKeys.get(accessKeyId).isPresent()) {
+            return callerArn;
+        }
+        return findSessionForCallerContext(accessKeyId).map(SessionCredential::getRoleArn);
+    }
+
     public Optional<String> resolveCallerUserId(String accessKeyId) {
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isEmpty()) {

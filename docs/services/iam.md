@@ -714,7 +714,10 @@ floci populates:
 operator on an absent key makes the whole statement *not apply*: it neither matches nor
 blocks. A `DenyRootUser`-style guardrail keyed on `aws:PrincipalArn` therefore fires against
 the account root the same way it does on real AWS, consistent with the account root already
-being bounded by SCPs (below): both forms of root enforcement now agree.
+being bounded by SCPs (below): both forms of root enforcement now agree. A negated operator
+(`StringNotEquals`, `ArnNotLike`, `NotIpAddress` and the rest) is the exception, as on AWS: an
+absent key cannot equal what the policy names, so the condition holds, and a `Deny` written
+that way applies when the key is missing.
 
 **Caveat:** `resolveCallerArn` hardcodes the assumed-role session name as `floci-session`,
 so `aws:PrincipalArn` for an assumed-role caller will not match a condition that pins a

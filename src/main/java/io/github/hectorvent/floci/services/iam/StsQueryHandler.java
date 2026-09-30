@@ -1,12 +1,14 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryController;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
-import io.github.hectorvent.floci.core.common.AccountResolver;
+import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
+import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.WebIdentityToken;
@@ -19,6 +21,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
@@ -58,6 +61,9 @@ public class StsQueryHandler {
 
     @Context
     HttpHeaders headers;
+
+    @Context
+    UriInfo uriInfo;
 
     @Inject
     public StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
@@ -119,7 +125,8 @@ public class StsQueryHandler {
         String callerAccountId = regionResolver.getAccountId();
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
-        Response trustDenied = enforceTrustPolicy(roleArn, roleName, accountId);
+        IamRole role = iamService.findRole(accountId, roleName).orElse(null);
+        Response trustDenied = enforceTrustPolicy(roleArn, role, accountId, params);
         if (trustDenied != null) {
             return trustDenied;
         }
@@ -129,10 +136,13 @@ public class StsQueryHandler {
 
         // Register session so IAM enforcement can resolve the role's policies, RDS/ElastiCache
         // IAM token validation can find the temporary secret key, and account routing can map
-        // these temporary credentials to the assumed role's account.
+        // these temporary credentials to the assumed role's account. The session records the
+        // role's own ARN, path included: it is the session's aws:PrincipalArn, and it keeps naming
+        // the role that issued the session even if a role of the same name replaces it later.
         String sessionPolicy = getParam(params, "Policy");
+        String sessionRoleArn = role != null ? role.getArn() : roleArn;
         iamService.registerSession(
-                accessKeyId, secretKey, sessionToken, roleArn, expiration, sessionPolicy, callerAccountId,
+                accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, sessionPolicy, callerAccountId,
                 sessionName, assumedRoleId);
 
         String result = new XmlBuilder()
@@ -150,21 +160,36 @@ public class StsQueryHandler {
      * When IAM enforcement is enabled, denies AssumeRole if the target role's trust policy does not
      * permit the caller. Returns {@code null} to allow — enforcement disabled, the role is unknown
      * to Floci (permissive, backward-compatible), or the caller is permitted.
+     *
+     * <p>The caller's account is the one the request was resolved to from its credentials, signed
+     * in the header or presigned in the query, which for an IAM user or a session is the account
+     * that owns the key rather than the default one. A role session is matched as the role that
+     * issued it, whose ARN keeps the path the session ARN drops. The trust policy's conditions see
+     * the request's keys: the global keys, {@code aws:PrincipalArn}, {@code sts:RoleSessionName},
+     * and {@code sts:ExternalId} when the caller sends one.
      */
-    private Response enforceTrustPolicy(String roleArn, String roleName, String roleAccountId) {
-        if (!config.services().iam().enforcementEnabled()) {
+    private Response enforceTrustPolicy(String roleArn, IamRole role, String roleAccountId,
+                                        MultivaluedMap<String, String> params) {
+        if (!config.services().iam().enforcementEnabled() || role == null) {
             return null;
         }
-        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
-        if (role.isEmpty()) {
-            return null;
-        }
-        String auth = headers == null ? null : headers.getHeaderString("Authorization");
-        String callerAccount = accountResolver.resolve(auth);
-        String callerArn = iamService.resolveCallerArn(
-                        auth == null ? null : accountResolver.extractAccessKeyId(auth))
+        String auth = IamEnforcementFilter.requestAuthorization(
+                headers == null ? null : headers.getHeaderString("Authorization"),
+                uriInfo == null ? null : uriInfo.getQueryParameters());
+        String callerAccount = regionResolver.getAccountId();
+        String accessKeyId = auth == null ? null : accountResolver.extractAccessKeyId(auth);
+        String callerArn = iamService.resolveCallerArn(accessKeyId)
                 .orElse(AwsArnUtils.Arn.of("iam", "", callerAccount, "root").toString());
-        if (trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, callerAccount)) {
+        String principalArn = iamService.resolvePrincipalArn(accessKeyId).orElse(callerArn);
+        Map<String, List<String>> requestContext = IamConditionContextResolver.withGlobalContext(
+                null, roleArn, regionResolver.getRegion(), callerAccount, roleAccountId);
+        requestContext.put("sts:RoleSessionName", List.of(getParam(params, "RoleSessionName")));
+        String externalId = getParam(params, "ExternalId");
+        if (externalId != null) {
+            requestContext.put("sts:ExternalId", List.of(externalId));
+        }
+        if (trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), callerArn, principalArn,
+                callerAccount, requestContext)) {
             return null;
         }
         return AwsQueryResponse.error("AccessDenied",

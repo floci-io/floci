@@ -418,6 +418,43 @@ class IamPolicyEvaluatorTest {
     }
 
     @Test
+    void negatedOperatorOnAnAbsentKeyHolds() {
+        // IAM User Guide, condition operators: when the condition requires that the key is not
+        // matched and the key is not present, the condition is true. A Deny written that way
+        // applies to a request that does not carry the key.
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"sqs:SendMessage","Resource":"*"},
+              {"Effect":"Deny","Action":"sqs:SendMessage","Resource":"*",
+               "Condition":{"ArnNotLike":{"aws:SourceArn":"arn:aws:sns:us-east-1:111122223333:*"}}}
+            ]}""";
+
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(policy), "sqs:SendMessage", "*", Map.of()));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(policy), "sqs:SendMessage", "*",
+                Map.of("aws:SourceArn", List.of("arn:aws:sns:us-east-1:999999999999:topic"))));
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(policy), "sqs:SendMessage", "*",
+                Map.of("aws:SourceArn", List.of("arn:aws:sns:us-east-1:111122223333:topic"))));
+    }
+
+    @Test
+    void negatedSetOperatorOnAnAbsentKeyKeepsTheSetOperatorRule() {
+        // The set operators have their own rule for an absent key: ForAnyValue with a Deny effect
+        // evaluates as no match when the key is not present (IAM User Guide, set operators).
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*"},
+              {"Effect":"Deny","Action":"dynamodb:GetItem","Resource":"*",
+               "Condition":{"ForAnyValue:StringNotEquals":{"dynamodb:Attributes":["name"]}}}
+            ]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*", Map.of()));
+    }
+
+    @Test
     void forAllValuesWithANegatedOperatorAndsAcrossThePolicyValues() {
         // The deny-list idiom for dynamodb:Attributes: allow only while none of the
         // attributes the request touches is one of the forbidden names. AWS ANDs the
