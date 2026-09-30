@@ -211,8 +211,12 @@ public interface EmulatorConfig {
         List<String> containerFallbackServers();
 
         /**
-         * When {@code true}, the embedded DNS server also answers A queries for
-         * {@code amazonaws.com} and every subdomain (any depth: {@code sts.amazonaws.com},
+         * When {@code true}, the embedded DNS server also answers A queries for every AWS
+         * partition's DNS and dual-stack suffix (amazonaws.com, api.aws, amazonaws.com.cn,
+         * api.amazonwebservices.com.cn, amazonaws.eu, api.amazonwebservices.eu, c2s.ic.gov,
+         * api.aws.ic.gov, sc2s.sgov.gov, api.aws.scloud, cloud.adc-e.uk,
+         * api.cloud-aws.adc-e.uk, csp.hci.ic.gov, api.aws.hci.ic.gov) and every subdomain
+         * (any depth: {@code sts.amazonaws.com},
          * {@code organizations.us-east-1.amazonaws.com}, virtual-hosted S3 like
          * {@code bucket.s3.us-east-1.amazonaws.com}) with Floci's container IP,
          * LocalStack-style transparent endpoint injection. Tools that construct SDK
@@ -222,7 +226,8 @@ public interface EmulatorConfig {
          * <p>Combine with {@code floci.tls.enabled=true} so hardcoded {@code https://}
          * endpoints are served on port 443 with a certificate covering the AWS wildcards.
          *
-         * <p>Off by default: it hijacks all real-AWS traffic from spawned containers.
+         * <p>Off by default: it hijacks all real-AWS traffic from spawned containers, including
+         * live suffixes such as {@code api.aws} and {@code amazonaws.eu}.
          * Env: {@code FLOCI_DNS_SPOOF_AWS_ENDPOINTS}
          */
         @WithDefault("false")

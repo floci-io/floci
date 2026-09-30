@@ -92,10 +92,13 @@ floci:
     # extra-suffixes:
     #   - localhost.localstack.cloud
 
-    # Transparent endpoint injection: resolve amazonaws.com and every subdomain to
-    # Floci's container IP inside spawned containers, so SDK clients built with
-    # explicit real-AWS endpoints (which override AWS_ENDPOINT_URL) land on the
-    # emulator. Combine with tls.enabled for clients that hardcode https://.
+    # Transparent endpoint injection: resolve every AWS partition's DNS and dual-stack
+    # suffix (amazonaws.com, api.aws, amazonaws.eu, amazonaws.com.cn and the rest; see
+    # environment-variables.md for the full list) and every subdomain to Floci's
+    # container IP inside spawned containers, so SDK clients built with explicit
+    # real-AWS endpoints (which override AWS_ENDPOINT_URL) land on the emulator.
+    # Live suffixes like api.aws and amazonaws.eu resolve to Floci while this is on.
+    # Combine with tls.enabled for clients that hardcode https://.
     # Via env var: FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true
     spoof-aws-endpoints: false
 

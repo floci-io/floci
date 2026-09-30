@@ -142,16 +142,26 @@ Floci's embedded DNS server always resolves the following wildcard suffixes to F
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_DNS_EXTRA_SUFFIXES` | _(none)_ | Comma-separated list of additional hostname suffixes to resolve to Floci's container IP. Use this for custom domains beyond the built-in ones above (e.g. a private internal suffix). |
-| `FLOCI_DNS_SPOOF_AWS_ENDPOINTS` | `false` | Resolve `amazonaws.com` and every subdomain to Floci's container IP inside spawned containers (transparent endpoint injection). See below. |
+| `FLOCI_DNS_SPOOF_AWS_ENDPOINTS` | `false` | Resolve every AWS partition's DNS and dual-stack suffix (`amazonaws.com`, `api.aws`, `amazonaws.eu`, and more) and every subdomain to Floci's container IP inside spawned containers (transparent endpoint injection). See below. |
 
 ### Transparent endpoints
 
-Some tools construct SDK clients with explicit real-AWS endpoints (e.g. `https://sts.us-east-1.amazonaws.com`), which override `AWS_ENDPOINT_URL`, so those calls escape the emulator and fail against real AWS. With `FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true`, the embedded DNS server answers A queries for `amazonaws.com` and every subdomain at any depth (`sts.amazonaws.com`, `organizations.us-east-1.amazonaws.com`, virtual-hosted S3 like `my-bucket.s3.us-east-1.amazonaws.com`) with Floci's container IP, matching LocalStack's transparent endpoint injection. All other queries keep the normal forward/fallback behavior.
+Some tools construct SDK clients with explicit real-AWS endpoints (e.g. `https://sts.us-east-1.amazonaws.com`), which override `AWS_ENDPOINT_URL`, so those calls escape the emulator and fail against real AWS. With `FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true`, the embedded DNS server answers A queries for every AWS partition's DNS and dual-stack suffix and every subdomain at any depth (`sts.amazonaws.com`, `organizations.us-east-1.amazonaws.com`, virtual-hosted S3 like `my-bucket.s3.us-east-1.amazonaws.com`) with Floci's container IP, matching LocalStack's transparent endpoint injection. The intercepted suffixes are:
+
+- `amazonaws.com` and `api.aws` (aws, aws-us-gov)
+- `amazonaws.com.cn` and `api.amazonwebservices.com.cn` (aws-cn)
+- `amazonaws.eu` and `api.amazonwebservices.eu` (aws-eusc)
+- `c2s.ic.gov` and `api.aws.ic.gov` (aws-iso)
+- `sc2s.sgov.gov` and `api.aws.scloud` (aws-iso-b)
+- `cloud.adc-e.uk` and `api.cloud-aws.adc-e.uk` (aws-iso-e)
+- `csp.hci.ic.gov` and `api.aws.hci.ic.gov` (aws-iso-f)
+
+Some of these are live public names, not sandbox-only ones: with the flag on, `api.aws` and `amazonaws.eu` resolve to Floci too, so real endpoints under them are unreachable from spawned containers. All other queries keep the normal forward/fallback behavior.
 
 Combine it with `FLOCI_TLS_ENABLED=true` so hardcoded `https://` endpoints work end to end:
 
 - the TLS proxy already serves HTTPS on port 443, where those clients connect;
-- the generated self-signed certificate additionally covers `*.amazonaws.com` and `*.<region>.amazonaws.com` for every published region, plus the multi-label and S3 endpoint forms (flipping the flag regenerates the certificate).
+- the generated self-signed certificate additionally covers each of those suffixes and `*.<region>.<suffix>` for every published region, plus the multi-label and S3 endpoint forms (flipping the flag regenerates the certificate).
 
 With TLS, set `FLOCI_DNS_SPOOF_AWS_ENDPOINTS` as an environment variable (or `-Dfloci.dns.spoof-aws-endpoints=true`), because the certificate generator does not read `application.yml`; Floci logs a warning at startup if the flag is only set there.
 

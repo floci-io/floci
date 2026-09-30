@@ -252,11 +252,16 @@ floci:
       - 8.8.8.8
       - 8.8.4.4
 
-    # Transparent endpoint injection: answer amazonaws.com (and every subdomain) A queries
-    # with Floci's container IP inside spawned containers, so SDK clients constructed with
-    # explicit real-AWS endpoints, which override AWS_ENDPOINT_URL, land on the emulator.
+    # Transparent endpoint injection: answer A queries for every AWS partition's DNS and
+    # dual-stack suffix (and every subdomain) with Floci's container IP inside spawned
+    # containers, so SDK clients constructed with explicit real-AWS endpoints, which override
+    # AWS_ENDPOINT_URL, land on the emulator. Suffixes: amazonaws.com, api.aws,
+    # amazonaws.com.cn, api.amazonwebservices.com.cn, amazonaws.eu, api.amazonwebservices.eu,
+    # c2s.ic.gov, api.aws.ic.gov, sc2s.sgov.gov, api.aws.scloud, cloud.adc-e.uk,
+    # api.cloud-aws.adc-e.uk, csp.hci.ic.gov, api.aws.hci.ic.gov. Live suffixes like api.aws and
+    # amazonaws.eu resolve to Floci while this is on.
     # Combine with tls.enabled so clients that hardcode https:// are served on port 443
-    # with a certificate covering *.amazonaws.com and *.<region>.amazonaws.com for every published region.
+    # with a certificate covering those suffixes and their regional wildcards.
     spoof-aws-endpoints: false                    # FLOCI_DNS_SPOOF_AWS_ENDPOINTS
 
   auth:

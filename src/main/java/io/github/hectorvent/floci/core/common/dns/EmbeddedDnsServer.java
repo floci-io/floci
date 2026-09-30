@@ -39,7 +39,7 @@ import java.util.regex.Pattern;
  * Docker network IP so virtual-hosted S3 URLs (my-bucket.floci:4566) work from
  * inside Lambda containers without requiring wildcard Docker aliases.
  *
- * When floci.dns.spoof-aws-endpoints is enabled, amazonaws.com and all of its
+ * When floci.dns.spoof-aws-endpoints is enabled, every AWS partition suffix and all of its
  * subdomains resolve to Floci's IP as well (transparent endpoint injection), so
  * clients built with explicit real-AWS endpoints land on the emulator.
  *
@@ -149,10 +149,7 @@ public class EmbeddedDnsServer {
                 suffixes.addAll(TlsConfigSource.awsEndpointSuffixes());
                 if (shouldWarnSpoofInvisibleToTls(true, TlsConfigSource.tlsEnabledVisibleToTls(),
                         TlsConfigSource.spoofAwsEndpointsVisibleToTls())) {
-                    LOG.warnv("floci.dns.spoof-aws-endpoints is set in application config but the TLS "
-                            + "certificate only reads it from FLOCI_DNS_SPOOF_AWS_ENDPOINTS or "
-                            + "-Dfloci.dns.spoof-aws-endpoints; https:// calls to {0} will "
-                            + "fail the handshake until it is set there.", TlsConfigSource.awsEndpointSuffixes());
+                    LOG.warnv("floci.dns.spoof-aws-endpoints is set in application config but the TLS certificate only reads it from FLOCI_DNS_SPOOF_AWS_ENDPOINTS or -Dfloci.dns.spoof-aws-endpoints; https:// calls to {0} will fail the handshake until it is set there.", TlsConfigSource.awsEndpointSuffixes());
                 }
             }
 

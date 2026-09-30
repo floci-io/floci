@@ -262,7 +262,7 @@ class TlsConfigSourceCertificateReuseTest {
      * Test that certificate is regenerated when the spoof-aws-endpoints flag flips
      */
     @Test
-    void testCertificateRegeneratedWhenSpoofAwsEndpointsFlagFlips() throws Exception {
+    void certificateIsRegeneratedWhenTheSpoofFlagFlips() throws Exception {
         // Arrange: Generate initial certificate without AWS endpoint spoofing
         System.setProperty("floci.tls.enabled", "true");
         System.setProperty("floci.tls.self-signed", "true");
