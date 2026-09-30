@@ -513,7 +513,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 users.delete(userName);
                 user.setUserName(newUserName);
                 if (newPath != null) user.setPath(normalizePath(newPath));
-                user.setArn(iamArn("user", user.getPath(), newUserName));
+                user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
                 users.put(newUserName, user);
                 loginProfiles.get(userName).ifPresent(profile -> {
                     loginProfiles.delete(userName);
@@ -534,7 +534,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             } else {
                 if (newPath != null) {
                     user.setPath(normalizePath(newPath));
-                    user.setArn(iamArn("user", user.getPath(), userName));
+                    user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), userName));
                 }
                 users.put(userName, user);
             }
@@ -608,7 +608,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 if (newPath != null) {
                     group.setPath(normalizePath(newPath));
                 }
-                group.setArn(iamArn("group", group.getPath(), newGroupName));
+                group.setArn(iamArnBeside(group.getArn(), "group", group.getPath(), newGroupName));
                 groups.put(newGroupName, group);
                 // Keep member references in sync so group policies still resolve after a rename.
                 for (String memberName : group.getUserNames()) {
@@ -621,7 +621,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             } else {
                 if (newPath != null) {
                     group.setPath(normalizePath(newPath));
-                    group.setArn(iamArn("group", group.getPath(), groupName));
+                    group.setArn(iamArnBeside(group.getArn(), "group", group.getPath(), groupName));
                 }
                 groups.put(groupName, group);
             }
@@ -1957,7 +1957,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /**
      * AWS identifies a provider by URL, so the ARN is derived from it rather than from a random
      * id, and the scheme is stripped: {@code https://host/path} becomes
-     * {@code arn:aws:iam::<account>:oidc-provider/host/path}. Creating the same URL twice is
+     * {@code arn:<partition>:iam::<account>:oidc-provider/host/path}. Creating the same URL twice is
      * therefore a duplicate resource, not a second provider.
      */
     public OpenIDConnectProvider createOpenIDConnectProvider(String url, List<String> clientIdList,
@@ -2646,10 +2646,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 sessionName = session.getEc2InstanceId() != null
                         ? session.getEc2InstanceId() : "floci-session";
             }
-            // The session lives in the role's partition, the one its ARN names, whatever region a
-            // later call is signed for: AssumeRole issued the same partition for it.
-            String partition = AwsArnUtils.isArn(roleArn)
-                    ? AwsArnUtils.parse(roleArn).partition() : regionResolver.getPartition();
+            // The session lives in its role's partition, as AssumeRole issued it, whatever region
+            // a later call is signed for.
+            String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
             return Optional.of(AwsArnUtils.Arn.global(partition, "sts", accountId,
                     "assumed-role/" + roleName + "/" + sessionName).toString());
         }
@@ -2876,8 +2875,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return docs;
     }
 
+    /**
+     * Mints the ARN of a new IAM resource in the request's partition (the deployment's outside a
+     * request, as for the seeded deployer user). An IAM resource then stays in the partition it was
+     * created in: AWS never has to choose, since an account belongs to one partition, but Floci
+     * keys IAM by account and serves every partition from one process.
+     */
     private String iamArn(String resourceType, String path, String name) {
-        return AwsArnUtils.Arn.of("iam", "", regionResolver.getAccountId(), resourceType + path + name).toString();
+        return regionResolver.buildGlobalArn("iam", resourceType + path + name);
+    }
+
+    /** Re-mints a renamed or moved resource's ARN in the partition its current ARN names. */
+    private String iamArnBeside(String currentArn, String resourceType, String path, String name) {
+        String partition = AwsArnUtils.partitionOrDefault(currentArn, regionResolver.getPartition());
+        return AwsArnUtils.Arn.global(partition, "iam", regionResolver.getAccountId(),
+                resourceType + path + name).toString();
     }
 
     private static <T> boolean containsNameIgnoreCase(StorageBackend<String, T> storage,
@@ -3141,7 +3153,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private String rootAccountReportRow() {
-        String arn = AwsArnUtils.Arn.of("iam", "", regionResolver.getAccountId(), "root").toString();
+        String arn = regionResolver.buildGlobalArn("iam", "root");
         return String.join(",",
                 "<root_account>", arn, "N/A",
                 "FALSE", "N/A", "N/A", "not_supported",

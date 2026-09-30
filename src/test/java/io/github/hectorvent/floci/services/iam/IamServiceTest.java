@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
@@ -78,6 +79,17 @@ class IamServiceTest {
                 new RegionResolver("cn-north-1", "000000000000"));
         assertFalse(china.getAccountSummary().containsKey("GlobalEndpointTokenVersion"));
         assertEquals(0L, china.getAccountSummary().get("Users"));
+    }
+
+    @Test
+    void credentialReportRootRowCarriesThePartition() {
+        IamService china = iamService(false, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("cn-north-1", "000000000000"));
+        china.generateCredentialReport();
+
+        String report = new String(Base64.getDecoder().decode(china.getCredentialReport().base64Content()),
+                StandardCharsets.UTF_8);
+        assertTrue(report.contains("<root_account>,arn:aws-cn:iam::000000000000:root,"), report);
     }
 
     @Test

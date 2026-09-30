@@ -78,7 +78,7 @@ class StsSessionIdentityIntegrationTest {
     /** The session keeps its role's partition: GetCallerIdentity reports the ARN AssumeRole issued. */
     @Test
     void callerIdentityKeepsTheChinaPartitionOfTheAssumedRoleSession() {
-        given()
+        String roleArn = given()
                 .formParam("Action", "CreateRole")
                 .formParam("RoleName", CHINA_ROLE_NAME)
                 .formParam("AssumeRolePolicyDocument",
@@ -86,11 +86,13 @@ class StsSessionIdentityIntegrationTest {
                         + "\"Principal\":{\"AWS\":\"arn:aws-cn:iam::000000000000:root\"},"
                         + "\"Action\":\"sts:AssumeRole\"}]}")
                 .header("Authorization", CHINA_IAM_AUTHORIZATION)
-                .when().post("/").then().statusCode(200);
+                .when().post("/").then().statusCode(200)
+                .extract().path("CreateRoleResponse.CreateRoleResult.Role.Arn");
+        assertEquals("arn:aws-cn:iam::000000000000:role/" + CHINA_ROLE_NAME, roleArn);
 
         ValidatableResponse assumed = given()
                 .formParam("Action", "AssumeRole")
-                .formParam("RoleArn", "arn:aws-cn:iam::000000000000:role/" + CHINA_ROLE_NAME)
+                .formParam("RoleArn", roleArn)
                 .formParam("RoleSessionName", SESSION_NAME)
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260925/cn-north-1/sts/aws4_request")
                 .when().post("/").then().statusCode(200);
@@ -109,6 +111,44 @@ class StsSessionIdentityIntegrationTest {
                         "AWS4-HMAC-SHA256 Credential=" + accessKeyId
                         + "/20260925/cn-north-1/sts/aws4_request")
                 .header("X-Amz-Security-Token", sessionToken)
+                .when().post("/").then().statusCode(200)
+                .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", equalTo(assumedRoleArn));
+    }
+
+    /**
+     * A role created in the commercial partition and assumed with a call signed for China: the
+     * session stays in the role's partition, and AssumeRole and GetCallerIdentity agree on it.
+     */
+    @Test
+    void assumeRoleAndCallerIdentityAgreeWhenSignedForAnotherPartition() {
+        String roleArn = given()
+                .formParam("Action", "CreateRole")
+                .formParam("RoleName", ROLE_NAME)
+                .formParam("AssumeRolePolicyDocument",
+                        "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                        + "\"Principal\":{\"AWS\":\"*\"},\"Action\":\"sts:AssumeRole\"}]}")
+                .header("Authorization", AUTHORIZATION)
+                .when().post("/").then().statusCode(200)
+                .extract().path("CreateRoleResponse.CreateRoleResult.Role.Arn");
+
+        ValidatableResponse assumed = given()
+                .formParam("Action", "AssumeRole")
+                .formParam("RoleArn", roleArn)
+                .formParam("RoleSessionName", SESSION_NAME)
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260925/cn-north-1/sts/aws4_request")
+                .when().post("/").then().statusCode(200);
+        String assumedRoleArn = assumed.extract().path(
+                "AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn");
+        assertEquals("arn:aws:sts::000000000000:assumed-role/" + ROLE_NAME + "/" + SESSION_NAME, assumedRoleArn);
+
+        given()
+                .formParam("Action", "GetCallerIdentity")
+                .header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential="
+                        + assumed.extract().path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId")
+                        + "/20260925/cn-north-1/sts/aws4_request")
+                .header("X-Amz-Security-Token", (String) assumed.extract().path(
+                        "AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken"))
                 .when().post("/").then().statusCode(200)
                 .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", equalTo(assumedRoleArn));
     }

@@ -138,8 +138,16 @@ partition is refused: `endpoints.json` omits the newer services that ship an end
 alone (FIS, MWAA, S3 Tables), and those are served everywhere.
 
 STS is regionalized everywhere and its global host `sts.amazonaws.com` exists only in `aws`, so
-IAM's `GetAccountSummary` reports `GlobalEndpointTokenVersion` only there; STS and IAM ARNs
-(`assumed-role`, `federated-user`, `root`, `oidc-provider`) carry the request's partition.
+IAM's `GetAccountSummary` reports `GlobalEndpointTokenVersion` only there.
+
+An IAM resource (user, group, role, policy, instance profile, OIDC provider) is created in the
+request's partition and keeps it: a rename signed for another partition does not move it. On AWS
+an account belongs to one partition, but one Floci process serves them all, so anything derived
+from a stored resource follows that resource. A role's sessions (`assumed-role`) and the OIDC
+provider its web-identity trust policy names take the role's partition, so `AssumeRole` and a later
+`GetCallerIdentity` agree whatever region each call is signed for. ARNs with nothing stored
+behind them, the `root` fallback of `GetCallerIdentity` and `federated-user`, take the request's
+partition.
 
 ## Open questions
 

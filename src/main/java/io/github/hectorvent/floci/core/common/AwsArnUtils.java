@@ -104,6 +104,15 @@ public final class AwsArnUtils {
     }
 
     /**
+     * Returns the partition an ARN names, or {@code defaultPartition} when the value is null or
+     * not an ARN. Anything derived from a stored IAM resource (a role's sessions, its account's
+     * OIDC provider) takes the partition that resource was created in, not the request's.
+     */
+    public static String partitionOrDefault(String arn, String defaultPartition) {
+        return isArn(arn) ? parse(arn).partition() : defaultPartition;
+    }
+
+    /**
      * Regex fragment matching any AWS partition id: {@code aws}, {@code aws-cn},
      * {@code aws-us-gov}, and the classified {@code aws-iso*} and {@code aws-eusc} partitions.
      *
