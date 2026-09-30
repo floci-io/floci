@@ -11,6 +11,9 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -88,6 +91,24 @@ class IamPartitionArnIntegrationTest {
         String arn = iam("us-east-1", "GetUser", "UserName", renamed)
                 .then().statusCode(200).extract().path("GetUserResponse.GetUserResult.User.Arn");
         assertEquals("arn:aws-cn:iam::" + PartitionMatrix.ACCOUNT + ":user/" + renamed, arn);
+    }
+
+    /** A report generated for one partition is never handed to a caller in another. */
+    @Test
+    void eachPartitionGetsItsOwnCredentialReport() {
+        assertEquals("arn:aws-iso-f:iam::" + PartitionMatrix.ACCOUNT + ":root",
+                credentialReportRootArn("us-isof-south-1"));
+        assertEquals("arn:aws-iso-e:iam::" + PartitionMatrix.ACCOUNT + ":root",
+                credentialReportRootArn("eu-isoe-west-1"));
+    }
+
+    private static String credentialReportRootArn(String region) {
+        iam(region, "GenerateCredentialReport").then().statusCode(200);
+        String content = iam(region, "GetCredentialReport").then().statusCode(200)
+                .extract().path("GetCredentialReportResponse.GetCredentialReportResult.Content");
+        String report = new String(Base64.getDecoder().decode(content), StandardCharsets.UTF_8);
+        return report.lines().filter(line -> line.startsWith("<root_account>,")).findFirst()
+                .orElseThrow().split(",")[1];
     }
 
     private static void assertIamArn(PartitionCase partitionCase, String resource, String arn) {

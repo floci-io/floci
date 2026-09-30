@@ -167,8 +167,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final StorageBackend<String, String> serviceLinkedRoleDeletions;
     private final StorageBackend<String, OrganizationRootFeatures> orgRootFeatures;
     /**
-     * Holds at most one entry per account under {@link #CREDENTIAL_REPORT_KEY}: the same
-     * single-value-per-account shape as {@link #accountAliases}.
+     * Holds at most one report per account and partition, keyed by {@link #credentialReportKey}:
+     * the report's root row names the partition it was generated for, so a report generated for
+     * one partition is never handed to a caller in another.
      */
     private final StorageBackend<String, CredentialReport> credentialReports;
     private final RegionResolver regionResolver;
@@ -3101,22 +3102,26 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public CredentialReportGeneration generateCredentialReport() {
         Instant now = Instant.now();
-        Optional<CredentialReport> existing = credentialReports.get(CREDENTIAL_REPORT_KEY);
+        Optional<CredentialReport> existing = credentialReports.get(credentialReportKey());
         if (existing.isPresent() && now.isBefore(existing.get().getGeneratedTime().plus(CREDENTIAL_REPORT_MAX_AGE))) {
             return new CredentialReportGeneration("COMPLETE",
                     "Current report has already been generated within the past 4 hours.");
         }
         String csv = buildCredentialReportCsv();
         String base64Content = Base64.getEncoder().encodeToString(csv.getBytes(StandardCharsets.UTF_8));
-        credentialReports.put(CREDENTIAL_REPORT_KEY, new CredentialReport(base64Content, now));
+        credentialReports.put(credentialReportKey(), new CredentialReport(base64Content, now));
         String description = existing.isEmpty()
                 ? "No report exists. Starting a new report generation task"
                 : "The previous report has expired. Starting a new report generation task";
         return new CredentialReportGeneration("STARTED", description);
     }
 
+    private String credentialReportKey() {
+        return CREDENTIAL_REPORT_KEY + "/" + regionResolver.getPartition();
+    }
+
     public CredentialReportContent getCredentialReport() {
-        CredentialReport report = credentialReports.get(CREDENTIAL_REPORT_KEY)
+        CredentialReport report = credentialReports.get(credentialReportKey())
                 .orElseThrow(() -> new AwsException("ReportNotPresent",
                         "The request was rejected because the credential report does not exist. "
                                 + "To generate a credential report, use GenerateCredentialReport.", 410));

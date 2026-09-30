@@ -152,4 +152,42 @@ class StsSessionIdentityIntegrationTest {
                 .when().post("/").then().statusCode(200)
                 .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", equalTo(assumedRoleArn));
     }
+
+    /**
+     * A RoleArn naming another partition still finds the role (Floci keys IAM by account and
+     * name), but the session belongs to the stored role, so it keeps the role's China partition.
+     */
+    @Test
+    void sessionFollowsTheStoredRoleWhenTheRoleArnNamesAnotherPartition() {
+        given()
+                .formParam("Action", "CreateRole")
+                .formParam("RoleName", CHINA_ROLE_NAME)
+                .formParam("AssumeRolePolicyDocument",
+                        "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                        + "\"Principal\":{\"AWS\":\"*\"},\"Action\":\"sts:AssumeRole\"}]}")
+                .header("Authorization", CHINA_IAM_AUTHORIZATION)
+                .when().post("/").then().statusCode(200);
+
+        ValidatableResponse assumed = given()
+                .formParam("Action", "AssumeRole")
+                .formParam("RoleArn", "arn:aws:iam::000000000000:role/" + CHINA_ROLE_NAME)
+                .formParam("RoleSessionName", SESSION_NAME)
+                .header("Authorization", STS_AUTHORIZATION)
+                .when().post("/").then().statusCode(200);
+        String assumedRoleArn = assumed.extract().path(
+                "AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn");
+        assertEquals("arn:aws-cn:sts::000000000000:assumed-role/" + CHINA_ROLE_NAME + "/" + SESSION_NAME,
+                assumedRoleArn);
+
+        given()
+                .formParam("Action", "GetCallerIdentity")
+                .header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential="
+                        + assumed.extract().path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId")
+                        + "/20260925/us-east-1/sts/aws4_request")
+                .header("X-Amz-Security-Token", (String) assumed.extract().path(
+                        "AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken"))
+                .when().post("/").then().statusCode(200)
+                .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", equalTo(assumedRoleArn));
+    }
 }

@@ -144,8 +144,10 @@ An IAM resource (user, group, role, policy, instance profile, OIDC provider) is 
 request's partition and keeps it: a rename signed for another partition does not move it. On AWS
 an account belongs to one partition, but one Floci process serves them all, so anything derived
 from a stored resource follows that resource. A role's sessions (`assumed-role`) and the OIDC
-provider its web-identity trust policy names take the role's partition, so `AssumeRole` and a later
-`GetCallerIdentity` agree whatever region each call is signed for. ARNs with nothing stored
+provider its web-identity trust policy names take the stored role's partition, whichever partition
+the request's `RoleArn` names, so `AssumeRole` and a later `GetCallerIdentity` agree whatever region
+each call is signed for. The credential report is kept per partition, so its root row always
+names the caller's. ARNs with nothing stored
 behind them, the `root` fallback of `GetCallerIdentity` and `federated-user`, take the request's
 partition.
 

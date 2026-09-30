@@ -131,7 +131,8 @@ public class StsQueryHandler {
             return trustDenied;
         }
 
-        String assumedRoleArn = assumedRoleArn(roleArn, accountId, roleName, sessionName);
+        String sessionRoleArn = role != null ? role.getArn() : roleArn;
+        String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
         // Register session so IAM enforcement can resolve the role's policies, RDS/ElastiCache
@@ -140,7 +141,6 @@ public class StsQueryHandler {
         // role's own ARN, path included: it is the session's aws:PrincipalArn, and it keeps naming
         // the role that issued the session even if a role of the same name replaces it later.
         String sessionPolicy = getParam(params, "Policy");
-        String sessionRoleArn = role != null ? role.getArn() : roleArn;
         iamService.registerSession(
                 accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, sessionPolicy, callerAccountId,
                 sessionName, assumedRoleId);
@@ -260,7 +260,8 @@ public class StsQueryHandler {
         String sessionToken = randomSecret(200);
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
-        String assumedRoleArn = assumedRoleArn(roleArn, accountId, roleName, sessionName);
+        String sessionRoleArn = iamService.findRole(accountId, roleName).map(IamRole::getArn).orElse(roleArn);
+        String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
         String provider = verified != null ? verified.issuer()
@@ -270,7 +271,7 @@ public class StsQueryHandler {
 
         String sessionPolicy = getParam(params, "Policy");
         iamService.registerSession(
-                accessKeyId, secretKey, sessionToken, roleArn, expiration, sessionPolicy, callerAccountId,
+                accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, sessionPolicy, callerAccountId,
                 sessionName, assumedRoleId);
 
         String result = new XmlBuilder()
@@ -365,7 +366,9 @@ public class StsQueryHandler {
 
     /**
      * A session on a role lives in the role's partition, whatever region AssumeRole is signed
-     * for; {@link IamService#resolveCallerArn} applies the same rule, so the two always agree.
+     * for. Callers pass the stored role's ARN when the role exists, not the RoleArn the request
+     * named, and register the session under the same ARN, so {@link IamService#resolveCallerArn}
+     * always agrees with the ARN returned here.
      */
     private String assumedRoleArn(String roleArn, String accountId, String roleName, String sessionName) {
         return AwsArnUtils.Arn.global(AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition()),
@@ -441,10 +444,10 @@ public class StsQueryHandler {
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
-        String assumedRoleArn = assumedRoleArn(roleArn, accountId, roleName, sessionName);
+        String assumedRoleArn = assumedRoleArn(role.getArn(), accountId, roleName, sessionName);
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
-        iamService.registerSession(accessKeyId, secretKey, sessionToken, roleArn, expiration, null,
+        iamService.registerSession(accessKeyId, secretKey, sessionToken, role.getArn(), expiration, null,
                 callerAccountId, sessionName, assumedRoleId);
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))

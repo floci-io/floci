@@ -275,12 +275,14 @@ class StsQueryHandlerTest {
     /**
      * A role and its account's OIDC provider are IAM resources of one partition, so a trust policy
      * naming the provider ARN CreateOpenIDConnectProvider returned keeps matching and the session
-     * lands in the role's partition, whatever region AssumeRoleWithWebIdentity is signed for.
+     * lands in the stored role's partition, whatever region AssumeRoleWithWebIdentity is signed for
+     * and whichever partition its RoleArn names.
      */
     @Test
     void webIdentityMatchesTheProviderAndMintsTheSessionInTheRolesPartition() throws Exception {
         String issuer = "https://oidc.example.com/id/ABC";
         String roleArn = "arn:aws-cn:iam::000000000000:role/web-role";
+        String requestedRoleArn = "arn:aws:iam::000000000000:role/web-role";
         String providerArn = "arn:aws-cn:iam::000000000000:oidc-provider/oidc.example.com/id/ABC";
 
         EmulatorConfig config = mock(EmulatorConfig.class);
@@ -307,7 +309,7 @@ class StsQueryHandlerTest {
                 new RegionResolver(REGION, "000000000000"), config, mock(AssumeRolePolicyEvaluator.class),
                 trust, verifier, keys, mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
-        params.putSingle("RoleArn", roleArn);
+        params.putSingle("RoleArn", requestedRoleArn);
         params.putSingle("RoleSessionName", "app");
         params.putSingle("WebIdentityToken", "jwt");
 

@@ -2228,7 +2228,7 @@ class IamServiceTest {
     @Test
     void getCredentialReportOnAnExpiredReportThrowsReportExpired() {
         StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
-        credentialReports.put("credential-report",
+        credentialReports.put("credential-report/aws",
                 new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
         IamService withExpiredReport = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -2245,7 +2245,7 @@ class IamServiceTest {
     @Test
     void generateCredentialReportOnAnExpiredReportStartsANewOne() {
         StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
-        credentialReports.put("credential-report",
+        credentialReports.put("credential-report/aws",
                 new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
         IamService withExpiredReport = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
