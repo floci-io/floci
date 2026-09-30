@@ -2312,6 +2312,55 @@ class SqsServiceTest {
         assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"delete", "changeVisibility"})
+    void fifoQueueRejectsAnOlderReceiptHandleAsExpired(String operation) {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-stale.fifo", Map.of("FifoQueue", "true"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, "g", "d", region);
+        String older = sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0, region).get(0).getReceiptHandle();
+        sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> useReceiptHandle(operation, queue.getQueueUrl(), older, region));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Value " + older + " for parameter ReceiptHandle is invalid. Reason: The receipt handle has expired.",
+                ex.getMessage());
+        assertEquals(1, sqsService.peekMessages(queue.getQueueUrl(), region).size());
+    }
+
+    @Test
+    void fifoQueueRejectsTheHandleOfAReceiveWhoseVisibilityEnded() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-visible.fifo", Map.of("FifoQueue", "true"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, "g", "d", region);
+        String handle = sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0, region).get(0).getReceiptHandle();
+
+        AwsException single = assertThrows(AwsException.class,
+                () -> sqsService.deleteMessage(queue.getQueueUrl(), handle, region));
+        assertEquals("InvalidParameterValue", single.getErrorCode());
+
+        AwsException batch = assertThrows(AwsException.class,
+                () -> sqsService.deleteMessageInBatch(queue.getQueueUrl(), handle, region));
+        assertEquals("ReceiptHandleIsInvalid", batch.getErrorCode());
+        assertEquals("The receipt handle has expired", batch.getMessage());
+    }
+
+    @Test
+    void fifoQueueDeletesWithTheCurrentReceiptHandle() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-current.fifo", Map.of("FifoQueue", "true"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, "g", "d", region);
+        String handle = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).get(0).getReceiptHandle();
+
+        sqsService.changeMessageVisibility(queue.getQueueUrl(), handle, 60, region);
+        sqsService.deleteMessage(queue.getQueueUrl(), handle, region);
+
+        assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty());
+        assertDoesNotThrow(() -> sqsService.deleteMessage(queue.getQueueUrl(), handle, region));
+    }
+
     private void useReceiptHandle(String operation, String queueUrl, String receiptHandle, String region) {
         if ("delete".equals(operation)) {
             sqsService.deleteMessage(queueUrl, receiptHandle, region);

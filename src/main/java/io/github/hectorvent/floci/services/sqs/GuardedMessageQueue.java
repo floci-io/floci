@@ -159,44 +159,58 @@ class GuardedMessageQueue {
         }
     }
 
-    /** Finds the message by the id in the handle, so an older handle of the message still works. */
-    Optional<Message> removeByReceiptHandle(String receiptHandle) {
+    enum HandleResult { APPLIED, MESSAGE_GONE, HANDLE_EXPIRED }
+
+    record Removal(HandleResult result, Message message) {
+    }
+
+    /**
+     * Finds the message by the id in the handle. On a standard queue an older handle of the
+     * message still works. On a FIFO queue only the handle of the receive still in flight does.
+     */
+    Removal removeByReceiptHandle(String receiptHandle, boolean fifo) {
         ReceiptHandle parsed = ReceiptHandle.parse(receiptHandle);
         if (parsed == null) {
-            return Optional.empty();
+            return new Removal(HandleResult.MESSAGE_GONE, null);
         }
         try (Guard _ = hold()) {
-            Message removed = null;
             for (Iterator<Message> it = messages.iterator(); it.hasNext(); ) {
                 Message m = it.next();
                 if (parsed.messageId().equals(m.getMessageId())) {
-                    removed = m;
+                    if (fifo && isExpiredFifoHandle(m, receiptHandle)) {
+                        return new Removal(HandleResult.HANDLE_EXPIRED, null);
+                    }
                     it.remove();
-                    break;
+                    persist();
+                    return new Removal(HandleResult.APPLIED, m);
                 }
             }
-            if (removed != null) {
-                persist();
-            }
-            return Optional.ofNullable(removed);
+            return new Removal(HandleResult.MESSAGE_GONE, null);
         }
     }
 
-    boolean changeVisibility(String receiptHandle, int visibilityTimeout) {
+    HandleResult changeVisibility(String receiptHandle, int visibilityTimeout, boolean fifo) {
         ReceiptHandle parsed = ReceiptHandle.parse(receiptHandle);
         if (parsed == null) {
-            return false;
+            return HandleResult.MESSAGE_GONE;
         }
         try (Guard _ = hold()) {
             for (Message msg : messages) {
                 if (parsed.messageId().equals(msg.getMessageId())) {
+                    if (fifo && isExpiredFifoHandle(msg, receiptHandle)) {
+                        return HandleResult.HANDLE_EXPIRED;
+                    }
                     msg.setVisibleAt(Instant.now().plusSeconds(visibilityTimeout));
                     persist();
-                    return true;
+                    return HandleResult.APPLIED;
                 }
             }
-            return false;
+            return HandleResult.MESSAGE_GONE;
         }
+    }
+
+    private static boolean isExpiredFifoHandle(Message msg, String receiptHandle) {
+        return !receiptHandle.equals(msg.getReceiptHandle()) || msg.isVisible();
     }
 
     void removeMessages(List<Message> toRemove) {

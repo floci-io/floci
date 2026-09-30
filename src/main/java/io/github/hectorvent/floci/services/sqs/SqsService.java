@@ -1253,22 +1253,25 @@ public class SqsService implements Resettable, ResourceProvider {
 
     private void deleteMessage(String queueUrl, String receiptHandle, String region, boolean inBatch) {
         String storageKey = regionKey(region, queueUrl);
-        if (getQueueByUrl(storageKey, queueUrl).isEmpty()) {
-            throw new AwsException("AWS.SimpleQueueService.NonExistentQueue",
-                    "The specified queue does not exist.", 400);
-        }
+        Queue queue = getQueueByUrl(storageKey, queueUrl)
+                .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                        "The specified queue does not exist.", 400));
         checkReceiptHandle(storageKey, receiptHandle, inBatch);
 
-        Optional<Message> removed = getOrCreateQueue(storageKey).removeByReceiptHandle(receiptHandle);
+        GuardedMessageQueue.Removal removal =
+                getOrCreateQueue(storageKey).removeByReceiptHandle(receiptHandle, queue.isFifo());
 
+        if (removal.result() == GuardedMessageQueue.HandleResult.HANDLE_EXPIRED) {
+            throw invalidReceiptHandle(receiptHandle, "The receipt handle has expired", inBatch);
+        }
         // AWS reports success for a message that is already gone.
-        if (removed.isEmpty()) {
+        if (removal.result() == GuardedMessageQueue.HandleResult.MESSAGE_GONE) {
             LOG.debugv("No message for receipt handle {0}", receiptHandle);
             return;
         }
         LOG.debugv("Deleted message with receipt handle {0}", receiptHandle);
         if (LOG.isTraceEnabled()) {
-            Message m = removed.get();
+            Message m = removal.message();
             LOG.tracev("Deleted message {0} from queue {1} body={2}",
                     m.getMessageId(), queueUrl, m.getBody());
         }
@@ -1281,11 +1284,17 @@ public class SqsService implements Resettable, ResourceProvider {
     private void changeMessageVisibility(String queueUrl, String receiptHandle, int visibilityTimeout,
                                          String region, boolean inBatch) {
         String storageKey = regionKey(region, queueUrl);
-        ensureQueueExists(storageKey);
+        Queue queue = queueStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                        "The specified queue does not exist.", 400));
         checkReceiptHandle(storageKey, receiptHandle, inBatch);
 
-        boolean found = getOrCreateQueue(storageKey).changeVisibility(receiptHandle, visibilityTimeout);
-        if (!found) {
+        GuardedMessageQueue.HandleResult result =
+                getOrCreateQueue(storageKey).changeVisibility(receiptHandle, visibilityTimeout, queue.isFifo());
+        if (result == GuardedMessageQueue.HandleResult.HANDLE_EXPIRED) {
+            throw invalidReceiptHandle(receiptHandle, "The receipt handle has expired", inBatch);
+        }
+        if (result == GuardedMessageQueue.HandleResult.MESSAGE_GONE) {
             throw invalidReceiptHandle(receiptHandle,
                     "Message does not exist or is not available for visibility timeout change", inBatch);
         }
