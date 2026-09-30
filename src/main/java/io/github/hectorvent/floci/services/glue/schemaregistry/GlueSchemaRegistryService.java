@@ -642,20 +642,22 @@ public class GlueSchemaRegistryService {
         return new CheckValidityResult(false, error);
     }
 
-    public synchronized SchemaVersion getSchemaByDefinition(SchemaId schemaId, String definition, String region) {
+    public SchemaVersion getSchemaByDefinition(SchemaId schemaId, String definition, String region) {
         validateDefinitionRequired(definition);
         Schema schema = resolveSchema(schemaId, region);
         String schemaKey = schemaKey(schema.getRegistryName(), schema.getSchemaName());
         String hash = canonicalHash(definition, schema.getDataFormat());
-        Map<String, String> hashIndex = versionByDefinitionHash.get(schemaKey);
-        String id = hashIndex != null ? hashIndex.get(hash) : null;
-        if (id == null) {
-            throw new AwsException("EntityNotFoundException",
-                    "Schema version is not found. Definition not found in " + schemaKey, 400);
+        synchronized (this) {
+            Map<String, String> hashIndex = versionByDefinitionHash.get(schemaKey);
+            String id = hashIndex != null ? hashIndex.get(hash) : null;
+            if (id == null) {
+                throw new AwsException("EntityNotFoundException",
+                        "Schema version is not found. Definition not found in " + schemaKey, 400);
+            }
+            return versionStore.get(id)
+                    .orElseThrow(() -> new AwsException("EntityNotFoundException",
+                            "Schema version vanished: " + id, 400));
         }
-        return versionStore.get(id)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                        "Schema version vanished: " + id, 400));
     }
 
     // ---- Helpers ---------------------------------------------------------
