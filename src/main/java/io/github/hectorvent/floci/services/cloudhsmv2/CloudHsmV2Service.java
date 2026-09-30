@@ -175,15 +175,19 @@ public class CloudHsmV2Service {
             certs.setManufacturerHardwareCertificate(certificateGenerator.toPem(certificateGenerator.signCertificate(
                     mfrName, mfrKeyPair.getPublic(), mfrName, mfrKeyPair.getPrivate(), List.of(), true, null, 365)));
 
+            Instant certificateNotBefore = Instant.now();
+            Instant certificateNotAfter = certificateNotBefore.plus(365, ChronoUnit.DAYS);
             KeyPair awsKeyPair = generateKeyPair();
             X500Name awsName = new X500Name("CN=AWS CloudHSM Hardware CA,O=AWS,C=US");
             certs.setAwsHardwareCertificate(certificateGenerator.toPem(certificateGenerator.signCertificate(
-                    awsName, awsKeyPair.getPublic(), mfrName, mfrKeyPair.getPrivate(), List.of(), true, null, 365)));
+                    awsName, awsKeyPair.getPublic(), mfrName, mfrKeyPair.getPrivate(), List.of(), true, null,
+                    certificateNotBefore, certificateNotAfter, mfrKeyPair.getPublic())));
 
             KeyPair hsmKeyPair = generateKeyPair();
             X500Name hsmName = new X500Name("CN=HSM Instance " + clusterId + ",O=AWS,C=US");
             certs.setHsmCertificate(certificateGenerator.toPem(certificateGenerator.signCertificate(
-                    hsmName, hsmKeyPair.getPublic(), awsName, awsKeyPair.getPrivate(), List.of(), false, null, 365)));
+                    hsmName, hsmKeyPair.getPublic(), awsName, awsKeyPair.getPrivate(), List.of(), false, null,
+                    certificateNotBefore, certificateNotAfter, awsKeyPair.getPublic())));
         } catch (Exception e) {
             LOG.warnv("Failed to generate emulated hardware certs: {0}", e.getMessage());
         }
