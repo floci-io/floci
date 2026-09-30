@@ -231,6 +231,63 @@ class S3EventBridgeIntegrationTest {
     }
 
     @Test
+    @Order(9)
+    void deleteObjectVersion_eventBridgeDetailCarriesTheDeletedVersionId() {
+        String versionedBucket = "eb-s3-versioned-test-bucket";
+        given().when().put("/" + versionedBucket).then().statusCode(200);
+        given()
+            .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+            .put("/" + versionedBucket + "?versioning")
+        .then()
+            .statusCode(200);
+
+        String olderVersionId = given()
+            .contentType("text/plain")
+            .body("v1")
+        .when()
+            .put("/" + versionedBucket + "/k.txt")
+        .then()
+            .statusCode(200)
+            .extract().header("x-amz-version-id");
+        given().contentType("text/plain").body("v2").when().put("/" + versionedBucket + "/k.txt")
+            .then().statusCode(200);
+
+        // Enabled after the writes, so the version delete is the only event on the queue.
+        given()
+            .contentType("application/xml")
+            .body("""
+                <NotificationConfiguration>
+                    <EventBridgeConfiguration/>
+                </NotificationConfiguration>
+                """)
+        .when()
+            .put("/" + versionedBucket + "?notification")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .delete("/" + versionedBucket + "/k.txt?versionId=" + olderVersionId)
+        .then()
+            .statusCode(204);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", allOf(
+                containsString("Object Deleted"),
+                containsString("\"version-id\":\"" + olderVersionId + "\"")));
+    }
+
+    @Test
     @Order(100)
     void cleanup() {
         given()

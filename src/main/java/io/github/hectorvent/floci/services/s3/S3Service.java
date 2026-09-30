@@ -4506,6 +4506,9 @@ public class S3Service implements Resettable, ResourceProvider {
             objectNode.put("key", key);
             objectNode.put("size", size);
             objectNode.put("etag", eTag);
+            if (obj != null && obj.getVersionId() != null) {
+                objectNode.put("version-id", obj.getVersionId());
+            }
             detail.put("request-id", UUID.randomUUID().toString());
             detail.put("requester", "aws:emulator");
             detail.put("source-ip-address", "127.0.0.1");
