@@ -862,6 +862,8 @@ For DynamoDB Streams mappings, Floci retries failed batches with exponential bac
 
 For Kinesis mappings, a function error or throttle leaves the shard checkpoint in place and the same batch is read again on the next poll; there is no retry limit, backoff, or OnFailure destination. With `FunctionResponseTypes: ["ReportBatchItemFailures"]`, a partial batch response moves the checkpoint up to the lowest reported record, and a malformed response retries the whole batch. `FunctionResponseTypes` can be set or cleared on an existing mapping with `UpdateEventSourceMapping`.
 
+For SQS mappings, a function error returns every delivered message to the queue with the queue's `VisibilityTimeout`, so it is received again after that timeout and the queue's `RedrivePolicy` applies as usual. With `FunctionResponseTypes: ["ReportBatchItemFailures"]`, only the messages the function reports are returned and the rest are deleted; a malformed response returns the whole batch.
+
 A DynamoDB Streams mapping created with `StartingPosition: LATEST` delivers only records written after it is created, so a stream that is empty at creation delivers everything written later. After a restart it still resumes from the trim horizon, because native stream records are volatile. Deleting or disabling a mapping stops any poll that has not yet invoked the function. An invocation already running completes, but its checkpoint is not saved: a deleted mapping is never recreated and its result is dropped, and a disabled mapping re-reads that batch when it is enabled again.
 
 ```bash
@@ -992,13 +994,13 @@ of `{}` or with an empty `Filters` array clears any existing filters.
     where AWS matches when the record's own field is itself an array and any
     element satisfies the pattern, and Floci does not.
 
-!!! warning "Direct Lambda API only"
-    `FilterCriteria` is carried only by the direct Lambda
-    `CreateEventSourceMapping` / `UpdateEventSourceMapping` APIs (SDK, CLI,
-    Terraform). CloudFormation and SAM event-source-mapping resources do not yet
-    forward `FilterCriteria` (as they also do not forward `ScalingConfig` or
-    `DestinationConfig`); forwarding it through those paths is tracked as a
-    follow-up.
+!!! warning "SAM event sources"
+    CloudFormation `AWS::Lambda::EventSourceMapping` resources forward
+    `FilterCriteria`, `MaximumBatchingWindowInSeconds`, `ScalingConfig` and
+    `DestinationConfig`, so a stack-created mapping behaves as one created
+    through the Lambda API. SAM `SQS`, `Kinesis` and `DynamoDB` function events
+    forward only the queue or stream, `BatchSize` and `Enabled`, so any other
+    event property, `FilterCriteria` included, is dropped.
 
 ## Supported Runtimes
 
