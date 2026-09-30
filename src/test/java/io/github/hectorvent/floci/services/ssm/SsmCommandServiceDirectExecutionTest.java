@@ -632,16 +632,19 @@ class SsmCommandServiceDirectExecutionTest {
         SsmCommandService service = new SsmCommandService(
                 new InMemoryStorageFactory(), objectMapper, regionResolver, executor);
 
-        ObjectNode request = objectMapper.createObjectNode();
-        ArrayNode instanceIdsNode = request.putArray("InstanceIds");
-        for (int i = 0; i < instanceCount; i++) {
-            instanceIdsNode.add("i-burst-" + i);
+        // SendCommand takes at most 50 InstanceIds, so the burst is split across several commands.
+        List<Command> commands = new ArrayList<>();
+        for (int first = 0; first < instanceCount; first += 50) {
+            ObjectNode request = objectMapper.createObjectNode();
+            ArrayNode instanceIdsNode = request.putArray("InstanceIds");
+            for (int i = first; i < Math.min(first + 50, instanceCount); i++) {
+                instanceIdsNode.add("i-burst-" + i);
+            }
+            request.put("DocumentName", "AWS-RunShellScript");
+            request.putObject("Parameters").putArray("commands").add("sleep 60");
+            request.put("TimeoutSeconds", 60);
+            commands.add(service.sendCommand(request, "us-west-2"));
         }
-        request.put("DocumentName", "AWS-RunShellScript");
-        request.putObject("Parameters").putArray("commands").add("sleep 60");
-        request.put("TimeoutSeconds", 60);
-
-        Command command = service.sendCommand(request, "us-west-2");
 
         try {
             assertTrue(allStarted.await(10, TimeUnit.SECONDS), (instanceCount - allStarted.getCount())
@@ -650,11 +653,9 @@ class SsmCommandServiceDirectExecutionTest {
         } finally {
             release.countDown();
         }
-        for (int i = 0; i < 250 && "InProgress".equals(
-                service.listCommands(command.getCommandId(), null, "us-west-2").getFirst().getStatus()); i++) {
-            TimeUnit.MILLISECONDS.sleep(20);
+        for (Command command : commands) {
+            assertEquals("Success", waitForCommandStatus(service, command.getCommandId(), "us-west-2"));
         }
-        assertEquals("Success", service.listCommands(command.getCommandId(), null, "us-west-2").getFirst().getStatus());
     }
 
     @Test
@@ -738,7 +739,7 @@ class SsmCommandServiceDirectExecutionTest {
     }
 
     private static String waitForCommandStatus(SsmCommandService service, String commandId, String region) throws InterruptedException {
-        for (int i = 0; i < 50; i++) {
+        for (int i = 0; i < 250; i++) {
             Command command = service.listCommands(commandId, null, region).getFirst();
             if (!"InProgress".equals(command.getStatus())) {
                 return command.getStatus();

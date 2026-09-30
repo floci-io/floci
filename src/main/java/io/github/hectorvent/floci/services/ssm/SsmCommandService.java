@@ -45,6 +45,7 @@ public class SsmCommandService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SsmCommandService.class);
     private static final int MIN_TIMEOUT_SECONDS = 30;
+    private static final int MAX_INSTANCE_IDS = 50;
     static final int MAX_STDOUT_CHARS = 24000;
     static final int MAX_STDERR_CHARS = 8000;
 
@@ -149,6 +150,12 @@ public class SsmCommandService implements Resettable {
         request.path("InstanceIds").forEach(n -> instanceIds.add(n.asText()));
         if (instanceIds.isEmpty()) {
             throw new AwsException("InvalidInstanceId", "At least one InstanceId is required.", 400);
+        }
+        if (instanceIds.size() > MAX_INSTANCE_IDS) {
+            throw new AwsException(
+                    "ValidationException",
+                    "1 validation error detected: Value at 'instanceIds' failed to satisfy constraint: Member must have length less than or equal to " + MAX_INSTANCE_IDS,
+                    400);
         }
 
         Map<String, List<String>> parameters = parseParameters(request.path("Parameters"));
