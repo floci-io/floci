@@ -23,8 +23,9 @@ import java.util.Set;
 /**
  * Provisions {@code AWS::Route53::HostedZone} and {@code AWS::Route53::RecordSet}.
  *
- * <p>A record set is written into its hosted zone through {@code ChangeResourceRecordSets}: the
- * declared record is applied as an UPSERT so create and update both converge, {@code Ref} is the
+ * <p>A record set is written into its hosted zone through {@code ChangeResourceRecordSets}: a record
+ * the resource does not own yet is sent as a CREATE, so a record another owner holds fails the stack,
+ * and an update that re-applies the record it already wrote is sent as an UPSERT. {@code Ref} is the
  * record name, and stack delete removes the record with a matching DELETE change. The schema-required
  * {@code Type} and {@code Name} are validated, and the zone is taken from {@code HostedZoneId} (or
  * resolved from {@code HostedZoneName}), since a record cannot be written without one. No
@@ -101,18 +102,22 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         rrs.setRecords(parseResourceRecords(props, ctx));
         rrs.setAliasTarget(parseAliasTarget(props, ctx));
 
-        // UPSERT: provision serves create and update, and re-applying the same record must not fail
-        // with "already exists" the way a CREATE would on the second UpdateStack.
+        // The record's identity is Name + Type + SetIdentifier within a zone. Re-applying the identity
+        // this resource wrote last time is an UPSERT. Any other identity, on stack create or on an
+        // update that changes it, is a record the stack does not own yet, so it is a CREATE: a record
+        // another owner already holds under that identity fails the stack instead of being taken over.
+        boolean sameIdentity = isPriorIdentity(ctx, priorAttributes, zoneId, name, type, setIdentifier);
         Map<String, Object> change = new HashMap<>();
-        change.put("action", "UPSERT");
+        change.put("action", sameIdentity ? "UPSERT" : "CREATE");
         change.put("rrs", rrs);
         route53Service.changeResourceRecordSets(zoneId, List.of(change),
                 "CloudFormation " + ctx.stackName() + "/" + resource.getLogicalId());
 
-        // The record's identity is Name + Type + SetIdentifier within a zone. When an update changes
-        // any of them, the UPSERT writes a new record and the prior one is orphaned, so remove it,
+        // An update that changes the identity leaves the prior record orphaned, so remove it,
         // otherwise it lingers in the zone and later blocks the zone's own delete.
-        removeSupersededRecord(ctx, priorAttributes, zoneId, name, type, setIdentifier);
+        if (!sameIdentity) {
+            removeSupersededRecord(ctx, priorAttributes);
+        }
 
         resource.setPhysicalId(name);
         resource.getAttributes().put(RECORD_ZONE_ATTR, zoneId);
@@ -125,13 +130,27 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Removes the record a prior provision wrote when this update changed the record's identity
-     * (zone, Name, Type or SetIdentifier). Reads the prior identity from the attributes the last
-     * provision recorded plus the prior physical id (the prior Name). A no-op on create, and when
-     * the identity is unchanged the UPSERT already replaced the record in place.
+     * Whether the last provision of this resource wrote the same record identity: zone, Name, Type
+     * and SetIdentifier. Names are compared fully qualified, so a change that only adds or drops the
+     * trailing dot is the same record. Reads the prior identity from the attributes the last
+     * provision recorded plus the prior physical id (the prior Name). False on create.
      */
-    private void removeSupersededRecord(ProvisionContext ctx, Map<String, String> priorAttributes,
-                                        String zoneId, String name, String type, String setIdentifier) {
+    private static boolean isPriorIdentity(ProvisionContext ctx, Map<String, String> priorAttributes,
+                                           String zoneId, String name, String type, String setIdentifier) {
+        return ctx.isUpdate()
+                && zoneId.equals(priorAttributes.get(RECORD_ZONE_ATTR))
+                && Route53Service.normalizeName(name).equals(Route53Service.normalizeName(ctx.priorPhysicalId()))
+                && type.equals(priorAttributes.get(RECORD_TYPE_ATTR))
+                && Objects.equals(priorAttributes.get(RECORD_SET_ID_ATTR), setIdentifier);
+    }
+
+    /**
+     * Removes the record a prior provision wrote, once this update has changed the record's
+     * identity. Reads the prior identity from the attributes the last provision recorded plus the
+     * prior physical id (the prior Name). A no-op on create, and when no prior zone or type was
+     * recorded.
+     */
+    private void removeSupersededRecord(ProvisionContext ctx, Map<String, String> priorAttributes) {
         if (!ctx.isUpdate()) {
             return;
         }
@@ -141,12 +160,6 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         String priorSetId = priorAttributes.get(RECORD_SET_ID_ATTR);
         if (priorZoneId == null || priorZoneId.isBlank() || priorName == null || priorName.isBlank()
                 || priorType == null || priorType.isBlank()) {
-            return;
-        }
-        boolean sameIdentity = priorZoneId.equals(zoneId)
-                && Route53Service.normalizeName(priorName).equals(Route53Service.normalizeName(name))
-                && priorType.equals(type) && Objects.equals(priorSetId, setIdentifier);
-        if (sameIdentity) {
             return;
         }
         removeRecord(priorZoneId, priorName, priorType, priorSetId, "CloudFormation supersede");

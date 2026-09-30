@@ -377,7 +377,7 @@ class Route53CfnProvisionerTest {
     }
 
     @Test
-    void recordSetIsUpsertedIntoItsZoneAndRefIsTheRecordName() {
+    void recordSetIsCreatedInItsZoneAndRefIsTheRecordName() {
         Route53Service service = mock(Route53Service.class);
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode()
@@ -404,7 +404,9 @@ class Route53CfnProvisionerTest {
         ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
         verify(service).changeResourceRecordSets(eq("Z123456789"), captor.capture(), any());
         Map<String, Object> change = captor.getValue().get(0);
-        assertEquals("UPSERT", change.get("action"));
+        // A CREATE, not an UPSERT: the stack does not own the record yet, so a record another owner
+        // already holds under this name must fail the stack rather than be overwritten.
+        assertEquals("CREATE", change.get("action"));
         ResourceRecordSet rrs = (ResourceRecordSet) change.get("rrs");
         // Route 53 stores and lists every record name fully qualified, whatever the template wrote.
         assertEquals("www.example.com.", rrs.getName());
@@ -523,14 +525,14 @@ class Route53CfnProvisionerTest {
         new Route53CfnProvisioner(service).provision(resource, props, context);
 
         assertEquals("login.example.com", resource.getPhysicalId());
-        // Two changes: an UPSERT for the new name and a DELETE removing the record left under the old.
+        // Two changes: a CREATE for the new name, which the stack does not own yet, and a DELETE
+        // removing the record left under the old.
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
         verify(service, times(2)).changeResourceRecordSets(eq("Z1"), captor.capture(), any());
         List<String> actions = captor.getAllValues().stream()
                 .map(changes -> (String) changes.get(0).get("action")).toList();
-        assertTrue(actions.contains("UPSERT"), actions.toString());
-        assertTrue(actions.contains("DELETE"), actions.toString());
+        assertEquals(List.of("CREATE", "DELETE"), actions);
     }
 
     @Test

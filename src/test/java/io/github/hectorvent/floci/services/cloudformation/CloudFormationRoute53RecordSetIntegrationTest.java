@@ -149,6 +149,103 @@ class CloudFormationRoute53RecordSetIntegrationTest {
         .then().statusCode(404);
     }
 
+    @Test
+    void createStackFailsRatherThanTakeOverARecordTheRoute53ApiCreated() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "r53-recordset-taken-" + suffix;
+        String zoneName = suffix + ".cfn-taken-it.example.com";
+        String recordName = "www." + zoneName;
+        String zoneId = createHostedZone(zoneName, "cfn-taken-" + suffix);
+        changeRecordSet(zoneId, "CREATE", recordName + ".", "192.0.2.10");
+        String template = """
+                {
+                  "Resources": {
+                    "Www": {
+                      "Type": "AWS::Route53::RecordSet",
+                      "Properties": {
+                        "HostedZoneId": "%s",
+                        "Name": "%s",
+                        "Type": "A",
+                        "TTL": "300",
+                        "ResourceRecords": ["192.0.2.20"]
+                      }
+                    }
+                  }
+                }
+                """.formatted(zoneId, recordName);
+
+        try {
+            createStack(stackName, template);
+            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
+            // AWS sends CREATE for a record the stack does not own yet, so the name being taken
+            // fails the create and the rollback leaves the other owner's record alone.
+            assertEquals("ROLLBACK_COMPLETE", state.status(), state.reason());
+            assertTrue(state.reason().contains("already exists"), state.reason());
+            String afterCreate = listResourceRecordSets(zoneId);
+            assertTrue(afterCreate.contains("192.0.2.10"), "API record overwritten: " + afterCreate);
+            assertFalse(afterCreate.contains("192.0.2.20"), "stack value written: " + afterCreate);
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+
+        String afterDelete = listResourceRecordSets(zoneId);
+        assertTrue(afterDelete.contains("<Name>" + recordName + ".</Name>"), "API record deleted: " + afterDelete);
+        assertTrue(afterDelete.contains("192.0.2.10"), "API record value lost: " + afterDelete);
+
+        // A DELETE must name the record's current values, so it succeeding proves them unchanged.
+        changeRecordSet(zoneId, "DELETE", recordName + ".", "192.0.2.10");
+        given()
+            .header("Authorization", ROUTE53_AUTH)
+        .when().delete("/2013-04-01/hostedzone/" + zoneId)
+        .then().statusCode(200);
+    }
+
+    private String createHostedZone(String zoneName, String callerReference) {
+        String location = given()
+            .contentType("application/xml")
+            .header("Authorization", ROUTE53_AUTH)
+            .body("""
+                    <?xml version="1.0" encoding="UTF-8"?>
+                    <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                      <Name>%s</Name>
+                      <CallerReference>%s</CallerReference>
+                    </CreateHostedZoneRequest>
+                    """.formatted(zoneName, callerReference))
+        .when().post("/2013-04-01/hostedzone")
+        .then().statusCode(201)
+            .extract().header("Location");
+        return location.substring(location.lastIndexOf('/') + 1);
+    }
+
+    private void changeRecordSet(String zoneId, String action, String name, String address) {
+        given()
+            .contentType("application/xml")
+            .header("Authorization", ROUTE53_AUTH)
+            .body("""
+                    <?xml version="1.0" encoding="UTF-8"?>
+                    <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                      <ChangeBatch>
+                        <Changes>
+                          <Change>
+                            <Action>%s</Action>
+                            <ResourceRecordSet>
+                              <Name>%s</Name>
+                              <Type>A</Type>
+                              <TTL>300</TTL>
+                              <ResourceRecords>
+                                <ResourceRecord><Value>%s</Value></ResourceRecord>
+                              </ResourceRecords>
+                            </ResourceRecordSet>
+                          </Change>
+                        </Changes>
+                      </ChangeBatch>
+                    </ChangeResourceRecordSetsRequest>
+                    """.formatted(action, name, address))
+        .when().post("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+        .then().statusCode(200);
+    }
+
     private void stackRequest(String action, String stackName, String template, String recordName, String address) {
         given()
             .contentType("application/x-www-form-urlencoded")
