@@ -11,7 +11,9 @@ import java.util.concurrent.CountDownLatch;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HistoryChainTest {
 
@@ -93,6 +95,65 @@ class HistoryChainTest {
         branch.leaveStateAside("TaskStateAborted", null);
 
         assertEquals(List.of("TaskStateEntered"), typesOf(history));
+    }
+
+    @Test
+    void anIterationThatEndedBeforeTheCutIsReportedEndedAndNotCut() {
+        List<HistoryEvent> history = new ArrayList<>();
+        HistoryChain iteration = HistoryChain.of(history).fork();
+        iteration.publishStateEntered("Task", "TaskStateEntered", null);
+        iteration.publishStateExited("TaskStateExited", null);
+        iteration.publishIterationEnd("MapIterationSucceeded", null);
+
+        HistoryChain.IterationCut cut = iteration.abandonIteration();
+
+        assertTrue(cut.ended());
+        assertNull(cut.stateType());
+        assertEquals(List.of("TaskStateEntered", "TaskStateExited", "MapIterationSucceeded"), typesOf(history));
+    }
+
+    @Test
+    void anIterationCutBeforeItEndsIsReportedInItsStateAndRecordsNoEnd() {
+        List<HistoryEvent> history = new ArrayList<>();
+        HistoryChain iteration = HistoryChain.of(history).fork();
+        iteration.publishStateEntered("Task", "TaskStateEntered", null);
+
+        HistoryChain.IterationCut cut = iteration.abandonIteration();
+        iteration.publishStateExited("TaskStateExited", null);
+        iteration.publishIterationEnd("MapIterationSucceeded", null);
+
+        assertFalse(cut.ended());
+        assertEquals("Task", cut.stateType());
+        assertEquals(List.of("TaskStateEntered"), typesOf(history));
+    }
+
+    @Test
+    void aCutRacingAnIterationEndNeverReportsItBothEndedAndCut() throws Exception {
+        for (int round = 0; round < 2_000; round++) {
+            List<HistoryEvent> history = Collections.synchronizedList(new ArrayList<>());
+            HistoryChain iteration = HistoryChain.of(history).fork();
+            CountDownLatch start = new CountDownLatch(1);
+            Thread worker = new Thread(() -> {
+                try {
+                    start.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                iteration.publishStateEntered("Task", "TaskStateEntered", null);
+                iteration.publishStateExited("TaskStateExited", null);
+                iteration.publishIterationEnd("MapIterationSucceeded", null);
+            });
+            worker.start();
+            start.countDown();
+            HistoryChain.IterationCut cut = iteration.abandonIteration();
+            worker.join();
+
+            List<String> types = typesOf(history);
+            assertEquals(types.contains("MapIterationSucceeded"), cut.ended(), "round " + round + ": " + cut + " with " + types);
+            boolean cutMidState = types.contains("TaskStateEntered") && !types.contains("TaskStateExited");
+            assertEquals(cutMidState, "Task".equals(cut.stateType()), "round " + round + ": " + cut + " with " + types);
+        }
     }
 
     @Test

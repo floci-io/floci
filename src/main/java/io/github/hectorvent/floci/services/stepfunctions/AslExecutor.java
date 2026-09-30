@@ -2903,7 +2903,7 @@ public class AslExecutor {
                                     + failedSoFar + " of " + itemCount + " items failed."), recordFailed);
                 }
                 if (recordFailed) {
-                    iterationChain.publishAside("MapIterationFailed", Map.of("name", name, "index", i));
+                    iterationChain.publishIterationEndAside("MapIterationFailed", Map.of("name", name, "index", i));
                 }
                 if (hasResultWriter) {
                     failedByIndex[i] = new FailedChild(childInputsByIndex[i],
@@ -2914,7 +2914,7 @@ public class AslExecutor {
             succeededItems.addAndGet(itemsInChild);
             succeededExecutions.incrementAndGet();
             if (!distributed) {
-                iterationChain.publish("MapIterationSucceeded", Map.of("name", name, "index", i));
+                iterationChain.publishIterationEnd("MapIterationSucceeded", Map.of("name", name, "index", i));
             }
             if (hasResultWriter) {
                 childTimingsByIndex[i] = new long[]{startMs, System.currentTimeMillis()};
@@ -2925,14 +2925,16 @@ public class AslExecutor {
         if (childCount > 0) {
             List<JsonNode> itemOutputs;
             // The iterations a failure cuts, each read and cut in one step before it is cancelled,
-            // as a Parallel does with its branches (cutAfterFailure). Filled on this thread.
+            // as a Parallel does with its branches (cutAfterFailure). Filled on this thread. An
+            // iteration that has recorded its end is not cut: the scheduler names every iteration it
+            // has not yet taken off its queue, ended or not.
             List<CutIteration> cutIterations = new ArrayList<>();
             try {
                 itemOutputs = MapIterationScheduler.execute(
                         childCount, Math.max(1, effectiveConcurrency),
                         i -> () -> callUnderExecutionAccount(sm, makeTask.apply(i)),
                         executionDeadlineNanos,
-                        i -> cutIterations.add(new CutIteration(i, iterationChains.get(i).abandonInState())));
+                        i -> cutIteration(iterationChains.get(i), i, cutIterations));
             } catch (java.util.concurrent.TimeoutException e) {
                 // The only deadline the scheduler is given is the state machine's budget, so its
                 // expiry ends the execution rather than failing the Map state.
@@ -5871,6 +5873,13 @@ public class AslExecutor {
 
     /** An iteration a failure cut, and the state it was in, or null when it was between states. */
     private record CutIteration(int index, String stateType) {}
+
+    private static void cutIteration(HistoryChain iteration, int index, List<CutIteration> cutIterations) {
+        HistoryChain.IterationCut cut = iteration.abandonIteration();
+        if (!cut.ended()) {
+            cutIterations.add(new CutIteration(index, cut.stateType()));
+        }
+    }
 
     /**
      * Records the iterations a failure cut, the way AWS was measured recording them: for each, a

@@ -21,6 +21,7 @@ final class HistoryChain {
     private final HistoryChain parent;
     private volatile boolean abandoned;
     private String activeStateType;
+    private boolean iterationEnded;
     private long lastEventId;
     private long tailEventId;
 
@@ -118,6 +119,37 @@ final class HistoryChain {
     synchronized String abandonInState() {
         abandoned = true;
         return activeStateType;
+    }
+
+    /**
+     * Publishes the event that ends a Map iteration and marks the iteration ended, under the same
+     * lock a cut takes, so an iteration is reported either ended or cut, never both.
+     */
+    synchronized void publishIterationEnd(String type, Map<String, Object> details) {
+        iterationEnded = true;
+        publish(type, details);
+    }
+
+    /** {@link #publishIterationEnd} for an event recorded aside, as a tolerated MapIterationFailed is. */
+    synchronized void publishIterationEndAside(String type, Map<String, Object> details) {
+        iterationEnded = true;
+        publishAside(type, details);
+    }
+
+    /**
+     * What a cut found an iteration doing: already ended, or else inside {@code stateType}, or
+     * between states when that is null.
+     */
+    record IterationCut(boolean ended, String stateType) {}
+
+    /**
+     * Cuts the chain like {@link #abandonInState} and also reports whether the iteration had already
+     * recorded its end. An iteration cut first records no end event afterwards; one that ended first
+     * is not reported as cut.
+     */
+    synchronized IterationCut abandonIteration() {
+        abandoned = true;
+        return new IterationCut(iterationEnded, activeStateType);
     }
 
     private boolean isAbandoned() {
