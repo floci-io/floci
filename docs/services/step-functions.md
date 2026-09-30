@@ -110,12 +110,13 @@ When the request sets `includeExecutionData` to false, the details objects stay 
 
 A few gaps remain. `TaskStarted`, `LambdaFunctionStarted`, and `ActivityStarted` fire at
 scheduling time, not when a worker actually picks up the task. `TaskSubmitted`, which real
-AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet. When a
-branch fails, AWS records `*StateAborted` and `MapIterationAborted` events for the states its
-sibling branches were in; Floci cancels the siblings without recording them. A Distributed
-`Map` that declares no tolerance reports a failed item's own error rather than AWS's
-`States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that error. A `Map` that
-declares one reports `States.ExceedToleratedFailureThreshold`, as AWS does.
+AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet. When a `Map`
+iteration fails, AWS records `MapIterationAborted` and `*StateAborted` events for the iterations
+it cuts; Floci cancels them without recording them, where a `Parallel` records the state of each
+branch it cuts, as above. A Distributed `Map` that declares no tolerance reports a failed item's
+own error rather than AWS's `States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed`
+with that error. A `Map` that declares one reports `States.ExceedToleratedFailureThreshold`, as
+AWS does.
 
 ## Map concurrency
 
@@ -126,7 +127,8 @@ omitted value, uses the AWS service ceiling: 40 concurrent iterations for Inline
 
 Results remain in input order even when iterations finish out of order. If an iteration fails,
 the Map state fails promptly, cancels its active sibling iterations, and does not start queued
-iterations.
+iterations. A cancelled iteration whose `Task` was waiting on a `.sync` job stops that job, the
+way a cut `Parallel` branch does.
 
 ## Distributed Map ItemReader
 
@@ -266,8 +268,8 @@ When the `Task`'s own clock fires, the job it was waiting on is stopped the way 
 ECS task reads `stopCode: UserInitiated`, the child execution reads `ABORTED` with no error, and
 both carry the cause `The Task state in AWS Step Functions execution [<arn>] which was managing
 this resource was aborted`. A `StopExecution` that lands while the state waits ends the wait and
-stops the job with the same cause, and so does the execution's budget, and a failure in another
-`Parallel` branch that cuts the branch the `Task` is in.
+stops the job with the same cause, and so does the execution's budget, and so does a failure in
+another branch of the `Parallel`, or in another iteration of the `Map`, that the `Task` is in.
 
 One deviation. AWS starts the `TimeoutSeconds` clock when a worker picks the task up, the instant
 it emits `ActivityStarted`. Floci emits `ActivityStarted` at schedule time, so both clocks start

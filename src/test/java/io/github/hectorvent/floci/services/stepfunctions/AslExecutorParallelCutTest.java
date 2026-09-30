@@ -50,7 +50,9 @@ import static org.mockito.Mockito.when;
  * cause below, and records one {@code TaskStateAborted} (or {@code WaitStateAborted}) per cut
  * branch, each chained to the failing branch's last event and recorded before
  * {@code ParallelStateFailed}, which is chained to that same event. When the execution's budget
- * cuts the Parallel instead, the child is aborted as well and no such event is recorded.
+ * cuts the Parallel instead, the child is aborted as well and no such event is recorded. An
+ * iteration of an inline Map that fails cuts the other iterations the same way, and the job one of
+ * them waits on is aborted too.
  *
  * <p>The failing branch pauses in a Wait that the sleeper holds until every other branch is
  * parked on its own wait, so the cut always lands while the others are mid-state.
@@ -81,6 +83,16 @@ class AslExecutorParallelCutTest {
             {"StartAt":"Done","States":{"Done":{"Type":"Pass","End":true}}}""";
     private static final String LONG_WAIT_BRANCH = """
             {"StartAt":"Long","States":{"Long":{"Type":"Wait","Seconds":20,"End":true}}}""";
+    /** An inline Map whose "fail" item runs the failing branch and whose other items run the nested one. */
+    private static final String MAP_WITH_A_FAILING_ITERATION = """
+            {"Type":"Map","End":true,"ItemProcessor":{"ProcessorConfig":{"Mode":"INLINE"},
+              "StartAt":"Route","States":{
+              "Route":{"Type":"Choice","Default":"Nest",
+                "Choices":[{"Variable":"$.kind","StringEquals":"fail","Next":"Pause"}]},
+              "Pause":{"Type":"Wait","Seconds":1,"Next":"Boom"},
+              "Boom":{"Type":"Fail","Error":"Boom","Cause":"sibling failed"},
+              "Nest":{"Type":"Task","Resource":"arn:aws:states:::states:startExecution.sync:2",
+                "Parameters":{"StateMachineArn":"%s"},"End":true}}}}""".formatted(CHILD_SM_ARN);
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private StepFunctionsService sfnService;
@@ -149,6 +161,18 @@ class AslExecutorParallelCutTest {
         assertEquals("FAILED", execution.getStatus());
         assertTrue(types().contains("PassStateExited"), types().toString());
         assertTrue(types().stream().noneMatch(type -> type.endsWith("StateAborted")), types().toString());
+    }
+
+    @Test
+    void aMapIterationFailureAbortsTheChildAnotherIterationWaitsOn() {
+        Execution execution = run(MAP_WITH_A_FAILING_ITERATION, sleeper(1), 0,
+                "[{\"kind\":\"nest\"},{\"kind\":\"fail\"}]");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Boom", execution.getError());
+        assertEquals("sibling failed", execution.getCause());
+        assertEquals(1, eventsOfType("MapIterationFailed").size(), types().toString());
+        verify(sfnService, timeout(5_000)).stopExecution(eq(CHILD_ARN), eq(ABORT_CAUSE), isNull());
     }
 
     @Test
@@ -228,10 +252,15 @@ class AslExecutorParallelCutTest {
     }
 
     private Execution run(String parallelState, AslExecutor.Sleeper sleeper, int executionTimeoutSeconds) {
+        return run(parallelState, sleeper, executionTimeoutSeconds, "{}");
+    }
+
+    private Execution run(String state, AslExecutor.Sleeper sleeper, int executionTimeoutSeconds,
+                          String input) {
         String budget = executionTimeoutSeconds > 0
                 ? "\"TimeoutSeconds\":%d,".formatted(executionTimeoutSeconds)
                 : "";
-        String definition = "{" + budget + "\"StartAt\":\"P\",\"States\":{\"P\":" + parallelState + "}}";
+        String definition = "{" + budget + "\"StartAt\":\"P\",\"States\":{\"P\":" + state + "}}";
 
         StateMachine stateMachine = new StateMachine();
         stateMachine.setName("parent");
@@ -243,7 +272,7 @@ class AslExecutorParallelCutTest {
         execution.setName("parent-run");
         execution.setExecutionArn(PARENT_ARN);
         execution.setStateMachineArn(stateMachine.getStateMachineArn());
-        execution.setInput("{}");
+        execution.setInput(input);
 
         history = new ArrayList<>();
         newExecutor(sleeper).executeSync(stateMachine, execution, history, (updated, events) -> { });
