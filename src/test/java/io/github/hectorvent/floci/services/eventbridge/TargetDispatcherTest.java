@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -42,6 +43,8 @@ class TargetDispatcherTest {
     private LambdaService lambdaService;
     private SqsService sqsService;
     private AtomicReference<Instant> clockNow;
+    private EventBridgeInvoker invoker;
+    private Clock clock;
     private TargetDispatcher dispatcher;
 
     @BeforeEach
@@ -50,10 +53,10 @@ class TargetDispatcherTest {
         sqsService = mock(SqsService.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.baseUrl()).thenReturn(BASE_URL);
-        EventBridgeInvoker invoker = new EventBridgeInvoker(
+        invoker = new EventBridgeInvoker(
                 lambdaService, sqsService, mock(SnsService.class), new ObjectMapper(), config);
         clockNow = new AtomicReference<>(T0);
-        Clock clock = mock(Clock.class);
+        clock = mock(Clock.class);
         when(clock.instant()).thenAnswer(invocation -> clockNow.get());
         dispatcher = new TargetDispatcher(invoker, sqsService, BASE_URL, clock, null);
     }
@@ -99,6 +102,21 @@ class TargetDispatcherTest {
             executor.shutdownNow();
         }
         verifyNoDeadLetter();
+    }
+
+    @Test
+    void slowFailedAttemptSchedulesItsRetryFromWhenTheAttemptStarted() {
+        ScheduledExecutorService executor = mock(ScheduledExecutorService.class);
+        TargetDispatcher scheduled = new TargetDispatcher(invoker, sqsService, BASE_URL, clock, executor);
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION)).thenAnswer(invocation -> {
+            clockNow.set(T0.plusSeconds(5));
+            throw unavailable();
+        });
+        Target target = sqsTarget(null, DLQ_ARN);
+
+        scheduled.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
+
+        verify(executor).schedule(any(Runnable.class), eq(-4000L), eq(TimeUnit.MILLISECONDS));
     }
 
     @Test

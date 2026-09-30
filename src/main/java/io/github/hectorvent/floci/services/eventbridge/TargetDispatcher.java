@@ -167,7 +167,7 @@ public class TargetDispatcher implements Resettable {
                 pending.add(failed);
                 if (executor != null) {
                     Instant retryAt = failed.nextAttemptAt();
-                    executor.schedule(() -> tick(retryAt), Duration.between(now, retryAt).toMillis(),
+                    executor.schedule(() -> tick(retryAt), Duration.between(clock.instant(), retryAt).toMillis(),
                             TimeUnit.MILLISECONDS);
                 }
             }
