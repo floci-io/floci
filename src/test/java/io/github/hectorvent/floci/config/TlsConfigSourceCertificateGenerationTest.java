@@ -220,7 +220,7 @@ class TlsConfigSourceCertificateGenerationTest {
      * Test that the AWS endpoint wildcards are included when spoof-aws-endpoints is enabled
      */
     @Test
-    void testCertificateIncludesAwsWildcardsWhenSpoofEnabled() throws Exception {
+    void certificateIncludesAwsWildcardsWhenSpoofEnabled() throws Exception {
         // Arrange
         System.setProperty("floci.dns.spoof-aws-endpoints", "true");
 
@@ -247,7 +247,7 @@ class TlsConfigSourceCertificateGenerationTest {
      * Floci, so without dedicated SANs the request dies at the handshake.
      */
     @Test
-    void testCertificateCoversVirtualHostedS3WhenSpoofEnabled() throws Exception {
+    void certificateCoversVirtualHostedS3WhenSpoofEnabled() throws Exception {
         System.setProperty("floci.dns.spoof-aws-endpoints", "true");
 
         new TlsConfigSource();
@@ -268,7 +268,7 @@ class TlsConfigSourceCertificateGenerationTest {
      * just the configured default.
      */
     @Test
-    void testAwsRegionalWildcardsCoverEveryKnownRegion() throws Exception {
+    void awsRegionalWildcardsCoverEveryKnownRegion() throws Exception {
         // Catches: SANs limited to the configured default region, failing the handshake elsewhere
         System.setProperty("floci.dns.spoof-aws-endpoints", "true");
         System.setProperty("floci.default-region", "eu-west-1");
@@ -291,7 +291,7 @@ class TlsConfigSourceCertificateGenerationTest {
      * spoofing still routes them to Floci, so each needs a dedicated SAN.
      */
     @Test
-    void testCertificateCoversMultiLabelRegionalEndpointsWhenSpoofEnabled() throws Exception {
+    void certificateCoversMultiLabelRegionalEndpointsWhenSpoofEnabled() throws Exception {
         // Catches: a missing SAN for execute-api, dkr.ecr, s3-control or s3.dualstack hosts
         System.setProperty("floci.dns.spoof-aws-endpoints", "true");
 
@@ -309,7 +309,7 @@ class TlsConfigSourceCertificateGenerationTest {
     }
 
     @Test
-    void testCertificateDoesNotClaimLambdaUrlUnderAmazonaws() throws Exception {
+    void certificateDoesNotClaimLambdaUrlUnderAmazonaws() throws Exception {
         // Catches: a lambda-url SAN under the amazonaws suffix, where Lambda function URLs do not live
         System.setProperty("floci.dns.spoof-aws-endpoints", "true");
 
@@ -321,7 +321,7 @@ class TlsConfigSourceCertificateGenerationTest {
     }
 
     @Test
-    void testCertificateUsesEachRegionsOwnPartitionSuffix() throws Exception {
+    void certificateUsesEachRegionsOwnPartitionSuffix() throws Exception {
         // Catches: cn-* regions named under amazonaws.com and non-commercial partition suffixes uncovered
         System.setProperty("floci.dns.spoof-aws-endpoints", "true");
 
@@ -346,7 +346,7 @@ class TlsConfigSourceCertificateGenerationTest {
      * transfer-acceleration endpoints. The set follows S3VirtualHostFilter#isS3QualifierTail.
      */
     @Test
-    void testCertificateCoversEveryS3EndpointFormWhenSpoofEnabled() throws Exception {
+    void certificateCoversEveryS3EndpointFormWhenSpoofEnabled() throws Exception {
         // Catches: an S3 endpoint form that is routed to Floci but has no matching SAN
         System.setProperty("floci.dns.spoof-aws-endpoints", "true");
 
@@ -373,7 +373,7 @@ class TlsConfigSourceCertificateGenerationTest {
      * Test that no AWS wildcards are included when spoof-aws-endpoints is disabled
      */
     @Test
-    void testCertificateExcludesAwsWildcardsWhenSpoofDisabled() throws Exception {
+    void certificateExcludesAwsWildcardsWhenSpoofDisabled() throws Exception {
         // Act
         new TlsConfigSource();
 
