@@ -276,6 +276,22 @@ class AslExecutorParallelCutTest {
                 .map(event -> String.valueOf(event.getDetails().get("name"))).toList(), types().toString());
     }
 
+    /**
+     * A States.Runtime failure records no MapIterationFailed, and the iterations it cuts are then
+     * not recorded either, even when what ends the Map is the tolerance it exceeded.
+     */
+    @Test
+    void aRuntimeFailureThatExceedsTheToleranceRecordsNeitherTheIterationNorTheOnesItCut() {
+        String map = MAP_WITH_A_FAILING_ITERATION.replace("\"Type\":\"Map\",", "\"Type\":\"Map\",\"ToleratedFailureCount\":0,")
+                .replace("\"Default\":\"Nest\",", "");
+        Execution execution = run(map, sleeper(1), 0, "[{\"kind\":\"wait\"},{\"kind\":\"nomatch\"}]");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.ExceedToleratedFailureThreshold", execution.getError());
+        assertTrue(types().stream().noneMatch(type -> type.contains("Aborted") || type.equals("MapIterationFailed")),
+                types().toString());
+    }
+
     @Test
     void aMapIterationThatFinishedBeforeTheFailureRecordsNoAbortedEvent() {
         AslExecutor.Sleeper sleeper = nanos -> TimeUnit.MILLISECONDS.sleep(200);

@@ -2943,10 +2943,11 @@ public class AslExecutor {
                 // A Distributed Map's chain stays at MapRunStarted, as on AWS.
                 if (!distributed) {
                     chain.continueFrom(iterationChains.get(e.index).lastEventId());
-                    if (!e.failure.isRuntimeError()) {
-                        publishCutIterations(chain, name, cutIterations);
-                    }
+                    // One condition for both, so the cut iterations are never recorded without the
+                    // MapIterationFailed of the iteration that cut them: a States.Runtime failure
+                    // records neither, even when it is a declared tolerance it exceeded.
                     if (e.recordFailed) {
+                        publishCutIterations(chain, name, cutIterations);
                         chain.publishBeside("MapIterationFailed", Map.of("name", name, "index", e.index));
                     }
                 } else {
