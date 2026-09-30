@@ -17,7 +17,6 @@ import org.mockito.ArgumentCaptor;
 
 import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -42,6 +41,7 @@ class TargetDispatcherTest {
 
     private LambdaService lambdaService;
     private SqsService sqsService;
+    private AtomicReference<Instant> clockNow;
     private TargetDispatcher dispatcher;
 
     @BeforeEach
@@ -52,7 +52,10 @@ class TargetDispatcherTest {
         when(config.baseUrl()).thenReturn(BASE_URL);
         EventBridgeInvoker invoker = new EventBridgeInvoker(
                 lambdaService, sqsService, mock(SnsService.class), new ObjectMapper(), config);
-        dispatcher = new TargetDispatcher(invoker, sqsService, BASE_URL, Clock.fixed(T0, ZoneOffset.UTC), null);
+        clockNow = new AtomicReference<>(T0);
+        Clock clock = mock(Clock.class);
+        when(clock.instant()).thenAnswer(invocation -> clockNow.get());
+        dispatcher = new TargetDispatcher(invoker, sqsService, BASE_URL, clock, null);
     }
 
     @Test
@@ -199,6 +202,68 @@ class TargetDispatcherTest {
 
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         verify(sqsService).sendMessage(BASE_URL + "/000000000000/orders-v2", EVENT, 0, null, null, REGION);
+    }
+
+    @Test
+    void loweredRetryLimitDeadLettersAQueuedRetryWithoutAnotherAttempt() {
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION)).thenThrow(unavailable());
+        Target original = sqsTarget(new Target.RetryPolicy(2, 3600), DLQ_ARN);
+        AtomicReference<List<Target>> current = new AtomicReference<>(List.of(original));
+
+        dispatcher.dispatch(RULE_ARN, original, EVENT, REGION, current::get);
+        current.set(List.of(sqsTarget(new Target.RetryPolicy(0, 3600), DLQ_ARN)));
+        dispatcher.tick(T0.plusSeconds(1));
+
+        verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        Map<String, MessageAttributeValue> attributes = deadLetterAttributes();
+        assertAttribute(attributes, "EXHAUSTED_RETRY_CONDITION", "MaximumRetryAttempts");
+        assertAttribute(attributes, "RETRY_ATTEMPTS", "0");
+    }
+
+    @Test
+    void slowRetryDoesNotLetALaterDueRetryOutliveItsEventAge() {
+        String slowUrl = BASE_URL + "/000000000000/slow";
+        Target slow = new Target("slow-target", "arn:aws:sqs:us-east-1:000000000000:slow", null, null);
+        Target aged = sqsTarget(new Target.RetryPolicy(185, 60), DLQ_ARN);
+        when(sqsService.sendMessage(slowUrl, EVENT, 0, null, null, REGION))
+                .thenThrow(unavailable())
+                .thenAnswer(invocation -> {
+                    clockNow.set(T0.plusSeconds(100));
+                    return null;
+                });
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION)).thenThrow(unavailable());
+
+        dispatcher.dispatch(RULE_ARN, slow, EVENT, REGION, () -> List.of(slow, aged));
+        clockNow.set(T0.plusMillis(500));
+        dispatcher.dispatch(RULE_ARN, aged, EVENT, REGION, () -> List.of(slow, aged));
+        dispatcher.tick(T0.plusSeconds(2));
+
+        verify(sqsService, times(2)).sendMessage(slowUrl, EVENT, 0, null, null, REGION);
+        verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        assertAttribute(deadLetterAttributes(), "EXHAUSTED_RETRY_CONDITION", "MaximumEventAgeInSeconds");
+    }
+
+    @Test
+    void clearDuringATickStopsTheRemainingRetries() {
+        String firstUrl = BASE_URL + "/000000000000/first";
+        Target first = new Target("first-target", "arn:aws:sqs:us-east-1:000000000000:first", null, null);
+        Target second = sqsTarget(null, DLQ_ARN);
+        when(sqsService.sendMessage(firstUrl, EVENT, 0, null, null, REGION))
+                .thenThrow(unavailable())
+                .thenAnswer(invocation -> {
+                    dispatcher.clear();
+                    return null;
+                });
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION)).thenThrow(unavailable());
+
+        dispatcher.dispatch(RULE_ARN, first, EVENT, REGION, () -> List.of(first, second));
+        clockNow.set(T0.plusMillis(500));
+        dispatcher.dispatch(RULE_ARN, second, EVENT, REGION, () -> List.of(first, second));
+        dispatcher.tick(T0.plusSeconds(2));
+
+        verify(sqsService, times(2)).sendMessage(firstUrl, EVENT, 0, null, null, REGION);
+        verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        verifyNoDeadLetter();
     }
 
     @Test

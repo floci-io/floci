@@ -16,13 +16,13 @@ import org.jboss.logging.Logger;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -52,7 +52,8 @@ public class TargetDispatcher implements Resettable {
     private final String baseUrl;
     private final Clock clock;
     private final ScheduledExecutorService executor;
-    private final ConcurrentLinkedQueue<Delivery> pending = new ConcurrentLinkedQueue<>();
+    private final PriorityBlockingQueue<Delivery> pending =
+            new PriorityBlockingQueue<>(11, Comparator.comparing(Delivery::nextAttemptAt));
 
     @Inject
     public TargetDispatcher(EventBridgeInvoker invoker, SqsService sqsService, EmulatorConfig config, Clock clock) {
@@ -96,30 +97,21 @@ public class TargetDispatcher implements Resettable {
         }
     }
 
-    void tick(Instant now) {
-        List<Delivery> due = new ArrayList<>();
-        for (Delivery delivery : pending) {
-            if (!now.isBefore(delivery.nextAttemptAt()) && pending.remove(delivery)) {
-                due.add(delivery);
+    // The executor may fire marginally before the wall clock reaches dueAt, so the due time is a floor.
+    void tick(Instant dueAt) {
+        while (true) {
+            Delivery delivery = pending.peek();
+            Instant clockNow = clock.instant();
+            Instant now = clockNow.isBefore(dueAt) ? dueAt : clockNow;
+            if (delivery == null || now.isBefore(delivery.nextAttemptAt()) || !pending.remove(delivery)) {
+                return;
             }
-        }
-        for (Delivery delivery : due) {
             try {
                 RequestScopes.runAs(AwsArnUtils.parse(delivery.ruleArn()).accountId(), () -> retry(delivery, now));
             } catch (RuntimeException e) {
                 LOG.warnv("EventBridge retry for rule {0} target {1} failed: {2}",
                         delivery.ruleArn(), delivery.targetId(), e.getMessage());
             }
-        }
-    }
-
-    // The executor may fire marginally before the wall clock reaches dueAt, so the due time is a floor.
-    private void tickSafely(Instant dueAt) {
-        try {
-            Instant now = clock.instant();
-            tick(now.isBefore(dueAt) ? dueAt : now);
-        } catch (RuntimeException e) {
-            LOG.warnv("EventBridge target retry tick failed: {0}", e.getMessage());
         }
     }
 
@@ -135,6 +127,10 @@ public class TargetDispatcher implements Resettable {
         }
         if (!now.isBefore(expiresAt(delivery, target))) {
             deadLetter(delivery, target, EXHAUSTED_BY_AGE);
+            return;
+        }
+        if (delivery.retryAttempts() >= maximumRetryAttempts(target)) {
+            deadLetter(delivery, target, EXHAUSTED_BY_ATTEMPTS);
             return;
         }
         attempt(delivery.nextRetry(), target, now);
@@ -162,7 +158,7 @@ public class TargetDispatcher implements Resettable {
                 pending.add(failed);
                 if (executor != null) {
                     long delayMillis = Duration.between(now, failed.nextAttemptAt()).toMillis();
-                    executor.schedule(() -> tickSafely(failed.nextAttemptAt()), delayMillis, TimeUnit.MILLISECONDS);
+                    executor.schedule(() -> tick(failed.nextAttemptAt()), delayMillis, TimeUnit.MILLISECONDS);
                 }
             }
         }
