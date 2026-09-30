@@ -82,7 +82,7 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         String zoneId = resolveZoneId(props, ctx);
 
         ResourceRecordSet rrs = new ResourceRecordSet();
-        rrs.setName(name);
+        rrs.setName(Route53Service.normalizeName(name));
         rrs.setType(type);
         String ttl = ctx.resolveOptional(props, "TTL");
         if (ttl != null && !ttl.isBlank()) {
@@ -143,7 +143,8 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
                 || priorType == null || priorType.isBlank()) {
             return;
         }
-        boolean sameIdentity = priorZoneId.equals(zoneId) && priorName.equals(name)
+        boolean sameIdentity = priorZoneId.equals(zoneId)
+                && Route53Service.normalizeName(priorName).equals(Route53Service.normalizeName(name))
                 && priorType.equals(type) && Objects.equals(priorSetId, setIdentifier);
         if (sameIdentity) {
             return;
@@ -373,9 +374,14 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         }, "NoSuchHostedZone", "InvalidChangeBatch");
     }
 
+    /**
+     * The zone holds every record name fully qualified, while the physical id keeps the name as the
+     * template wrote it, so the lookup qualifies the name before comparing.
+     */
     private ResourceRecordSet findRecord(String zoneId, String name, String type, String setIdentifier) {
+        String storedName = Route53Service.normalizeName(name);
         for (ResourceRecordSet rrs : route53Service.listResourceRecordSets(zoneId, null, null, 0)) {
-            if (name.equals(rrs.getName()) && type.equals(rrs.getType())
+            if (storedName.equals(rrs.getName()) && type.equals(rrs.getType())
                     && Objects.equals(setIdentifier, rrs.getSetIdentifier())) {
                 return rrs;
             }

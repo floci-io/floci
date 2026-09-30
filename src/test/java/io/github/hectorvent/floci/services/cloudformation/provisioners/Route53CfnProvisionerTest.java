@@ -406,7 +406,8 @@ class Route53CfnProvisionerTest {
         Map<String, Object> change = captor.getValue().get(0);
         assertEquals("UPSERT", change.get("action"));
         ResourceRecordSet rrs = (ResourceRecordSet) change.get("rrs");
-        assertEquals("www.example.com", rrs.getName());
+        // Route 53 stores and lists every record name fully qualified, whatever the template wrote.
+        assertEquals("www.example.com.", rrs.getName());
         assertEquals("A", rrs.getType());
         assertEquals(Long.valueOf(300), rrs.getTtl());
         assertEquals(List.of("10.0.0.1"), rrs.getRecords().stream().map(ResourceRecord::getValue).toList());
@@ -502,7 +503,7 @@ class Route53CfnProvisionerTest {
     void renamingARecordSetOnUpdateRemovesTheSupersededRecord() {
         Route53Service service = mock(Route53Service.class);
         ResourceRecordSet priorRecord = new ResourceRecordSet();
-        priorRecord.setName("auth.example.com");
+        priorRecord.setName("auth.example.com.");
         priorRecord.setType("A");
         when(service.listResourceRecordSets("Z1", null, null, 0)).thenReturn(List.of(priorRecord));
         ObjectMapper mapper = new ObjectMapper();
@@ -533,10 +534,41 @@ class Route53CfnProvisionerTest {
     }
 
     @Test
+    void anUpdateThatOnlyAddsTheTrailingDotKeepsTheRecord() {
+        Route53Service service = mock(Route53Service.class);
+        ResourceRecordSet stored = new ResourceRecordSet();
+        stored.setName("www.example.com.");
+        stored.setType("A");
+        when(service.listResourceRecordSets("Z1", null, null, 0)).thenReturn(List.of(stored));
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode props = mapper.createObjectNode()
+                .put("HostedZoneId", "Z1")
+                .put("Name", "www.example.com.")
+                .put("Type", "A");
+        ProvisionContext context = new ProvisionContext(recordEngine(), "us-east-1", "623666680275",
+                "dns-stack", "www.example.com");
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Www");
+        resource.setResourceType("AWS::Route53::RecordSet");
+        resource.setPhysicalId("www.example.com");
+        resource.getAttributes().put("__FlociRoute53RecordZoneId", "Z1");
+        resource.getAttributes().put("__FlociRoute53RecordType", "A");
+
+        new Route53CfnProvisioner(service).provision(resource, props, context);
+
+        // Both names are the same record once fully qualified, so the UPSERT is the only change: a
+        // DELETE of the "prior" name would remove the record the UPSERT just wrote.
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(service).changeResourceRecordSets(eq("Z1"), captor.capture(), any());
+        assertEquals("UPSERT", captor.getValue().get(0).get("action"));
+    }
+
+    @Test
     void deletingARecordSetViaTheResourceIssuesAMatchingDeleteChange() {
         Route53Service service = mock(Route53Service.class);
         ResourceRecordSet existing = new ResourceRecordSet();
-        existing.setName("www.example.com");
+        existing.setName("www.example.com.");
         existing.setType("A");
         when(service.listResourceRecordSets("Z123456789", null, null, 0)).thenReturn(List.of(existing));
         StackResource resource = new StackResource();
