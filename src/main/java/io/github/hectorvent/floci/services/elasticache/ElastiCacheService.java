@@ -1652,41 +1652,64 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /**
-     * Honors the request's {@code Port} when it is free and inside the proxy range. AWS models
-     * Port as an optional input on CreateReplicationGroup ("the port number on which each member
-     * of the replication group accepts connections"), so a caller that pins one and reads back a
-     * different value sees permanent drift: Terraform treats the port as replacement-forcing.
+     * Honors the request's {@code Port} when it is free and inside the proxy range, and otherwise
+     * serves the cache on a port from that range instead of refusing it.
      *
-     * <p>An explicit port is therefore either honored or refused, never quietly changed.
-     * Substituting one reproduces the very drift honoring it was meant to remove, and the
-     * substitution could only ever hit a caller who did ask for a port: one who does not care
-     * passes null and never reaches that branch. Floci multiplexes every group's proxy onto one
-     * host, so two groups genuinely cannot share a port, and a caller who pinned an unavailable
-     * one needs to know rather than discover it as drift later.
+     * <p>On AWS, Port belongs to a cache's own endpoint. 6379 is the Redis default, so nearly
+     * every ElastiCache cluster in the world uses it and they coexist: AWS gives each cache a DNS
+     * name of its own, and the port never has to distinguish them. Floci multiplexes every
+     * cache's proxy onto one host, where a TCP port is exclusive and the port is the only thing
+     * that does distinguish them. Refusing the second cache on 6379, which is what this method
+     * used to do, diverges from AWS on an entirely ordinary request: any module standing up two
+     * Redis clusters, and any suite running one per test in parallel, failed at the second
+     * create.
      *
-     * <p>Only an unpinned create falls back through the range below.
-     * {@code NeptuneService.allocateProxyPort} still substitutes on this path and carries the
-     * same flaw.
+     * <p>Which leaves a choice about the port a caller pinned but cannot have, and only two of
+     * the three obvious answers are safe. Refusing is the divergence above. Reporting the pinned
+     * port anyway, while listening on another, is worse than it sounds: the endpoint then names
+     * a listener belonging to a <em>different</em> cache, so a client that dials it reads someone
+     * else's data and is told nothing. That is the failure #4094 removed on the restore path,
+     * where "the old endpoint then reached an unrelated cache instead of failing cleanly".
+     *
+     * <p>So the port a cache reports is always the port it is actually on. A caller that pinned
+     * an unavailable port sees drift, which terraform surfaces as a replacement-forcing diff on
+     * the next plan. That is a visible, reversible failure, where the alternative is a silent
+     * wrong answer, and the create still succeeds. The WARN below names the port that was served
+     * and why the pinned one could not be.
+     *
+     * <p>A port outside the proxy range is substituted for the same reason rather than refused:
+     * the range bounds what this emulator may listen on, and never bounded what AWS accepts. The
+     * only rejection left is a range check, 1150 to 65535, which is the bound
+     * {@code RdsService.reserveProxyPort} applies to the same argument. Nothing here establishes
+     * that it is ElastiCache's real lower bound on AWS, so do not read it as one; it is strictly
+     * more permissive than the proxy-range check it replaced, which bounds the risk to accepting
+     * a port AWS would refuse rather than refusing one AWS accepts.
      */
     private int allocateProxyPort(Integer requested) {
         int base = config.services().elasticache().proxyBasePort();
         int max = config.services().elasticache().proxyMaxPort();
         if (requested != null) {
-            if (requested < base || requested > max) {
-                LOG.infov("Rejecting ElastiCache port {0}: outside the proxy range {1}-{2}",
-                        String.valueOf(requested), String.valueOf(base), String.valueOf(max));
+            if (requested < 1150 || requested > 65535) {
                 throw new AwsException("InvalidParameterValue",
-                        "Port " + requested + " is outside the port range this emulator serves ("
-                                + base + "-" + max + ").", 400);
+                        "Port must be between 1150 and 65535.", 400);
             }
-            if (!usedPorts.add(requested)) {
-                LOG.infov("Rejecting ElastiCache port {0}: already used by another replication group",
-                        String.valueOf(requested));
-                throw new AwsException("InvalidParameterValue",
-                        "Port " + requested + " is already in use by another replication group.", 400);
+            if (requested >= base && requested <= max && usedPorts.add(requested)) {
+                return requested;
             }
-            return requested;
+            int substitute = scanForFreePort(base, max);
+            LOG.warnv("ElastiCache port {0} could not be served: it is {1}. This cache is on {2} "
+                            + "instead, and that is the port its endpoint reports.",
+                    String.valueOf(requested),
+                    requested < base || requested > max
+                            ? "outside the proxy range " + base + "-" + max
+                            : "already in use by another cache here",
+                    String.valueOf(substitute));
+            return substitute;
         }
+        return scanForFreePort(base, max);
+    }
+
+    private int scanForFreePort(int base, int max) {
         for (int port = base; port <= max; port++) {
             if (usedPorts.add(port)) {
                 return port;

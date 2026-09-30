@@ -66,6 +66,39 @@ created against a name nothing resolves.)
 Each record re-reserves its proxy port as it is restored, before Floci serves anything, so a
 create is never handed a port a surviving cluster or replication group still advertises.
 
+#### Port, when two caches ask for the same one
+
+On AWS, `Port` belongs to a cache's own endpoint. 6379 is the Redis default, so nearly every
+ElastiCache cluster uses it and they coexist: each cache gets a DNS name of its own, and the
+port never has to tell them apart. Floci puts every cache's proxy on one host, where a TCP port
+is exclusive and the port is the only thing that does tell them apart.
+
+This section is about `Engine=redis` and `Engine=valkey`, the engines Floci fronts with an auth
+proxy. `Engine=memcached` never reaches any of it: `CreateCacheCluster` routes that engine to a
+path the `Port` is not passed to, so a pinned port is silently ignored and the cluster reports
+the Docker-published port it is actually on. The safety property below holds there for a
+different reason, not because the rules do.
+
+So a `Port` you pass is honored when it is free and inside
+`FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT`/`_MAX_PORT`, and otherwise the cache is served on
+another port from that range, which is the port its endpoint then reports. A create is never
+refused for a port that is merely taken: refusing the second cache on 6379 breaks any module
+standing up two Redis clusters, and any suite running one per test in parallel.
+
+**The port a cache reports is always the port it is actually on.** If you pinned one Floci could
+not give you, the endpoint reports the substitute rather than the port you asked for, and the
+create logs a warning saying which and why. That is a visible difference: terraform treats the
+port as replacement-forcing, so a pinned port that was unavailable shows up as a diff on the
+next plan. It is deliberately preferred to the alternative, where a cache reports the port you
+pinned while listening somewhere else, because that endpoint names a *different* cache's
+listener and a client following it reads the wrong cache's data with no error.
+
+The only port rejection left is a range check: `Port` must be between 1150 and 65535. That bound
+is the one `RdsService.reserveProxyPort` applies to the same argument, not a measurement of
+ElastiCache's own limit, which nothing here establishes. It is strictly more permissive than the
+proxy-range check it replaced, so the direction it could be wrong in is accepting a port AWS
+would refuse, never refusing one AWS accepts.
+
 `SnapshotRetentionLimit`, `SnapshotWindow`, `PreferredMaintenanceWindow`,
 `PreferredAvailabilityZone`, `SecurityGroupIds`, `NetworkType`, `IpDiscovery` and
 `AtRestEncryptionEnabled` (output-only on real AWS's CreateCacheCluster; accepted here leniently and echoed) are kept and echoed by `DescribeCacheClusters`, with the same defaults

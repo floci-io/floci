@@ -40,7 +40,7 @@ public class StsQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(StsQueryHandler.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    private static final String STS_AUDIENCE = "sts.amazonaws.com";
+    private static final String STS_AUDIENCE = "sts.amazonaws.com"; // partition-literal: web-identity audience; no source outside the commercial partition (P9)
 
     private final IamService iamService;
     private final AccountResolver accountResolver;
@@ -240,7 +240,7 @@ public class StsQueryHandler {
 
         String provider = verified != null ? verified.issuer()
                 : (providerId != null && !providerId.isBlank() ? providerId : "accounts.google.com");
-        String audience = verified != null ? verified.audience() : "sts.amazonaws.com";
+        String audience = verified != null ? verified.audience() : STS_AUDIENCE;
         String subject = verified != null ? verified.subject() : "web-identity-subject";
 
         String sessionPolicy = getParam(params, "Policy");

@@ -43,6 +43,7 @@ import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import java.util.LinkedHashMap;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -1088,8 +1089,23 @@ public class SecretsManagerService implements ResourceProvider {
         return secret;
     }
 
+    /**
+     * Rotation started by Floci itself, such as the scheduled sweep, with no caller to authorize.
+     */
     public Secret rotateSecret(String secretId, String clientRequestToken, String rotationLambdaArn, Secret.RotationRules rotationRules,
                                boolean rotateImmediately, String region) {
+        return rotateSecret(secretId, clientRequestToken, rotationLambdaArn, rotationRules, rotateImmediately, region,
+                functionArn -> { });
+    }
+
+    /**
+     * @param authorizeInvoke called with the full ARN of the rotation function this call will
+     *                        invoke, before the function is looked up or the secret changed, so the
+     *                        caller can be refused {@code lambda:InvokeFunction} on exactly that
+     *                        function
+     */
+    public Secret rotateSecret(String secretId, String clientRequestToken, String rotationLambdaArn, Secret.RotationRules rotationRules,
+                               boolean rotateImmediately, String region, Consumer<String> authorizeInvoke) {
         Secret secret = resolveSecret(secretId, region);
         throwIfPendingDeletion(secret);
         throwIfReplica(secret);
@@ -1118,14 +1134,24 @@ public class SecretsManagerService implements ResourceProvider {
                     "You tried to enable rotation on a secret that doesn't already have a Lambda function ARN configured and you didn't include such an ARN as a parameter in this call.", 400);
         }
 
-        // Validate Lambda exists synchronously
+        // One full ARN for the permission check, the lookup and the invoke, so all three reach the same
+        // function: a name or partial ARN would otherwise be invoked in whatever account the rotation
+        // thread resolves, which is not necessarily the one that was checked.
+        String functionArn = serviceManaged ? null : rotationFunctionArn(finalLambdaArn, secret, region);
+        if (!serviceManaged) {
+            authorizeInvoke.accept(functionArn);
+        }
+
+        // A function that cannot be invoked is reported the way AWS reports it, whatever the reason:
+        // AccessDeniedException with HTTP 400, and the secret left as it was.
         if (!serviceManaged && lambdaService != null) {
             try {
-                lambdaService.getFunction(region, finalLambdaArn);
+                lambdaService.getFunction(region, functionArn);
             } catch (AwsException e) {
                 if (e.getHttpStatus() == 404) {
-                    throw new AwsException("ResourceNotFoundException",
-                            "Secrets Manager cannot find the specified Lambda function.", 404);
+                    throw new AwsException("AccessDeniedException",
+                            "Secrets Manager cannot invoke the specified Lambda function. Ensure that the function "
+                                    + "policy grants access to the principal secretsmanager.amazonaws.com.", 400); // partition-literal: AWS's error text verbatim; names the service principal, which the Secrets Manager guide gives with no partition variant
                 }
                 throw e;
             }
@@ -1172,7 +1198,7 @@ public class SecretsManagerService implements ResourceProvider {
         
         rotationExecutor.submit(() -> {
             try {
-                executeRotationLifecycle(arn, finalToken, finalLambdaArn, rotateImmediately, isExistingVersion, region);
+                executeRotationLifecycle(arn, finalToken, functionArn, rotateImmediately, isExistingVersion, region);
             } catch (Exception e) {
                 LOG.errorv(e, "Rotation lifecycle failed for secret {0}", arn);
             }
@@ -1182,6 +1208,23 @@ public class SecretsManagerService implements ResourceProvider {
         return secret;
     }
 
+
+    /**
+     * The rotation function as the full ARN an IAM policy's {@code Resource} names. A function name
+     * or partial ARN resolves in the secret's own account and the request's Region, as Lambda
+     * resolves one.
+     */
+    static String rotationFunctionArn(String functionRef, Secret secret, String region) {
+        if (functionRef.startsWith("arn:")) {
+            return functionRef;
+        }
+        AwsArnUtils.Arn secretArn = AwsArnUtils.parse(secret.getArn());
+        if (functionRef.contains(":function:")) {
+            return "arn:" + secretArn.partition() + ":lambda:" + region + ":" + functionRef;
+        }
+        return new AwsArnUtils.Arn(secretArn.partition(), "lambda", region, secretArn.accountId(),
+                "function:" + functionRef).toString();
+    }
 
     /**
      * The outcome of {@link #cancelRotateSecret}: the secret with rotation turned off, plus the id

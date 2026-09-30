@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
@@ -70,9 +71,9 @@ public class RamController {
     @Consumes(MediaType.WILDCARD)
     public Response enableSharingWithAwsOrganization() {
         String callerAccountId = regionResolver.getAccountId();
-        organizationsService.enableAWSServiceAccess(callerAccountId, "ram.amazonaws.com");
+        organizationsService.enableAWSServiceAccess(callerAccountId, ServicePrincipals.of("ram"));
         if (iamService.findRole(callerAccountId, "AWSServiceRoleForResourceAccessManager").isEmpty()) {
-            iamService.createServiceLinkedRole("ram.amazonaws.com", null,
+            iamService.createServiceLinkedRole(ServicePrincipals.of("ram"), null,
                     "Allows AWS Resource Access Manager to access AWS Organizations on your behalf.");
         }
         ObjectNode response = objectMapper.createObjectNode();

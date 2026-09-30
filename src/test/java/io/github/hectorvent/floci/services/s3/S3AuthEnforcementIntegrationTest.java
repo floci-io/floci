@@ -2356,6 +2356,47 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(204);
     }
 
+    @Test
+    @Order(57)
+    void signedIamPrincipalMatchesPrincipalIsAwsServiceFalseInBucketPolicy() {
+        String bucket = "auth-principal-is-service-bucket";
+        given().filter(LOCAL_SIGNER).when().put("/" + bucket).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).body("private data")
+            .when().put("/" + bucket + "/data.txt")
+            .then().statusCode(200);
+
+        String denyForIamPrincipals = """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": {
+                    "Effect": "Deny",
+                    "Principal": "*",
+                    "Action": "s3:GetObject",
+                    "Resource": "arn:aws:s3:::%s/*",
+                    "Condition": {"Bool": {"aws:PrincipalIsAWSService": "false"}}
+                  }
+                }""".formatted(bucket);
+        given().filter(LOCAL_SIGNER).contentType("application/json").body(denyForIamPrincipals)
+            .when().put("/" + bucket + "?policy")
+            .then().statusCode(200);
+
+        given().filter(LOCAL_SIGNER)
+            .when().get("/" + bucket + "/data.txt")
+            .then().statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        String denyForServicePrincipals = denyForIamPrincipals.replace(
+                "\"aws:PrincipalIsAWSService\": \"false\"",
+                "\"aws:PrincipalIsAWSService\": \"true\"");
+        given().filter(LOCAL_SIGNER).contentType("application/json").body(denyForServicePrincipals)
+            .when().put("/" + bucket + "?policy")
+            .then().statusCode(200);
+        given().filter(LOCAL_SIGNER)
+            .when().get("/" + bucket + "/data.txt")
+            .then().statusCode(200)
+            .body(equalTo("private data"));
+    }
+
     private static String publicObjectActionPolicy(String bucket, String action) {
         return publicObjectActionPolicy(bucket, "*", action);
     }

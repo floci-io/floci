@@ -160,7 +160,7 @@ class StepFunctionsTimeoutSecondsIntegrationTest {
     @Test
     void stateMachineTimeoutSecondsCutsTheWaitForANestedExecution() throws Exception {
         // The child sleeps far past the parent's budget. The parent ends TIMED_OUT where its budget
-        // runs out; the child keeps running, since nothing in ASL propagates the parent's timeout.
+        // runs out, and the child is aborted with it, as AWS does (measured: ABORTED, no error).
         String childArn = createStateMachine("nested-child", """
                 {
                     "StartAt": "Linger",
@@ -193,6 +193,16 @@ class StepFunctionsTimeoutSecondsIntegrationTest {
         JsonNode events = mapper.readTree(getExecutionHistory(execArn).body().asString()).path("events");
         assertEquals("ExecutionTimedOut", events.get(events.size() - 1).path("type").asText(),
                 "history was " + events);
+        Response children = given()
+                .header("X-Amz-Target", "AWSStepFunctions.ListExecutions")
+                .contentType(SFN_CONTENT_TYPE)
+                .body("""
+                        {"stateMachineArn": "%s"}
+                        """.formatted(childArn))
+                .when()
+                .post("/");
+        assertEquals(List.of("ABORTED"), children.jsonPath().getList("executions.status"),
+                children.body().asString());
     }
 
     @Test

@@ -561,8 +561,21 @@ public class AslExecutor {
                                  StateMachine sm, String topLevelQueryLanguage, JsonNode context,
                                  ObjectNode variables, long executionDeadlineNanos) throws Exception {
         var type = stateDef.path("Type").asText();
-        var enteredEventId = chain.publish(stateEnteredEventType(type),
+        long enteredEventId = chain.publishStateEntered(type, stateEnteredEventType(type),
                 Map.of("name", name, "input", input.toString(), "inputDetails", Map.of("truncated", false)));
+        try {
+            return runEnteredState(chain, name, enteredEventId, type, stateDef, input, sm, topLevelQueryLanguage,
+                    context, variables, executionDeadlineNanos);
+        } finally {
+            // A state that ends by throwing publishes no Exited event, so the chain leaves it here.
+            chain.leaveState();
+        }
+    }
+
+    private StateResult runEnteredState(HistoryChain chain, String name, long enteredEventId, String type,
+                                        JsonNode stateDef, JsonNode input, StateMachine sm,
+                                        String topLevelQueryLanguage, JsonNode context, ObjectNode variables,
+                                        long executionDeadlineNanos) throws Exception {
         updateStateContext(context, name);
         var jsonata = isJsonata(stateDef, topLevelQueryLanguage);
         StateResult result;
@@ -589,12 +602,12 @@ public class AslExecutor {
             if (result == null) {
                 if (chain.isBranch() && "Task".equals(type) && !failure.isRuntimeError()) {
                     // AWS records this after TaskFailed when the failure ends the branch.
-                    chain.publishAside("TaskStateAborted", null);
+                    chain.leaveStateAside("TaskStateAborted", null);
                 }
                 throw failure;
             }
         }
-        chain.publish(stateExitedEventType(type),
+        chain.publishStateExited(stateExitedEventType(type),
                 Map.of("name", name, "output", result.output().toString(),
                        "outputDetails", Map.of("truncated", false)));
         return result;
@@ -831,7 +844,8 @@ public class AslExecutor {
                 // was sealed by the abort; nothing more is written about the state.
                 throw e;
             } catch (InterruptedException e) {
-                // The task of a branch that was cut. AWS records nothing for it.
+                // The task of a branch that was cut. The branch records nothing more; the Parallel
+                // that cut it records its TaskStateAborted.
                 throw e;
             } catch (Exception e) {
                 var failure = e instanceof FailStateException f ? f : null;
@@ -1703,16 +1717,16 @@ public class AslExecutor {
             return result;
         }
 
-        // .sync or .sync:2 polls until terminal, or until one of the two clocks runs out: the parent
-        // execution's TimeoutSeconds budget ends the parent as TIMED_OUT and leaves the child running;
-        // the Task's own TimeoutSeconds fails the state with States.Timeout and aborts the child, the
-        // way AWS does (measured: child ABORTED, no error, the cause below). A StopExecution on the
-        // parent ends the wait the same way, so a stopped execution does not keep a polling worker.
+        // .sync or .sync:2 polls until terminal. Whatever else ends the wait aborts the child, the way
+        // AWS does (measured: child ABORTED, no error, the cause below): the Task's own TimeoutSeconds,
+        // which fails the state with States.Timeout; the parent execution's budget, which ends it
+        // TIMED_OUT; a failure in a sibling Parallel branch, which interrupts this one; and a
+        // StopExecution on the parent, so a stopped execution does not keep a polling worker.
         while (true) {
             try {
                 sleepOrTimeOutTask(TimeUnit.MILLISECONDS.toNanos(SYNC_POLL_INTERVAL_MS),
                         executionDeadlineNanos, taskDeadlineNanos);
-            } catch (TaskTimedOutException e) {
+            } catch (TaskTimedOutException | ExecutionTimedOutException | InterruptedException e) {
                 abortChildExecution(execArn, executionArn);
                 throw e;
             }
@@ -1722,7 +1736,13 @@ public class AslExecutor {
             }
             io.github.hectorvent.floci.services.stepfunctions.model.Execution current =
                     sfnService.get().describeExecution(execArn);
-            String status = current.getStatus();
+            String status;
+            // The child's worker and StopExecution write its terminal fields under this monitor,
+            // status last. Reading the status under it makes everything written before it visible,
+            // so a terminal status is never seen without the error, cause and stop date behind it.
+            synchronized (current) {
+                status = current.getStatus();
+            }
             if ("RUNNING".equals(status)) {
                 continue;
             }
@@ -1749,11 +1769,48 @@ public class AslExecutor {
                 }
                 return envelope;
             }
-            throw new FailStateException(
-                    current.getError() != null ? current.getError() : "States.TaskFailed",
-                    current.getCause() != null ? current.getCause()
-                            : "Nested execution ended with status: " + status);
+            // However the child ended, FAILED, TIMED_OUT or ABORTED, and whatever its own error, the
+            // parent sees States.TaskFailed (measured), so a Catch on the child's error never fires.
+            throw new FailStateException("States.TaskFailed", nestedExecutionFailureCause(current));
         }
+    }
+
+    /**
+     * The cause of a {@code .sync} Task whose child ended other than SUCCEEDED, as measured on AWS
+     * for {@code .sync} and {@code .sync:2} alike: the child's DescribeExecution response in
+     * PascalCase with its keys in alphabetical order, {@code Cause} and {@code Error} only when the
+     * child has them, {@code StateMachineAliasArn} and {@code StateMachineVersionArn} only when it
+     * was started through an alias or a version (an alias carries both), dates in epoch
+     * milliseconds, and no {@code Output}. Floci does not implement
+     * redrive, so the two redrive fields carry what AWS reports for a child never redriven.
+     */
+    private String nestedExecutionFailureCause(Execution child) {
+        ObjectNode cause = objectMapper.createObjectNode();
+        if (child.getCause() != null) {
+            cause.put("Cause", child.getCause());
+        }
+        if (child.getError() != null) {
+            cause.put("Error", child.getError());
+        }
+        cause.put("ExecutionArn", child.getExecutionArn());
+        cause.put("Input", child.getInput() != null ? child.getInput() : "{}");
+        cause.putObject("InputDetails").put("Included", true);
+        cause.put("Name", child.getName());
+        cause.put("RedriveCount", 0);
+        cause.put("RedriveStatus", "REDRIVABLE");
+        cause.put("StartDate", Math.round(child.getStartDate() * 1000));
+        if (child.getStateMachineAliasArn() != null) {
+            cause.put("StateMachineAliasArn", child.getStateMachineAliasArn());
+        }
+        cause.put("StateMachineArn", child.getStateMachineArn());
+        if (child.getStateMachineVersionArn() != null) {
+            cause.put("StateMachineVersionArn", child.getStateMachineVersionArn());
+        }
+        cause.put("Status", child.getStatus());
+        if (child.getStopDate() != null) {
+            cause.put("StopDate", Math.round(child.getStopDate() * 1000));
+        }
+        return cause.toString();
     }
 
     /**
@@ -1839,15 +1896,16 @@ public class AslExecutor {
         // All tasks must be polled (not just the first): with Count > 1, a failure in any task must
         // fail the state, otherwise tasks beyond the first would run unmonitored. The wait is bounded
         // by the Task's TimeoutSeconds and by the execution's budget, never by a poll count of its own.
-        // The Task's clock also stops the tasks it launched, the way AWS does (measured: the ECS task
-        // reads stopCode UserInitiated with the cause below), and so does a StopExecution on the
-        // execution, which otherwise would leave this worker polling until a clock ran out.
+        // Whatever ends the wait before the tasks stop also stops the tasks it launched, the way AWS
+        // does (measured: the ECS task reads stopCode UserInitiated with the cause below): either
+        // clock, a failure in a sibling Parallel branch, which interrupts this one, and a
+        // StopExecution on the execution, which otherwise would leave this worker polling.
         List<String> taskArns = launched.stream().map(EcsTask::getTaskArn).toList();
         while (true) {
             try {
                 sleepOrTimeOutTask(TimeUnit.MILLISECONDS.toNanos(SYNC_POLL_INTERVAL_MS),
                         executionDeadlineNanos, taskDeadlineNanos);
-            } catch (TaskTimedOutException e) {
+            } catch (TaskTimedOutException | ExecutionTimedOutException | InterruptedException e) {
                 stopEcsTasks(cluster, taskArns, executionArn, region);
                 throw e;
             }
@@ -1882,8 +1940,8 @@ public class AslExecutor {
     }
 
     /**
-     * The reason AWS writes on a job it stops because the {@code .sync} Task waiting on it ran out
-     * of its {@code TimeoutSeconds}: verbatim, as the ECS task's {@code stoppedReason} and the child
+     * The reason AWS writes on a job it stops because the {@code .sync} Task waiting on it ended
+     * first, whichever way it ended: verbatim, as the ECS task's {@code stoppedReason} and the child
      * execution's {@code cause}.
      */
     private static String syncAbortCause(String executionArn) {
@@ -1891,24 +1949,24 @@ public class AslExecutor {
                 + "] which was managing this resource was aborted";
     }
 
-    /** Best effort, like AWS: a task that is already gone does not change the timeout being reported. */
+    /** Best effort, like AWS: a task that is already gone does not change how the state ends. */
     private void stopEcsTasks(String cluster, List<String> taskArns, String executionArn, String region) {
         for (String taskArn : taskArns) {
             try {
                 ecsService.stopTask(cluster, taskArn, syncAbortCause(executionArn), region);
             } catch (RuntimeException e) {
-                LOG.warnv("ecs:runTask.sync timed out but the task {0} could not be stopped: {1}",
+                LOG.warnv("ecs:runTask.sync ended before its task {0} did, and the task could not be stopped: {1}",
                         taskArn, e.getMessage());
             }
         }
     }
 
-    /** Best effort, like AWS: a child that already ended does not change the timeout being reported. */
+    /** Best effort, like AWS: a child that already ended does not change how the state ends. */
     private void abortChildExecution(String childExecutionArn, String executionArn) {
         try {
             sfnService.get().stopExecution(childExecutionArn, syncAbortCause(executionArn), null);
         } catch (RuntimeException e) {
-            LOG.warnv("states:startExecution.sync timed out but the child {0} could not be stopped: {1}",
+            LOG.warnv("states:startExecution.sync ended before its child {0} did, and the child could not be stopped: {1}",
                     childExecutionArn, e.getMessage());
         }
     }
@@ -2580,8 +2638,13 @@ public class AslExecutor {
             Thread.currentThread().interrupt();
             throw e;
         } catch (ExecutionException e) {
-            abandon(branchChains, futures);
+            List<String> abortedEventTypes = cutAfterFailure(branchChains, futures);
             chain.continueFrom(branchChains.get(joined).lastEventId());
+            if (e.getCause() instanceof FailStateException failure && !failure.isRuntimeError()) {
+                for (String abortedEventType : abortedEventTypes) {
+                    chain.publishBeside(abortedEventType, null);
+                }
+            }
             // Unwrap so a branch's FailStateException reaches the Parallel state's own Retry and
             // Catch handling instead of surfacing as States.Runtime, and so an Error reaches the
             // execution-level handler as itself rather than as an ExecutionException wrapper. The
@@ -2615,6 +2678,28 @@ public class AslExecutor {
         JsonNode output = mergeResult(stateDef, input, selected);
         output = applyOutputPath(stateDef, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
+    }
+
+    /**
+     * Cuts every branch after one of them failed, like {@link #abandon}, and returns one
+     * {@code *StateAborted} event type per branch it cut inside a Task or a Wait: the two state
+     * types AWS was measured recording it for (a {@code .sync} Task waiting on its job, and a Wait).
+     * A branch between states, or inside any other state, gets no event. Each branch is read and cut
+     * in one step, so a state that exits before its cut is not reported, and one that is reported
+     * records no Exited event afterwards. The state alone decides: a branch that has finished, the
+     * failed one included, has left every state it entered, and reading its future as well would
+     * reopen the gap between the cut and that read.
+     */
+    private static List<String> cutAfterFailure(List<HistoryChain> chains, List<? extends Future<?>> futures) {
+        List<String> abortedEventTypes = new ArrayList<>();
+        for (HistoryChain branch : chains) {
+            String stateType = branch.abandonInState();
+            if ("Task".equals(stateType) || "Wait".equals(stateType)) {
+                abortedEventTypes.add(stateType + "StateAborted");
+            }
+        }
+        futures.forEach(future -> future.cancel(true));
+        return abortedEventTypes;
     }
 
     private static void abandon(List<HistoryChain> chains, List<? extends Future<?>> futures) {

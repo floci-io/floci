@@ -41,6 +41,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Stage;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigateway.model.VpcLink;
+import io.swagger.parser.OpenAPIParser;
 import io.swagger.v3.core.util.Json;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
@@ -120,6 +121,12 @@ public class ApiGatewayService implements ResourceProvider {
     private static final String EPC_KEY = "endpointConfiguration";
     private static final String EPC_TYPES_KEY = "types";
     private static final String EPC_VPC_IDS_KEY = "vpcEndpointIds";
+
+    ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
+                      TlsCertificateManager certificateManager) {
+        this(storageFactory, config, certificateManager,
+                new RegionResolver(config.defaultRegion(), config.defaultAccountId()));
+    }
 
     @Inject
     public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
@@ -2769,7 +2776,7 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     public RestApi importRestApi(String region, String specBody, boolean failOnWarnings) {
-        ParsedOpenApi parsed = parseOpenApiSpec(specBody, failOnWarnings);
+        ParsedOpenApi parsed = parseOpenApiSpec(region, specBody, failOnWarnings);
         OpenAPI openAPI = parsed.openAPI();
 
         String name = openAPI.getInfo() != null ? openAPI.getInfo().getTitle() : "Imported API";
@@ -2805,7 +2812,7 @@ public class ApiGatewayService implements ResourceProvider {
             throw new AwsException("BadRequestException",
                     "Invalid mode specified. Valid modes are 'merge' and 'overwrite'.", 400);
         }
-        ParsedOpenApi parsed = parseOpenApiSpec(specBody, failOnWarnings);
+        ParsedOpenApi parsed = parseOpenApiSpec(region, specBody, failOnWarnings);
         RestApiSnapshot snapshot = snapshotRestApi(region, apiId);
         try {
             RestApi api = mode == null || "merge".equals(mode)
@@ -2819,6 +2826,16 @@ public class ApiGatewayService implements ResourceProvider {
             restoreRestApi(region, apiId, snapshot);
             throw e;
         }
+    }
+
+    private String resolveOpenApiAwsVariables(String region, String value) {
+        if (value == null) {
+            return null;
+        }
+        return value
+                .replace("${AWS::Region}", region)
+                .replace("${AWS::AccountId}", regionResolver.getAccountId())
+                .replace("${AWS::Partition}", regionResolver.partitionForRegion(region));
     }
 
     private RestApi overwriteRestApi(String region, String apiId, OpenAPI openAPI) {
@@ -2918,8 +2935,9 @@ public class ApiGatewayService implements ResourceProvider {
 
     private record ParsedOpenApi(OpenAPI openAPI, List<String> warnings) {}
 
-    private ParsedOpenApi parseOpenApiSpec(String specBody, boolean failOnWarnings) {
-        SwaggerParseResult result = new io.swagger.parser.OpenAPIParser().readContents(specBody, null, null);
+    private ParsedOpenApi parseOpenApiSpec(String region, String specBody, boolean failOnWarnings) {
+        SwaggerParseResult result = new OpenAPIParser()
+                .readContents(resolveOpenApiAwsVariables(region, specBody), null, null);
         if (result.getOpenAPI() == null) {
             String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
             throw new AwsException("BadRequestException", "Failed to parse OpenAPI spec: " + errors, 400);

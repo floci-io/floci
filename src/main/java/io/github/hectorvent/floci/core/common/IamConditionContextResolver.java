@@ -101,7 +101,9 @@ public class IamConditionContextResolver {
         putIfPresent(conditions, "aws:ResourceAccount", resourceAccount);
         putIfPresent(conditions, "aws:PrincipalAccount", accountId);
         putIfPresent(conditions, "aws:RequestedRegion", region);
-        return conditions.isEmpty() ? null : conditions;
+        // Enforcement evaluates signed IAM credentials, not direct AWS service principals.
+        conditions.put("aws:PrincipalIsAWSService", List.of("false"));
+        return conditions;
     }
 
     private static String accountFromArn(String arn) {

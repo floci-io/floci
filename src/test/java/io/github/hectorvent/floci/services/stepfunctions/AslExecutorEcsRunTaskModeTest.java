@@ -26,6 +26,7 @@ import org.mockito.ArgumentCaptor;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -38,7 +39,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -106,7 +107,7 @@ class AslExecutorEcsRunTaskModeTest {
                 null,
                 Clock.systemUTC(),
                 sleeper,
-                null);
+                30);
     }
 
     @Test
@@ -218,7 +219,7 @@ class AslExecutorEcsRunTaskModeTest {
     }
 
     @Test
-    void executionBudgetCutsASyncWaitBeforeTheTasksOwnTimeout() throws Exception {
+    void executionBudgetCutsASyncWaitBeforeTheTasksOwnTimeoutAndStopsTheTask() throws Exception {
         launchOneTask();
         when(ecsService.describeTasks(any(), any(), any())).thenReturn(List.of(task("RUNNING")));
 
@@ -235,10 +236,52 @@ class AslExecutorEcsRunTaskModeTest {
 
         assertEquals("TIMED_OUT", execution.getStatus());
         assertNull(execution.getError());
-        verify(ecsService, never()).stopTask(any(), any(), any(), any());
+        // AWS stops the task on the execution's budget too (measured: UserInitiated, same reason).
+        verify(ecsService).stopTask(any(), eq(task("RUNNING").getTaskArn()),
+                eq("The Task state in AWS Step Functions execution [" + execution.getExecutionArn()
+                        + "] which was managing this resource was aborted"), eq(REGION));
         assertTrue(history.stream().noneMatch(event -> "TaskTimedOut".equals(event.getType())),
                 "the execution's budget writes nothing about the state it cut");
         assertTrue(history.stream().anyMatch(event -> "ExecutionTimedOut".equals(event.getType())));
+    }
+
+    @Test
+    void failureInASiblingParallelBranchStopsTheTask() throws Exception {
+        // The sibling's Pause is held until this branch is polling, so the cut lands mid-wait.
+        CountDownLatch polling = new CountDownLatch(1);
+        executor = newExecutor(nanos -> {
+            if (nanos == TimeUnit.SECONDS.toNanos(1)) {
+                polling.await();
+                return;
+            }
+            polling.countDown();
+            TimeUnit.NANOSECONDS.sleep(nanos);
+        });
+        launchOneTask();
+        when(ecsService.describeTasks(any(), any(), any())).thenReturn(List.of(task("RUNNING")));
+
+        Execution execution = runDefinition("""
+                {
+                  "StartAt": "P",
+                  "States": {
+                    "P": { "Type": "Parallel", "End": true, "Branches": [
+                      { "StartAt": "Pause", "States": {
+                          "Pause": { "Type": "Wait", "Seconds": 1, "Next": "Boom" },
+                          "Boom": { "Type": "Fail", "Error": "Boom" } } },
+                      { "StartAt": "RunTask", "States": {
+                          "RunTask": { "Type": "Task", "Resource": "arn:aws:states:::ecs:runTask.sync",
+                                       "Parameters": { "TaskDefinition": "my-task-def" }, "End": true } } }
+                    ] }
+                  }
+                }
+                """, "{}");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Boom", execution.getError());
+        // The cut branch stops its task on its own thread, after the Parallel has already failed.
+        verify(ecsService, timeout(5_000)).stopTask(any(), eq(task("RUNNING").getTaskArn()),
+                eq("The Task state in AWS Step Functions execution [" + execution.getExecutionArn()
+                        + "] which was managing this resource was aborted"), eq(REGION));
     }
 
     @Test

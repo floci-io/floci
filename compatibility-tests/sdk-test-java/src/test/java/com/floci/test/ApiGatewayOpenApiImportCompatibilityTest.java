@@ -7,6 +7,7 @@ import software.amazon.awssdk.services.apigateway.ApiGatewayClient;
 import software.amazon.awssdk.services.apigateway.model.BadRequestException;
 import software.amazon.awssdk.services.apigateway.model.GetIntegrationResponse;
 import software.amazon.awssdk.services.apigateway.model.GetMethodResponse;
+import software.amazon.awssdk.services.apigateway.model.GatewayResponseType;
 import software.amazon.awssdk.services.apigateway.model.ImportRestApiResponse;
 import software.amazon.awssdk.services.apigateway.model.NotFoundException;
 import software.amazon.awssdk.services.apigateway.model.PutMode;
@@ -23,6 +24,72 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @DisplayName("API Gateway OpenAPI import")
 class ApiGatewayOpenApiImportCompatibilityTest {
+
+    @Test
+    @DisplayName("ImportRestApi and PutRestApi resolve AWS variables through the SDK")
+    void sdkImportAndPutResolveAwsVariables() {
+        String title = TestFixtures.uniqueName("apigw-variable-import");
+        try (ApiGatewayClient apiGateway = TestFixtures.apiGatewayClient()) {
+            ImportRestApiResponse imported = apiGateway.importRestApi(request -> request
+                    .body(SdkBytes.fromUtf8String(variableSpec(title, "${AWS::Region}"))));
+            try {
+                String initialId = resourceId(apiGateway, imported.id(), "/variable");
+                GetIntegrationResponse integration = apiGateway.getIntegration(request -> request
+                        .restApiId(imported.id()).resourceId(initialId).httpMethod("POST"));
+                assertThat(integration.uri())
+                        .isEqualTo("arn:aws:apigateway:us-east-1:states:action/StartExecution");
+                assertThat(integration.requestTemplates())
+                        .containsEntry("application/json", "{\"value\":\"us-east-1\"}");
+                assertThat(integration.requestParameters())
+                        .containsEntry("integration.request.header.X-Region", "'us-east-1'");
+                assertThat(apiGateway.getGatewayResponse(request -> request
+                        .restApiId(imported.id()).responseType(GatewayResponseType.UNAUTHORIZED))
+                        .responseTemplates())
+                        .containsEntry("application/json", "{\"account\":\"000000000000\"}");
+
+                apiGateway.putRestApi(request -> request.restApiId(imported.id())
+                        .mode(PutMode.OVERWRITE)
+                        .body(SdkBytes.fromUtf8String(variableSpec(title, "${AWS::AccountId}"))));
+                String updatedId = resourceId(apiGateway, imported.id(), "/variable");
+                integration = apiGateway.getIntegration(request -> request
+                        .restApiId(imported.id()).resourceId(updatedId).httpMethod("POST"));
+                assertThat(integration.requestTemplates())
+                        .containsEntry("application/json", "{\"value\":\"000000000000\"}");
+            } finally {
+                apiGateway.deleteRestApi(request -> request.restApiId(imported.id()));
+            }
+        }
+    }
+
+    private static String variableSpec(String title, String templateValue) {
+        return """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "%s", "version": "1"},
+                  "paths": {
+                    "/variable": {
+                      "post": {
+                        "responses": {"200": {"description": "ok"}},
+                        "x-amazon-apigateway-integration": {
+                          "type": "aws", "httpMethod": "POST",
+                          "uri": "arn:${AWS::Partition}:apigateway:${AWS::Region}:states:action/StartExecution",
+                          "requestParameters": {
+                            "integration.request.header.X-Region": "'${AWS::Region}'"
+                          },
+                          "requestTemplates": {"application/json": "{\\"value\\":\\"%s\\"}"},
+                          "responses": {"default": {"statusCode": "200"}}
+                        }
+                      }
+                    }
+                  },
+                  "x-amazon-apigateway-gateway-responses": {
+                    "UNAUTHORIZED": {
+                      "responseTemplates": {"application/json": "{\\"account\\":\\"${AWS::AccountId}\\"}"}
+                    }
+                  }
+                }
+                """.formatted(title, templateValue);
+    }
 
     private static final String BROKEN_ANY_METHOD_PATHS = """
             "paths": {

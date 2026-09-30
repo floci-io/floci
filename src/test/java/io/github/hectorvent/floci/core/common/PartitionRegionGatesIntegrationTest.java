@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.PartitionMatrix;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -14,6 +15,7 @@ import java.util.List;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -133,14 +135,38 @@ class PartitionRegionGatesIntegrationTest {
         assertTrue(names.contains("com.amazonaws.cn-north-1.s3"), names.toString());
         assertTrue(names.contains("com.amazonaws.cn-north-1.dynamodb"), names.toString());
 
-        List<String> services = given()
+        XmlPath endpointServices = given()
             .header("Authorization", PartitionMatrix.sigV4Auth("cn-north-1", "ec2"))
             .formParam("Action", "DescribeVpcEndpointServices")
             .formParam("Version", "2016-11-15")
         .when().post("/").then().statusCode(200)
-            .extract().xmlPath().getList("DescribeVpcEndpointServicesResponse.serviceNameSet.item");
+            .extract().xmlPath();
+        List<String> services = endpointServices.getList("DescribeVpcEndpointServicesResponse.serviceNameSet.item");
         assertTrue(services.contains("cn.com.amazonaws.cn-north-1.lambda"), services.toString());
         assertTrue(services.contains("com.amazonaws.cn-north-1.s3"), services.toString());
+        assertTrue(services.contains("cn.com.amazonaws.cn-north-1.s3"), services.toString());
+        assertEquals(List.of("Gateway"), serviceTypes(endpointServices, "com.amazonaws.cn-north-1.s3"));
+        assertEquals(List.of("Interface"), serviceTypes(endpointServices, "cn.com.amazonaws.cn-north-1.s3"));
+    }
+
+    /** Where the two S3 offerings share a name, the one service detail carries both types. */
+    @Test
+    void commercialS3IsOneServiceWithBothEndpointTypes() {
+        XmlPath endpointServices = given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", "ec2"))
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Version", "2016-11-15")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath();
+        List<String> s3Names = endpointServices.getList("DescribeVpcEndpointServicesResponse.serviceNameSet.item",
+                String.class).stream().filter(name -> name.endsWith(".s3")).toList();
+        assertEquals(List.of("com.amazonaws.us-east-1.s3"), s3Names);
+        assertEquals(List.of("Gateway", "Interface"), serviceTypes(endpointServices, "com.amazonaws.us-east-1.s3"));
+    }
+
+    private static List<String> serviceTypes(XmlPath endpointServices, String serviceName) {
+        return endpointServices.getList("DescribeVpcEndpointServicesResponse.serviceDetailSet.item"
+                + ".find { it.serviceName == '" + serviceName + "' }.serviceType.item.serviceType", String.class);
     }
 
     @Test

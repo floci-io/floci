@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.config;
 
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.asn1.x509.Extension;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -8,7 +11,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.Security;
+import java.security.cert.X509Certificate;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -177,6 +184,35 @@ class TlsConfigSourceCertificateReuseTest {
             "Certificate should be reused (same timestamp)");
         assertEquals(initialMetadata, newMetadata,
             "Metadata should be unchanged");
+    }
+
+    @Test
+    void legacyServerLeafWithoutKeyIdentifiersIsReissued() throws Exception {
+        System.setProperty("floci.tls.enabled", "true");
+        System.setProperty("floci.tls.self-signed", "true");
+        System.setProperty("floci.storage.persistent-path", tempDir.toString());
+        new TlsConfigSource();
+
+        Path tlsDir = tempDir.resolve("tls");
+        Path certFile = tlsDir.resolve("floci-server.crt");
+        Path keyFile = tlsDir.resolve("floci-server.key");
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
+        KeyPair keyPair = KeyPairGenerator.getInstance("RSA").generateKeyPair();
+        CertificateGenerator generator = new CertificateGenerator();
+        X509Certificate legacy = generator.signCertificate(new X500Name("CN=localhost"), keyPair.getPublic(),
+                new X500Name("CN=Floci Local CA"), ca.key(), List.of("localhost"), false,
+                CertificateGenerator.LeafUsage.SERVER, 365);
+        Files.writeString(certFile, generator.toPem(legacy));
+        Files.writeString(keyFile, generator.toPem(keyPair.getPrivate()));
+        assertNull(legacy.getExtensionValue(Extension.authorityKeyIdentifier.getId()));
+
+        new TlsConfigSource();
+
+        X509Certificate reissued = generator.parseCertificate(Files.readString(certFile));
+        assertNotEquals(legacy, reissued);
+        assertNotNull(reissued.getExtensionValue(Extension.subjectKeyIdentifier.getId()));
+        assertNotNull(reissued.getExtensionValue(Extension.authorityKeyIdentifier.getId()));
+        reissued.verify(ca.certificate().getPublicKey());
     }
 
     /**

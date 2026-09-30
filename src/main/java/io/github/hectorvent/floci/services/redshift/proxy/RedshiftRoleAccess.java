@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -85,9 +86,10 @@ final class RedshiftRoleAccess {
         }
         if (clusterAccountId != null
                 && !ROLE_TRUST_POLICY_EVALUATOR.allowsService(
-                        role.get().getAssumeRolePolicyDocument(), "redshift.amazonaws.com")) {
+                        role.get().getAssumeRolePolicyDocument(), ServicePrincipals.of("redshift"))) {
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                    "IAM Role '" + iamRoleArn + "' could not be assumed: trust policy does not allow redshift.amazonaws.com",
+                    "IAM Role '" + iamRoleArn + "' could not be assumed: trust policy does not allow "
+                            + ServicePrincipals.of("redshift"),
                     null);
         }
 

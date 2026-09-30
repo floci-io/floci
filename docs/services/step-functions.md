@@ -80,7 +80,10 @@ the parent execution's history, as on AWS. A `Parallel` records `ParallelStateSt
 `MapIterationStarted`, `MapIterationSucceeded`, `MapIterationFailed`, `MapStateSucceeded` and
 `MapStateFailed`. A Distributed `Map` records `MapRunStarted`, `MapRunSucceeded` and
 `MapRunFailed` instead. Its items are child executions and publish nothing into the parent
-history. A `Task` whose failure ends its branch also records `TaskStateAborted`.
+history. A `Task` whose failure ends its branch also records `TaskStateAborted`. When a failure
+ends a `Parallel`, each other branch that is still inside a `Task` or a `Wait` records
+`TaskStateAborted` or `WaitStateAborted`, chained to the failing branch's last event and recorded
+before `ParallelStateFailed`.
 
 Branches and iterations run concurrently, so the order in which their events interleave differs
 from run to run. Each branch chains its own events through `previousEventId`, and that chain is
@@ -107,10 +110,12 @@ When the request sets `includeExecutionData` to false, the details objects stay 
 
 A few gaps remain. `TaskStarted`, `LambdaFunctionStarted`, and `ActivityStarted` fire at
 scheduling time, not when a worker actually picks up the task. `TaskSubmitted`, which real
-AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet. When a
-branch fails, AWS records `*StateAborted` and `MapIterationAborted` events for the states its
-sibling branches were in; Floci cancels the siblings without recording them. A Distributed
-`Map` that declares no tolerance reports a failed item's own error rather than AWS's
+AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet. When an inline
+`Map` iteration fails, AWS records a `MapIterationAborted` for each iteration it cuts and the
+`*StateAborted` of the state that iteration was in, all chained to the failing iteration's last
+event and recorded before `MapIterationFailed` and `MapStateFailed`; Floci cancels the iterations
+without recording them, where a `Parallel` records the state of each branch it cuts, as above. A
+Distributed `Map` that declares no tolerance reports a failed item's own error rather than AWS's
 `States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that error. A `Map` that
 declares one reports `States.ExceedToleratedFailureThreshold`, as AWS does.
 
@@ -123,7 +128,8 @@ omitted value, uses the AWS service ceiling: 40 concurrent iterations for Inline
 
 Results remain in input order even when iterations finish out of order. If an iteration fails,
 the Map state fails promptly, cancels its active sibling iterations, and does not start queued
-iterations.
+iterations. A cancelled iteration whose `Task` was waiting on a `.sync` job stops that job, the
+way a cut `Parallel` branch does.
 
 ## Distributed Map ItemReader
 
@@ -263,7 +269,8 @@ When the `Task`'s own clock fires, the job it was waiting on is stopped the way 
 ECS task reads `stopCode: UserInitiated`, the child execution reads `ABORTED` with no error, and
 both carry the cause `The Task state in AWS Step Functions execution [<arn>] which was managing
 this resource was aborted`. A `StopExecution` that lands while the state waits ends the wait and
-stops the job with the same cause. When the execution's budget fires instead, the job is left running.
+stops the job with the same cause, and so does the execution's budget, and so does a failure in
+another branch of the `Parallel`, or in another iteration of the `Map`, that the `Task` is in.
 
 One deviation. AWS starts the `TimeoutSeconds` clock when a worker picks the task up, the instant
 it emits `ActivityStarted`. Floci emits `ActivityStarted` at schedule time, so both clocks start
@@ -427,6 +434,17 @@ integrations, and only the casing of the result tells them apart.
 `startSyncExecution` is the only one that does not fail the calling task when the child fails: the
 SDK call itself succeeded, so the task result carries `Status`, `Error` and `Cause` and the parent
 decides what to do next.
+
+The two `.sync` modes fail the calling task with `States.TaskFailed` however the child ended
+(`FAILED`, `TIMED_OUT` or `ABORTED`) and whatever its own error was, `States.Timeout` included, so
+a `Catch` on the child's own error name never takes it. The cause is the child's `DescribeExecution`
+response as JSON, PascalCase with its keys in alphabetical order: `Cause` and `Error` when the
+child has them, then `ExecutionArn`, `Input`, `InputDetails`, `Name`, `RedriveCount`,
+`RedriveStatus`, `StartDate`, `StateMachineArn`, `Status` and `StopDate`, with dates in epoch
+milliseconds and no `Output`. A child started through an alias also carries `StateMachineAliasArn`
+and `StateMachineVersionArn`, and one started through a version carries `StateMachineVersionArn`,
+each in its alphabetical place. A parent that needs the child's error reads it from there, for
+example with `States.StringToJson($.Cause)` after a `Catch`.
 
 A `Name` a Standard child already used fails the calling task with the child's collision error, named
 for the integration that raised it: `StepFunctions.ExecutionAlreadyExistsException` through
