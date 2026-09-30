@@ -421,7 +421,10 @@ public class CognitoOAuthController {
                     nonceClaim(consumedCode.nonce()), consumedCode.scopes());
             ObjectNode body = objectMapper.createObjectNode();
             body.put("access_token", (String) authentication.get("AccessToken"));
-            body.put("id_token", (String) authentication.get("IdToken"));
+            // Minted only for a grant with openid; AWS leaves the field out otherwise.
+            if (authentication.get("IdToken") instanceof String idToken) {
+                body.put("id_token", idToken);
+            }
             body.put("refresh_token", (String) authentication.get("RefreshToken"));
             body.put("expires_in", ((Number) authentication.get("ExpiresIn")).longValue());
             body.put("token_type", (String) authentication.get("TokenType"));
@@ -467,8 +470,9 @@ public class CognitoOAuthController {
 
     /**
      * The checks every authorization request passes, for managed login and federation alike. Errors
-     * are 400 JSON, including those found after redirect_uri is known to be registered, where AWS
-     * redirects the error to it instead.
+     * are 400 JSON, including most of those found after redirect_uri is known to be registered, where
+     * AWS redirects the error to it instead. A scope the client is not allowed is redirected, as AWS
+     * does.
      */
     private AuthorizationCheck checkAuthorizationRequest(ContainerRequestContext requestContext,
                                                          AuthorizationRequest request) {
@@ -496,7 +500,26 @@ public class CognitoOAuthController {
         if (pkceError != null) {
             return AuthorizationCheck.rejected(oauthError("invalid_request", pkceError));
         }
+        if (!allowsEveryScope(client, splitScopes(request.scope()))) {
+            return AuthorizationCheck.rejected(invalidScopeRedirect(request));
+        }
         return check;
+    }
+
+    private static boolean allowsEveryScope(UserPoolClient client, List<String> scopes) {
+        List<String> allowed = client.getAllowedOAuthScopes();
+        return scopes.isEmpty() || (allowed != null && allowed.containsAll(scopes));
+    }
+
+    /** AWS's redirect for a scope the client is not allowed, parameters in the order AWS sends them. */
+    private Response invalidScopeRedirect(AuthorizationRequest request) {
+        Map<String, String> parameters = new LinkedHashMap<>();
+        parameters.put("error_description", "invalid_scope");
+        if (request.state() != null) {
+            parameters.put("state", request.state());
+        }
+        parameters.put("error", "invalid_request");
+        return redirect(request.redirectUri(), parameters);
     }
 
     /** An authorization request that managed login answers, at the authorize, login, and logout endpoints. */

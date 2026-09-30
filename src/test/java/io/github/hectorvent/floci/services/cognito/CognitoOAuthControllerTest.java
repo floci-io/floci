@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -156,6 +157,24 @@ class CognitoOAuthControllerTest {
         }
     }
 
+    /** AWS redirects an unallowed scope to the callback, in this parameter order, before any provider is involved. */
+    @Test
+    void authorizeRedirectsAScopeTheClientIsNotAllowedToTheCallbackForEitherProvider() {
+        for (String provider : new String[] {null, "COGNITO", "ExampleOidc"}) {
+            Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid phone",
+                    null, provider, "s1", null, null, null);
+
+            assertEquals(302, response.getStatus());
+            assertEquals(CALLBACK_URI + "?error_description=invalid_scope&state=s1&error=invalid_request",
+                    response.getHeaderString("Location"));
+        }
+        Response withoutState = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code",
+                "aws.cognito.signin.user.admin", null, null, null, null, null, null);
+        assertEquals(CALLBACK_URI + "?error_description=invalid_scope&error=invalid_request",
+                withoutState.getHeaderString("Location"));
+        verify(federationService, never()).beginAuthorization(any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
     @Test
     void authorizeWithASessionOfThePoolRedirectsWithACodeCarryingTheNonceAndChallenge() {
         when(cognitoService.adminGetUser(POOL_ID, "session-user")).thenReturn(user("session-user"));
@@ -257,6 +276,21 @@ class CognitoOAuthControllerTest {
         assertEquals("refresh-token", body.path("refresh_token").asText());
         assertEquals(3600, body.path("expires_in").asInt());
         assertOAuthError(replay, "invalid_grant");
+    }
+
+    /** AWS leaves {@code id_token} out of the response, rather than sending it as null, without openid. */
+    @Test
+    void tokenLeavesTheIdTokenOutWhenNoneWasMinted() {
+        String code = putAuthorizationCode();
+        when(cognitoService.generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client), eq(null), any()))
+                .thenReturn(Map.of("AccessToken", "access-token", "RefreshToken", "refresh-token",
+                        "ExpiresIn", 3600, "TokenType", "Bearer"));
+
+        Response response = controller.token(null, requestContext(null), validAuthorizationCodeForm(code));
+
+        assertEquals(200, response.getStatus());
+        JsonNode body = (JsonNode) response.getEntity();
+        assertEquals(List.of("access_token", "refresh_token", "expires_in", "token_type"), fieldNames(body));
     }
 
     @Test
@@ -466,6 +500,7 @@ class CognitoOAuthControllerTest {
         result.setUserPoolId(POOL_ID);
         result.setAllowedOAuthFlowsUserPoolClient(true);
         result.setAllowedOAuthFlows(List.of("code"));
+        result.setAllowedOAuthScopes(List.of("openid", "email"));
         result.setCallbackURLs(List.of(CALLBACK_URI));
         result.setSupportedIdentityProviders(List.of("COGNITO"));
         return result;
@@ -505,6 +540,12 @@ class CognitoOAuthControllerTest {
     private static String basicAuthorization(String clientId, String clientSecret) {
         String credentials = clientId + ":" + clientSecret;
         return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static List<String> fieldNames(JsonNode body) {
+        List<String> names = new ArrayList<>();
+        body.fieldNames().forEachRemaining(names::add);
+        return names;
     }
 
     private void assertOAuthError(Response response, String error) {

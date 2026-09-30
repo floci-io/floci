@@ -1778,7 +1778,7 @@ final class CognitoAuthFlowHandler {
      *
      * <p>AWS names this trigger source {@code TokenGeneration_HostedAuth}, which it uses for sign-in
      * through the hosted UI regardless of whether the user is native or federated. {@code scopes} are
-     * the scopes the authorization request asked for, which a V2 lambda may branch on.
+     * the scopes the authorization request was granted, which a V2 lambda may branch on.
      */
     CognitoService.ClaimsOverride preTokenGenerationForHostedAuth(UserPool pool, UserPoolClient client,
                                                                   CognitoUser user, List<String> scopes) {

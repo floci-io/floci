@@ -367,7 +367,9 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
 
 1. `GET /cognito-idp/oauth2/authorize` redirects to `/cognito-idp/login` with the request's
    parameters. If the browser already has a managed login session in the pool, it skips the
-   form and redirects straight to the callback with a code, as AWS does.
+   form and redirects straight to the callback with a code, as AWS does. A `scope` the client's
+   `AllowedOAuthScopes` does not include is refused first, as on AWS, with a redirect to the
+   callback carrying `error=invalid_request`, `error_description=invalid_scope` and the `state`.
 2. `GET /cognito-idp/login` renders a plain username and password form. The form carries the
    request in hidden fields and a CSRF token that must match the `XSRF-TOKEN` cookie set with it.
 3. `POST /cognito-idp/login` checks the password as `USER_PASSWORD_AUTH` does, including
@@ -378,9 +380,11 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
 4. `POST /cognito-idp/oauth2/token` redeems the code. It invokes the pre token generation
    trigger with triggerSource `TokenGeneration_HostedAuth`, as AWS does for a hosted-UI
    sign-in, so a pool that customises its claims gets the same tokens here as from
-   `InitiateAuth`. The trigger is told the scopes the request asked for, narrowed to the
-   client's `AllowedOAuthScopes`, since the authorize endpoint does not check them itself. The
-   ID token carries the request's `nonce`, which the trigger cannot override.
+   `InitiateAuth`. The access token's `scope` is the scopes the request asked for, or every
+   scope in the client's `AllowedOAuthScopes` when it asked for none, as on AWS, and the
+   trigger is told the same scopes. A V2 trigger's `scopesToAdd` and `scopesToSuppress` apply
+   on top of them. The ID token is issued only when the scopes include `openid`, and it carries
+   the request's `nonce`, which the trigger cannot override.
 5. `GET /cognito-idp/logout?client_id=...&logout_uri=...` ends the session and redirects to
    `logout_uri`, which must be one of the client's `LogoutURLs`. With `redirect_uri` and
    `response_type=code` instead of `logout_uri`, it ends the session and redirects to the
@@ -399,7 +403,8 @@ Differences from AWS:
   confirmed, sees an error on the form instead. Sign-up, forgot-password, MFA and passkey
   pages are not served, and `prompt`, `login_hint`, `lang` and `idp_identifier` are ignored.
 - **Errors are JSON.** An authorization request error returns `400` with an OAuth error body,
-  even after `redirect_uri` is validated, where AWS redirects the error to the callback.
+  even after `redirect_uri` is validated, where AWS redirects the error to the callback. The
+  exception is an unallowed `scope`, which is redirected as on AWS.
 - **Relative redirect.** The redirect from `/oauth2/authorize` to the sign-in form has a
   relative `Location`, where AWS's is absolute.
 - **One session cookie per host.** Floci's own host serves every pool, so signing in to a
@@ -450,7 +455,8 @@ curl -s -b jar -o /dev/null -w '%{http_code} %{redirect_url}\n' \
 - It requires `AllowedOAuthFlowsUserPoolClient=true` and `AllowedOAuthFlows=["client_credentials"]`.
 - It doesn't require a Cognito domain.
 - Client-credentials returns only `access_token`, `token_type`, and `expires_in`; authorization-code
-  redemption returns the Cognito access, ID and refresh token set.
+  redemption returns the Cognito access and refresh tokens, and an ID token when the granted scopes
+  include `openid`.
 - It validates requested OAuth scopes against the app client's `AllowedOAuthScopes` and the pool's registered resource-server scopes.
 - It advertises the prefixed token endpoint in `/{userPoolId}/.well-known/openid-configuration`, or
   `https://<domain>/oauth2/token` when the pool has a custom domain (see Custom domains above).
@@ -486,8 +492,8 @@ literal `Username` you supply, unchanged.
 Floci mirrors AWS's access-token / ID-token split:
 
 - **Access token:** `sub`, `username` (the UUID), `scope` (`aws.cognito.signin.user.admin` for API
-  sign-in), `client_id`, `cognito:groups`, `jti`/`origin_jti`. It does **not** carry `cognito:username`
-  or user attributes like `email`.
+  sign-in, the granted OAuth scopes for an authorization code), `client_id`, `cognito:groups`,
+  `jti`/`origin_jti`. It does **not** carry `cognito:username` or user attributes like `email`.
 - **ID token:** `sub`, `cognito:username`, `aud`, and readable user attributes (`email`,
   `email_verified`, `phone_number`, `custom:*`, ...). Attribute claims are filtered by the app client's
   `ReadAttributes` (an unset/empty list means all attributes are readable).

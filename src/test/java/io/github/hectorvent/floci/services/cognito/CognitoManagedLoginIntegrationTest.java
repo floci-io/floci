@@ -16,9 +16,11 @@ import org.mockito.ArgumentCaptor;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -39,6 +41,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -60,6 +64,7 @@ class CognitoManagedLoginIntegrationTest {
     private static final Pattern HIDDEN_FIELD = Pattern.compile("<input type=\"hidden\" name=\"([^\"]*)\" value=\"([^\"]*)\">");
     private static final Pattern FORM_ACTION = Pattern.compile("<form method=\"post\" action=\"([^\"]*)\">");
     private static final String PRE_TOKEN_GENERATION_ARN = "arn:aws:lambda:::pre-token-generation";
+    private static final String ADMIN_SCOPE = "aws.cognito.signin.user.admin";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** Only the PreTokenGeneration trigger is configured on any pool here, so nothing else invokes it. */
@@ -236,38 +241,104 @@ class CognitoManagedLoginIntegrationTest {
     }
 
     /**
-     * The authorize endpoint stores the scopes the request named without checking them against the
-     * client's AllowedOAuthScopes, so a request can carry one the client may not use. A V2 trigger can
-     * grant claims or scopes from what it is told was requested, so an unallowed scope must not reach it.
+     * AWS refuses a scope outside the client's AllowedOAuthScopes at the authorize endpoint, before
+     * the sign-in form and even for a browser that is already signed in, by redirecting to the
+     * callback with {@code error=invalid_request} and {@code error_description=invalid_scope}. No
+     * code is issued, so a V2 trigger never hears of the scope.
      */
     @Test
-    void aScopeTheClientIsNotAllowedDoesNotReachTheTrigger() throws Exception {
-        Pool pool = newPoolWithPreTokenGenerationTrigger();
-        Map<String, String> query = authorizeRequest(pool.clientId());
-        query.put("scope", "openid email admin/superuser");
-        ArgumentCaptor<byte[]> event = ArgumentCaptor.forClass(byte[].class);
-        when(lambdaService.invoke(anyString(), eq(PRE_TOKEN_GENERATION_ARN), event.capture(), any()))
-                .thenReturn(triggerResponse(Map.of()));
+    void aScopeTheClientIsNotAllowedIsRedirectedToTheCallbackAsInvalidScope() throws Exception {
+        Pool withoutAdmin = newPoolWithPreTokenGenerationTrigger();
+        Pool withAdmin = newPool(List.of("openid", "email", ADMIN_SCOPE));
+        String session = signIn(null, withoutAdmin, authorizeRequest(withoutAdmin.clientId())).getCookie("cognito");
+        Map<String, Pool> requests = new LinkedHashMap<>();
+        requests.put("openid " + ADMIN_SCOPE, withoutAdmin);
+        requests.put("openid email admin/superuser", withoutAdmin);
+        requests.put("openid phone", withAdmin);
 
-        Response tokens = redeem(null, pool.clientId(), code(signIn(null, pool, query)), VERIFIER);
+        for (Map.Entry<String, Pool> request : requests.entrySet()) {
+            Map<String, String> query = withField(authorizeRequest(request.getValue().clientId()), "scope",
+                    request.getKey());
+            for (String sessionCookie : new String[] {null, session}) {
+                String location = browserGet(null, "/cognito-idp/oauth2/authorize", query, sessionCookie)
+                        .then().statusCode(302).extract().header("Location");
 
-        tokens.then().statusCode(200);
-        assertEquals(List.of("openid", "email"),
-                MAPPER.convertValue(MAPPER.readTree(event.getValue()).path("request").path("scopes"), List.class),
-                "admin/superuser is not in the client's AllowedOAuthScopes, so the trigger never sees it");
+                assertTrue(location.startsWith(CALLBACK + "?"), location);
+                assertEquals(Map.of("error", "invalid_request", "error_description", "invalid_scope",
+                        "state", "client-state"), queryOf(location), "scope=" + request.getKey());
+            }
+        }
+        verify(lambdaService, never()).invoke(anyString(), anyString(), any(byte[].class), any());
+    }
+
+    /** AWS: the requested scopes, or every scope the client allows when the request names none. */
+    @Test
+    void theAccessTokenCarriesTheRequestedScopesOrEveryAllowedScopeWhenNoneAreRequested() throws Exception {
+        Pool pool = newPool(List.of("openid", "email", ADMIN_SCOPE));
+        Map<String, Set<String>> expected = new LinkedHashMap<>();
+        expected.put("openid email", Set.of("openid", "email"));
+        expected.put("openid email " + ADMIN_SCOPE, Set.of("openid", "email", ADMIN_SCOPE));
+        expected.put(null, Set.of("openid", "email", ADMIN_SCOPE));
+
+        for (Map.Entry<String, Set<String>> request : expected.entrySet()) {
+            Map<String, String> query = withField(authorizeRequest(pool.clientId()), "scope", request.getKey());
+
+            Response tokens = redeem(null, pool.clientId(), code(signIn(null, pool, query)), VERIFIER);
+
+            tokens.then().statusCode(200);
+            assertEquals(request.getValue(), scopes(tokens.path("access_token")), "scope=" + request.getKey());
+            assertEquals(Set.of("access_token", "id_token", "refresh_token", "expires_in", "token_type"),
+                    fieldNames(tokens), "scope=" + request.getKey());
+        }
+    }
+
+    /** AWS issues an ID token only for a request with {@code openid}. */
+    @Test
+    void withoutOpenidTheTokenEndpointIssuesNoIdToken() throws Exception {
+        Pool pool = newPool(List.of("openid", "email", ADMIN_SCOPE));
+
+        for (String requested : new String[] {"email", ADMIN_SCOPE}) {
+            Map<String, String> query = withField(authorizeRequest(pool.clientId()), "scope", requested);
+
+            Response tokens = redeem(null, pool.clientId(), code(signIn(null, pool, query)), VERIFIER);
+
+            tokens.then().statusCode(200);
+            assertEquals(Set.of("access_token", "refresh_token", "expires_in", "token_type"), fieldNames(tokens),
+                    "scope=" + requested);
+            assertEquals(Set.of(requested), scopes(tokens.path("access_token")));
+        }
     }
 
     /**
-     * GetUserAuthFactors needs {@code aws.cognito.signin.user.admin} in the access token's scope.
-     * Floci stamps that scope on every code-grant access token whatever the request asked for, so a
-     * V2 trigger reshapes this token's scope to the {@code openid email} the request named.
+     * A V2 trigger's {@code scopesToAdd} and {@code scopesToSuppress} apply on top of the scopes the
+     * request was granted, so a trigger can still give a token the scope that API calls need.
+     */
+    @Test
+    void preTokenGenerationV2ScopeChangesApplyOnTopOfTheGrantedScopes() throws Exception {
+        Pool pool = newPoolWithPreTokenGenerationTrigger();
+        when(lambdaService.invoke(anyString(), eq(PRE_TOKEN_GENERATION_ARN), any(byte[].class), any()))
+                .thenReturn(triggerResponse(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "accessTokenGeneration", Map.of(
+                                "scopesToSuppress", List.of("email"),
+                                "scopesToAdd", List.of(ADMIN_SCOPE))))));
+
+        Response tokens = redeem(null, pool.clientId(),
+                code(signIn(null, pool, authorizeRequest(pool.clientId()))), VERIFIER);
+
+        tokens.then().statusCode(200);
+        String accessToken = tokens.path("access_token");
+        assertEquals(Set.of("openid", ADMIN_SCOPE), scopes(accessToken));
+        cognitoAction("GetUser", "{\"AccessToken\":\"%s\"}".formatted(accessToken)).then().statusCode(200);
+    }
+
+    /**
+     * GetUserAuthFactors needs {@code aws.cognito.signin.user.admin} in the access token's scope,
+     * which a request for {@code openid email} is not granted.
      */
     @Test
     void codeGrantAccessTokenWithoutTheAdminScopeCannotReadAuthFactors() throws Exception {
-        String accessToken = codeGrantAccessTokenReshapedByTrigger(Map.of(
-                "scopesToAdd", List.of("openid", "email"),
-                "scopesToSuppress", List.of("aws.cognito.signin.user.admin")));
-        assertEquals("openid email", jwtPayload(accessToken).path("scope").asText());
+        String accessToken = accessToken(newPool(), "openid email");
+        assertEquals(Set.of("openid", "email"), scopes(accessToken));
 
         cognitoAction("GetUserAuthFactors", """
                 {"AccessToken":"%s"}
@@ -277,11 +348,11 @@ class CognitoManagedLoginIntegrationTest {
                 .body("message", equalTo("Access Token does not have required scopes"));
     }
 
-    /** A trigger that suppresses the token's only scope leaves no scope claim, which grants nothing. */
+    /** A trigger that suppresses every scope the request was granted leaves no scope claim, which grants nothing. */
     @Test
     void codeGrantAccessTokenWithEveryScopeSuppressedCannotReadAuthFactors() throws Exception {
         String accessToken = codeGrantAccessTokenReshapedByTrigger(Map.of(
-                "scopesToSuppress", List.of("aws.cognito.signin.user.admin")));
+                "scopesToSuppress", List.of("openid", "email")));
         assertFalse(jwtPayload(accessToken).has("scope"));
 
         cognitoAction("GetUserAuthFactors", """
@@ -295,7 +366,7 @@ class CognitoManagedLoginIntegrationTest {
     @Test
     void codeGrantAccessTokenWithEveryScopeSuppressedCannotVerifyAnAttribute() throws Exception {
         String accessToken = codeGrantAccessTokenReshapedByTrigger(Map.of(
-                "scopesToSuppress", List.of("aws.cognito.signin.user.admin")));
+                "scopesToSuppress", List.of("openid", "email")));
         assertFalse(jwtPayload(accessToken).has("scope"));
 
         cognitoAction("VerifyUserAttribute", """
@@ -308,15 +379,8 @@ class CognitoManagedLoginIntegrationTest {
 
     @Test
     void codeGrantAccessTokenWithTheAdminScopeReadsAuthFactors() throws Exception {
-        String poolId = cognitoJson("CreateUserPool", "{\"PoolName\":\"ManagedLoginAdminScopePool\"}")
-                .path("UserPool").path("Id").asText();
-        Pool pool = withUser(poolId,
-                codeClient(poolId, "\"openid\",\"email\",\"aws.cognito.signin.user.admin\""),
-                "user-" + System.nanoTime());
-        Map<String, String> query = authorizeRequest(pool.clientId());
-        query.put("scope", "openid email aws.cognito.signin.user.admin");
-        String accessToken = redeem(null, pool.clientId(), code(signIn(null, pool, query)), VERIFIER)
-                .path("access_token");
+        Pool pool = newPool(List.of("openid", "email", ADMIN_SCOPE));
+        String accessToken = accessToken(pool, "openid email " + ADMIN_SCOPE);
 
         cognitoAction("GetUserAuthFactors", """
                 {"AccessToken":"%s"}
@@ -471,7 +535,7 @@ class CognitoManagedLoginIntegrationTest {
                 """.formatted(poolId));
         String clientId = cognitoJson("CreateUserPoolClient", """
                 {"UserPoolId":"%s","ClientName":"federated-only","AllowedOAuthFlowsUserPoolClient":true,
-                 "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":["openid"],"CallbackURLs":["%s"],
+                 "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":["openid","email"],"CallbackURLs":["%s"],
                  "SupportedIdentityProviders":["ExampleOidc"]}
                 """.formatted(poolId, CALLBACK)).path("UserPoolClient").path("ClientId").asText();
         Map<String, String> query = authorizeRequest(clientId);
@@ -562,6 +626,26 @@ class CognitoManagedLoginIntegrationTest {
                 .then().statusCode(400).body("error", equalTo("invalid_client"));
     }
 
+    @Test
+    void customDomainScopesTheCodeGrantTheSameWay() throws Exception {
+        Pool pool = newPool(List.of("openid", "email", ADMIN_SCOPE));
+        String domain = "managed-login-scope-" + System.nanoTime() + ".teos.localhost.floci.io";
+        cognitoJson("CreateUserPoolDomain", customDomain(domain, pool.poolId(), requestCertificate(domain)));
+
+        Response tokens = redeem(domain, pool.clientId(),
+                code(signIn(domain, pool, withField(authorizeRequest(pool.clientId()), "scope", "email"))), VERIFIER);
+
+        tokens.then().statusCode(200);
+        assertEquals(Set.of("access_token", "refresh_token", "expires_in", "token_type"), fieldNames(tokens));
+        assertEquals(Set.of("email"), scopes(tokens.path("access_token")));
+        String refused = browserGet(domain, "/oauth2/authorize",
+                withField(authorizeRequest(pool.clientId()), "scope", "openid phone"), null)
+                .then().statusCode(302).extract().header("Location");
+        assertTrue(refused.startsWith(CALLBACK + "?"), refused);
+        assertEquals(Map.of("error", "invalid_request", "error_description", "invalid_scope", "state", "client-state"),
+                queryOf(refused));
+    }
+
     /** Without a custom domain Host, /login stays S3's path-style bucket route. */
     @Test
     void loginOnFlocisOwnHostIsNotManagedLogin() {
@@ -585,8 +669,12 @@ class CognitoManagedLoginIntegrationTest {
     }
 
     private static Pool newPool() throws Exception {
+        return newPool(List.of("openid", "email"));
+    }
+
+    private static Pool newPool(List<String> allowedScopes) throws Exception {
         String poolId = cognitoJson("CreateUserPool", "{\"PoolName\":\"ManagedLoginPool\"}").path("UserPool").path("Id").asText();
-        return withUser(poolId, codeClient(poolId), "user-" + System.nanoTime());
+        return withUser(poolId, codeClient(poolId, allowedScopes), "user-" + System.nanoTime());
     }
 
     private static Pool newPoolWithPreTokenGenerationTrigger() throws Exception {
@@ -615,16 +703,16 @@ class CognitoManagedLoginIntegrationTest {
     }
 
     private static String codeClient(String poolId) throws Exception {
-        return codeClient(poolId, "\"openid\",\"email\"");
+        return codeClient(poolId, List.of("openid", "email"));
     }
 
-    /** {@code allowedScopes} is the body of the AllowedOAuthScopes JSON array. */
-    private static String codeClient(String poolId, String allowedScopes) throws Exception {
+    private static String codeClient(String poolId, List<String> allowedScopes) throws Exception {
         return cognitoJson("CreateUserPoolClient", """
                 {"UserPoolId":"%s","ClientName":"managed-login","AllowedOAuthFlowsUserPoolClient":true,
-                 "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":[%s],"CallbackURLs":["%s"],
+                 "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":%s,"CallbackURLs":["%s"],
                  "LogoutURLs":["%s"],"SupportedIdentityProviders":["COGNITO"],"ExplicitAuthFlows":["ALLOW_REFRESH_TOKEN_AUTH"]}
-                """.formatted(poolId, allowedScopes, CALLBACK, SIGNED_OUT)).path("UserPoolClient").path("ClientId").asText();
+                """.formatted(poolId, MAPPER.writeValueAsString(allowedScopes), CALLBACK, SIGNED_OUT))
+                .path("UserPoolClient").path("ClientId").asText();
     }
 
     private static Pool withUser(String poolId, String clientId, String username) throws Exception {
@@ -723,6 +811,13 @@ class CognitoManagedLoginIntegrationTest {
         return request.when().post(host == null ? "/cognito-idp/oauth2/token" : "/oauth2/token");
     }
 
+    /** An access token for the pool's user from a fresh sign-in that requested {@code scope}. */
+    private static String accessToken(Pool pool, String scope) {
+        Map<String, String> query = withField(authorizeRequest(pool.clientId()), "scope", scope);
+        return redeem(null, pool.clientId(), code(signIn(null, pool, query)), VERIFIER)
+                .then().statusCode(200).extract().path("access_token");
+    }
+
     private static String code(Response callbackRedirect) {
         callbackRedirect.then().statusCode(302);
         String code = queryOf(callbackRedirect.getHeader("Location")).get("code");
@@ -731,6 +826,17 @@ class CognitoManagedLoginIntegrationTest {
     }
 
     // ──────────────────────────── Parsing ────────────────────────────
+
+    /** The access token's scopes, as a set: AWS does not promise their order. */
+    private static Set<String> scopes(String accessToken) throws Exception {
+        return Set.of(jwtPayload(accessToken).path("scope").asText().split(" "));
+    }
+
+    private static Set<String> fieldNames(Response tokens) throws Exception {
+        Set<String> names = new HashSet<>();
+        MAPPER.readTree(tokens.asString()).fieldNames().forEachRemaining(names::add);
+        return names;
+    }
 
     /** The Set-Cookie header that sets {@code name}, or null. */
     private static String setCookie(Response response, String name) {
