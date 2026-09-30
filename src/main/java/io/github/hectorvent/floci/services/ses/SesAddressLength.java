@@ -96,22 +96,32 @@ final class SesAddressLength {
 
     /**
      * Splits an RFC 5322 address-list header body at the commas that separate its addresses,
-     * ignoring commas inside a quoted display name or an angle-bracketed address. A group's
-     * {@code name:} prefix and closing semicolon are dropped, leaving its member addresses.
+     * ignoring commas inside a quoted display name, a comment or an angle-bracketed address. A
+     * quote inside a comment is literal. A group's {@code name:} prefix and closing semicolon are
+     * dropped, leaving its member addresses.
      */
     static List<String> splitAddressList(String body) {
         List<String> addresses = new ArrayList<>();
         StringBuilder current = new StringBuilder();
         boolean quoted = false;
         boolean angled = false;
+        int commentDepth = 0;
         for (int i = 0; i < body.length(); i++) {
             char c = body.charAt(i);
-            if (quoted && c == '\\' && i + 1 < body.length()) {
+            if ((quoted || commentDepth > 0) && c == '\\' && i + 1 < body.length()) {
                 current.append(c).append(body.charAt(++i));
                 continue;
             }
-            if (c == '"') {
+            if (commentDepth > 0) {
+                if (c == '(') {
+                    commentDepth++;
+                } else if (c == ')') {
+                    commentDepth--;
+                }
+            } else if (c == '"') {
                 quoted = !quoted;
+            } else if (!quoted && c == '(') {
+                commentDepth = 1;
             } else if (!quoted && c == '<') {
                 angled = true;
             } else if (!quoted && c == '>') {

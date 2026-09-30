@@ -192,6 +192,22 @@ class SesServiceAddressLengthTest {
     }
 
     @Test
+    void rawSend_quoteInsideCommentDoesNotJoinAddresses() {
+        String toHeader = address(200, 'a') + " (it\"s), " + address(200, 'b');
+
+        assertDoesNotThrow(() -> service.sendEmail(request(null).toAddresses(List.of())
+                .content(raw(SENDER, toHeader, "")).build()));
+    }
+
+    @Test
+    void rawSend_otherAddressHeadersAreNotChecked() {
+        String tooLong = address(330, 'a');
+
+        assertDoesNotThrow(() -> service.sendEmail(request(SENDER).content(raw(SENDER, TO,
+                "Sender: " + tooLong + "\r\nResent-To: " + tooLong + "\r\n")).build()));
+    }
+
+    @Test
     void rawSend_fromHeaderDisplayNameIsMeasuredWithoutQuotes() {
         assertDoesNotThrow(() -> service.sendEmail(request(null)
                 .content(raw(quotedName(320), TO, "")).build()));

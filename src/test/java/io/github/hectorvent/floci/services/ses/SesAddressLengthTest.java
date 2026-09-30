@@ -148,6 +148,18 @@ class SesAddressLengthTest {
     }
 
     @Test
+    void splitAddressListIgnoresQuotesAndCommasInsideComments() {
+        assertEquals(List.of("a@b.com (it\"s, (nested)) ", " c@d.com"),
+                SesAddressLength.splitAddressList("a@b.com (it\"s, (nested)) , c@d.com"));
+    }
+
+    @Test
+    void splitAddressListKeepsParenthesesInsideQuotedNames() {
+        assertEquals(List.of("\"a (b\" <x@y.com>", " z@y.com"),
+                SesAddressLength.splitAddressList("\"a (b\" <x@y.com>, z@y.com"));
+    }
+
+    @Test
     void splitAddressListDropsGroupSyntax() {
         assertEquals(List.of(" a@b.com", " c@d.com"),
                 SesAddressLength.splitAddressList("team: a@b.com, c@d.com;"));
