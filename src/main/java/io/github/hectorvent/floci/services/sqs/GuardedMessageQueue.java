@@ -159,12 +159,17 @@ class GuardedMessageQueue {
         }
     }
 
+    /** Finds the message by the id in the handle, so an older handle of the message still works. */
     Optional<Message> removeByReceiptHandle(String receiptHandle) {
+        ReceiptHandle parsed = ReceiptHandle.parse(receiptHandle);
+        if (parsed == null) {
+            return Optional.empty();
+        }
         try (Guard _ = hold()) {
             Message removed = null;
             for (Iterator<Message> it = messages.iterator(); it.hasNext(); ) {
                 Message m = it.next();
-                if (receiptHandle.equals(m.getReceiptHandle())) {
+                if (parsed.messageId().equals(m.getMessageId())) {
                     removed = m;
                     it.remove();
                     break;
@@ -178,9 +183,13 @@ class GuardedMessageQueue {
     }
 
     boolean changeVisibility(String receiptHandle, int visibilityTimeout) {
+        ReceiptHandle parsed = ReceiptHandle.parse(receiptHandle);
+        if (parsed == null) {
+            return false;
+        }
         try (Guard _ = hold()) {
             for (Message msg : messages) {
-                if (receiptHandle.equals(msg.getReceiptHandle())) {
+                if (parsed.messageId().equals(msg.getMessageId())) {
                     msg.setVisibleAt(Instant.now().plusSeconds(visibilityTimeout));
                     persist();
                     return true;

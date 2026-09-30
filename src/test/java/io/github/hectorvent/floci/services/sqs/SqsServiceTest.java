@@ -2264,6 +2264,54 @@ class SqsServiceTest {
         assertEquals("The request must contain the parameter ReceiptHandle.", results.get(0).errorMessage());
     }
 
+    @Test
+    void deletingAMessageThatIsAlreadyGoneSucceeds() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-gone", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        String handle = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).get(0).getReceiptHandle();
+        sqsService.deleteMessage(queue.getQueueUrl(), handle, region);
+
+        assertDoesNotThrow(() -> sqsService.deleteMessage(queue.getQueueUrl(), handle, region));
+        assertDoesNotThrow(() -> sqsService.deleteMessageInBatch(queue.getQueueUrl(), handle, region));
+    }
+
+    @Test
+    void changingVisibilityOfAMessageThatIsGoneIsInvalid() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-gone-visibility", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        String handle = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).get(0).getReceiptHandle();
+        sqsService.deleteMessage(queue.getQueueUrl(), handle, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.changeMessageVisibility(queue.getQueueUrl(), handle, 10, region));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Value " + handle + " for parameter ReceiptHandle is invalid. Reason: Message does not exist "
+                + "or is not available for visibility timeout change.", ex.getMessage());
+
+        List<SqsService.BatchResultEntry> results = sqsService.changeMessageVisibilityBatch(queue.getQueueUrl(),
+                List.of(new SqsService.ChangeVisibilityBatchEntry("g", handle, 10)), region);
+        assertEquals("ReceiptHandleIsInvalid", results.get(0).errorCode());
+        assertEquals("Message does not exist or is not available for visibility timeout change",
+                results.get(0).errorMessage());
+    }
+
+    @Test
+    void standardQueueAcceptsAnOlderReceiptHandleOfTheMessage() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-stale", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        String older = sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0, region).get(0).getReceiptHandle();
+        String newer = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).get(0).getReceiptHandle();
+        assertNotEquals(older, newer);
+
+        sqsService.changeMessageVisibility(queue.getQueueUrl(), older, 30, region);
+        sqsService.deleteMessage(queue.getQueueUrl(), older, region);
+
+        assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty());
+    }
+
     private void useReceiptHandle(String operation, String queueUrl, String receiptHandle, String region) {
         if ("delete".equals(operation)) {
             sqsService.deleteMessage(queueUrl, receiptHandle, region);

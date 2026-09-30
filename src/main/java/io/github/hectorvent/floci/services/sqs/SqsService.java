@@ -1261,9 +1261,10 @@ public class SqsService implements Resettable, ResourceProvider {
 
         Optional<Message> removed = getOrCreateQueue(storageKey).removeByReceiptHandle(receiptHandle);
 
+        // AWS reports success for a message that is already gone.
         if (removed.isEmpty()) {
-            throw new AwsException("ReceiptHandleIsInvalid",
-                    "The input receipt handle is not a valid receipt handle.", 400);
+            LOG.debugv("No message for receipt handle {0}", receiptHandle);
+            return;
         }
         LOG.debugv("Deleted message with receipt handle {0}", receiptHandle);
         if (LOG.isTraceEnabled()) {
@@ -1285,9 +1286,17 @@ public class SqsService implements Resettable, ResourceProvider {
 
         boolean found = getOrCreateQueue(storageKey).changeVisibility(receiptHandle, visibilityTimeout);
         if (!found) {
-            throw new AwsException("ReceiptHandleIsInvalid",
-                    "The input receipt handle is not a valid receipt handle.", 400);
+            throw invalidReceiptHandle(receiptHandle,
+                    "Message does not exist or is not available for visibility timeout change", inBatch);
         }
+    }
+
+    private static AwsException invalidReceiptHandle(String receiptHandle, String reason, boolean inBatch) {
+        if (inBatch) {
+            return new AwsException("ReceiptHandleIsInvalid", reason, 400);
+        }
+        return new AwsException("InvalidParameterValue",
+                "Value " + receiptHandle + " for parameter ReceiptHandle is invalid. Reason: " + reason + ".", 400);
     }
 
     /** A batch entry reports every receipt handle error under the ReceiptHandleIsInvalid code. */
