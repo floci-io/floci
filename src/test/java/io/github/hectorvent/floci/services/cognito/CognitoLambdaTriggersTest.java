@@ -711,6 +711,25 @@ class CognitoLambdaTriggersTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void preTokenGenerationV2SuppressingEveryScopeRemovesTheScopeClaim() throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "accessTokenGeneration", Map.of(
+                                "scopesToSuppress", List.of("aws.cognito.signin.user.admin"))))));
+
+        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        String accessToken = (String) ((Map<String, Object>) result.get("AuthenticationResult")).get("AccessToken");
+
+        Map<String, Object> claims = MAPPER.readValue(decodeJwtPayload(accessToken), new TypeReference<>() {});
+        assertFalse(claims.containsKey("scope"), "suppressing the only scope leaves no scope claim: " + claims);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void preTokenGenerationV2ResolvesArnFromPreTokenGenerationConfigKey() {
         UserPool pool = createPoolWithLambdaConfig(Map.of(
                 "PreTokenGenerationConfig", Map.of(

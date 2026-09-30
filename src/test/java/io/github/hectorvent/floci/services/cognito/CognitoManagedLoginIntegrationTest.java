@@ -264,18 +264,42 @@ class CognitoManagedLoginIntegrationTest {
      */
     @Test
     void codeGrantAccessTokenWithoutTheAdminScopeCannotReadAuthFactors() throws Exception {
-        Pool pool = newPoolWithPreTokenGenerationTrigger();
-        when(lambdaService.invoke(anyString(), eq(PRE_TOKEN_GENERATION_ARN), any(), any()))
-                .thenReturn(triggerResponse(Map.of("claimsAndScopeOverrideDetails", Map.of(
-                        "accessTokenGeneration", Map.of(
-                                "scopesToAdd", List.of("openid", "email"),
-                                "scopesToSuppress", List.of("aws.cognito.signin.user.admin"))))));
-        String accessToken = redeem(null, pool.clientId(),
-                code(signIn(null, pool, authorizeRequest(pool.clientId()))), VERIFIER).path("access_token");
+        String accessToken = codeGrantAccessTokenReshapedByTrigger(Map.of(
+                "scopesToAdd", List.of("openid", "email"),
+                "scopesToSuppress", List.of("aws.cognito.signin.user.admin")));
         assertEquals("openid email", jwtPayload(accessToken).path("scope").asText());
 
         cognitoAction("GetUserAuthFactors", """
                 {"AccessToken":"%s"}
+                """.formatted(accessToken))
+                .then().statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"))
+                .body("message", equalTo("Access Token does not have the required scope"));
+    }
+
+    /** A trigger that suppresses the token's only scope leaves no scope claim, which grants nothing. */
+    @Test
+    void codeGrantAccessTokenWithEveryScopeSuppressedCannotReadAuthFactors() throws Exception {
+        String accessToken = codeGrantAccessTokenReshapedByTrigger(Map.of(
+                "scopesToSuppress", List.of("aws.cognito.signin.user.admin")));
+        assertFalse(jwtPayload(accessToken).has("scope"));
+
+        cognitoAction("GetUserAuthFactors", """
+                {"AccessToken":"%s"}
+                """.formatted(accessToken))
+                .then().statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"))
+                .body("message", equalTo("Access Token does not have the required scope"));
+    }
+
+    @Test
+    void codeGrantAccessTokenWithEveryScopeSuppressedCannotVerifyAnAttribute() throws Exception {
+        String accessToken = codeGrantAccessTokenReshapedByTrigger(Map.of(
+                "scopesToSuppress", List.of("aws.cognito.signin.user.admin")));
+        assertFalse(jwtPayload(accessToken).has("scope"));
+
+        cognitoAction("VerifyUserAttribute", """
+                {"AccessToken":"%s","AttributeName":"email","Code":"123456"}
                 """.formatted(accessToken))
                 .then().statusCode(400)
                 .body("__type", equalTo("NotAuthorizedException"))
@@ -570,6 +594,19 @@ class CognitoManagedLoginIntegrationTest {
                 {"PoolName":"ManagedLoginTriggerPool","LambdaConfig":{"PreTokenGeneration":"%s"}}
                 """.formatted(PRE_TOKEN_GENERATION_ARN)).path("UserPool").path("Id").asText();
         return withUser(poolId, codeClient(poolId), "user-" + System.nanoTime());
+    }
+
+    /**
+     * Signs a new pool's user in through the code grant, with a V2 PreTokenGeneration trigger
+     * answering {@code accessTokenGeneration}, and returns the access token it mints.
+     */
+    private String codeGrantAccessTokenReshapedByTrigger(Map<String, Object> accessTokenGeneration) throws Exception {
+        Pool pool = newPoolWithPreTokenGenerationTrigger();
+        when(lambdaService.invoke(anyString(), eq(PRE_TOKEN_GENERATION_ARN), any(), any()))
+                .thenReturn(triggerResponse(Map.of("claimsAndScopeOverrideDetails",
+                        Map.of("accessTokenGeneration", accessTokenGeneration))));
+        return redeem(null, pool.clientId(),
+                code(signIn(null, pool, authorizeRequest(pool.clientId()))), VERIFIER).path("access_token");
     }
 
     /** A successful trigger invocation returning {@code response} as the Lambda's payload. */

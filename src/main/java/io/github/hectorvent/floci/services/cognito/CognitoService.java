@@ -3705,7 +3705,11 @@ public class CognitoService implements ResourceProvider {
             if (override.scopesToAdd() != null) {
                 for (String s : override.scopesToAdd()) if (!current.contains(s)) current.add(s);
             }
-            if (!current.isEmpty()) claims.put("scope", String.join(" ", current));
+            if (current.isEmpty()) {
+                claims.remove("scope");
+            } else {
+                claims.put("scope", String.join(" ", current));
+            }
         }
     }
 
@@ -4588,38 +4592,39 @@ public class CognitoService implements ResourceProvider {
 
 
     /**
-     * Extracts the space-separated {@code scope} claim from an already-verified access token
-     * (call after {@link #verifyAccessToken}). {@code null} means no scope claim at all, which
-     * every token this simulator currently issues also is not the case for access tokens (see
-     * {@code generateSignedJwt}, which always sets a default scope) but a caller-suppressed
-     * scope list still needs to be tolerated as "no restriction modeled" rather than treated the
-     * same as an empty, restrictive list.
+     * The scopes in the space-separated {@code scope} claim of an already-verified access token
+     * (call after {@link #verifyAccessToken}), empty when the claim is absent or blank. Every access
+     * token Floci mints sets the claim (see {@code generateSignedJwt}); it is missing only when a
+     * PreTokenGeneration trigger removed it, and such a token grants no scope.
      */
     private Set<String> extractScopesFromToken(String token) {
         try {
             String[] parts = token.split("\\.", -1);
             JsonNode claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
             String scope = textClaim(claims, "scope");
-            if (scope == null || scope.isBlank()) return null;
             Set<String> scopes = new HashSet<>();
+            if (scope == null) {
+                return scopes;
+            }
             for (String s : scope.split(" ")) {
                 if (!s.isBlank()) scopes.add(s);
             }
             return scopes;
         } catch (Exception e) {
-            return null;
+            LOG.debug("Could not read the scope claim of an access token", e);
+            return Set.of();
         }
     }
 
     /**
      * AWS requires an access token carrying the given scope for some operations (for example
-     * VerifyUserAttribute requires aws.cognito.signin.user.admin). Call after
-     * {@link #verifyAccessToken}, which already confirms the token is a valid, unexpired access
-     * token; this only adds the scope check on top.
+     * VerifyUserAttribute requires aws.cognito.signin.user.admin), and refuses a token with no
+     * scope claim. Call after {@link #verifyAccessToken}, which already confirms the token is a
+     * valid, unexpired access token; this only adds the scope check on top.
      */
     void requireScope(String accessToken, String requiredScope) {
         Set<String> scopes = extractScopesFromToken(accessToken);
-        if (scopes != null && !scopes.contains(requiredScope)) {
+        if (!scopes.contains(requiredScope)) {
             throw new AwsException("NotAuthorizedException", "Access Token does not have the required scope", 400);
         }
     }

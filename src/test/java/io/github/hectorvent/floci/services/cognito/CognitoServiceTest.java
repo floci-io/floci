@@ -5001,6 +5001,22 @@ class CognitoServiceTest {
         assertEquals("Access Token does not have the required scope", ex.getMessage());
     }
 
+    @Test
+    void getUserAuthFactors_accessTokenWithNoScopeClaim_isRejected() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        String accessToken = service.generateSignedJwt(user, pool, "access", client,
+                new CognitoService.ClaimsOverride(null, null, null, List.of("scope"),
+                        null, null, null, null, null));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.getUserAuthFactors(accessToken));
+
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("Access Token does not have the required scope", ex.getMessage());
+    }
+
     private void assertInvalidAccessToken(String token, String reason) {
         AwsException failure = assertThrows(AwsException.class, () -> service.getUser(token), reason);
         assertEquals("NotAuthorizedException", failure.getErrorCode(), reason);
