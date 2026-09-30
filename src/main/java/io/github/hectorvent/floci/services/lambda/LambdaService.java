@@ -1001,9 +1001,6 @@ public class LambdaService implements ResourceProvider {
         functionName = fn.getFunctionName();
         String arn = fn.getFunctionArn();
         warmPool.drainFunction(functionName);
-        if (executorService != null) {
-            executorService.dropPending(fn);
-        }
         // Take the same per-function lock used by Put/DeleteFunctionConcurrency
         // so a concurrent concurrency mutation cannot interleave with the
         // limiter reset and store delete and leave the two views out of sync.
@@ -1017,6 +1014,12 @@ public class LambdaService implements ResourceProvider {
             }
             codeStore.delete(ownerAccount(fn), region, functionName);
             functionStore.delete(region, functionName);
+            // Only once the function has left the store: an Event invoke reads the deletion count
+            // before it checks the store, so it either finds the function gone or has its event
+            // dropped by this count.
+            if (executorService != null) {
+                executorService.dropPending(fn);
+            }
             reclaimLegacyCodeDirectoryIfUnused(functionName);
             versionCounters.remove(versionCounterKey(region, fn));
             versionCounters.remove(legacyVersionCounterKey(region, functionName));
@@ -1036,6 +1039,15 @@ public class LambdaService implements ResourceProvider {
             }
         }
         LOG.infov("Deleted Lambda function: {0}", functionName);
+    }
+
+    /**
+     * Whether the function {@code fn} belongs to is still in the store, whichever version
+     * {@code fn} is. Looked up in the account and region of its ARN rather than the caller's.
+     */
+    boolean isLive(LambdaFunction fn) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.getFunctionArn());
+        return functionStore.getForAccount(arn.accountId(), arn.region(), fn.getFunctionName()).isPresent();
     }
 
     /**

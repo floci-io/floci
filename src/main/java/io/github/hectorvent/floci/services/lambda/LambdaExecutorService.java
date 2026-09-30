@@ -198,6 +198,13 @@ public class LambdaExecutorService implements Resettable {
             AsyncEvent event = new AsyncEvent(fn, payload, requestId, chainDepth, invokedQualifier,
                     maxRetries, clock.millis() + maxEventAgeSeconds * 1000L, generation.get(),
                     deletions.getOrDefault(functionKey(fn), 0L));
+            // The deletion count is read above, before this store check, and DeleteFunction removes the
+            // function from the store before it moves the count. So either this check sees the function
+            // gone, or the count moves after the event's snapshot and stale() drops the event.
+            if (lambdaService != null && !lambdaService.isLive(fn)) {
+                permit.close();
+                return new InvokeResult(202, null, new byte[0], null, requestId);
+            }
             try {
                 asyncExecutor.submit(() -> attempt(event, 1, null, permit));
             } catch (RuntimeException e) {
@@ -343,8 +350,9 @@ public class LambdaExecutorService implements Resettable {
     }
 
     /**
-     * Drops the pending asynchronous events of a function being deleted: AWS runs no further attempt
-     * and delivers no record for them.
+     * Drops the pending asynchronous events of a deleted function: AWS runs no further attempt and
+     * delivers no record for them. Must be called only after the function has left the store, which is
+     * what lets an Event invoke racing the delete drop its own event.
      */
     void dropPending(LambdaFunction fn) {
         // ponytail: deleting a single published version does not drop its pending events; they fail

@@ -299,6 +299,7 @@ class LambdaExecutorServiceTest {
         config.setMaximumRetryAttempts(2);
         config.setMaximumEventAgeInSeconds(21600);
         when(lambdaService.findEventInvokeConfig(fn, null)).thenReturn(Optional.of(config));
+        when(lambdaService.isLive(fn)).thenReturn(true);
 
         LambdaExecutorService retryExecutor =
                 new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, router, lambdaService);
@@ -336,6 +337,7 @@ class LambdaExecutorServiceTest {
         config.setMaximumRetryAttempts(2);
         config.setMaximumEventAgeInSeconds(0);
         when(lambdaService.findEventInvokeConfig(fn, null)).thenReturn(Optional.of(config));
+        when(lambdaService.isLive(fn)).thenReturn(true);
         LambdaExecutorService retryExecutor =
                 new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, router, lambdaService);
 
@@ -365,6 +367,7 @@ class LambdaExecutorServiceTest {
         config.setMaximumRetryAttempts(2);
         config.setMaximumEventAgeInSeconds(1);
         when(lambdaService.findEventInvokeConfig(fn, null)).thenReturn(Optional.of(config));
+        when(lambdaService.isLive(fn)).thenReturn(true);
         MutableClock clock = new MutableClock();
         LambdaExecutorService retryExecutor = new LambdaExecutorService(warmPool, new ObjectMapper(),
                 concurrencyLimiter, router, lambdaService, clock, Duration.ZERO);
@@ -548,6 +551,28 @@ class LambdaExecutorServiceTest {
     }
 
     @Test
+    void eventInvocation_ofAFunctionDeletedAfterItWasResolved_isDroppedWithoutAnAttempt() {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaService lambdaService = eventInvokeConfig(2, 21600);
+        LambdaExecutorService retryExecutor = retryingExecutor(router, lambdaService, Duration.ZERO);
+        LambdaConcurrencyLimiter.Permit permit = mock(LambdaConcurrencyLimiter.Permit.class);
+        when(concurrencyLimiter.acquire(fn)).thenReturn(permit);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        failEveryAttempt(rtas, failedAttempt("req-deleted-before-invoke"));
+        // DeleteFunction ran between the caller resolving fn and this invoke: the function has left
+        // the store and its deletion count has already moved.
+        when(lambdaService.isLive(fn)).thenReturn(false);
+        retryExecutor.dropPending(fn);
+
+        InvokeResult result = retryExecutor.invoke(fn, "{}".getBytes(), InvocationType.Event);
+
+        assertEquals(202, result.getStatusCode());
+        verify(warmPool, after(1000).never()).acquire(any());
+        verify(router, never()).route(any(), any(), any(), anyInt(), anyInt(), any());
+        verify(permit).close();
+    }
+
+    @Test
     void exceptionDuringInvocation_destroysHandle_doesNotRelease() {
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("cid-exc", "test-fn", rtas, ContainerState.WARM);
@@ -582,6 +607,7 @@ class LambdaExecutorServiceTest {
         config.setMaximumEventAgeInSeconds(maximumEventAgeInSeconds);
         LambdaService lambdaService = mock(LambdaService.class);
         when(lambdaService.findEventInvokeConfig(fn, null)).thenReturn(Optional.of(config));
+        when(lambdaService.isLive(fn)).thenReturn(true);
         return lambdaService;
     }
 
