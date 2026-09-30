@@ -74,4 +74,12 @@ class ElbV2TargetResolverTest {
             assertTrue(ex.getMessage().contains("link-local or metadata address"), ex.getMessage());
         }
     }
+
+    @Test
+    void hostHeaderBracketsIpv6Literals() {
+        assertEquals("[2001:db8::1]:8080", ElbV2TargetResolver.hostHeader("2001:db8::1", 8080));
+        assertEquals("[::1]:80", ElbV2TargetResolver.hostHeader("[::1]", 80));
+        assertEquals("10.0.0.5:8080", ElbV2TargetResolver.hostHeader("10.0.0.5", 8080));
+        assertEquals("backend.internal:443", ElbV2TargetResolver.hostHeader("backend.internal", 443));
+    }
 }

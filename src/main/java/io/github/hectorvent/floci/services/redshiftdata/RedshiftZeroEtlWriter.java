@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -61,40 +60,44 @@ public class RedshiftZeroEtlWriter {
         }
     }
 
-    public String writeBatch(String accountId, String clusterIdentifier, String tableName,
-                             List<DynamoDbStreamRecord> records) {
+    /** Writes AWS DynamoDB Streams {@code Records[]} elements, skipping event ids already landed. */
+    public void writeBatch(String accountId, String clusterIdentifier, String tableName, List<JsonNode> records) {
         if (records == null || records.isEmpty()) {
-            return null;
+            return;
         }
         String safeTableName = validateTableName(tableName);
-        String newestSequence = null;
         try (Connection connection = connectionFactory.open(target(accountId, clusterIdentifier));
              PreparedStatement statement = connection.prepareStatement(INSERT_RECORD.formatted(safeTableName))) {
-            for (DynamoDbStreamRecord record : records) {
+            for (JsonNode record : records) {
                 bind(statement, record);
                 statement.executeUpdate();
-                newestSequence = record.getSequenceNumber();
             }
         } catch (SQLException e) {
             throw new AwsException("InternalFailure", "Could not write Redshift zero-ETL records.", 500);
         }
-        return newestSequence;
     }
 
-    private void bind(PreparedStatement statement, DynamoDbStreamRecord record) throws SQLException {
-        statement.setString(1, record.getEventId());
-        statement.setString(2, record.getEventName());
-        setNullableString(statement, 3, record.getEventSource());
-        setNullableString(statement, 4, record.getAwsRegion());
-        statement.setString(5, record.getSequenceNumber());
-        if (record.getApproximateCreationDateTime() > 0) {
-            statement.setObject(6, Instant.ofEpochSecond(record.getApproximateCreationDateTime()));
+    private void bind(PreparedStatement statement, JsonNode record) throws SQLException {
+        JsonNode dynamodb = record.path("dynamodb");
+        statement.setString(1, text(record, "eventID"));
+        statement.setString(2, text(record, "eventName"));
+        setNullableString(statement, 3, text(record, "eventSource"));
+        setNullableString(statement, 4, text(record, "awsRegion"));
+        statement.setString(5, text(dynamodb, "SequenceNumber"));
+        long approximateCreationDateTime = dynamodb.path("ApproximateCreationDateTime").asLong();
+        if (approximateCreationDateTime > 0) {
+            statement.setObject(6, Instant.ofEpochSecond(approximateCreationDateTime));
         } else {
             statement.setNull(6, Types.TIMESTAMP_WITH_TIMEZONE);
         }
-        setJson(statement, 7, record.getKeys());
-        setJson(statement, 8, record.getOldImage());
-        setJson(statement, 9, record.getNewImage());
+        setJson(statement, 7, dynamodb.get("Keys"));
+        setJson(statement, 8, dynamodb.get("OldImage"));
+        setJson(statement, 9, dynamodb.get("NewImage"));
+    }
+
+    private static String text(JsonNode node, String field) {
+        JsonNode value = node.get(field);
+        return value == null || value.isNull() ? null : value.asText();
     }
 
     private void setNullableString(PreparedStatement statement, int index, String value) throws SQLException {

@@ -347,6 +347,16 @@ class EcrRegistryManagerTest {
     }
 
     @Test
+    void rewriteImageUri_matchesAChinaEcrUri_rewritesToLocalRegistry() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        String rewritten = manager.rewriteImageUri("123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn/backend-user:1");
+
+        assertEquals("123456789012.dkr.ecr.cn-north-1.localhost:4566/backend-user:1", rewritten);
+    }
+
+    @Test
     void rewriteImageUri_matchesAwsEcrUri_rewritesToLocalRegistryAndStartsIt() {
         when(lifecycleManager.createAndStart(any())).thenReturn(
                 new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));

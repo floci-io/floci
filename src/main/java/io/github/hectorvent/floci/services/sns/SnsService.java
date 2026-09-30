@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -32,8 +33,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.math.BigDecimal;
+import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -49,6 +53,7 @@ import java.util.Collections;
 import java.util.Deque;
 import java.util.HexFormat;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -64,6 +69,13 @@ public class SnsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SnsService.class);
     private static final Duration FIFO_DEDUP_WINDOW = Duration.ofMinutes(5);
+    private static final Set<String> SMS_ATTRIBUTE_NAMES = Set.of("MonthlySpendLimit",
+            "DeliveryStatusIAMRole", "DeliveryStatusSuccessSamplingRate", "DefaultSenderID",
+            "DefaultSMSType", "UsageReportS3Bucket");
+    private static final Pattern SMS_SENDER_ID = Pattern.compile("(?=.*[A-Za-z])[A-Za-z0-9]{1,11}");
+    /** Includes the original send and two immediate retries for local SQS fan-out. */
+    private static final int SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS = 3;
+    private static final String SUBSCRIPTION_REDRIVE_POLICY = "RedrivePolicy";
     /** Default value of the {@code MaximumMessageSize} topic attribute, and the ceiling below
      *  which a topic carries no subscription restrictions. AWS raised the maximum to 1 MiB in
      *  September 2026 but left the default at 256 KiB, so an unconfigured topic is unchanged. */
@@ -104,6 +116,7 @@ public class SnsService implements Resettable, ResourceProvider {
     private final StorageBackend<String, PlatformEndpoint> platformEndpointStore;
     private final Deque<PushNotification> pushCapture = new ConcurrentLinkedDeque<>();
     private final StorageBackend<String, SentSms> smsStore;
+    private final StorageBackend<String, Map<String, String>> smsAttributesStore;
     private final RegionResolver regionResolver;
     private final SqsService sqsService;
     private final LambdaService lambdaService;
@@ -134,6 +147,9 @@ public class SnsService implements Resettable, ResourceProvider {
                         }),
                 storageFactory.create("sns", "sns-sms.json",
                         new TypeReference<Map<String, SentSms>>() {
+                        }),
+                storageFactory.create("sns", "sns-sms-attributes.json",
+                        new TypeReference<Map<String, Map<String, String>>>() {
                         }),
                 regionResolver,
                 sqsService,
@@ -187,6 +203,7 @@ public class SnsService implements Resettable, ResourceProvider {
         this.platformAppStore = platformAppStore;
         this.platformEndpointStore = platformEndpointStore;
         this.smsStore = new InMemoryStorage<>();
+        this.smsAttributesStore = new InMemoryStorage<>();
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
@@ -215,11 +232,26 @@ public class SnsService implements Resettable, ResourceProvider {
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService, FirehoseService firehoseService,
                String baseUrl, ObjectMapper objectMapper) {
+        this(topicStore, subscriptionStore, platformAppStore, platformEndpointStore,
+                smsStore, new InMemoryStorage<>(), regionResolver, sqsService,
+                lambdaService, firehoseService, baseUrl, objectMapper);
+    }
+
+    SnsService(StorageBackend<String, Topic> topicStore,
+               StorageBackend<String, Subscription> subscriptionStore,
+               StorageBackend<String, PlatformApplication> platformAppStore,
+               StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+               StorageBackend<String, SentSms> smsStore,
+               StorageBackend<String, Map<String, String>> smsAttributesStore,
+               RegionResolver regionResolver, SqsService sqsService,
+               LambdaService lambdaService, FirehoseService firehoseService,
+               String baseUrl, ObjectMapper objectMapper) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
         this.platformEndpointStore = platformEndpointStore;
         this.smsStore = smsStore;
+        this.smsAttributesStore = smsAttributesStore;
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
@@ -232,6 +264,66 @@ public class SnsService implements Resettable, ResourceProvider {
     public void clear() {
         pushCapture.clear();
         fifoDeduplicationCache.clear();
+    }
+
+    public synchronized void setSmsAttributes(Map<String, String> attributes, String region) {
+        String key = smsAttributesKey(region);
+        Map<String, String> updated = new LinkedHashMap<>(smsAttributesStore.get(key).orElse(Map.of()));
+        for (Map.Entry<String, String> entry : attributes.entrySet()) {
+            String name = entry.getKey();
+            String value = entry.getValue();
+            if (!SMS_ATTRIBUTE_NAMES.contains(name) || value == null) {
+                throw new AwsException("InvalidParameter", "Invalid SMS attribute: " + name, 400);
+            }
+            if (value.isEmpty()) {
+                updated.remove(name);
+                continue;
+            }
+            if ("DefaultSMSType".equals(name)
+                    && !"Promotional".equals(value) && !"Transactional".equals(value)) {
+                throw new AwsException("InvalidParameter", "Invalid DefaultSMSType: " + value, 400);
+            }
+            if ("DefaultSenderID".equals(name) && !SMS_SENDER_ID.matcher(value).matches()) {
+                throw new AwsException("InvalidParameter", "Invalid DefaultSenderID: " + value, 400);
+            }
+            if ("MonthlySpendLimit".equals(name)) {
+                try {
+                    if (new BigDecimal(value).signum() < 0) {
+                        throw new NumberFormatException("negative amount");
+                    }
+                } catch (NumberFormatException e) {
+                    throw new AwsException("InvalidParameter", "Invalid MonthlySpendLimit: " + value, 400);
+                }
+            }
+            if ("DeliveryStatusSuccessSamplingRate".equals(name)) {
+                try {
+                    int rate = Integer.parseInt(value);
+                    if (rate < 0 || rate > 100) {
+                        throw new NumberFormatException("out of range");
+                    }
+                } catch (NumberFormatException e) {
+                    throw new AwsException("InvalidParameter",
+                            "Invalid DeliveryStatusSuccessSamplingRate: " + value, 400);
+                }
+            }
+            updated.put(name, value);
+        }
+        smsAttributesStore.put(key, updated);
+    }
+
+    public Map<String, String> getSmsAttributes(List<String> names, String region) {
+        String key = smsAttributesKey(region);
+        Map<String, String> stored = smsAttributesStore.get(key).orElse(Map.of());
+        if (names == null || names.isEmpty()) {
+            return new LinkedHashMap<>(stored);
+        }
+        Map<String, String> selected = new LinkedHashMap<>();
+        for (String name : names) {
+            if (stored.containsKey(name)) {
+                selected.put(name, stored.get(name));
+            }
+        }
+        return selected;
     }
 
     public Topic createTopic(String name, Map<String, String> attributes,
@@ -441,6 +533,9 @@ public class SnsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameter",
                     "Invalid parameter: Endpoint scheme does not match protocol '" + protocol + "'.", 400);
         }
+        if ("http".equals(protocol) || "https".equals(protocol)) {
+            requireDeliverableEndpoint(endpoint);
+        }
         if ("firehose".equals(protocol)) {
             requireFirehoseRoleArn(attributes == null ? null : attributes.get(SUBSCRIPTION_ROLE_ARN));
         }
@@ -564,7 +659,7 @@ public class SnsService implements Resettable, ResourceProvider {
         if (phoneNumber != null) {
             requireWithinMaxMessageSize(payloadSize, DEFAULT_MAX_MESSAGE_SIZE);
             String messageId = UUID.randomUUID().toString();
-            String effectiveRegion = region != null ? region : "us-east-1";
+            String effectiveRegion = region != null ? region : regionResolver.getDefaultRegion();
             SentSms sms = new SentSms(messageId, effectiveRegion, phoneNumber,
                     message, subject, Instant.now());
             smsStore.put("sms::" + effectiveRegion + "::" + messageId, sms);
@@ -1723,8 +1818,8 @@ public class SnsService implements Resettable, ResourceProvider {
                     Map<String, MessageAttributeValue> sqsAttributes = rawDelivery
                             ? toSqsMessageAttributes(messageAttributes)
                             : Collections.emptyMap();
-                    sqsService.sendMessage(queueUrl, body, null, messageGroupId, messageDeduplicationId, sqsAttributes, region);
-                    LOG.debugv("Delivered SNS message to SQS: {0} ({1}) raw={2}", sub.getEndpoint(), queueUrl, rawDelivery);
+                    deliverToSqsSubscription(sub, queueUrl, body, messageId, messageGroupId,
+                            messageDeduplicationId, sqsAttributes, region, rawDelivery);
                 }
                 case "lambda" -> {
                     String region = extractRegionFromArn(sub.getEndpoint());
@@ -1734,7 +1829,9 @@ public class SnsService implements Resettable, ResourceProvider {
                     LOG.debugv("Delivered SNS message to Lambda: {0}", sub.getEndpoint());
                 }
                 case "http", "https" -> {
-                    if (httpClient == null) break;
+                    if (httpClient == null) {
+                        break;
+                    }
                     boolean rawDelivery = "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
                     String body = rawDelivery
                             ? protocolMessage
@@ -1754,9 +1851,9 @@ public class SnsService implements Resettable, ResourceProvider {
                             .POST(HttpRequest.BodyPublishers.ofString(body))
                             .build();
                     String endpoint = sub.getEndpoint();
-                    httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
-                            .thenAccept(response -> logHttpResult("Delivered SNS notification", endpoint, response.statusCode()))
-                            .exceptionally(ex -> { LOG.warnv("Failed to deliver SNS message to {0}: {1}", endpoint, ex.getMessage()); return null; });
+                    // Screened off this thread: Publish fans out to every subscriber here, and a
+                    // slow DNS answer for one endpoint must not hold up the others or the caller.
+                    postScreenedAsync(request, endpoint, "Delivered SNS notification");
                 }
                 case "application" -> {
                     String region = extractRegionFromArn(sub.getEndpoint());
@@ -1834,6 +1931,73 @@ public class SnsService implements Resettable, ResourceProvider {
             // with room to spare; a queue configured with a smaller MaximumMessageSize crosses
             // the limit more easily. Either way the message is dropped here.
             LOG.warnv("Failed to deliver SNS message to {0}: {1}", sub.getEndpoint(), e.getMessage());
+        }
+    }
+
+    private void deliverToSqsSubscription(Subscription sub, String queueUrl, String body, String messageId,
+                                          String messageGroupId, String messageDeduplicationId,
+                                          Map<String, MessageAttributeValue> sqsAttributes,
+                                          String region, boolean rawDelivery) {
+        RuntimeException deliveryFailure = null;
+        for (int attempt = 1; attempt <= SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS; attempt++) {
+            try {
+                sqsService.sendMessage(queueUrl, body, null, messageGroupId,
+                        messageDeduplicationId, sqsAttributes, region);
+                LOG.debugv("Delivered SNS message to SQS: {0} ({1}) raw={2}",
+                        sub.getEndpoint(), queueUrl, rawDelivery);
+                return;
+            } catch (RuntimeException e) {
+                deliveryFailure = e;
+            }
+        }
+
+        String deadLetterTargetArn = subscriptionDeadLetterTargetArn(sub);
+        if (deadLetterTargetArn != null) {
+            try {
+                String deadLetterRegion = extractRegionFromArn(deadLetterTargetArn);
+                if (deadLetterRegion == null) {
+                    deadLetterRegion = region;
+                }
+                boolean fifoDeadLetterQueue = AwsArnUtils.parse(deadLetterTargetArn)
+                        .resource().endsWith(".fifo");
+                String deadLetterGroupId = messageGroupId;
+                String deadLetterDeduplicationId = messageDeduplicationId;
+                if (fifoDeadLetterQueue) {
+                    if (deadLetterGroupId == null || deadLetterGroupId.isBlank()) {
+                        deadLetterGroupId = messageId;
+                    }
+                    // Each failed subscription is a distinct DLQ delivery, even when
+                    // several subscriptions share this queue for the same publish.
+                    deadLetterDeduplicationId = sha256(messageId + "\0" + sub.getSubscriptionArn());
+                }
+                sqsService.sendMessage(sqsArnToUrl(deadLetterTargetArn), body, null,
+                        deadLetterGroupId, deadLetterDeduplicationId, sqsAttributes, deadLetterRegion);
+                LOG.warnv("SNS delivery to {0} failed after {1} attempts; sent notification to subscription DLQ {2}",
+                        sub.getEndpoint(), SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS, deadLetterTargetArn);
+                return;
+            } catch (RuntimeException deadLetterFailure) {
+                LOG.warnv("SNS delivery to {0} and subscription DLQ {1} failed: {2}",
+                        sub.getEndpoint(), deadLetterTargetArn, deadLetterFailure.getMessage());
+            }
+        }
+        LOG.warnv("SNS delivery to {0} failed after {1} attempts: {2}",
+                sub.getEndpoint(), SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS,
+                deliveryFailure == null ? "unknown failure" : deliveryFailure.getMessage());
+    }
+
+    private String subscriptionDeadLetterTargetArn(Subscription sub) {
+        String redrivePolicy = sub.getAttributes().get(SUBSCRIPTION_REDRIVE_POLICY);
+        if (redrivePolicy == null || redrivePolicy.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode policy = objectMapper.readTree(redrivePolicy);
+            String targetArn = policy.path("deadLetterTargetArn").asText(null);
+            return AwsArnUtils.isArnFor(targetArn, "sqs") ? targetArn : null;
+        } catch (Exception e) {
+            LOG.warnv("Ignoring invalid SNS subscription RedrivePolicy for {0}: {1}",
+                    sub.getSubscriptionArn(), e.getMessage());
+            return null;
         }
     }
 
@@ -2004,13 +2168,93 @@ public class SnsService implements Resettable, ResourceProvider {
                     .header("x-amz-sns-subscription-arn", "PendingConfirmation")
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
-            String endpoint = subscription.getEndpoint();
-            httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
-                    .thenAccept(response -> logHttpResult("Sent SubscriptionConfirmation", endpoint, response.statusCode()))
-                    .exceptionally(ex -> { LOG.warnv("Failed to send SubscriptionConfirmation to {0}: {1}", endpoint, ex.getMessage()); return null; });
+            postScreenedAsync(request, subscription.getEndpoint(), "Sent SubscriptionConfirmation");
         } catch (Exception e) {
             LOG.warnv("Failed to send SubscriptionConfirmation to {0}: {1}", subscription.getEndpoint(), e.getMessage());
         }
+    }
+
+    /**
+     * Rejects an endpoint that resolves to a link-local or cloud instance-metadata address. Floci
+     * posts to a subscribed endpoint itself, so without this an unauthenticated Subscribe turns the
+     * emulator into a blind request forwarder against addresses only it can reach. Loopback and
+     * private ranges stay allowed: a local topic delivering to a neighbouring container is the
+     * normal case here.
+     */
+    private static void requireDeliverableEndpoint(String endpoint) {
+        if (endpoint == null) {
+            return;
+        }
+        String host;
+        try {
+            host = URI.create(endpoint).getHost();
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameter", "Invalid parameter: Endpoint is not a valid URL.", 400);
+        }
+        if (host == null || host.isBlank()) {
+            throw new AwsException("InvalidParameter", "Invalid parameter: Endpoint is not a valid URL.", 400);
+        }
+        try {
+            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(host), host);
+        } catch (UnknownHostException e) {
+            // Unresolvable now does not mean unresolvable at delivery time, and AWS accepts an
+            // endpoint whose DNS is not yet live, so this is not the place to refuse it.
+            LOG.debugv("SNS endpoint host {0} did not resolve at subscribe time: {1}", host, e.getMessage());
+        } catch (IOException e) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Endpoint " + endpoint + " is not a permitted address.", 400);
+        }
+    }
+
+    /** Screens the endpoint, then posts. Nothing here resolves a name, so nothing here blocks. */
+    private void postScreenedAsync(HttpRequest request, String endpoint, String what) {
+        if (!deliverable(endpoint)) {
+            return;
+        }
+        httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+                .thenAccept(response -> logHttpResult(what, endpoint, response.statusCode()))
+                .exceptionally(ex -> {
+                    LOG.warnv("Failed to reach SNS endpoint {0}: {1}", endpoint, ex.getMessage());
+                    return null;
+                });
+    }
+
+    /**
+     * Whether this endpoint may be posted to, judged without resolving anything. Subscribe is where
+     * a name gets resolved and screened; this catches the endpoint that names an address outright,
+     * including a subscription stored before Subscribe began refusing them.
+     *
+     * <p>Deliberately not a second DNS lookup. {@link HttpClient} resolves the name again when it
+     * connects and cannot be handed the result of a check, so a lookup here could never be the thing
+     * that decides where the request goes: it would cost a resolution per delivery and still leave
+     * the same rebinding residual.
+     */
+    static boolean deliverable(String endpoint) {
+        String host;
+        try {
+            host = URI.create(endpoint).getHost();
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Refusing to deliver to SNS endpoint {0}: not a valid URL", endpoint);
+            return false;
+        }
+        if (host == null || !isIpLiteral(host)) {
+            return true;
+        }
+        try {
+            SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(host), host);
+            return true;
+        } catch (IOException e) {
+            LOG.warnv("Refusing to deliver to SNS endpoint {0}: {1}", endpoint, e.getMessage());
+            return false;
+        }
+    }
+
+    /** True for a bracketed IPv6 literal or a dotted IPv4 one, neither of which needs resolving. */
+    private static boolean isIpLiteral(String host) {
+        String bare = host.startsWith("[") && host.endsWith("]")
+                ? host.substring(1, host.length() - 1)
+                : host;
+        return bare.indexOf(':') >= 0 || bare.matches("[0-9.]+");
     }
 
     private String sqsArnToUrl(String arn) {
@@ -2056,6 +2300,10 @@ public class SnsService implements Resettable, ResourceProvider {
         } catch (NoSuchAlgorithmException e) {
             return UUID.randomUUID().toString();
         }
+    }
+
+    private String smsAttributesKey(String region) {
+        return regionResolver.getAccountId() + "::" + region;
     }
 
     private static String topicKey(String region, String arn) {

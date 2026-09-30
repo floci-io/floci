@@ -275,9 +275,10 @@ public class AlarmEvaluator {
 
     private static boolean isEvaluable(MetricAlarm alarm) {
         return alarm.getRegion() != null
+                && alarm.getMetrics().isEmpty()
                 && alarm.getNamespace() != null && !alarm.getNamespace().isBlank()
                 && alarm.getMetricName() != null && !alarm.getMetricName().isBlank()
-                && alarm.getPeriod() > 0
+                && alarm.getPeriod() != null && alarm.getPeriod() > 0
                 && alarm.getEvaluationPeriods() > 0
                 && alarm.getComparisonOperator() != null;
     }

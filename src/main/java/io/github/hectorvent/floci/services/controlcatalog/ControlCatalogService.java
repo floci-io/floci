@@ -74,7 +74,7 @@ public class ControlCatalogService implements Resettable {
         ObjectNode regionConfiguration = response.putObject("RegionConfiguration");
         regionConfiguration.put("Scope", definition.scope());
         if ("REGIONAL".equals(definition.scope())) {
-            String region = requestRegion == null || requestRegion.isBlank() ? "us-east-1" : requestRegion;
+            String region = requestRegion == null || requestRegion.isBlank() ? "us-east-1" : requestRegion; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
             regionConfiguration.set("DeployableRegions", stringArray(List.of(region)));
         }
 

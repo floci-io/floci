@@ -29,6 +29,7 @@ public class RuleScheduler implements Resettable {
     private final Vertx vertx;
     private final ObjectMapper objectMapper;
     private final String defaultAccountId;
+    private final String defaultRegion;
     private final EventBridgeInvoker invoker;
     private final Clock clock;
     private final ConcurrentHashMap<String, ScheduleContext> scheduleContexts = new ConcurrentHashMap<>();
@@ -54,6 +55,7 @@ public class RuleScheduler implements Resettable {
         this.vertx = vertx;
         this.objectMapper = objectMapper;
         this.defaultAccountId = config.defaultAccountId();
+        this.defaultRegion = config.defaultRegion();
         this.invoker = invoker;
         this.clock = clock;
     }
@@ -167,7 +169,7 @@ public class RuleScheduler implements Resettable {
             return;
         }
 
-        String region = data.rule.getRegion() != null ? data.rule.getRegion() : "us-east-1";
+        String region = data.rule.getRegion() != null ? data.rule.getRegion() : defaultRegion;
         String eventJson = buildScheduledEvent(data.rule, region);
         LOG.debugv("Rule {0} firing scheduled event", data.rule.getName());
 

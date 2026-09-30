@@ -1555,7 +1555,7 @@ public class EventBridgeService implements ResourceProvider {
                 && rule.getState() == RuleState.ENABLED
                 && rule.getScheduleExpression() != null
                 && !rule.getScheduleExpression().isBlank()) {
-            String region = rule.getRegion() != null ? rule.getRegion() : "us-east-1";
+            String region = rule.getRegion() != null ? rule.getRegion() : regionResolver.getDefaultRegion();
             String key = ruleKey(region, rule.getEventBusName(), rule.getName());
             String accountId = rule.getAccountId();
             ruleScheduler.startScheduler(

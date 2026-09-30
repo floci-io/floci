@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.redshiftdata;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import org.junit.jupiter.api.Test;
@@ -10,9 +10,10 @@ import org.junit.jupiter.api.Test;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
+import java.sql.Types;
+import java.time.Instant;
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -40,7 +41,7 @@ class RedshiftZeroEtlWriterTest {
     }
 
     @Test
-    void writesStreamRecordsIdempotentlyAndReturnsNewestSequence() throws Exception {
+    void writesAwsStreamRecordsIdempotently() throws Exception {
         RedshiftService redshiftService = mock(RedshiftService.class);
         RedshiftDataConnectionFactory connectionFactory = mock(RedshiftDataConnectionFactory.class);
         ObjectMapper objectMapper = new ObjectMapper();
@@ -50,16 +51,23 @@ class RedshiftZeroEtlWriterTest {
         when(connectionFactory.open(any())).thenReturn(connection);
         when(connection.prepareStatement(contains("ON CONFLICT (event_id) DO NOTHING"))).thenReturn(statement);
 
-        DynamoDbStreamRecord first = record("event-1", "000000000000000000001");
-        DynamoDbStreamRecord second = record("event-2", "000000000000000000002");
+        JsonNode first = record("event-1", "000000000000000000001");
+        JsonNode second = record("event-2", "000000000000000000002");
         RedshiftZeroEtlWriter writer = new RedshiftZeroEtlWriter(redshiftService, connectionFactory, objectMapper);
 
-        String sequence = writer.writeBatch("111111111111", "warehouse", "floci_zetl_orders", List.of(first, second));
+        writer.writeBatch("111111111111", "warehouse", "floci_zetl_orders", List.of(first, second));
 
-        assertEquals("000000000000000000002", sequence);
         verify(statement, times(2)).executeUpdate();
         verify(statement).setString(1, "event-1");
         verify(statement).setString(1, "event-2");
+        verify(statement, times(2)).setString(2, "INSERT");
+        verify(statement, times(2)).setString(3, "aws:dynamodb");
+        verify(statement, times(2)).setString(4, "us-east-1");
+        verify(statement).setString(5, "000000000000000000002");
+        verify(statement, times(2)).setObject(6, Instant.ofEpochSecond(1_758_153_600L));
+        verify(statement, times(2)).setString(7, "{\"id\":\"1\"}");
+        verify(statement, times(2)).setNull(8, Types.VARCHAR);
+        verify(statement, times(2)).setString(9, "{\"value\":\"new\"}");
         verify(connection).close();
     }
 
@@ -73,16 +81,17 @@ class RedshiftZeroEtlWriterTest {
         return cluster;
     }
 
-    private static DynamoDbStreamRecord record(String eventId, String sequenceNumber) {
-        DynamoDbStreamRecord record = new DynamoDbStreamRecord();
-        record.setEventId(eventId);
-        record.setEventName("INSERT");
-        record.setEventSource("aws:dynamodb");
-        record.setAwsRegion("us-east-1");
-        record.setSequenceNumber(sequenceNumber);
-        record.setApproximateCreationDateTime(1_758_153_600L);
-        record.setKeys(JsonNodeFactory.instance.objectNode().put("id", "1"));
-        record.setNewImage(JsonNodeFactory.instance.objectNode().put("value", "new"));
+    private static JsonNode record(String eventId, String sequenceNumber) {
+        ObjectNode record = new ObjectMapper().createObjectNode()
+                .put("eventID", eventId)
+                .put("eventName", "INSERT")
+                .put("eventSource", "aws:dynamodb")
+                .put("awsRegion", "us-east-1");
+        ObjectNode dynamodb = record.putObject("dynamodb")
+                .put("SequenceNumber", sequenceNumber)
+                .put("ApproximateCreationDateTime", 1_758_153_600L);
+        dynamodb.putObject("Keys").put("id", "1");
+        dynamodb.putObject("NewImage").put("value", "new");
         return record;
     }
 }

@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
@@ -28,13 +30,15 @@ public class NativeDynamoDbStreamsJsonHandler {
 
     private final DynamoDbStreamService streamService;
     private final DynamoDbService dynamoDbService;
+    private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
     public NativeDynamoDbStreamsJsonHandler(DynamoDbStreamService streamService, DynamoDbService dynamoDbService,
-                                            ObjectMapper objectMapper) {
+                                            RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.streamService = streamService;
         this.dynamoDbService = dynamoDbService;
+        this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
 
@@ -55,7 +59,8 @@ public class NativeDynamoDbStreamsJsonHandler {
     private Response handleListStreams(JsonNode request, String region) {
         String tableNameFilter = request.has("TableName") ? request.get("TableName").asText() : null;
 
-        List<StreamDescription> streams = streamService.listStreams(tableNameFilter, region);
+        List<StreamDescription> streams =
+                streamService.listStreams(tableNameFilter, regionResolver.getAccountId(), region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode streamList = objectMapper.createArrayNode();
@@ -72,7 +77,7 @@ public class NativeDynamoDbStreamsJsonHandler {
 
     private Response handleDescribeStream(JsonNode request, String region) {
         String streamArn = request.path("StreamArn").asText();
-        StreamDescription sd = streamService.describeStream(streamArn);
+        StreamDescription sd = streamService.describeStream(requireInScope(streamArn, region));
 
         // Fetch key schema from the table
         List<KeySchemaElement> keySchema = List.of();
@@ -130,7 +135,8 @@ public class NativeDynamoDbStreamsJsonHandler {
         String sequenceNumber = request.has("SequenceNumber")
                 ? request.get("SequenceNumber").asText() : null;
 
-        String iterator = streamService.getShardIterator(streamArn, shardId, iteratorType, sequenceNumber);
+        String iterator = streamService.getShardIterator(requireInScope(streamArn, region), shardId, iteratorType,
+                sequenceNumber);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ShardIterator", iterator);
@@ -141,6 +147,7 @@ public class NativeDynamoDbStreamsJsonHandler {
         String shardIterator = request.path("ShardIterator").asText();
         Integer limit = request.has("Limit") ? request.get("Limit").asInt() : null;
 
+        requireInScope(streamService.streamArnOf(shardIterator), region);
         DynamoDbStreamService.GetRecordsResult result = streamService.getRecords(shardIterator, limit);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -152,6 +159,15 @@ public class NativeDynamoDbStreamsJsonHandler {
         response.put("NextShardIterator", result.nextShardIterator());
         
         return Response.ok(response).build();
+    }
+
+    /** A stream of another account or region is not found, as ListStreams leaves it out. */
+    private String requireInScope(String streamArn, String region) {
+        if (!streamArn.startsWith(
+                AwsArnUtils.Arn.of("dynamodb", region, regionResolver.getAccountId(), "table/").toString())) {
+            throw new AwsException("ResourceNotFoundException", "Stream not found: " + streamArn, 400);
+        }
+        return streamArn;
     }
 
     private ObjectNode recordToNode(DynamoDbStreamRecord record) {

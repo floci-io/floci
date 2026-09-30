@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
@@ -462,7 +463,7 @@ public class EmrHandler {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", "ci-" + index + cluster.getId());
         node.put("Ec2InstanceId", "i-" + String.format("%017d", index));
-        node.put("PublicDnsName", "ec2-203-0-113-" + index + ".compute-1.amazonaws.com");
+        node.put("PublicDnsName", AwsEndpoints.ec2PublicDns("203.0.113." + index, cluster.getRegion()));
         node.put("PrivateDnsName", "ip-10-0-0-" + index + ".ec2.internal");
         node.put("PrivateIpAddress", "10.0.0." + index);
         node.put("InstanceGroupId", group.getId());

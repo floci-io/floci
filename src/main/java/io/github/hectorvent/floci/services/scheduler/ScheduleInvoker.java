@@ -480,6 +480,6 @@ public class ScheduleInvoker {
 
     /** The region a schedule lives in, taken from its ARN. */
     static String regionOf(Schedule schedule) {
-        return AwsArnUtils.regionOrDefault(schedule.getArn(), "us-east-1");
+        return AwsArnUtils.regionOrDefault(schedule.getArn(), "us-east-1"); // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
     }
 }

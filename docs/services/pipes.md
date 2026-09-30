@@ -119,9 +119,23 @@ the field on a source its parameter block does not describe, for example
 !!! note "Enforcement status"
     The configured `ParallelizationFactor` is persisted and returned on the wire, but the poller
     does not yet process concurrent batches per shard. Floci opens an iterator on a single shard
-    (`shardId-000000000000`) per Kinesis or DynamoDB Streams pipe and delivers one batch at a time
-    regardless of the configured value. Multi-shard polling and real per-shard concurrency are
-    tracked as follow-ups.
+    (`shardId-000000000000`) per Kinesis pipe, and reads the shards of a DynamoDB stream one batch
+    at a time, regardless of the configured value. Multi-shard Kinesis polling and real per-shard
+    concurrency are tracked as follow-ups.
+
+## DynamoDB Streams Source
+
+- `StartingPosition` `TRIM_HORIZON` and `LATEST` are honored. `LATEST` is pinned on the pipe's
+  first poll, so only records written after that poll are delivered.
+- Progress survives `StopPipe` and `StartPipe`: a restarted pipe resumes after the last record it
+  delivered or sent to the DLQ. The progress is kept in memory, so it is lost when Floci restarts.
+- Records are delivered in the AWS DynamoDB Streams record shape (`eventName`, `dynamodb.Keys`,
+  `dynamodb.NewImage` and so on) with `eventSourceARN` set to the stream ARN, so filter patterns on
+  `dynamodb.*` fields match as on AWS.
+- A failed batch is retried until it is delivered or sent to the `DeadLetterConfig` queue. When
+  some records of a batch reach a non-Lambda target and others fail, the whole batch is retried.
+- `MaximumRetryAttempts`, `MaximumRecordAgeInSeconds` and `OnPartialBatchItemFailure` are accepted
+  and returned but not enforced, so they do not bound or split those retries.
 
 ## Enrichment
 

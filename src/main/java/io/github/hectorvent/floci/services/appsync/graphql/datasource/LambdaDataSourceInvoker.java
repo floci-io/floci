@@ -59,6 +59,12 @@ public class LambdaDataSourceInvoker implements AppSyncDataSourceInvoker {
         return invokeOnce(functionArn, payload, region);
     }
 
+    @Override
+    public Object invokeVtl(DataSource dataSource, Object request, String region) {
+        Object payload = request instanceof Map<?, ?> map ? map.get("payload") : null;
+        return invokeOnce(functionArn(dataSource), payload, region);
+    }
+
     private Object invokeOnce(String functionArn, Object payload, String region) {
         byte[] body;
         try {

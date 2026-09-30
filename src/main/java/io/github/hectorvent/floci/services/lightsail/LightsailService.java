@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -407,10 +408,14 @@ public class LightsailService implements ResourceProvider {
         boolean includeAzs = request.path("includeAvailabilityZones").asBoolean(false);
         ObjectNode response = mapper.createObjectNode();
         ArrayNode regions = response.putArray("regions");
-        regions.add(regionNode("us-east-1", "Virginia", "United States", includeAzs));
-        regions.add(regionNode("us-west-2", "Oregon", "United States", includeAzs));
-        regions.add(regionNode("eu-central-1", "Frankfurt", "Europe", includeAzs));
-        regions.add(regionNode("eu-west-1", "Ireland", "Europe", includeAzs));
+        // Lightsail exists only in the commercial partition (endpoints.json lists it nowhere else).
+        if (!AwsPartitions.forRegionOrCommercial(regionResolver.getRegion()).offers("lightsail")) {
+            return response;
+        }
+        regions.add(regionNode("us-east-1", "Virginia", "United States", includeAzs)); // partition-literal: commercial Lightsail region
+        regions.add(regionNode("us-west-2", "Oregon", "United States", includeAzs)); // partition-literal: commercial Lightsail region
+        regions.add(regionNode("eu-central-1", "Frankfurt", "Europe", includeAzs)); // partition-literal: commercial Lightsail region
+        regions.add(regionNode("eu-west-1", "Ireland", "Europe", includeAzs)); // partition-literal: commercial Lightsail region
         return response;
     }
 

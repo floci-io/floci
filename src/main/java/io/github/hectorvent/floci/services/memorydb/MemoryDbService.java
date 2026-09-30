@@ -623,7 +623,7 @@ public class MemoryDbService {
             return region;
         }
         String defaultRegion = regionResolver.getDefaultRegion();
-        return defaultRegion != null ? defaultRegion : "us-east-1";
+        return defaultRegion != null ? defaultRegion : "us-east-1"; // partition-literal: reached only when the resolver has no default region (test constructors)
     }
 
     private String identityName(String accountId, String region, String name) {

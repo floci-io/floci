@@ -1,0 +1,59 @@
+name: IAM Namespace Drift
+
+# Checks that every namespace in the vendored IAM service namespace list is one AWS actually
+# publishes. That needs the live service reference index, so unlike every other check here it can
+# fail without anything in the repository having changed: an AWS outage, or a namespace AWS has
+# retired. It therefore runs on its own, never as part of a job that ordinary changes trigger.
+#
+# Two triggers, for two different failures:
+#
+#   - On a pull request that touches the vendored file or its generator, which is where a
+#     hand-typed or mistyped namespace would enter the repository. A pull request that does not
+#     touch them cannot introduce one, so it does not run and cannot be failed by an outage.
+#   - Weekly, because the list also goes stale without anyone touching it: AWS ships services and
+#     occasionally retires them. Tying the only upstream check to pull request activity would mean
+#     a quiet month is a month with no drift detection at all.
+#
+# A namespace AWS has *added* since the last `make iam-namespaces-sync` is reported without
+# failing, because being behind makes the service-last-accessed report incomplete rather than
+# wrong. The fix for a real failure is to run that target and commit the result.
+#
+# The offline shape check is hermetic and runs per pull request inside the "Vendored AWS data in
+# sync" job in partition-literals.yml instead.
+
+on:
+  pull_request:
+    paths:
+      - 'src/main/resources/aws/iam-service-namespaces.json'
+      - 'tools/aws/regen_service_namespaces.py'
+      - 'tools/aws/test_regen_service_namespaces.py'
+      - '.github/workflows/iam-namespace-drift.yml'
+  schedule:
+    # Mondays at 06:00 UTC, before the working week rather than during it.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  iam-namespaces-drift:
+    name: Vendored IAM namespaces still exist upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+
+      # No dependency install: the generator is deliberately stdlib-only, and this job runs no
+      # tests. The pinned botocore the sibling workflow needs is for the partition generator.
+      - name: Check every vendored IAM namespace still exists upstream
+        run: make iam-namespaces-verify

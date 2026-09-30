@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.kms;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
@@ -18,6 +19,7 @@ import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.PublicKey;
+import java.security.spec.ECGenParameterSpec;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
@@ -3115,6 +3117,62 @@ class KmsIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("KeySpec", equalTo("RSA_2048"))
+                .body("KeyUsage", equalTo("SIGN_VERIFY"))
+                .extract().path("PublicKey");
+
+        assertEquals(Base64.getEncoder().encodeToString(importedKeyPair.getPublic().getEncoded()), publicKey);
+        describeKey(keyId)
+                .body("KeyMetadata.KeyState", equalTo("Enabled"))
+                .body("KeyMetadata.Enabled", equalTo(true));
+    }
+
+    @Test
+    void eccImportRoundTripDerivesThePublicKey() throws Exception {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
+        generator.initialize(new ECGenParameterSpec("secp256r1"));
+        KeyPair importedKeyPair = generator.generateKeyPair();
+
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Origin\":\"EXTERNAL\",\"KeyUsage\":\"SIGN_VERIFY\",\"KeySpec\":\"ECC_NIST_P256\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.KeyState", equalTo("PendingImport"))
+                .extract().path("KeyMetadata.KeyId");
+
+        JsonPath parameters = given()
+                .header("X-Amz-Target", "TrentService.GetParametersForImport")
+                .contentType(KMS_CONTENT_TYPE)
+                .body(("{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSA_AES_KEY_WRAP_SHA_256\","
+                        + "\"WrappingKeySpec\":\"RSA_2048\"}").formatted(keyId))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().jsonPath();
+
+        String wrapped = Base64.getEncoder().encodeToString(wrapWithRsaAesSha256(
+                parameters.getString("PublicKey"), importedKeyPair.getPrivate().getEncoded()));
+        given()
+                .header("X-Amz-Target", "TrentService.ImportKeyMaterial")
+                .contentType(KMS_CONTENT_TYPE)
+                .body(("{\"KeyId\":\"%s\",\"ImportToken\":\"%s\",\"EncryptedKeyMaterial\":\"%s\","
+                        + "\"ExpirationModel\":\"KEY_MATERIAL_DOES_NOT_EXPIRE\"}")
+                        .formatted(keyId, parameters.getString("ImportToken"), wrapped))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMaterialId", matchesPattern("[a-f0-9]{64}"));
+
+        String publicKey = given()
+                .header("X-Amz-Target", "TrentService.GetPublicKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"%s\"}".formatted(keyId))
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("KeySpec", equalTo("ECC_NIST_P256"))
                 .body("KeyUsage", equalTo("SIGN_VERIFY"))
                 .extract().path("PublicKey");
 

@@ -3,10 +3,12 @@ package io.github.hectorvent.floci.services.kinesisanalytics.container;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.model.MountType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExecStubs;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -16,6 +18,7 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
+import io.github.hectorvent.floci.services.kinesisanalytics.model.Snapshot;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,6 +30,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -87,10 +91,13 @@ class FlinkContainerManagerTest {
         EmulatorConfig.DnsConfig dnsConfig = mock(EmulatorConfig.DnsConfig.class);
         when(dnsConfig.containerFallbackEnabled()).thenReturn(false);
 
+        EmulatorConfig.StorageConfig storageConfig = storageWithInitImage("busybox:stable");
+
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.docker()).thenReturn(dockerConfig);
         when(config.services()).thenReturn(servicesConfig);
         when(config.dns()).thenReturn(dnsConfig);
+        when(config.storage()).thenReturn(storageConfig);
         when(config.defaultRegion()).thenReturn("us-west-2");
 
         DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
@@ -125,6 +132,29 @@ class FlinkContainerManagerTest {
                 MAPPER);
     }
 
+    private static EmulatorConfig.StorageConfig storageWithInitImage(String initImage) {
+        EmulatorConfig.EfsSharingConfig efs = mock(EmulatorConfig.EfsSharingConfig.class);
+        when(efs.initImage()).thenReturn(initImage);
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        when(storage.efs()).thenReturn(efs);
+        return storage;
+    }
+
+    @Test
+    void deleteSnapshotFilesRemovesTheSavepointInsideTheJobManager() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, "jm-container-id", 0, "", "");
+        FlinkApplication app = application("my-app");
+        app.setContainerId("jm-container-id");
+        Snapshot snapshot = new Snapshot();
+        snapshot.setFlinkLocation("/savepoints/savepoint-1");
+
+        manager.deleteSnapshotFiles(app, snapshot);
+
+        assertEquals(List.of(List.of("rm", "-rf", "/savepoints/savepoint-1")), commands);
+    }
+
     private FlinkApplication application(String name) {
         return new FlinkApplication(name,
                 "arn:aws:kinesisanalytics:us-west-2:000000000000:application/" + name,
@@ -145,7 +175,7 @@ class FlinkContainerManagerTest {
         when(config.docker()).thenReturn(docker);
         when(docker.logMaxSize()).thenReturn("10m");
         when(docker.logMaxFile()).thenReturn("3");
-        EmulatorConfig.StorageConfig storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
+        EmulatorConfig.StorageConfig storage = storageWithInitImage("busybox:stable");
         when(config.storage()).thenReturn(storage);
         when(storage.hostPersistentPath()).thenReturn("floci-data");
 
@@ -278,6 +308,24 @@ class FlinkContainerManagerTest {
         assertTrue(jmSpec.extraHosts().contains("host.docker.internal:host-gateway"));
         assertTrue(jmSpec.dnsServers().contains("172.18.0.2"));
         verify(awsEnv).sdkBaselineEnv("us-west-2", Optional.empty());
+    }
+
+    @Test
+    void startCluster_savepointsVolume_isChownedToFlinkUser() {
+        FlinkApplication app = application("snap");
+        when(lifecycleManager.create(any())).thenReturn("jm-id");
+        when(lifecycleManager.startCreated(any(), any())).thenReturn(new ContainerInfo(
+                "jm-id", Map.of(8081, new EndpointInfo("localhost", 49152))));
+
+        manager.startCluster(app);
+
+        String volumeName = app.getDockerVolumeName();
+        verify(lifecycleManager).ensureSharedVolume(volumeName, OptionalInt.of(9999), OptionalInt.of(9999),
+                Optional.empty(), "busybox:stable");
+        ContainerSpec jmSpec = captureCreatedSpecs().getFirst();
+        assertTrue(jmSpec.mounts().stream().anyMatch(mount -> mount.getType() == MountType.VOLUME
+                && volumeName.equals(mount.getSource())
+                && "/opt/flink/savepoints".equals(mount.getTarget())));
     }
 
     @Test

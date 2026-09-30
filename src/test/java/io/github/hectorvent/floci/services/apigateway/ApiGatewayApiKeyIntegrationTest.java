@@ -285,4 +285,30 @@ class ApiGatewayApiKeyIntegrationTest {
                 .statusCode(404)
                 .body("__type", equalTo("NotFoundException"));
     }
+
+    @Test @Order(17)
+    void createApiKey_enabledAbsent_keyIsDisabled() {
+        String body = """
+                {"name":"enabled-absent-key"}
+                """;
+        String keyId = given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/apikeys")
+                .then()
+                .statusCode(201)
+                .body("enabled", equalTo(false))
+                .extract().path("id");
+
+        given()
+                .when().get("/apikeys/" + keyId)
+                .then()
+                .statusCode(200)
+                .body("enabled", equalTo(false));
+
+        given()
+                .when().delete("/apikeys/" + keyId)
+                .then()
+                .statusCode(202);
+    }
 }

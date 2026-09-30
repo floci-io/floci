@@ -26,7 +26,6 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -374,7 +373,7 @@ public class SesExportJobService implements Resettable {
         }
         return Optional.of(preSignedUrlGenerator.generatePresignedUrl(baseUrl,
                 exportBucket(job.getAccountId(), job.getRegion()), job.getObjectKey(), "GET",
-                PRESIGNED_URL_EXPIRY_SECONDS));
+                PRESIGNED_URL_EXPIRY_SECONDS, job.getRegion()));
     }
 
     public List<ExportJob> listExportJobs(String region, String sourceType, String jobStatus) {
@@ -393,9 +392,6 @@ public class SesExportJobService implements Resettable {
         return exportJobStore.scan(k -> k.startsWith(keyPrefix(region))).stream()
                 .filter(job -> sourceType == null || sourceType.equals(job.getExportSourceType()))
                 .filter(job -> jobStatus == null || jobStatus.equals(job.getJobStatus()))
-                // Newest first, as AWS returns them.
-                .sorted(Comparator.comparing(ExportJob::getCreatedTimestamp).reversed()
-                        .thenComparing(ExportJob::getJobId))
                 .toList();
     }
 

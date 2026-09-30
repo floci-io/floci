@@ -119,6 +119,7 @@ public class DynamoDbService {
     private static final int MIN_VECTOR_INDEX_NAME_LENGTH = 3;
     // The order AWS prints the enum constraint in, which is neither alphabetical nor the order
     // the API reference lists.
+    private static final Set<String> VALID_BILLING_MODES = Set.of("PROVISIONED", "PAY_PER_REQUEST");
     private static final List<String> VECTOR_DISTANCE_FUNCTIONS = List.of(
             DynamoDbVectorScoring.DOT_PRODUCT,
             DynamoDbVectorScoring.COSINE,
@@ -167,7 +168,7 @@ public class DynamoDbService {
 
     /** Package-private constructor for testing. */
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore) {
-        this(tableStore, null, null, null, new RegionResolver("us-east-1", "000000000000"), null, null, null, null);
+        this(tableStore, null, null, null, new RegionResolver("us-east-1", "000000000000"), null, null, null, null); // partition-literal: test-shaped constructor default
     }
 
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore, RegionResolver regionResolver) {
@@ -225,6 +226,26 @@ public class DynamoDbService {
         this.vectorIndexBackfillSeconds = vectorIndexBackfillSeconds;
         loadPersistedItems();
         recoverInterruptedJobs();
+    }
+
+    /** Emulator reset: drops the in-process item cache, locks and idempotency tokens, and stream state. */
+    public void clearProcessState() {
+        itemsByTable.clear();
+        itemLocks.clear();
+        txIdempotency.clear();
+        if (streamService != null) {
+            streamService.clear();
+        }
+        if (kinesisForwarder != null) {
+            kinesisForwarder.clear();
+        }
+    }
+
+    /** Shutdown: ends Kinesis forwarding drains so none writes to Kinesis during the final storage flush. */
+    public void stopKinesisForwarding() {
+        if (kinesisForwarder != null) {
+            kinesisForwarder.clear();
+        }
     }
 
     private void loadPersistedItems() {
@@ -795,7 +816,7 @@ public class DynamoDbService {
         if (streamService == null) {
             return table;
         }
-        streamService.disableStream(table.getTableName(), region);
+        streamService.disableStream(table.getTableArn());
         table.setStreamEnabled(false);
         persistTable(tableName, table, region);
         return table;
@@ -820,7 +841,7 @@ public class DynamoDbService {
             itemStore.delete(storageKey);
         }
         if (streamService != null) {
-            streamService.deleteStream(canonicalTableName, region);
+            streamService.deleteStream(table.getTableArn());
         }
         if (kinesisForwarder != null) {
             // Discard any buffered CDC records and stop draining: the destination stream is gone.
@@ -948,7 +969,7 @@ public class DynamoDbService {
             String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
                 if (streamService != null) {
-                    streamService.captureEvent(canonicalTableName, eventName, existing, item, table, region);
+                    streamService.captureEvent(eventName, existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
                     kinesisForwarder.forward(eventName, existing, item, table, region, ownerAccountId);
@@ -1050,7 +1071,7 @@ public class DynamoDbService {
                 String ownerAccountId = regionResolver.getAccountId();
                 Runnable streamEvent = () -> {
                     if (streamService != null) {
-                        streamService.captureEvent(canonicalTableName, "REMOVE", removed, null, table, region);
+                        streamService.captureEvent("REMOVE", removed, null, table, region);
                     }
                     if (kinesisForwarder != null) {
                         kinesisForwarder.forward("REMOVE", removed, null, table, region, ownerAccountId);
@@ -1265,7 +1286,7 @@ public class DynamoDbService {
             String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
                 if (streamService != null) {
-                    streamService.captureEvent(canonicalTableName, "MODIFY", existing, item, table, region);
+                    streamService.captureEvent("MODIFY", existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
                     kinesisForwarder.forward("MODIFY", existing, item, table, region, ownerAccountId);
@@ -2285,8 +2306,7 @@ public class DynamoDbService {
 
         for (String gsiName : gsiDeletes) {
             if (table.findGsi(gsiName).isEmpty()) {
-                throw new AwsException("ResourceNotFoundException",
-                        "Global secondary index " + gsiName + " does not exist on the table", 400);
+                throw missingGsi(gsiName, table.getTableName());
             }
         }
 
@@ -2687,7 +2707,8 @@ public class DynamoDbService {
     }
 
     record ExpiredTableScan(String rawKey, String accountId, String storageKey, String region,
-                             TableDefinition table, List<String> itemKeys) {}
+                             TableDefinition table, List<String> itemKeys,
+                             ConcurrentSkipListMap<String, JsonNode> items) {}
 
     void deleteExpiredItems() {
         deleteScannedItems(scanExpiredItems());
@@ -2726,7 +2747,7 @@ public class DynamoDbService {
             String accountId = slash >= 0 ? rawKey.substring(0, slash) : null;
             String storageKey = slash >= 0 ? rawKey.substring(slash + 1) : rawKey;
             String region = storageKey.split("::", 2)[0];
-            scans.add(new ExpiredTableScan(rawKey, accountId, storageKey, region, table, expiredKeys));
+            scans.add(new ExpiredTableScan(rawKey, accountId, storageKey, region, table, expiredKeys, items));
         }
         return scans;
     }
@@ -2734,13 +2755,14 @@ public class DynamoDbService {
     void deleteScannedItems(List<ExpiredTableScan> scans) {
         int totalDeleted = 0;
         for (ExpiredTableScan scan : scans) {
-            ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scan.rawKey());
-            if (items == null) {
-                continue;
-            }
+            ConcurrentSkipListMap<String, JsonNode> items = scan.items();
 
             int deletedForTable = 0;
             for (String itemKey : scan.itemKeys()) {
+                // A table deleted, or deleted and recreated, since the scan or during this sweep: its items are not this scan's.
+                if (itemsByTable.get(scan.rawKey()) != items) {
+                    break;
+                }
                 JsonNode removed = withScopedItemLock(scan.rawKey(), itemKey, () -> {
                     JsonNode current = items.get(itemKey);
                     if (current == null || !isExpired(current, scan.table())) {
@@ -2753,8 +2775,7 @@ public class DynamoDbService {
                 }
                 deletedForTable++;
                 if (streamService != null) {
-                    streamService.captureEvent(scan.table().getTableName(), "REMOVE", removed, null,
-                            scan.table(), scan.region());
+                    streamService.captureEvent("REMOVE", removed, null, scan.table(), scan.region());
                 }
                 if (kinesisForwarder != null) {
                     // Out of request scope here: pass the table owner's account explicitly so the CDC
@@ -2763,7 +2784,15 @@ public class DynamoDbService {
                 }
             }
             if (deletedForTable > 0) {
-                persistItemsForAccount(scan.accountId(), scan.storageKey(), items);
+                // A DeleteTable during the loop detached this map; writing it back would revive its items.
+                // Persisting under the entry's lock holds off DeleteTable, which removes the entry before
+                // it deletes the stored items.
+                itemsByTable.computeIfPresent(scan.rawKey(), (key, live) -> {
+                    if (live == items) {
+                        persistItemsForAccount(scan.accountId(), scan.storageKey(), items);
+                    }
+                    return live;
+                });
                 totalDeleted += deletedForTable;
             }
         }
@@ -4763,6 +4792,21 @@ public class DynamoDbService {
      * leaves nothing behind. Returns the import already started with the same ClientToken,
      * or null when this is a new import.
      */
+    static void validateBillingMode(JsonNode request, String memberPrefix) {
+        JsonNode billingMode = request.path("BillingMode");
+        if (billingMode.isTextual() && !VALID_BILLING_MODES.contains(billingMode.asText())) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + billingMode.asText() + "' at '" + memberPrefix
+                    + "billingMode' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]", 400);
+        }
+    }
+
+    static AwsException missingGsi(String indexName, String tableName) {
+        return new AwsException("ResourceNotFoundException",
+                "Requested resource not found: Index " + indexName + " for table " + tableName, 400);
+    }
+
     public ImportTableDescription validateImportRequest(JsonNode request) {
         if (request.path("S3BucketSource").path("S3Bucket").asText("").isBlank()) {
             throw new AwsException("ValidationException", "S3BucketSource.S3Bucket is required", 400);
@@ -4787,6 +4831,7 @@ public class DynamoDbService {
                     + "' at 'inputCompressionType' failed to satisfy constraint: Member must satisfy enum value set: [GZIP, ZSTD, NONE]", 400);
         }
         DynamoDbTableNames.requireShortName(request.path("TableCreationParameters").path("TableName").asText(null));
+        validateBillingMode(request.path("TableCreationParameters"), "tableCreationParameters.");
         var clientToken = request.path("ClientToken").asText(null);
         if (clientToken != null && clientToken.isBlank()) {
             throw new AwsException("ValidationException",

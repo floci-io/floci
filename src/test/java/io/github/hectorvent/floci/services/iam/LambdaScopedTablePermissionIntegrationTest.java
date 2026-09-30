@@ -92,7 +92,7 @@ class LambdaScopedTablePermissionIntegrationTest {
                             {"TableName":"not-granted-%s","Key":{"id":{"S":"record"}}}
                             """.formatted(suffix))
             .when().post("/")
-            .then().statusCode(403).body(containsString("AccessDenied"));
+            .then().statusCode(400).body(containsString("AccessDenied"));
         } finally {
             executionRoleCredentials.unregister(ACCOUNT_ID, credentials.accessKeyId());
             iamService.deleteRolePolicy(roleName, "TableAccess");

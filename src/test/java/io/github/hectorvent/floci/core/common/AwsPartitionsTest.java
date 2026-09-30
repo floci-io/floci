@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -216,6 +217,23 @@ class AwsPartitionsTest {
     @ValueSource(strings = {"amazonaws.com", "localhost:4566", "bucket.localhost", "example.com", "s3.amazonaws.com.evil"})
     void hostsWithoutAPublishedSuffixDoNotStrip(String host) {
         assertTrue(AwsPartitions.stripKnownDnsSuffix(host).isEmpty());
+    }
+
+    @Test
+    void dnsSuffixHelpersRecogniseEveryPublishedSuffix() {
+        assertTrue(AwsPartitions.isDnsSuffix("amazonaws.com"));
+        assertTrue(AwsPartitions.isDnsSuffix("AMAZONAWS.COM.CN"));
+        assertTrue(AwsPartitions.isDnsSuffix("api.aws"));
+        assertTrue(AwsPartitions.isDnsSuffix("c2s.ic.gov"));
+        assertFalse(AwsPartitions.isDnsSuffix("localhost"));
+        assertFalse(AwsPartitions.isDnsSuffix("s3.amazonaws.com"));
+        assertFalse(AwsPartitions.isDnsSuffix(null));
+        Pattern host = Pattern.compile("^bucket\\.s3\\." + AwsPartitions.dnsSuffixRegex() + "$");
+        assertTrue(host.matcher("bucket.s3.amazonaws.com").matches());
+        assertTrue(host.matcher("bucket.s3.amazonaws.com.cn").matches());
+        assertTrue(host.matcher("bucket.s3.csp.hci.ic.gov").matches());
+        assertFalse(host.matcher("bucket.s3.amazonaws.com.evil").matches());
+        assertFalse(host.matcher("bucket.s3.amazonawsXcom").matches(), "the suffix dots are quoted");
     }
 
     @Test

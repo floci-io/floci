@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.codeartifact;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -36,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Docker-gated form.
  */
 @QuarkusTest
-@TestProfile(CodeArtifactMavenSidecarProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CodeArtifactMavenDockerIntegrationTest {
 
@@ -49,7 +50,7 @@ class CodeArtifactMavenDockerIntegrationTest {
 
     @BeforeAll
     static void setUp() {
-        CodeArtifactMavenSidecarProfile.requireDockerAndTheSidecarImage();
+        SidecarContainersProfile.requireDockerAndImage("floci.services.codeartifact.maven-image");
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 

@@ -12,13 +12,17 @@ import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.AuthenticationMode;
 import software.amazon.awssdk.services.elasticache.model.CreateReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.CreateUserRequest;
+import software.amazon.awssdk.services.elasticache.model.CreateUserResponse;
 import software.amazon.awssdk.services.elasticache.model.DeleteReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteUserRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeUsersRequest;
+import software.amazon.awssdk.services.elasticache.model.Endpoint;
 import software.amazon.awssdk.services.elasticache.model.InputAuthenticationType;
 import software.amazon.awssdk.services.elasticache.model.ModifyReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.ModifyUserRequest;
+import software.amazon.awssdk.services.elasticache.model.ModifyUserResponse;
+import software.amazon.awssdk.services.elasticache.model.ReplicationGroup;
 import software.amazon.awssdk.services.elasticache.model.ElastiCacheException;
 
 import java.io.IOException;
@@ -87,11 +91,13 @@ class ElastiCacheTest {
 
         assertThat(response.replicationGroup().replicationGroupId()).isEqualTo(groupId);
         assertThat(response.replicationGroup().status()).isEqualTo("available");
-        assertThat(response.replicationGroup().configurationEndpoint()).isNotNull();
-        assertThat(response.replicationGroup().configurationEndpoint().address()).isEqualTo(TestFixtures.proxyHost());
+        assertThat(response.replicationGroup().clusterEnabled()).isFalse();
+        assertThat(response.replicationGroup().configurationEndpoint()).isNull();
+        assertThat(response.replicationGroup().nodeGroups()).hasSize(1);
+        assertThat(primaryEndpoint(response.replicationGroup()).address()).isEqualTo(TestFixtures.proxyHost());
         assertThat(response.replicationGroup().authTokenEnabled()).isTrue();
 
-        firstProxyPort = response.replicationGroup().configurationEndpoint().port();
+        firstProxyPort = primaryEndpoint(response.replicationGroup()).port();
         groupCreated = true;
     }
 
@@ -106,7 +112,8 @@ class ElastiCacheTest {
 
         assertThat(response.replicationGroups()).hasSize(1);
         assertThat(response.replicationGroups().get(0).replicationGroupId()).isEqualTo(groupId);
-        assertThat(response.replicationGroups().get(0).configurationEndpoint().port()).isEqualTo(firstProxyPort);
+        assertThat(response.replicationGroups().get(0).configurationEndpoint()).isNull();
+        assertThat(primaryEndpoint(response.replicationGroups().get(0)).port()).isEqualTo(firstProxyPort);
     }
 
     @Test
@@ -294,6 +301,38 @@ class ElastiCacheTest {
 
     @Test
     @Order(12)
+    void topLevelPasswordsAndAccessStringChangesRoundTrip() {
+        String passwordUserId = TestFixtures.uniqueName("ec-pw-user");
+        CreateUserResponse created = elasticache.createUser(CreateUserRequest.builder()
+                .userId(passwordUserId)
+                .userName(TestFixtures.uniqueName("ec-pw-name"))
+                .engine("redis")
+                .accessString("on ~app:* -@all +@read")
+                .passwords("top-level-password-1")
+                .build());
+        assertThat(created.authentication().typeAsString()).isEqualTo("password");
+        assertThat(created.authentication().passwordCount()).isEqualTo(1);
+
+        try {
+            ModifyUserResponse appended = elasticache.modifyUser(ModifyUserRequest.builder()
+                    .userId(passwordUserId)
+                    .appendAccessString("+@write")
+                    .build());
+            assertThat(appended.accessString()).isEqualTo("on ~app:* -@all +@read +@write");
+
+            ModifyUserResponse opened = elasticache.modifyUser(ModifyUserRequest.builder()
+                    .userId(passwordUserId)
+                    .noPasswordRequired(true)
+                    .build());
+            assertThat(opened.authentication().typeAsString()).isEqualTo("no-password-required");
+            assertThat(opened.authentication().passwordCount()).isZero();
+        } finally {
+            elasticache.deleteUser(DeleteUserRequest.builder().userId(passwordUserId).build());
+        }
+    }
+
+    @Test
+    @Order(13)
     void deleteReplicationGroupReleasesPortForReuse() {
         requireGroup();
 
@@ -315,9 +354,13 @@ class ElastiCacheTest {
                 .authToken(authToken)
                 .build());
 
-        assertThat(response.replicationGroup().configurationEndpoint().port()).isEqualTo(firstProxyPort);
+        assertThat(primaryEndpoint(response.replicationGroup()).port()).isEqualTo(firstProxyPort);
         groupCreated = false;
-        firstProxyPort = response.replicationGroup().configurationEndpoint().port();
+        firstProxyPort = primaryEndpoint(response.replicationGroup()).port();
+    }
+
+    private static Endpoint primaryEndpoint(ReplicationGroup group) {
+        return group.nodeGroups().get(0).primaryEndpoint();
     }
 
     private static void requireGroup() {

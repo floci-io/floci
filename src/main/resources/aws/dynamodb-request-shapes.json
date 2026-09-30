@@ -1,0 +1,1663 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_dynamodb_shapes.py",
+    "botocore": "botocore 1.43.98 (installed package)"
+  },
+  "operations": {
+    "BatchExecuteStatement": "BatchExecuteStatementInput",
+    "BatchGetItem": "BatchGetItemInput",
+    "BatchWriteItem": "BatchWriteItemInput",
+    "CreateBackup": "CreateBackupInput",
+    "CreateGlobalTable": "CreateGlobalTableInput",
+    "CreateTable": "CreateTableInput",
+    "DeleteBackup": "DeleteBackupInput",
+    "DeleteItem": "DeleteItemInput",
+    "DeleteResourcePolicy": "DeleteResourcePolicyInput",
+    "DeleteTable": "DeleteTableInput",
+    "DescribeBackup": "DescribeBackupInput",
+    "DescribeContinuousBackups": "DescribeContinuousBackupsInput",
+    "DescribeContributorInsights": "DescribeContributorInsightsInput",
+    "DescribeEndpoints": "DescribeEndpointsRequest",
+    "DescribeExport": "DescribeExportInput",
+    "DescribeGlobalTable": "DescribeGlobalTableInput",
+    "DescribeGlobalTableSettings": "DescribeGlobalTableSettingsInput",
+    "DescribeImport": "DescribeImportInput",
+    "DescribeKinesisStreamingDestination": "DescribeKinesisStreamingDestinationInput",
+    "DescribeLimits": "DescribeLimitsInput",
+    "DescribeTable": "DescribeTableInput",
+    "DescribeTableReplicaAutoScaling": "DescribeTableReplicaAutoScalingInput",
+    "DescribeTimeToLive": "DescribeTimeToLiveInput",
+    "DisableKinesisStreamingDestination": "KinesisStreamingDestinationInput",
+    "EnableKinesisStreamingDestination": "KinesisStreamingDestinationInput",
+    "ExecuteStatement": "ExecuteStatementInput",
+    "ExecuteTransaction": "ExecuteTransactionInput",
+    "ExportTableToPointInTime": "ExportTableToPointInTimeInput",
+    "GetItem": "GetItemInput",
+    "GetResourcePolicy": "GetResourcePolicyInput",
+    "ImportTable": "ImportTableInput",
+    "ListBackups": "ListBackupsInput",
+    "ListContributorInsights": "ListContributorInsightsInput",
+    "ListExports": "ListExportsInput",
+    "ListGlobalTables": "ListGlobalTablesInput",
+    "ListImports": "ListImportsInput",
+    "ListTables": "ListTablesInput",
+    "ListTagsOfResource": "ListTagsOfResourceInput",
+    "PutItem": "PutItemInput",
+    "PutResourcePolicy": "PutResourcePolicyInput",
+    "Query": "QueryInput",
+    "RestoreTableFromBackup": "RestoreTableFromBackupInput",
+    "RestoreTableToPointInTime": "RestoreTableToPointInTimeInput",
+    "Scan": "ScanInput",
+    "SearchVectors": "SearchVectorsInput",
+    "TagResource": "TagResourceInput",
+    "TransactGetItems": "TransactGetItemsInput",
+    "TransactWriteItems": "TransactWriteItemsInput",
+    "UntagResource": "UntagResourceInput",
+    "UpdateContinuousBackups": "UpdateContinuousBackupsInput",
+    "UpdateContributorInsights": "UpdateContributorInsightsInput",
+    "UpdateGlobalTable": "UpdateGlobalTableInput",
+    "UpdateGlobalTableSettings": "UpdateGlobalTableSettingsInput",
+    "UpdateItem": "UpdateItemInput",
+    "UpdateKinesisStreamingDestination": "UpdateKinesisStreamingDestinationInput",
+    "UpdateTable": "UpdateTableInput",
+    "UpdateTableReplicaAutoScaling": "UpdateTableReplicaAutoScalingInput",
+    "UpdateTimeToLive": "UpdateTimeToLiveInput"
+  },
+  "shapes": {
+    "ApproximateCreationDateTimePrecision": {
+      "type": "string"
+    },
+    "AttributeAction": {
+      "type": "string"
+    },
+    "AttributeDefinition": {
+      "type": "structure",
+      "members": {
+        "AttributeName": "KeySchemaAttributeName",
+        "AttributeType": "ScalarAttributeType"
+      }
+    },
+    "AttributeDefinitions": {
+      "type": "list",
+      "member": "AttributeDefinition"
+    },
+    "AttributeName": {
+      "type": "string"
+    },
+    "AttributeNameList": {
+      "type": "list",
+      "member": "AttributeName"
+    },
+    "AttributeUpdates": {
+      "type": "map",
+      "value": "AttributeValueUpdate"
+    },
+    "AttributeValue": {
+      "type": "structure",
+      "members": {
+        "S": "StringAttributeValue",
+        "N": "NumberAttributeValue",
+        "B": "BinaryAttributeValue",
+        "SS": "StringSetAttributeValue",
+        "NS": "NumberSetAttributeValue",
+        "BS": "BinarySetAttributeValue",
+        "M": "MapAttributeValue",
+        "L": "ListAttributeValue",
+        "NULL": "NullAttributeValue",
+        "BOOL": "BooleanAttributeValue"
+      }
+    },
+    "AttributeValueList": {
+      "type": "list",
+      "member": "AttributeValue"
+    },
+    "AttributeValueUpdate": {
+      "type": "structure",
+      "members": {
+        "Value": "AttributeValue",
+        "Action": "AttributeAction"
+      }
+    },
+    "AutoScalingPolicyName": {
+      "type": "string"
+    },
+    "AutoScalingPolicyUpdate": {
+      "type": "structure",
+      "members": {
+        "PolicyName": "AutoScalingPolicyName",
+        "TargetTrackingScalingPolicyConfiguration": "AutoScalingTargetTrackingScalingPolicyConfigurationUpdate"
+      }
+    },
+    "AutoScalingRoleArn": {
+      "type": "string"
+    },
+    "AutoScalingSettingsUpdate": {
+      "type": "structure",
+      "members": {
+        "MinimumUnits": "PositiveLongObject",
+        "MaximumUnits": "PositiveLongObject",
+        "AutoScalingDisabled": "BooleanObject",
+        "AutoScalingRoleArn": "AutoScalingRoleArn",
+        "ScalingPolicyUpdate": "AutoScalingPolicyUpdate"
+      }
+    },
+    "AutoScalingTargetTrackingScalingPolicyConfigurationUpdate": {
+      "type": "structure",
+      "members": {
+        "DisableScaleIn": "BooleanObject",
+        "ScaleInCooldown": "IntegerObject",
+        "ScaleOutCooldown": "IntegerObject",
+        "TargetValue": "DoubleObject"
+      }
+    },
+    "BackupArn": {
+      "type": "string"
+    },
+    "BackupName": {
+      "type": "string"
+    },
+    "BackupTypeFilter": {
+      "type": "string"
+    },
+    "BackupsInputLimit": {
+      "type": "integer"
+    },
+    "BatchExecuteStatementInput": {
+      "type": "structure",
+      "members": {
+        "Statements": "PartiQLBatchRequest",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity"
+      }
+    },
+    "BatchGetItemInput": {
+      "type": "structure",
+      "members": {
+        "RequestItems": "BatchGetRequestMap",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity"
+      }
+    },
+    "BatchGetRequestMap": {
+      "type": "map",
+      "value": "KeysAndAttributes"
+    },
+    "BatchStatementRequest": {
+      "type": "structure",
+      "members": {
+        "Statement": "PartiQLStatement",
+        "Parameters": "PreparedStatementParameters",
+        "ConsistentRead": "ConsistentRead",
+        "ReturnValuesOnConditionCheckFailure": "ReturnValuesOnConditionCheckFailure"
+      }
+    },
+    "BatchWriteItemInput": {
+      "type": "structure",
+      "members": {
+        "RequestItems": "BatchWriteItemRequestMap",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity",
+        "ReturnItemCollectionMetrics": "ReturnItemCollectionMetrics"
+      }
+    },
+    "BatchWriteItemRequestMap": {
+      "type": "map",
+      "value": "WriteRequests"
+    },
+    "BillingMode": {
+      "type": "string"
+    },
+    "BinaryAttributeValue": {
+      "type": "blob"
+    },
+    "BinarySetAttributeValue": {
+      "type": "list",
+      "member": "BinaryAttributeValue"
+    },
+    "BooleanAttributeValue": {
+      "type": "boolean"
+    },
+    "BooleanObject": {
+      "type": "boolean"
+    },
+    "ClientRequestToken": {
+      "type": "string"
+    },
+    "ClientToken": {
+      "type": "string"
+    },
+    "ComparisonOperator": {
+      "type": "string"
+    },
+    "Condition": {
+      "type": "structure",
+      "members": {
+        "AttributeValueList": "AttributeValueList",
+        "ComparisonOperator": "ComparisonOperator"
+      }
+    },
+    "ConditionCheck": {
+      "type": "structure",
+      "members": {
+        "Key": "Key",
+        "TableName": "TableArn",
+        "ConditionExpression": "ConditionExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap",
+        "ExpressionAttributeValues": "ExpressionAttributeValueMap",
+        "ReturnValuesOnConditionCheckFailure": "ReturnValuesOnConditionCheckFailure"
+      }
+    },
+    "ConditionExpression": {
+      "type": "string"
+    },
+    "ConditionalOperator": {
+      "type": "string"
+    },
+    "ConfirmRemoveSelfResourceAccess": {
+      "type": "boolean"
+    },
+    "ConsistentRead": {
+      "type": "boolean"
+    },
+    "ContributorInsightsAction": {
+      "type": "string"
+    },
+    "ContributorInsightsMode": {
+      "type": "string"
+    },
+    "CreateBackupInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "BackupName": "BackupName"
+      }
+    },
+    "CreateGlobalSecondaryIndexAction": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName",
+        "KeySchema": "KeySchema",
+        "Projection": "Projection",
+        "ProvisionedThroughput": "ProvisionedThroughput",
+        "OnDemandThroughput": "OnDemandThroughput",
+        "WarmThroughput": "WarmThroughput"
+      }
+    },
+    "CreateGlobalTableInput": {
+      "type": "structure",
+      "members": {
+        "GlobalTableName": "TableName",
+        "ReplicationGroup": "ReplicaList"
+      }
+    },
+    "CreateGlobalTableWitnessGroupMemberAction": {
+      "type": "structure",
+      "members": {
+        "RegionName": "RegionName"
+      }
+    },
+    "CreateReplicaAction": {
+      "type": "structure",
+      "members": {
+        "RegionName": "RegionName"
+      }
+    },
+    "CreateReplicationGroupMemberAction": {
+      "type": "structure",
+      "members": {
+        "RegionName": "RegionName",
+        "KMSMasterKeyId": "KMSMasterKeyId",
+        "ProvisionedThroughputOverride": "ProvisionedThroughputOverride",
+        "OnDemandThroughputOverride": "OnDemandThroughputOverride",
+        "GlobalSecondaryIndexes": "ReplicaGlobalSecondaryIndexList",
+        "TableClassOverride": "TableClass"
+      }
+    },
+    "CreateTableInput": {
+      "type": "structure",
+      "members": {
+        "AttributeDefinitions": "AttributeDefinitions",
+        "TableName": "TableArn",
+        "KeySchema": "KeySchema",
+        "LocalSecondaryIndexes": "LocalSecondaryIndexList",
+        "GlobalSecondaryIndexes": "GlobalSecondaryIndexList",
+        "BillingMode": "BillingMode",
+        "ProvisionedThroughput": "ProvisionedThroughput",
+        "StreamSpecification": "StreamSpecification",
+        "SSESpecification": "SSESpecification",
+        "Tags": "TagList",
+        "TableClass": "TableClass",
+        "DeletionProtectionEnabled": "DeletionProtectionEnabled",
+        "WarmThroughput": "WarmThroughput",
+        "ResourcePolicy": "ResourcePolicy",
+        "OnDemandThroughput": "OnDemandThroughput",
+        "GlobalTableSourceArn": "TableArn",
+        "GlobalTableSettingsReplicationMode": "GlobalTableSettingsReplicationMode",
+        "VectorIndexes": "VectorIndexList"
+      }
+    },
+    "CreateVectorIndexAction": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName",
+        "VectorAttribute": "VectorAttributeDefinition",
+        "SearchSchema": "SearchSchema",
+        "Projection": "Projection",
+        "Dimensions": "PositiveLongObject",
+        "DistanceFunction": "VectorDistanceFunction"
+      }
+    },
+    "CsvDelimiter": {
+      "type": "string"
+    },
+    "CsvHeader": {
+      "type": "string"
+    },
+    "CsvHeaderList": {
+      "type": "list",
+      "member": "CsvHeader"
+    },
+    "CsvOptions": {
+      "type": "structure",
+      "members": {
+        "Delimiter": "CsvDelimiter",
+        "HeaderList": "CsvHeaderList"
+      }
+    },
+    "Date": {
+      "type": "timestamp"
+    },
+    "Delete": {
+      "type": "structure",
+      "members": {
+        "Key": "Key",
+        "TableName": "TableArn",
+        "ConditionExpression": "ConditionExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap",
+        "ExpressionAttributeValues": "ExpressionAttributeValueMap",
+        "ReturnValuesOnConditionCheckFailure": "ReturnValuesOnConditionCheckFailure"
+      }
+    },
+    "DeleteBackupInput": {
+      "type": "structure",
+      "members": {
+        "BackupArn": "BackupArn"
+      }
+    },
+    "DeleteGlobalSecondaryIndexAction": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName"
+      }
+    },
+    "DeleteGlobalTableWitnessGroupMemberAction": {
+      "type": "structure",
+      "members": {
+        "RegionName": "RegionName"
+      }
+    },
+    "DeleteItemInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "Key": "Key",
+        "Expected": "ExpectedAttributeMap",
+        "ConditionalOperator": "ConditionalOperator",
+        "ReturnValues": "ReturnValue",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity",
+        "ReturnItemCollectionMetrics": "ReturnItemCollectionMetrics",
+        "ConditionExpression": "ConditionExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap",
+        "ExpressionAttributeValues": "ExpressionAttributeValueMap",
+        "ReturnValuesOnConditionCheckFailure": "ReturnValuesOnConditionCheckFailure"
+      }
+    },
+    "DeleteReplicaAction": {
+      "type": "structure",
+      "members": {
+        "RegionName": "RegionName"
+      }
+    },
+    "DeleteReplicationGroupMemberAction": {
+      "type": "structure",
+      "members": {
+        "RegionName": "RegionName"
+      }
+    },
+    "DeleteRequest": {
+      "type": "structure",
+      "members": {
+        "Key": "Key"
+      }
+    },
+    "DeleteResourcePolicyInput": {
+      "type": "structure",
+      "members": {
+        "ResourceArn": "ResourceArnString",
+        "ExpectedRevisionId": "PolicyRevisionId"
+      }
+    },
+    "DeleteTableInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn"
+      }
+    },
+    "DeleteVectorIndexAction": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName"
+      }
+    },
+    "DeletionProtectionEnabled": {
+      "type": "boolean"
+    },
+    "DescribeBackupInput": {
+      "type": "structure",
+      "members": {
+        "BackupArn": "BackupArn"
+      }
+    },
+    "DescribeContinuousBackupsInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn"
+      }
+    },
+    "DescribeContributorInsightsInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "IndexName": "IndexName"
+      }
+    },
+    "DescribeEndpointsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeExportInput": {
+      "type": "structure",
+      "members": {
+        "ExportArn": "ExportArn"
+      }
+    },
+    "DescribeGlobalTableInput": {
+      "type": "structure",
+      "members": {
+        "GlobalTableName": "TableName"
+      }
+    },
+    "DescribeGlobalTableSettingsInput": {
+      "type": "structure",
+      "members": {
+        "GlobalTableName": "TableName"
+      }
+    },
+    "DescribeImportInput": {
+      "type": "structure",
+      "members": {
+        "ImportArn": "ImportArn"
+      }
+    },
+    "DescribeKinesisStreamingDestinationInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn"
+      }
+    },
+    "DescribeLimitsInput": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeTableInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn"
+      }
+    },
+    "DescribeTableReplicaAutoScalingInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn"
+      }
+    },
+    "DescribeTimeToLiveInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn"
+      }
+    },
+    "DoubleObject": {
+      "type": "double"
+    },
+    "EnableKinesisStreamingConfiguration": {
+      "type": "structure",
+      "members": {
+        "ApproximateCreationDateTimePrecision": "ApproximateCreationDateTimePrecision"
+      }
+    },
+    "ExecuteStatementInput": {
+      "type": "structure",
+      "members": {
+        "Statement": "PartiQLStatement",
+        "Parameters": "PreparedStatementParameters",
+        "ConsistentRead": "ConsistentRead",
+        "NextToken": "PartiQLNextToken",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity",
+        "Limit": "PositiveIntegerObject",
+        "ReturnValuesOnConditionCheckFailure": "ReturnValuesOnConditionCheckFailure"
+      }
+    },
+    "ExecuteTransactionInput": {
+      "type": "structure",
+      "members": {
+        "TransactStatements": "ParameterizedStatements",
+        "ClientRequestToken": "ClientRequestToken",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity"
+      }
+    },
+    "ExpectedAttributeMap": {
+      "type": "map",
+      "value": "ExpectedAttributeValue"
+    },
+    "ExpectedAttributeValue": {
+      "type": "structure",
+      "members": {
+        "Value": "AttributeValue",
+        "Exists": "BooleanObject",
+        "ComparisonOperator": "ComparisonOperator",
+        "AttributeValueList": "AttributeValueList"
+      }
+    },
+    "ExportArn": {
+      "type": "string"
+    },
+    "ExportFormat": {
+      "type": "string"
+    },
+    "ExportFromTime": {
+      "type": "timestamp"
+    },
+    "ExportNextToken": {
+      "type": "string"
+    },
+    "ExportTableToPointInTimeInput": {
+      "type": "structure",
+      "members": {
+        "TableArn": "TableArn",
+        "ExportTime": "ExportTime",
+        "ClientToken": "ClientToken",
+        "S3Bucket": "S3Bucket",
+        "S3BucketOwner": "S3BucketOwner",
+        "S3Prefix": "S3Prefix",
+        "S3SseAlgorithm": "S3SseAlgorithm",
+        "S3SseKmsKeyId": "S3SseKmsKeyId",
+        "ExportFormat": "ExportFormat",
+        "ExportType": "ExportType",
+        "IncrementalExportSpecification": "IncrementalExportSpecification"
+      }
+    },
+    "ExportTime": {
+      "type": "timestamp"
+    },
+    "ExportToTime": {
+      "type": "timestamp"
+    },
+    "ExportType": {
+      "type": "string"
+    },
+    "ExportViewType": {
+      "type": "string"
+    },
+    "ExpressionAttributeNameMap": {
+      "type": "map",
+      "value": "AttributeName"
+    },
+    "ExpressionAttributeValueMap": {
+      "type": "map",
+      "value": "AttributeValue"
+    },
+    "FilterConditionMap": {
+      "type": "map",
+      "value": "Condition"
+    },
+    "Get": {
+      "type": "structure",
+      "members": {
+        "Key": "Key",
+        "TableName": "TableArn",
+        "ProjectionExpression": "ProjectionExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap"
+      }
+    },
+    "GetItemInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "Key": "Key",
+        "AttributesToGet": "AttributeNameList",
+        "ConsistentRead": "ConsistentRead",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity",
+        "ProjectionExpression": "ProjectionExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap"
+      }
+    },
+    "GetResourcePolicyInput": {
+      "type": "structure",
+      "members": {
+        "ResourceArn": "ResourceArnString"
+      }
+    },
+    "GlobalSecondaryIndex": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName",
+        "KeySchema": "KeySchema",
+        "Projection": "Projection",
+        "ProvisionedThroughput": "ProvisionedThroughput",
+        "OnDemandThroughput": "OnDemandThroughput",
+        "WarmThroughput": "WarmThroughput"
+      }
+    },
+    "GlobalSecondaryIndexAutoScalingUpdate": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName",
+        "ProvisionedWriteCapacityAutoScalingUpdate": "AutoScalingSettingsUpdate"
+      }
+    },
+    "GlobalSecondaryIndexAutoScalingUpdateList": {
+      "type": "list",
+      "member": "GlobalSecondaryIndexAutoScalingUpdate"
+    },
+    "GlobalSecondaryIndexList": {
+      "type": "list",
+      "member": "GlobalSecondaryIndex"
+    },
+    "GlobalSecondaryIndexUpdate": {
+      "type": "structure",
+      "members": {
+        "Update": "UpdateGlobalSecondaryIndexAction",
+        "Create": "CreateGlobalSecondaryIndexAction",
+        "Delete": "DeleteGlobalSecondaryIndexAction"
+      }
+    },
+    "GlobalSecondaryIndexUpdateList": {
+      "type": "list",
+      "member": "GlobalSecondaryIndexUpdate"
+    },
+    "GlobalTableGlobalSecondaryIndexSettingsUpdate": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName",
+        "ProvisionedWriteCapacityUnits": "PositiveLongObject",
+        "ProvisionedWriteCapacityAutoScalingSettingsUpdate": "AutoScalingSettingsUpdate"
+      }
+    },
+    "GlobalTableGlobalSecondaryIndexSettingsUpdateList": {
+      "type": "list",
+      "member": "GlobalTableGlobalSecondaryIndexSettingsUpdate"
+    },
+    "GlobalTableSettingsReplicationMode": {
+      "type": "string"
+    },
+    "GlobalTableWitnessGroupUpdate": {
+      "type": "structure",
+      "members": {
+        "Create": "CreateGlobalTableWitnessGroupMemberAction",
+        "Delete": "DeleteGlobalTableWitnessGroupMemberAction"
+      }
+    },
+    "GlobalTableWitnessGroupUpdateList": {
+      "type": "list",
+      "member": "GlobalTableWitnessGroupUpdate"
+    },
+    "ImportArn": {
+      "type": "string"
+    },
+    "ImportNextToken": {
+      "type": "string"
+    },
+    "ImportTableInput": {
+      "type": "structure",
+      "members": {
+        "ClientToken": "ClientToken",
+        "S3BucketSource": "S3BucketSource",
+        "InputFormat": "InputFormat",
+        "InputFormatOptions": "InputFormatOptions",
+        "InputCompressionType": "InputCompressionType",
+        "TableCreationParameters": "TableCreationParameters"
+      }
+    },
+    "IncrementalExportSpecification": {
+      "type": "structure",
+      "members": {
+        "ExportFromTime": "ExportFromTime",
+        "ExportToTime": "ExportToTime",
+        "ExportViewType": "ExportViewType"
+      }
+    },
+    "IndexName": {
+      "type": "string"
+    },
+    "InputCompressionType": {
+      "type": "string"
+    },
+    "InputFormat": {
+      "type": "string"
+    },
+    "InputFormatOptions": {
+      "type": "structure",
+      "members": {
+        "Csv": "CsvOptions"
+      }
+    },
+    "IntegerObject": {
+      "type": "integer"
+    },
+    "KMSMasterKeyId": {
+      "type": "string"
+    },
+    "Key": {
+      "type": "map",
+      "value": "AttributeValue"
+    },
+    "KeyConditions": {
+      "type": "map",
+      "value": "Condition"
+    },
+    "KeyExpression": {
+      "type": "string"
+    },
+    "KeyList": {
+      "type": "list",
+      "member": "Key"
+    },
+    "KeySchema": {
+      "type": "list",
+      "member": "KeySchemaElement"
+    },
+    "KeySchemaAttributeName": {
+      "type": "string"
+    },
+    "KeySchemaElement": {
+      "type": "structure",
+      "members": {
+        "AttributeName": "KeySchemaAttributeName",
+        "KeyType": "KeyType"
+      }
+    },
+    "KeyType": {
+      "type": "string"
+    },
+    "KeysAndAttributes": {
+      "type": "structure",
+      "members": {
+        "Keys": "KeyList",
+        "AttributesToGet": "AttributeNameList",
+        "ConsistentRead": "ConsistentRead",
+        "ProjectionExpression": "ProjectionExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap"
+      }
+    },
+    "KinesisStreamingDestinationInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "StreamArn": "StreamArn",
+        "EnableKinesisStreamingConfiguration": "EnableKinesisStreamingConfiguration"
+      }
+    },
+    "ListAttributeValue": {
+      "type": "list",
+      "member": "AttributeValue"
+    },
+    "ListBackupsInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "Limit": "BackupsInputLimit",
+        "TimeRangeLowerBound": "TimeRangeLowerBound",
+        "TimeRangeUpperBound": "TimeRangeUpperBound",
+        "ExclusiveStartBackupArn": "BackupArn",
+        "BackupType": "BackupTypeFilter"
+      }
+    },
+    "ListContributorInsightsInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "NextToken": "NextTokenString",
+        "MaxResults": "ListContributorInsightsLimit"
+      }
+    },
+    "ListContributorInsightsLimit": {
+      "type": "integer"
+    },
+    "ListExportsInput": {
+      "type": "structure",
+      "members": {
+        "TableArn": "TableArn",
+        "MaxResults": "ListExportsMaxLimit",
+        "NextToken": "ExportNextToken"
+      }
+    },
+    "ListExportsMaxLimit": {
+      "type": "integer"
+    },
+    "ListGlobalTablesInput": {
+      "type": "structure",
+      "members": {
+        "ExclusiveStartGlobalTableName": "TableName",
+        "Limit": "PositiveIntegerObject",
+        "RegionName": "RegionName"
+      }
+    },
+    "ListImportsInput": {
+      "type": "structure",
+      "members": {
+        "TableArn": "TableArn",
+        "PageSize": "ListImportsMaxLimit",
+        "NextToken": "ImportNextToken"
+      }
+    },
+    "ListImportsMaxLimit": {
+      "type": "integer"
+    },
+    "ListTablesInput": {
+      "type": "structure",
+      "members": {
+        "ExclusiveStartTableName": "TableName",
+        "Limit": "ListTablesInputLimit"
+      }
+    },
+    "ListTablesInputLimit": {
+      "type": "integer"
+    },
+    "ListTagsOfResourceInput": {
+      "type": "structure",
+      "members": {
+        "ResourceArn": "ResourceArnString",
+        "NextToken": "NextTokenString"
+      }
+    },
+    "LocalSecondaryIndex": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName",
+        "KeySchema": "KeySchema",
+        "Projection": "Projection"
+      }
+    },
+    "LocalSecondaryIndexList": {
+      "type": "list",
+      "member": "LocalSecondaryIndex"
+    },
+    "LongObject": {
+      "type": "long"
+    },
+    "MapAttributeValue": {
+      "type": "map",
+      "value": "AttributeValue"
+    },
+    "MultiRegionConsistency": {
+      "type": "string"
+    },
+    "NextTokenString": {
+      "type": "string"
+    },
+    "NonKeyAttributeName": {
+      "type": "string"
+    },
+    "NonKeyAttributeNameList": {
+      "type": "list",
+      "member": "NonKeyAttributeName"
+    },
+    "NullAttributeValue": {
+      "type": "boolean"
+    },
+    "NumberAttributeValue": {
+      "type": "string"
+    },
+    "NumberSetAttributeValue": {
+      "type": "list",
+      "member": "NumberAttributeValue"
+    },
+    "OnDemandThroughput": {
+      "type": "structure",
+      "members": {
+        "MaxReadRequestUnits": "LongObject",
+        "MaxWriteRequestUnits": "LongObject"
+      }
+    },
+    "OnDemandThroughputOverride": {
+      "type": "structure",
+      "members": {
+        "MaxReadRequestUnits": "LongObject"
+      }
+    },
+    "ParameterizedStatement": {
+      "type": "structure",
+      "members": {
+        "Statement": "PartiQLStatement",
+        "Parameters": "PreparedStatementParameters",
+        "ReturnValuesOnConditionCheckFailure": "ReturnValuesOnConditionCheckFailure"
+      }
+    },
+    "ParameterizedStatements": {
+      "type": "list",
+      "member": "ParameterizedStatement"
+    },
+    "PartiQLBatchRequest": {
+      "type": "list",
+      "member": "BatchStatementRequest"
+    },
+    "PartiQLNextToken": {
+      "type": "string"
+    },
+    "PartiQLStatement": {
+      "type": "string"
+    },
+    "PointInTimeRecoverySpecification": {
+      "type": "structure",
+      "members": {
+        "PointInTimeRecoveryEnabled": "BooleanObject",
+        "RecoveryPeriodInDays": "RecoveryPeriodInDays"
+      }
+    },
+    "PolicyRevisionId": {
+      "type": "string"
+    },
+    "PositiveIntegerObject": {
+      "type": "integer"
+    },
+    "PositiveLongObject": {
+      "type": "long"
+    },
+    "PreparedStatementParameters": {
+      "type": "list",
+      "member": "AttributeValue"
+    },
+    "Projection": {
+      "type": "structure",
+      "members": {
+        "ProjectionType": "ProjectionType",
+        "NonKeyAttributes": "NonKeyAttributeNameList"
+      }
+    },
+    "ProjectionExpression": {
+      "type": "string"
+    },
+    "ProjectionType": {
+      "type": "string"
+    },
+    "ProvisionedThroughput": {
+      "type": "structure",
+      "members": {
+        "ReadCapacityUnits": "PositiveLongObject",
+        "WriteCapacityUnits": "PositiveLongObject"
+      }
+    },
+    "ProvisionedThroughputOverride": {
+      "type": "structure",
+      "members": {
+        "ReadCapacityUnits": "PositiveLongObject"
+      }
+    },
+    "Put": {
+      "type": "structure",
+      "members": {
+        "Item": "PutItemInputAttributeMap",
+        "TableName": "TableArn",
+        "ConditionExpression": "ConditionExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap",
+        "ExpressionAttributeValues": "ExpressionAttributeValueMap",
+        "ReturnValuesOnConditionCheckFailure": "ReturnValuesOnConditionCheckFailure"
+      }
+    },
+    "PutItemInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "Item": "PutItemInputAttributeMap",
+        "Expected": "ExpectedAttributeMap",
+        "ReturnValues": "ReturnValue",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity",
+        "ReturnItemCollectionMetrics": "ReturnItemCollectionMetrics",
+        "ConditionalOperator": "ConditionalOperator",
+        "ConditionExpression": "ConditionExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap",
+        "ExpressionAttributeValues": "ExpressionAttributeValueMap",
+        "ReturnValuesOnConditionCheckFailure": "ReturnValuesOnConditionCheckFailure"
+      }
+    },
+    "PutItemInputAttributeMap": {
+      "type": "map",
+      "value": "AttributeValue"
+    },
+    "PutRequest": {
+      "type": "structure",
+      "members": {
+        "Item": "PutItemInputAttributeMap"
+      }
+    },
+    "PutResourcePolicyInput": {
+      "type": "structure",
+      "members": {
+        "ResourceArn": "ResourceArnString",
+        "Policy": "ResourcePolicy",
+        "ExpectedRevisionId": "PolicyRevisionId",
+        "ConfirmRemoveSelfResourceAccess": "ConfirmRemoveSelfResourceAccess"
+      }
+    },
+    "QueryInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "IndexName": "IndexName",
+        "Select": "Select",
+        "AttributesToGet": "AttributeNameList",
+        "Limit": "PositiveIntegerObject",
+        "ConsistentRead": "ConsistentRead",
+        "KeyConditions": "KeyConditions",
+        "QueryFilter": "FilterConditionMap",
+        "ConditionalOperator": "ConditionalOperator",
+        "ScanIndexForward": "BooleanObject",
+        "ExclusiveStartKey": "Key",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity",
+        "ProjectionExpression": "ProjectionExpression",
+        "FilterExpression": "ConditionExpression",
+        "KeyConditionExpression": "KeyExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap",
+        "ExpressionAttributeValues": "ExpressionAttributeValueMap"
+      }
+    },
+    "RecoveryPeriodInDays": {
+      "type": "integer"
+    },
+    "RegionName": {
+      "type": "string"
+    },
+    "Replica": {
+      "type": "structure",
+      "members": {
+        "RegionName": "RegionName"
+      }
+    },
+    "ReplicaAutoScalingUpdate": {
+      "type": "structure",
+      "members": {
+        "RegionName": "RegionName",
+        "ReplicaGlobalSecondaryIndexUpdates": "ReplicaGlobalSecondaryIndexAutoScalingUpdateList",
+        "ReplicaProvisionedReadCapacityAutoScalingUpdate": "AutoScalingSettingsUpdate"
+      }
+    },
+    "ReplicaAutoScalingUpdateList": {
+      "type": "list",
+      "member": "ReplicaAutoScalingUpdate"
+    },
+    "ReplicaGlobalSecondaryIndex": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName",
+        "ProvisionedThroughputOverride": "ProvisionedThroughputOverride",
+        "OnDemandThroughputOverride": "OnDemandThroughputOverride"
+      }
+    },
+    "ReplicaGlobalSecondaryIndexAutoScalingUpdate": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName",
+        "ProvisionedReadCapacityAutoScalingUpdate": "AutoScalingSettingsUpdate"
+      }
+    },
+    "ReplicaGlobalSecondaryIndexAutoScalingUpdateList": {
+      "type": "list",
+      "member": "ReplicaGlobalSecondaryIndexAutoScalingUpdate"
+    },
+    "ReplicaGlobalSecondaryIndexList": {
+      "type": "list",
+      "member": "ReplicaGlobalSecondaryIndex"
+    },
+    "ReplicaGlobalSecondaryIndexSettingsUpdate": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName",
+        "ProvisionedReadCapacityUnits": "PositiveLongObject",
+        "ProvisionedReadCapacityAutoScalingSettingsUpdate": "AutoScalingSettingsUpdate"
+      }
+    },
+    "ReplicaGlobalSecondaryIndexSettingsUpdateList": {
+      "type": "list",
+      "member": "ReplicaGlobalSecondaryIndexSettingsUpdate"
+    },
+    "ReplicaList": {
+      "type": "list",
+      "member": "Replica"
+    },
+    "ReplicaSettingsUpdate": {
+      "type": "structure",
+      "members": {
+        "RegionName": "RegionName",
+        "ReplicaProvisionedReadCapacityUnits": "PositiveLongObject",
+        "ReplicaProvisionedReadCapacityAutoScalingSettingsUpdate": "AutoScalingSettingsUpdate",
+        "ReplicaGlobalSecondaryIndexSettingsUpdate": "ReplicaGlobalSecondaryIndexSettingsUpdateList",
+        "ReplicaTableClass": "TableClass"
+      }
+    },
+    "ReplicaSettingsUpdateList": {
+      "type": "list",
+      "member": "ReplicaSettingsUpdate"
+    },
+    "ReplicaUpdate": {
+      "type": "structure",
+      "members": {
+        "Create": "CreateReplicaAction",
+        "Delete": "DeleteReplicaAction"
+      }
+    },
+    "ReplicaUpdateList": {
+      "type": "list",
+      "member": "ReplicaUpdate"
+    },
+    "ReplicationGroupUpdate": {
+      "type": "structure",
+      "members": {
+        "Create": "CreateReplicationGroupMemberAction",
+        "Update": "UpdateReplicationGroupMemberAction",
+        "Delete": "DeleteReplicationGroupMemberAction"
+      }
+    },
+    "ReplicationGroupUpdateList": {
+      "type": "list",
+      "member": "ReplicationGroupUpdate"
+    },
+    "ResourceArnString": {
+      "type": "string"
+    },
+    "ResourcePolicy": {
+      "type": "string"
+    },
+    "RestoreTableFromBackupInput": {
+      "type": "structure",
+      "members": {
+        "TargetTableName": "TableName",
+        "BackupArn": "BackupArn",
+        "BillingModeOverride": "BillingMode",
+        "GlobalSecondaryIndexOverride": "GlobalSecondaryIndexList",
+        "LocalSecondaryIndexOverride": "LocalSecondaryIndexList",
+        "ProvisionedThroughputOverride": "ProvisionedThroughput",
+        "OnDemandThroughputOverride": "OnDemandThroughput",
+        "SSESpecificationOverride": "SSESpecification",
+        "VectorIndexOverride": "VectorIndexList"
+      }
+    },
+    "RestoreTableToPointInTimeInput": {
+      "type": "structure",
+      "members": {
+        "SourceTableArn": "TableArn",
+        "SourceTableName": "TableName",
+        "TargetTableName": "TableName",
+        "UseLatestRestorableTime": "BooleanObject",
+        "RestoreDateTime": "Date",
+        "BillingModeOverride": "BillingMode",
+        "GlobalSecondaryIndexOverride": "GlobalSecondaryIndexList",
+        "LocalSecondaryIndexOverride": "LocalSecondaryIndexList",
+        "ProvisionedThroughputOverride": "ProvisionedThroughput",
+        "OnDemandThroughputOverride": "OnDemandThroughput",
+        "SSESpecificationOverride": "SSESpecification",
+        "VectorIndexOverride": "VectorIndexList"
+      }
+    },
+    "ReturnConsumedCapacity": {
+      "type": "string"
+    },
+    "ReturnItemCollectionMetrics": {
+      "type": "string"
+    },
+    "ReturnValue": {
+      "type": "string"
+    },
+    "ReturnValuesOnConditionCheckFailure": {
+      "type": "string"
+    },
+    "S3Bucket": {
+      "type": "string"
+    },
+    "S3BucketOwner": {
+      "type": "string"
+    },
+    "S3BucketSource": {
+      "type": "structure",
+      "members": {
+        "S3BucketOwner": "S3BucketOwner",
+        "S3Bucket": "S3Bucket",
+        "S3KeyPrefix": "S3Prefix"
+      }
+    },
+    "S3Prefix": {
+      "type": "string"
+    },
+    "S3SseAlgorithm": {
+      "type": "string"
+    },
+    "S3SseKmsKeyId": {
+      "type": "string"
+    },
+    "SSEEnabled": {
+      "type": "boolean"
+    },
+    "SSESpecification": {
+      "type": "structure",
+      "members": {
+        "Enabled": "SSEEnabled",
+        "SSEType": "SSEType",
+        "KMSMasterKeyId": "KMSMasterKeyId"
+      }
+    },
+    "SSEType": {
+      "type": "string"
+    },
+    "ScalarAttributeType": {
+      "type": "string"
+    },
+    "ScanInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "IndexName": "IndexName",
+        "AttributesToGet": "AttributeNameList",
+        "Limit": "PositiveIntegerObject",
+        "Select": "Select",
+        "ScanFilter": "FilterConditionMap",
+        "ConditionalOperator": "ConditionalOperator",
+        "ExclusiveStartKey": "Key",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity",
+        "TotalSegments": "ScanTotalSegments",
+        "Segment": "ScanSegment",
+        "ProjectionExpression": "ProjectionExpression",
+        "FilterExpression": "ConditionExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap",
+        "ExpressionAttributeValues": "ExpressionAttributeValueMap",
+        "ConsistentRead": "ConsistentRead"
+      }
+    },
+    "ScanSegment": {
+      "type": "integer"
+    },
+    "ScanTotalSegments": {
+      "type": "integer"
+    },
+    "SearchSchema": {
+      "type": "list",
+      "member": "SearchSchemaElement"
+    },
+    "SearchSchemaElement": {
+      "type": "structure",
+      "members": {
+        "AttributeName": "AttributeName",
+        "SearchSchemaElementType": "SearchSchemaElementType"
+      }
+    },
+    "SearchSchemaElementType": {
+      "type": "string"
+    },
+    "SearchVectorList": {
+      "type": "list",
+      "member": "AttributeValue"
+    },
+    "SearchVectorsInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "IndexName": "IndexName",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap",
+        "ExpressionAttributeValues": "ExpressionAttributeValueMap",
+        "ProjectionExpression": "ProjectionExpression",
+        "SearchVector": "SearchVectorList",
+        "SearchConditionExpression": "String",
+        "TopK": "TopKInteger"
+      }
+    },
+    "Select": {
+      "type": "string"
+    },
+    "StreamArn": {
+      "type": "string"
+    },
+    "StreamEnabled": {
+      "type": "boolean"
+    },
+    "StreamSpecification": {
+      "type": "structure",
+      "members": {
+        "StreamEnabled": "StreamEnabled",
+        "StreamViewType": "StreamViewType"
+      }
+    },
+    "StreamViewType": {
+      "type": "string"
+    },
+    "String": {
+      "type": "string"
+    },
+    "StringAttributeValue": {
+      "type": "string"
+    },
+    "StringSetAttributeValue": {
+      "type": "list",
+      "member": "StringAttributeValue"
+    },
+    "TableArn": {
+      "type": "string"
+    },
+    "TableClass": {
+      "type": "string"
+    },
+    "TableCreationParameters": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableName",
+        "AttributeDefinitions": "AttributeDefinitions",
+        "KeySchema": "KeySchema",
+        "BillingMode": "BillingMode",
+        "ProvisionedThroughput": "ProvisionedThroughput",
+        "OnDemandThroughput": "OnDemandThroughput",
+        "SSESpecification": "SSESpecification",
+        "GlobalSecondaryIndexes": "GlobalSecondaryIndexList",
+        "VectorIndexes": "VectorIndexList"
+      }
+    },
+    "TableName": {
+      "type": "string"
+    },
+    "Tag": {
+      "type": "structure",
+      "members": {
+        "Key": "TagKeyString",
+        "Value": "TagValueString"
+      }
+    },
+    "TagKeyList": {
+      "type": "list",
+      "member": "TagKeyString"
+    },
+    "TagKeyString": {
+      "type": "string"
+    },
+    "TagList": {
+      "type": "list",
+      "member": "Tag"
+    },
+    "TagResourceInput": {
+      "type": "structure",
+      "members": {
+        "ResourceArn": "ResourceArnString",
+        "Tags": "TagList"
+      }
+    },
+    "TagValueString": {
+      "type": "string"
+    },
+    "TimeRangeLowerBound": {
+      "type": "timestamp"
+    },
+    "TimeRangeUpperBound": {
+      "type": "timestamp"
+    },
+    "TimeToLiveAttributeName": {
+      "type": "string"
+    },
+    "TimeToLiveEnabled": {
+      "type": "boolean"
+    },
+    "TimeToLiveSpecification": {
+      "type": "structure",
+      "members": {
+        "Enabled": "TimeToLiveEnabled",
+        "AttributeName": "TimeToLiveAttributeName"
+      }
+    },
+    "TopKInteger": {
+      "type": "integer"
+    },
+    "TransactGetItem": {
+      "type": "structure",
+      "members": {
+        "Get": "Get"
+      }
+    },
+    "TransactGetItemList": {
+      "type": "list",
+      "member": "TransactGetItem"
+    },
+    "TransactGetItemsInput": {
+      "type": "structure",
+      "members": {
+        "TransactItems": "TransactGetItemList",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity"
+      }
+    },
+    "TransactWriteItem": {
+      "type": "structure",
+      "members": {
+        "ConditionCheck": "ConditionCheck",
+        "Put": "Put",
+        "Delete": "Delete",
+        "Update": "Update"
+      }
+    },
+    "TransactWriteItemList": {
+      "type": "list",
+      "member": "TransactWriteItem"
+    },
+    "TransactWriteItemsInput": {
+      "type": "structure",
+      "members": {
+        "TransactItems": "TransactWriteItemList",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity",
+        "ReturnItemCollectionMetrics": "ReturnItemCollectionMetrics",
+        "ClientRequestToken": "ClientRequestToken"
+      }
+    },
+    "UntagResourceInput": {
+      "type": "structure",
+      "members": {
+        "ResourceArn": "ResourceArnString",
+        "TagKeys": "TagKeyList"
+      }
+    },
+    "Update": {
+      "type": "structure",
+      "members": {
+        "Key": "Key",
+        "UpdateExpression": "UpdateExpression",
+        "TableName": "TableArn",
+        "ConditionExpression": "ConditionExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap",
+        "ExpressionAttributeValues": "ExpressionAttributeValueMap",
+        "ReturnValuesOnConditionCheckFailure": "ReturnValuesOnConditionCheckFailure"
+      }
+    },
+    "UpdateContinuousBackupsInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "PointInTimeRecoverySpecification": "PointInTimeRecoverySpecification"
+      }
+    },
+    "UpdateContributorInsightsInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "IndexName": "IndexName",
+        "ContributorInsightsAction": "ContributorInsightsAction",
+        "ContributorInsightsMode": "ContributorInsightsMode"
+      }
+    },
+    "UpdateExpression": {
+      "type": "string"
+    },
+    "UpdateGlobalSecondaryIndexAction": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName",
+        "ProvisionedThroughput": "ProvisionedThroughput",
+        "OnDemandThroughput": "OnDemandThroughput",
+        "WarmThroughput": "WarmThroughput"
+      }
+    },
+    "UpdateGlobalTableInput": {
+      "type": "structure",
+      "members": {
+        "GlobalTableName": "TableName",
+        "ReplicaUpdates": "ReplicaUpdateList"
+      }
+    },
+    "UpdateGlobalTableSettingsInput": {
+      "type": "structure",
+      "members": {
+        "GlobalTableName": "TableName",
+        "GlobalTableBillingMode": "BillingMode",
+        "GlobalTableProvisionedWriteCapacityUnits": "PositiveLongObject",
+        "GlobalTableProvisionedWriteCapacityAutoScalingSettingsUpdate": "AutoScalingSettingsUpdate",
+        "GlobalTableGlobalSecondaryIndexSettingsUpdate": "GlobalTableGlobalSecondaryIndexSettingsUpdateList",
+        "ReplicaSettingsUpdate": "ReplicaSettingsUpdateList"
+      }
+    },
+    "UpdateItemInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "Key": "Key",
+        "AttributeUpdates": "AttributeUpdates",
+        "Expected": "ExpectedAttributeMap",
+        "ConditionalOperator": "ConditionalOperator",
+        "ReturnValues": "ReturnValue",
+        "ReturnConsumedCapacity": "ReturnConsumedCapacity",
+        "ReturnItemCollectionMetrics": "ReturnItemCollectionMetrics",
+        "UpdateExpression": "UpdateExpression",
+        "ConditionExpression": "ConditionExpression",
+        "ExpressionAttributeNames": "ExpressionAttributeNameMap",
+        "ExpressionAttributeValues": "ExpressionAttributeValueMap",
+        "ReturnValuesOnConditionCheckFailure": "ReturnValuesOnConditionCheckFailure"
+      }
+    },
+    "UpdateKinesisStreamingConfiguration": {
+      "type": "structure",
+      "members": {
+        "ApproximateCreationDateTimePrecision": "ApproximateCreationDateTimePrecision"
+      }
+    },
+    "UpdateKinesisStreamingDestinationInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "StreamArn": "StreamArn",
+        "UpdateKinesisStreamingConfiguration": "UpdateKinesisStreamingConfiguration"
+      }
+    },
+    "UpdateReplicationGroupMemberAction": {
+      "type": "structure",
+      "members": {
+        "RegionName": "RegionName",
+        "KMSMasterKeyId": "KMSMasterKeyId",
+        "ProvisionedThroughputOverride": "ProvisionedThroughputOverride",
+        "OnDemandThroughputOverride": "OnDemandThroughputOverride",
+        "GlobalSecondaryIndexes": "ReplicaGlobalSecondaryIndexList",
+        "TableClassOverride": "TableClass"
+      }
+    },
+    "UpdateTableInput": {
+      "type": "structure",
+      "members": {
+        "AttributeDefinitions": "AttributeDefinitions",
+        "TableName": "TableArn",
+        "BillingMode": "BillingMode",
+        "ProvisionedThroughput": "ProvisionedThroughput",
+        "GlobalSecondaryIndexUpdates": "GlobalSecondaryIndexUpdateList",
+        "StreamSpecification": "StreamSpecification",
+        "SSESpecification": "SSESpecification",
+        "ReplicaUpdates": "ReplicationGroupUpdateList",
+        "TableClass": "TableClass",
+        "DeletionProtectionEnabled": "DeletionProtectionEnabled",
+        "MultiRegionConsistency": "MultiRegionConsistency",
+        "GlobalTableWitnessUpdates": "GlobalTableWitnessGroupUpdateList",
+        "OnDemandThroughput": "OnDemandThroughput",
+        "WarmThroughput": "WarmThroughput",
+        "GlobalTableSettingsReplicationMode": "GlobalTableSettingsReplicationMode",
+        "VectorIndexUpdates": "VectorIndexUpdateList"
+      }
+    },
+    "UpdateTableReplicaAutoScalingInput": {
+      "type": "structure",
+      "members": {
+        "GlobalSecondaryIndexUpdates": "GlobalSecondaryIndexAutoScalingUpdateList",
+        "TableName": "TableArn",
+        "ProvisionedWriteCapacityAutoScalingUpdate": "AutoScalingSettingsUpdate",
+        "ReplicaUpdates": "ReplicaAutoScalingUpdateList"
+      }
+    },
+    "UpdateTimeToLiveInput": {
+      "type": "structure",
+      "members": {
+        "TableName": "TableArn",
+        "TimeToLiveSpecification": "TimeToLiveSpecification"
+      }
+    },
+    "VectorAttributeDefinition": {
+      "type": "structure",
+      "members": {
+        "AttributeName": "VectorAttributeName"
+      }
+    },
+    "VectorAttributeName": {
+      "type": "string"
+    },
+    "VectorDistanceFunction": {
+      "type": "string"
+    },
+    "VectorIndex": {
+      "type": "structure",
+      "members": {
+        "IndexName": "IndexName",
+        "VectorAttribute": "VectorAttributeDefinition",
+        "SearchSchema": "SearchSchema",
+        "Projection": "Projection",
+        "Dimensions": "PositiveLongObject",
+        "DistanceFunction": "VectorDistanceFunction"
+      }
+    },
+    "VectorIndexList": {
+      "type": "list",
+      "member": "VectorIndex"
+    },
+    "VectorIndexUpdate": {
+      "type": "structure",
+      "members": {
+        "Create": "CreateVectorIndexAction",
+        "Delete": "DeleteVectorIndexAction"
+      }
+    },
+    "VectorIndexUpdateList": {
+      "type": "list",
+      "member": "VectorIndexUpdate"
+    },
+    "WarmThroughput": {
+      "type": "structure",
+      "members": {
+        "ReadUnitsPerSecond": "LongObject",
+        "WriteUnitsPerSecond": "LongObject"
+      }
+    },
+    "WriteRequest": {
+      "type": "structure",
+      "members": {
+        "PutRequest": "PutRequest",
+        "DeleteRequest": "DeleteRequest"
+      }
+    },
+    "WriteRequests": {
+      "type": "list",
+      "member": "WriteRequest"
+    }
+  }
+}

@@ -507,9 +507,8 @@ class CloudFormationPipesCleanupIntegrationTest {
 
         Mockito.doCallRealMethod().when(pipesService).tagResource(anyString(), anyString(), anyMap());
         deleteStack(stackName);
-        // A resource left UPDATE_FAILED by a failed rollback is not one DeleteStack removes, so the
-        // pipe outlives the stack and this test deletes it itself.
-        pipesService.deletePipe(pipeName, "us-east-1");
+        // A resource left UPDATE_FAILED by a failed rollback still belongs to the stack.
+        assertPipeMissing(pipeName);
     }
 
     /** The pipe alone, under a fixed name, so every update reconciles it in place. */

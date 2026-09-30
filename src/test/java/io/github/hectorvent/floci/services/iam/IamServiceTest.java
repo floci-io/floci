@@ -318,6 +318,19 @@ class IamServiceTest {
         assertTrue(tags2.containsKey("env"));
     }
 
+    @Test
+    void tagUserCleansUpPreExistingDuplicateCasedTags() {
+        IamUser user = iamService.createUser("dup-tags-user", "/");
+        user.getTags().put("Department", "finance");
+        user.getTags().put("department", "old-hr");
+        assertEquals(2, user.getTags().size());
+
+        iamService.tagUser("dup-tags-user", Map.of("department", "new-hr"));
+        Map<String, String> tags = iamService.listUserTags("dup-tags-user");
+        assertEquals(1, tags.size());
+        assertEquals("new-hr", tags.get("Department"));
+    }
+
     // =========================================================================
     // Login Profiles
     // =========================================================================
@@ -602,6 +615,20 @@ class IamServiceTest {
     }
 
     @Test
+    void createServiceLinkedRoleAcceptsTheLegacyPartitionFormOfThePrincipal() {
+        // AWS still honours the pre-universal China principal; the derived name, the path and the
+        // trust policy are the universal ones either way.
+        IamRole role = iamService.createServiceLinkedRole("autoscaling.amazonaws.com.cn", null, null);
+        assertEquals("AWSServiceRoleForAutoScaling", role.getRoleName());
+        assertEquals("/aws-service-role/autoscaling.amazonaws.com/", role.getPath());
+        assertTrue(role.getAssumeRolePolicyDocument().contains("\"Service\":\"autoscaling.amazonaws.com\""),
+                role.getAssumeRolePolicyDocument());
+
+        IamRole es = iamService.createServiceLinkedRole("es.amazonaws.com.cn", null, null);
+        assertEquals("AWSServiceRoleForEs", es.getRoleName());
+    }
+
+    @Test
     void createServiceLinkedRoleForCloud9UsesAwsCanonicalName() {
         IamRole role = iamService.createServiceLinkedRole(
                 "cloud9.amazonaws.com", null, "Cloud9 SLR");
@@ -756,7 +783,7 @@ class IamServiceTest {
 
     @Test
     void awsManagedReadOnlyPolicyAllowsReadsButDeniesWrites() {
-        String arn = AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess";
+        String arn = AwsManagedPolicies.arnPrefix("aws") + "/AmazonS3ReadOnlyAccess";
         IamPolicy policy = iamService.getPolicy(arn);
 
         assertEquals("AmazonS3ReadOnlyAccess", policy.getPolicyName());
@@ -772,9 +799,9 @@ class IamServiceTest {
     @Test
     void serviceScopedAndAdministratorManagedPoliciesUseTheirDocumentedScopes() {
         IamPolicy s3ReadOnly = iamService.getPolicy(
-                AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess");
+                AwsManagedPolicies.arnPrefix("aws") + "/AmazonS3ReadOnlyAccess");
         IamPolicy administrator = iamService.getPolicy(
-                AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess");
+                AwsManagedPolicies.arnPrefix("aws") + "/AdministratorAccess");
         IamPolicyEvaluator evaluator = new IamPolicyEvaluator(new ObjectMapper());
 
         assertEquals(IamPolicyEvaluator.Decision.DENY,
@@ -791,8 +818,8 @@ class IamServiceTest {
     @Test
     void managedPolicyActsAsPermissionsBoundary() {
         IamUser user = iamService.createUser("boundary-user", "/");
-        String adminArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
-        String boundaryArn = AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess";
+        String adminArn = AwsManagedPolicies.arnPrefix("aws") + "/AdministratorAccess";
+        String boundaryArn = AwsManagedPolicies.arnPrefix("aws") + "/AmazonS3ReadOnlyAccess";
         iamService.attachUserPolicy(user.getUserName(), adminArn);
         iamService.putUserPermissionsBoundary(user.getUserName(), boundaryArn);
 
@@ -809,7 +836,7 @@ class IamServiceTest {
 
     @Test
     void managedPolicyRetrievalPreservesFieldsAndUnavailableVersionFailsWithNoSuchEntity() {
-        String arn = AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess";
+        String arn = AwsManagedPolicies.arnPrefix("aws") + "/AmazonS3ReadOnlyAccess";
         IamPolicy policy = iamService.getPolicy(arn);
         assertEquals("AmazonS3ReadOnlyAccess", policy.getPolicyName());
         assertEquals(arn, policy.getArn());

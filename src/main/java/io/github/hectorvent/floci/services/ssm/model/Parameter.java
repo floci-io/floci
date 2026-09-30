@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ssm.model;
 
 import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -41,6 +42,14 @@ public class Parameter {
     @JsonAlias({"tags", "Tags"})
     private Map<String, String> tags = new HashMap<>();
 
+    // Only set on a copy answering a name:version or name:label read; never persisted.
+    @JsonIgnore
+    private String selector;
+
+    // Only set on a Secrets Manager reference: AWS's GetSecretValue result as a JSON string.
+    @JsonIgnore
+    private String sourceResult;
+
     public Parameter() {}
 
     public Parameter(String name, String value, String type) {
@@ -77,4 +86,10 @@ public class Parameter {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    public String getSelector() { return selector; }
+    public void setSelector(String selector) { this.selector = selector; }
+
+    public String getSourceResult() { return sourceResult; }
+    public void setSourceResult(String sourceResult) { this.sourceResult = sourceResult; }
 }

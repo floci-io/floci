@@ -392,6 +392,11 @@ it to a `docker exec` in the container. Deliberate limits:
 with `maxResults` and `nextToken`. Unlike every other ECS listing, which pages a hundred at a
 time, a request that names no `maxResults` gets ten ARNs and a `nextToken`.
 
+With persistent storage, services survive a restart but their tasks do not: task state is
+held in memory. The service scheduler starts at boot, so within a few seconds of startup every
+persisted service is brought back to its `desiredCount`, re-registering load balancer targets
+and Cloud Map instances as its tasks start, without waiting for an ECS request.
+
 #### Service deployments
 
 An `ACTIVE` service reports exactly one `PRIMARY` entry in `services[].deployments`,
@@ -464,10 +469,15 @@ Known differences from AWS:
 
 A service that declares `serviceRegistries` has each of its running tasks registered as a
 Cloud Map instance of the named service, and deregistered when the task stops. The instance
-carries `AWS_INSTANCE_IPV4` (the task's ENI address on an awsvpc task, otherwise the
-container's address on the Docker network) and `AWS_INSTANCE_PORT` (the entry's `port`, or
-the host port its `containerPort` was published on), alongside the metadata attributes AWS
-records: `AVAILABILITY_ZONE`, `REGION`, `ECS_SERVICE_NAME`, `ECS_CLUSTER_NAME` and
+carries `AWS_INSTANCE_IPV4` and `AWS_INSTANCE_PORT`, chosen by network mode:
+
+| Network mode | `AWS_INSTANCE_IPV4` | `AWS_INSTANCE_PORT` |
+|---|---|---|
+| `awsvpc` | the address the task's container holds on its Docker network | the entry's `containerPort` |
+| `bridge` or `host` | the address Floci reaches the container at: `127.0.0.1` when Floci runs natively, the container's Docker network address when Floci runs in Docker | the host port the entry's `containerPort` was published on, or the `containerPort` when it has no binding |
+
+An explicit `port` on the registry entry is registered as-is in every mode, as on AWS. The
+instance also carries the metadata attributes AWS records: `AVAILABILITY_ZONE`, `REGION`, `ECS_SERVICE_NAME`, `ECS_CLUSTER_NAME` and
 `ECS_TASK_DEFINITION_FAMILY`. The task id is the instance id, as on AWS, so a replacement
 task supersedes its predecessor.
 
@@ -483,6 +493,12 @@ Known differences from AWS:
   reachable port is the published host port rather than the container port. Floci serves
   only A records, so such a task registers its address and its published host port and
   resolves by address; the port is readable through `DiscoverInstances` rather than DNS.
+- An awsvpc task registers its container's Docker network address, not its ENI address. On
+  AWS the two are the same interface. In Floci a task's containers never join the subnet's
+  network, so the ENI address `DescribeTasks` reports is not one a peer can connect to. The
+  registrar falls back to the ENI address only when it cannot read an address from a running
+  container. Because the address is the container's own, the port is its `containerPort`, not
+  any host port Floci also published it on.
 - `EC2_INSTANCE_ID` is not recorded. Every Floci task runs as a container rather than on a
   registered EC2 host, which is the Fargate case on AWS, where the attribute is also absent.
 - An instance's health status never moves. AWS registers a task `UNHEALTHY` and promotes it to
@@ -490,6 +506,52 @@ Known differences from AWS:
   declares `HealthCheckCustomConfig`. Floci feeds no container health into Cloud Map, so a task
   registers `HEALTHY`, which is Cloud Map's own default for a `RegisterInstance` that names no
   `AWS_INIT_HEALTH_STATUS`, and stays there until it is deregistered.
+
+#### Restarts
+
+Task state is memory-only, so a restarted Floci knows no task and the service scheduler starts
+new ones to reach each service's desired count. Floci therefore clears what the previous run's
+tasks left behind before it starts their replacements, so a service is never served by a task
+nothing manages:
+
+- In Docker mode, every ECS container a previous run of this Floci left on the daemon is
+  removed. A graceful shutdown already stops them; this covers a run that ended without one
+  (SIGKILL, OOM, a stop timeout that expired mid-drain). Containers are recognised by the
+  `floci_owner_port` label (the resource namespace and API port), so the containers of another
+  Floci sharing the daemon stay, and are told apart from the current run's by a per-process
+  `floci.ecs-run` label rather than by creation time. Containers created by a Floci version without that label are
+  not recognised and must be removed by hand once. If Docker cannot list or remove one, the
+  ECS starts no task until it is gone, retrying the removal before each launch: a service's
+  replacement on a reconciliation tick, or a `RunTask` or `StartTask` call, whose task then stops
+  with a `TaskFailedToStart` reason naming the leftovers. Each distinct failure is logged as a
+  warning once. Two Floci instances that share a daemon with the same API port and no
+  `FLOCI_DOCKER_RESOURCE_NAMESPACE` carry the same owner label and would remove each other's task
+  containers: give each its own namespace, or set
+  `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP=false` to skip this sweep, as EC2's
+  `FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP` does for instance containers. It also
+  skips the startup removal of task-role credentials proxies, which carry the same label.
+  Registrations are still released either way, since each Floci releases only what its own
+  persisted state recorded.
+- Every load balancer target and Cloud Map instance a previous run's tasks registered is
+  deregistered. Floci registers task containers by address, and Docker hands a dead container's
+  address to the next container it starts, so a stale target would route to an unrelated
+  container. ECS records each registration it makes in its persisted state and releases exactly
+  those, so a target or instance registered through the ELBv2 or Cloud Map API, even into the
+  same target group or Cloud Map service, stays. A registration is recorded before it is made,
+  so one cut short by the process dying is still released. A target already in its group when a
+  task starts is recorded as the task's own, since its address and port reach only that task, so
+  it is deregistered when the task stops, as ECS does on AWS.
+- Registrations no ECS task recorded, as those a Floci version without the record made, are
+  removed once they would misroute: when a task starts, each registration that points at it and
+  that no running task recorded is deregistered from the target groups and Cloud Map services an
+  ECS service names, and a warning names it. Such an entry was left by a task that is gone, and
+  would otherwise send another service's traffic to the new task. A target points at the task
+  when it is at its container's address on the Docker network and on a port the container
+  publishes. A Cloud Map instance points at it when it is at that container address, on any port
+  since a DNS answer carries none, or at the task's ENI address in a namespace of the task's own
+  VPC, as ENI addresses are unique only within a VPC. A loopback address, which every task
+  published on the host shares, matches only on the task's host ports. Target groups and Cloud
+  Map services no ECS service names are never touched.
 
 #### Unknown services
 
@@ -695,6 +757,62 @@ Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default CPU units when the task definition omits it |
 | `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | *(unset)* | Approved parent directories for host volume bind mounts (`volumes[].host.sourcePath`) |
 | `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES` | `false` | Allow any host path, bypassing the `HOST_VOLUME_ROOTS` allowlist; traversal, the bare root, and the Docker socket are still always rejected |
+| `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | On startup, in Docker mode, remove the ECS containers a previous run of this Floci left on the daemon before the scheduler starts replacement tasks (see [Restarts](#restarts)) |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED` | `false` | Vend real task IAM role credentials to task containers |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_TTL_SECONDS` | `21600` | Lifetime of the vended credentials |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT` | `51679` | Floci-side port serving the credentials endpoint |
+| `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PROXY_IMAGE` | `floci/network-helper:local` | Image for the per-network credentials proxy |
+
+### Task IAM role credentials
+
+Off by default. With `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED=true`, a task whose
+definition sets a resolvable `taskRoleArn` gets credentials for that role the way real ECS vends
+them: Floci
+writes `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` into every container in the task, pointing at one
+`/v2/credentials/{id}` path per task, and the AWS SDKs pick it up with no code change.
+
+**A user-defined Docker network is required.** Set `FLOCI_SERVICES_ECS_DOCKER_NETWORK` to a network
+you created; the default bridge will not work. The SDKs hardcode `169.254.170.2` for this endpoint,
+so Floci runs a small proxy container that holds that address on the task's network and forwards to
+`FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT`. Each task container is also given its own address
+in `169.254.0.0/16`, without which it would have no route to the endpoint at all. Docker only
+allows both of those on a user-defined network.
+
+```bash
+docker network create floci-net
+
+docker run -d --name floci \
+  -p 4566:4566 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --network floci-net \
+  -e FLOCI_SERVICES_ECS_DOCKER_NETWORK=floci-net \
+  -e FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED=true \
+  floci/floci:latest
+```
+
+Credentials a task sets for itself always win. Floci drops only the baseline `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` it would otherwise inject, because the SDKs read
+environment credentials before the container endpoint and leaving them in place would silently
+shadow the role. Anything the task definition sets explicitly is left alone.
+
+In three cases a task that asks for a role gets none. It starts without the relative URI and keeps
+whatever baseline credentials Floci would have injected anyway. Usually that is the emulator's
+default account, but if Floci itself was started with AWS credentials in its environment those are
+forwarded into the task instead, and Floci logs a warning once per process when it does that.
+
+Either way the task is not running as the role it asked for, so a policy test against it says
+nothing about that role: the call is evaluated against a different identity and may succeed or fail
+for reasons that have nothing to do with the role's policy.
+
+- **The role does not resolve.** It does not exist in the account, the ARN is malformed, or it
+  names a different account: Floci looks the role up in the account the request authenticated as
+  and requires an exact ARN match, so a cross-account `taskRoleArn` never resolves.
+- **No user-defined Docker network is configured.** The endpoint has nowhere to listen.
+- **The task runs under security-group enforcement.** Its containers join an isolated helper
+  namespace rather than the shared network the proxy sits on, so the endpoint would not be
+  reachable.
+
+Each of these logs a warning naming the task and the role it asked for.
 
 ### Host volume safety
 

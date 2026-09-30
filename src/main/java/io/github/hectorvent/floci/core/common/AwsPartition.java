@@ -28,6 +28,7 @@ import java.util.regex.Pattern;
  * @param globalServices       services with a partition-wide endpoint, by service key
  * @param supportsDualStack    whether the partition publishes dual-stack endpoints
  * @param supportsFips         whether the partition publishes FIPS endpoints
+ * @param s3DualStackRegions   the regions whose S3 endpoint publishes a dual-stack variant
  */
 public record AwsPartition(
         String id,
@@ -41,7 +42,8 @@ public record AwsPartition(
         Set<String> services,
         Map<String, GlobalEndpoint> globalServices,
         boolean supportsDualStack,
-        boolean supportsFips) {
+        boolean supportsFips,
+        Set<String> s3DualStackRegions) {
 
     /**
      * A published region.
@@ -72,6 +74,16 @@ public record AwsPartition(
         regions = List.copyOf(regions);
         services = Set.copyOf(services);
         globalServices = Map.copyOf(globalServices);
+        s3DualStackRegions = Set.copyOf(s3DualStackRegions);
+    }
+
+    /**
+     * True when S3 publishes a dual-stack endpoint in {@code region}: every region in the
+     * commercial, China, GovCloud and ISO partitions, only {@code us-isob-east-1} in ISO-B, none
+     * in ISO-E, ISO-F or EUSC.
+     */
+    public boolean supportsS3DualStack(String region) {
+        return region != null && s3DualStackRegions.contains(region.trim().toLowerCase(Locale.ROOT));
     }
 
     /** True when {@code endpoints.json} lists {@code service} for this partition. */

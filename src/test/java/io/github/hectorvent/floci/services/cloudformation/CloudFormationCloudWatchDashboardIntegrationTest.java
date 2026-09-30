@@ -11,7 +11,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
-import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -306,9 +305,8 @@ class CloudFormationCloudWatchDashboardIntegrationTest {
 
         cloudFormation(stack, "DeleteStack", null, Map.of());
         CfnStackWaits.awaitStackDeleted(stack);
-        // A resource left UPDATE_FAILED by a failed rollback is not one DeleteStack removes, so the
-        // dashboard outlives the stack and this test removes it itself.
-        dashboardsService.deleteDashboards(List.of(name), "us-east-1");
+        // A resource left UPDATE_FAILED by a failed rollback still belongs to the stack.
+        getDashboard(name).then().statusCode(404);
     }
 
     /** Dropping an explicit name is a replacement on AWS: the dashboard comes back under a generated name. */

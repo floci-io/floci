@@ -26,8 +26,8 @@ import java.util.concurrent.CompletableFuture;
  * <p>Bound to a normal Floci-host port, not to 169.254.170.2: the AWS SDK hardcodes that address
  * (it is not configurable, unlike EC2's {@code AWS_EC2_METADATA_SERVICE_ENDPOINT}), and nothing in
  * Floci's own process can bind an address it does not otherwise own on a task's Docker network.
- * A follow-up piece is what actually holds 169.254.170.2, one small proxy container per ECS
- * network, forwarding here over {@code host.docker.internal}.
+ * {@link EcsCredentialsProxy} is what actually holds 169.254.170.2, one small proxy container per
+ * ECS network, forwarding here over {@code host.docker.internal}.
  */
 @ApplicationScoped
 public class EcsTaskRoleCredentialsServer {

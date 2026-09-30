@@ -24,7 +24,7 @@ final class Sm2KeyType implements KmsKeyType {
 
     @Override
     public void generateKeyMaterial(KmsKey key, String region) throws GeneralSecurityException {
-        if (!region.equals("cn-north-1") && !region.equals("cn-northwest-1")) {
+        if (!region.equals("cn-north-1") && !region.equals("cn-northwest-1")) { // partition-literal: SM2 keys exist only in the China regions
             throw new AwsException("UnsupportedOperationException",
                     "KeySpec SM2 is not supported in this Region", 400);
         }

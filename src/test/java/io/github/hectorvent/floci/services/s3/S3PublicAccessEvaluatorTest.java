@@ -129,6 +129,28 @@ class S3PublicAccessEvaluatorTest {
     }
 
     @Test
+    void principalIsAwsServiceBoolRequiresTheMatchingContextValue() {
+        String userArn = "arn:aws:iam::123456789012:user/alice";
+        String policy = """
+                {"Version":"2012-10-17","Statement":{
+                  "Effect":"Allow",
+                  "Principal":{"AWS":"%s"},
+                  "Action":"s3:GetObject",
+                  "Resource":"arn:aws:s3:::public-bucket/*",
+                  "Condition":{"Bool":{"aws:PrincipalIsAWSService":"false"}}
+                }}""".formatted(userArn);
+
+        assertEquals(ALLOW, S3PublicAccessEvaluator.principalPolicyDecision(
+                OBJECT_MAPPER, policy, "AWS", userArn, "s3:GetObject", OBJECT_ARN,
+                Map.of("aws:PrincipalIsAWSService", "false")));
+        assertEquals(NEUTRAL, S3PublicAccessEvaluator.principalPolicyDecision(
+                OBJECT_MAPPER, policy, "AWS", userArn, "s3:GetObject", OBJECT_ARN,
+                Map.of("aws:PrincipalIsAWSService", "true")));
+        assertEquals(NEUTRAL, S3PublicAccessEvaluator.principalPolicyDecision(
+                OBJECT_MAPPER, policy, "AWS", userArn, "s3:GetObject", OBJECT_ARN, Map.of()));
+    }
+
+    @Test
     void cloudFrontOaiPrincipalMatchesAwsPrincipal() {
         String oaiArn =
                 "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity EIDENTITY";

@@ -9,10 +9,13 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
+import io.github.hectorvent.floci.services.ses.model.EmailContent;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.ListManagementOptions;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
+import io.github.hectorvent.floci.services.ses.model.SendBulkEmailRequest;
+import io.github.hectorvent.floci.services.ses.model.SendEmailRequest;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -101,13 +104,24 @@ public class SesSendController {
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
             String feedbackForwardingAddress =
                     request.path("FeedbackForwardingEmailAddress").asText(null);
-            List<String> allDestinations = mergeLists(toAddresses, ccAddresses, bccAddresses);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             String tenantName = stringMemberOrAbsent(request, "TenantName");
             List<MessageTag> emailTags = parseEmailTagsArray(request.path("EmailTags"), "EmailTags");
             ListManagementOptions listManagement =
                     parseListManagementOptions(request.path("ListManagementOptions"));
 
+            SendEmailRequest.Builder sendRequest = SendEmailRequest.builder()
+                    .source(fromEmailAddress)
+                    .toAddresses(toAddresses)
+                    .ccAddresses(ccAddresses)
+                    .bccAddresses(bccAddresses)
+                    .replyToAddresses(replyToAddresses)
+                    .returnPath(feedbackForwardingAddress)
+                    .configurationSetName(configurationSetName)
+                    .emailTags(emailTags)
+                    .listManagement(listManagement)
+                    .tenantName(tenantName)
+                    .region(region);
             JsonNode content = request.path("Content");
             String messageId;
 
@@ -117,15 +131,13 @@ public class SesSendController {
                     throw new AwsException("BadRequestException",
                             "Content.Raw.Data is required.", 400);
                 }
-                if (allDestinations.isEmpty()) {
+                if (toAddresses.isEmpty() && ccAddresses.isEmpty() && bccAddresses.isEmpty()) {
                     throw new AwsException("BadRequestException",
                             "At least one destination address is required.", 400);
                 }
                 sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData,
                         configurationSetName, regionResolver.getAccountId(), region);
-                messageId = sesService.sendRawEmail(fromEmailAddress, allDestinations, rawData,
-                        feedbackForwardingAddress, configurationSetName, emailTags, listManagement,
-                        tenantName, region);
+                messageId = sesService.sendEmail(sendRequest.content(new EmailContent.Raw(rawData)).build());
             } else if (content.has("Simple")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     // AWS returns BadRequestException with a null message body here.
@@ -139,11 +151,9 @@ public class SesSendController {
                         parseHeadersArray(simple.path("Headers"), "content.simple.headers");
                 sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
                         null, regionResolver.getAccountId(), region);
-                messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
-                        bccAddresses, replyToAddresses, feedbackForwardingAddress,
-                        subject, bodyText, bodyHtml,
-                        configurationSetName, emailTags, additionalHeaders, listManagement,
-                        tenantName, region);
+                messageId = sesService.sendEmail(sendRequest
+                        .content(new EmailContent.Simple(subject, bodyText, bodyHtml, additionalHeaders))
+                        .build());
             } else if (content.has("Template")) {
                 if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                     throw new AwsException("BadRequestException", "Source cannot be empty", 400);
@@ -173,10 +183,9 @@ public class SesSendController {
                             : SesTemplateService.templateNameFromArn(templateArn);
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, resolvedName, regionResolver.getAccountId(), region);
-                    messageId = sesService.sendTemplatedEmail(fromEmailAddress, toAddresses, ccAddresses,
-                            bccAddresses, replyToAddresses, feedbackForwardingAddress,
-                            resolvedName, templateData,
-                            configurationSetName, emailTags, additionalHeaders, listManagement, tenantName, region);
+                    messageId = sesService.sendEmail(sendRequest
+                            .content(new EmailContent.Template(resolvedName, templateData, additionalHeaders))
+                            .build());
                 } else {
                     JsonNode inline = template.path("TemplateContent");
                     String subject = inline.path("Subject").asText(null);
@@ -188,10 +197,10 @@ public class SesSendController {
                     SesService.requireInlineTemplateContent(subject, text, html);
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, null, regionResolver.getAccountId(), region);
-                    messageId = sesService.sendInlineTemplatedEmail(fromEmailAddress, toAddresses,
-                            ccAddresses, bccAddresses, replyToAddresses, feedbackForwardingAddress,
-                            subject, text, html, templateData,
-                            configurationSetName, emailTags, additionalHeaders, listManagement, tenantName, region);
+                    messageId = sesService.sendEmail(sendRequest
+                            .content(new EmailContent.InlineTemplate(subject, text, html, templateData,
+                                    additionalHeaders))
+                            .build());
                 }
             } else {
                 throw new AwsException("BadRequestException",
@@ -316,10 +325,18 @@ public class SesSendController {
             sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
                     gateTemplateName, regionResolver.getAccountId(), region);
 
-            List<BulkEmailEntryResult> results = sesService.sendBulkTemplatedEmail(fromEmailAddress,
-                    replyToAddresses, feedbackForwardingAddress, subject, text, html,
-                    defaultTemplateData, entries, configurationSetName,
-                    defaultEmailTags, defaultHeaders, tenantName, region);
+            List<BulkEmailEntryResult> results = sesService.sendBulkEmail(SendBulkEmailRequest.builder()
+                    .source(fromEmailAddress)
+                    .replyToAddresses(replyToAddresses)
+                    .returnPath(feedbackForwardingAddress)
+                    .configurationSetName(configurationSetName)
+                    .defaultEmailTags(defaultEmailTags)
+                    .tenantName(tenantName)
+                    .region(region)
+                    .defaultContent(new EmailContent.InlineTemplate(subject, text, html, defaultTemplateData,
+                            defaultHeaders))
+                    .entries(entries)
+                    .build());
 
             ObjectNode response = objectMapper.createObjectNode();
             ArrayNode arr = response.putArray("BulkEmailEntryResults");
@@ -388,13 +405,6 @@ public class SesSendController {
         List<String> list = new ArrayList<>();
         arrayNode.forEach(node -> list.add(node.asText()));
         return list;
-    }
-
-    private List<String> mergeLists(List<String> to, List<String> cc, List<String> bcc) {
-        List<String> all = new ArrayList<>(to);
-        all.addAll(cc);
-        all.addAll(bcc);
-        return all;
     }
 
     private JsonNode parseTemplateData(JsonNode parent, String fieldName) {

@@ -88,14 +88,14 @@ public class SAMLTrustPolicyEvaluator {
         }
         if ("StringLike".equals(operator)) {
             return actual.stream().anyMatch(value -> expected.stream().anyMatch(pattern ->
-                    WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive(pattern, value)));
+                    IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value)));
         }
         if ("StringNotEquals".equals(operator)) {
             return actual.stream().allMatch(value -> expected.stream().noneMatch(value::equals));
         }
         if ("StringNotLike".equals(operator)) {
             return actual.stream().allMatch(value -> expected.stream().noneMatch(pattern ->
-                    WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive(pattern, value)));
+                    IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value)));
         }
         return false;
     }

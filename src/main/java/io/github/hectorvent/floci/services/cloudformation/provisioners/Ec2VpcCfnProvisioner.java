@@ -1,13 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Map;
@@ -19,8 +17,6 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
-
-    private static final Logger LOG = Logger.getLogger(Ec2VpcCfnProvisioner.class);
 
     private final Ec2Service ec2Service;
 
@@ -69,15 +65,8 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
         if (priorPhysicalId == null || priorPhysicalId.isBlank()) {
             return null;
         }
-        Vpc existing;
-        try {
-            existing = ec2Service.describeVpcs(region, List.of(priorPhysicalId), Map.of())
-                    .stream().findFirst().orElse(null);
-        } catch (AwsException notFound) {
-            // Expected when the VPC was deleted out of band since the prior update.
-            LOG.debugv(notFound, "No existing VPC {0} found on file, falling back to create", priorPhysicalId);
-            return null;
-        }
+        Vpc existing = ec2Service.describeVpcs(region, List.of(priorPhysicalId), Map.of())
+                .stream().findFirst().orElse(null);
         if (existing == null) {
             return null;
         }

@@ -33,7 +33,7 @@ class S3PartitionBucketPolicyIamEnforcementIntegrationTest {
         String key = "guarded.txt";
         S3RequestSigner china = createAccountAdmin("cn-admin-" + suffix).inRegion("cn-north-1");
 
-        createBucket(bucket, china);
+        createBucket(bucket, "cn-north-1", china);
         putObject(bucket, key, china);
         putBucketPolicy(bucket, denyObjectReadWritePolicy("aws-cn", bucket), china);
 
@@ -48,7 +48,7 @@ class S3PartitionBucketPolicyIamEnforcementIntegrationTest {
         String key = "guarded.txt";
         S3RequestSigner commercial = createAccountAdmin("us-admin-" + suffix);
 
-        createBucket(bucket, commercial);
+        createBucket(bucket, "us-east-1", commercial);
         putObject(bucket, key, commercial);
         putBucketPolicy(bucket, denyObjectReadWritePolicy("aws", bucket), commercial);
 
@@ -93,8 +93,14 @@ class S3PartitionBucketPolicyIamEnforcementIntegrationTest {
             .body(containsString("AccessDenied"));
     }
 
-    private static void createBucket(String bucket, S3RequestSigner signer) {
-        given().filter(signer).when().put("/" + bucket).then().statusCode(200);
+    /** A regional endpoint other than us-east-1 requires a LocationConstraint naming its region, as on AWS. */
+    private static void createBucket(String bucket, String region, S3RequestSigner signer) {
+        RequestSpecification request = given().filter(signer);
+        if (!"us-east-1".equals(region)) {
+            request = request.contentType("application/xml").body("<CreateBucketConfiguration><LocationConstraint>"
+                    + region + "</LocationConstraint></CreateBucketConfiguration>");
+        }
+        request.when().put("/" + bucket).then().statusCode(200);
     }
 
     private static void putObject(String bucket, String key, S3RequestSigner signer) {
@@ -131,7 +137,7 @@ class S3PartitionBucketPolicyIamEnforcementIntegrationTest {
                 .formParam("Action", action)
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + ACCOUNT
                         + "/20260629/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=abc");
-        for (int i = 0; i < params.length; i += 2) {
+        for (int i = 0; i + 1 < params.length; i += 2) {
             request = request.formParam(params[i], params[i + 1]);
         }
         return request.when().post("/").then().statusCode(200).extract();

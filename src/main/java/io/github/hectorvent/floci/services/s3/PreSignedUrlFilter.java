@@ -124,37 +124,49 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             return;
         }
 
-        // Verify signature: SigV4 when enforce-auth is enabled, custom when validateSignatures is enabled
-        if (s3Service.isAuthEnforced()) {
+        // Registered IAM credentials always carry standard SigV4. Account-shaped credentials
+        // from older Floci-generated URLs retain the custom validation path when enforcement is off.
+        boolean authEnforced = s3Service.isAuthEnforced();
+        String rawCredential = queryParams.getFirst("X-Amz-Credential");
+        String scopedAccessKey = URLDecoder.decode(rawCredential, StandardCharsets.UTF_8).split("/", 2)[0];
+        boolean generatedCredential = iamService != null && iamService.presignedScope(scopedAccessKey).isPresent();
+        if (authEnforced || presignGenerator.shouldValidateSignatures() || generatedCredential) {
             String credential = queryParams.getFirst("X-Amz-Credential");
             String decodedCredential = URLDecoder.decode(credential, StandardCharsets.UTF_8);
             String[] credParts = decodedCredential.split("/");
             if (credParts.length < 5) {
+                if (authEnforced || generatedCredential) {
+                    requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
+                            "The AWS Access Key Id you provided does not exist in our records."));
+                    return;
+                }
+            } else {
+                String accessKeyId = credParts[0];
+                String secretKey = resolveSecretKey(accessKeyId, queryParams.getFirst("X-Amz-Security-Token"));
+                if (secretKey != null) {
+                    if (!verifySigV4Signature(requestContext, signature, secretKey)) {
+                        requestContext.abortWith(errorResponse(403, "SignatureDoesNotMatch",
+                                "The request signature we calculated does not match the signature you provided."));
+                        return;
+                    }
+
+                    List<String> unsignedChecksumHeaders = unsignedChecksumHeaders(
+                            requestContext.getHeaders().keySet(), queryParams.getFirst("X-Amz-SignedHeaders"));
+                    if (!unsignedChecksumHeaders.isEmpty()) {
+                        requestContext.abortWith(headersNotSignedResponse(unsignedChecksumHeaders));
+                    }
+                    return;
+                }
+            }
+
+            if (authEnforced || generatedCredential) {
                 requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
                         "The AWS Access Key Id you provided does not exist in our records."));
                 return;
             }
+        }
 
-            String accessKeyId = credParts[0];
-            String secretKey = resolveSecretKey(accessKeyId, queryParams.getFirst("X-Amz-Security-Token"));
-            if (secretKey == null) {
-                requestContext.abortWith(errorResponse(403, "InvalidAccessKeyId",
-                        "The AWS Access Key Id you provided does not exist in our records."));
-                return;
-            }
-
-            if (!verifySigV4Signature(requestContext, signature, secretKey)) {
-                requestContext.abortWith(errorResponse(403, "SignatureDoesNotMatch",
-                        "The request signature we calculated does not match the signature you provided."));
-                return;
-            }
-
-            List<String> unsignedChecksumHeaders = unsignedChecksumHeaders(
-                    requestContext.getHeaders().keySet(), queryParams.getFirst("X-Amz-SignedHeaders"));
-            if (!unsignedChecksumHeaders.isEmpty()) {
-                requestContext.abortWith(headersNotSignedResponse(unsignedChecksumHeaders));
-            }
-        } else if (presignGenerator.shouldValidateSignatures()) {
+        if (presignGenerator.shouldValidateSignatures()) {
             String path = requestContext.getUriInfo().getPath();
             String[] parts = path.split("/", 3);
             if (parts.length < 3) {
@@ -208,16 +220,6 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             String authority = S3VirtualHostFilter.resolveHost(requestContext.getHeaderString("Host"),
                     requestContext.getHeaderString("X-Forwarded-Host"), requestUri);
 
-            StringBuilder canonicalHeaders = new StringBuilder();
-            for (String header : signedHeaders.split(";")) {
-                if ("host".equals(header)) {
-                    canonicalHeaders.append("host:").append(authority).append("\n");
-                } else {
-                    String canonicalValue = canonicalizeHeaderValue(requestContext.getHeaderString(header));
-                    canonicalHeaders.append(header).append(":").append(canonicalValue).append("\n");
-                }
-            }
-
             // Canonical request: the wire path, since a leading-slash key travels (and is
             // signed) as a double slash that JAX-RS would otherwise collapse.
             String path = S3HeaderSignatureFilter.signedPath(currentVertxRequest, requestUri);
@@ -229,18 +231,12 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             if (payloadHash == null) {
                 payloadHash = "UNSIGNED-PAYLOAD";
             }
-            String canonicalRequest = requestContext.getMethod() + "\n"
-                    + path + "\n"
-                    + canonicalQueryString + "\n"
-                    + canonicalHeaders + "\n"
-                    + signedHeaders + "\n"
-                    + payloadHash;
-
-            // String to sign
-            String stringToSign = "AWS4-HMAC-SHA256\n"
-                    + amzDate + "\n"
-                    + credentialScope + "\n"
-                    + SigV4RequestValidator.sha256Hex(canonicalRequest);
+            String canonicalRequest = S3PresignedCanonicalRequest.build(
+                    requestContext.getMethod(), path, canonicalQueryString, signedHeaders,
+                    header -> "host".equals(header) ? authority : requestContext.getHeaderString(header),
+                    payloadHash);
+            String stringToSign = S3PresignedCanonicalRequest.stringToSign(
+                    amzDate, credentialScope, canonicalRequest);
 
             // Derive signing key and compute expected signature
             byte[] signingKey = SigV4RequestValidator.deriveSigningKey(secretKey, date, region, service);

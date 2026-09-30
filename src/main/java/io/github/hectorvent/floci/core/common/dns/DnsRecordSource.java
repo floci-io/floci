@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.core.common.dns;
 
-import java.util.List;
 import java.util.Optional;
 
 /**
@@ -9,14 +8,20 @@ import java.util.Optional;
  * independent of them: it discovers implementations through CDI rather than importing one.
  *
  * <p>An implementation answers only for names inside a zone it owns. An empty optional leaves
- * the query to the next source or the upstream resolvers; a present empty list means the name
- * is owned but has no A records. It runs outside any request context.
+ * the query to the next source or the upstream resolvers; a present answer with no addresses
+ * means the name is owned but has no A records. It runs outside any request context.
  */
 public interface DnsRecordSource {
 
     /**
-     * Resolves a query name to IPv4 addresses. An empty optional means this source does not own
-     * the name. The name arrives without a trailing dot and in the case the client sent.
+     * Resolves a query name to IPv4 addresses and their TTL. An empty optional means this
+     * source does not own the name. The name arrives without a trailing dot and in the case the client sent.
      */
-    Optional<List<String>> resolveIpv4(String name);
+    Optional<DnsAnswer> resolveIpv4(String name);
+
+    /** A source that only implements IPv4 still preserves name ownership for other query types. */
+    default Optional<DnsAnswer> resolve(String name, int type) {
+        return resolveIpv4(name).map(answer -> type == 1 ? answer
+                : answer.nameExists() ? DnsAnswer.noData() : DnsAnswer.nxDomain());
+    }
 }

@@ -955,7 +955,11 @@ public class EcsResponseWriter {
         putInstant(n, "createdAt", d.getCreatedAt());
         putInstant(n, "startedAt", d.getStartedAt());
         putInstant(n, "finishedAt", d.getFinishedAt());
+        putInstant(n, "stoppedAt", d.getStoppedAt());
         putInstant(n, "updatedAt", d.getUpdatedAt());
+        if (d.getStatusReason() != null) {
+            n.put("statusReason", d.getStatusReason());
+        }
         if (d.getTargetServiceRevisionArn() != null) {
             n.set("targetServiceRevision",
                     serviceRevisionSummaryNode(d.getTargetServiceRevisionArn(), d.getServiceArn()));

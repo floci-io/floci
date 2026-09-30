@@ -146,10 +146,8 @@ def test_region_literal_matches_region_and_zone_ids(text, expected):
     assert ("region-literal" in categories_of(text)) is expected
 
 
-def test_region_literal_is_report_only_and_the_rest_are_gated():
-    gated = {c.name for c in p.CATEGORIES if c.gated}
-    assert gated == {"arn-literal", "arn-regex-dialect", "dns-suffix", "hosted-zone-id"}
-    assert not p.CATEGORY_BY_NAME["region-literal"].gated
+def test_every_category_is_gated():
+    assert {c.name for c in p.CATEGORIES if c.gated} == {c.name for c in p.CATEGORIES}
 
 
 # --------------------------------------------------------------------------- #
@@ -249,17 +247,15 @@ def findings_for(tmp_path: Path, files: dict[str, str]) -> list[p.Finding]:
     return p.collect_findings(tmp_path, [])
 
 
-def test_baseline_round_trips_only_gated_categories(tmp_path):
+def test_baseline_round_trips_gated_categories(tmp_path):
     findings = findings_for(tmp_path, {
         "a/A.java": 'class A { String r = "us-east-1"; String a = "arn:aws:s3:::b"; }\n',
     })
     baseline = tmp_path / "baseline.tsv"
     written = p.write_baseline(baseline, findings)
-    assert written == Counter({("arn-literal", "a/A.java"): 1})
+    assert written == Counter({("arn-literal", "a/A.java"): 1, ("region-literal", "a/A.java"): 1})
     assert p.read_baseline(baseline) == written
-    text = baseline.read_text()
-    assert text.startswith("# category\tpath\tcount\n")
-    assert "region-literal" not in text
+    assert baseline.read_text().startswith("# category\tpath\tcount\n")
 
 
 def test_read_baseline_rejects_malformed_rows(tmp_path):
@@ -307,9 +303,10 @@ def test_check_fails_a_drop_until_the_baseline_is_regenerated(tmp_path):
     assert "make partition-baseline" in problems[0]
 
 
-def test_check_ignores_report_only_drift(tmp_path):
+def test_check_gates_region_literals_too(tmp_path):
     findings = findings_for(tmp_path, {"a/A.java": 'class A { String r = "us-east-1"; String z = "us-west-2"; }\n'})
-    assert p.check(findings, Counter()) == []
+    problems = p.check(findings, Counter())
+    assert len(problems) == 1 and "2 region-literal literal(s)" in problems[0]
 
 
 def test_check_treats_an_escaped_literal_as_absent(tmp_path):

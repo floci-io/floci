@@ -600,6 +600,38 @@ class ElbV2IntegrationTest {
     }
 
     @Test
+    @Order(22)
+    void createTargetGroupRejectsOutOfRangeHealthCheckPort() {
+        given()
+                .formParam("Action", "CreateTargetGroup")
+                .formParam("Name", "bad-hc-port-tg")
+                .formParam("Protocol", "HTTP")
+                .formParam("Port", "80")
+                .formParam("HealthCheckPort", "70000")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+    }
+
+    @Test
+    @Order(22)
+    void modifyTargetGroupRejectsNonNumericHealthCheckPort() {
+        given()
+                .formParam("Action", "ModifyTargetGroup")
+                .formParam("TargetGroupArn", tgArn)
+                .formParam("HealthCheckPort", "not-a-port")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+    }
+
+    @Test
     @Order(23)
     void modifyTargetGroupAttributes() {
         given()

@@ -11,9 +11,13 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
+import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -22,10 +26,15 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class SnsServiceTest {
 
@@ -58,6 +67,57 @@ class SnsServiceTest {
     }
 
     @Test
+    void smsAttributesAreScopedToAccountAndRegion() {
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn("111122223333", "444455556666", "111122223333");
+        SnsService service = new SnsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), regionResolver, null, null, null, BASE_URL, new ObjectMapper());
+
+        service.setSmsAttributes(Map.of("DefaultSMSType", "Transactional", "MonthlySpendLimit", "10"), REGION);
+
+        assertTrue(service.getSmsAttributes(List.of(), REGION).isEmpty());
+        assertEquals(Map.of("DefaultSMSType", "Transactional", "MonthlySpendLimit", "10"),
+                service.getSmsAttributes(List.of(), REGION));
+        assertTrue(service.getSmsAttributes(List.of(), "us-west-2").isEmpty());
+        assertEquals(Map.of("DefaultSMSType", "Transactional"),
+                service.getSmsAttributes(List.of("DefaultSMSType"), REGION));
+    }
+
+    @Test
+    void smsAttributesRejectInvalidValuesWithoutChangingStoredSettings() {
+        snsService.setSmsAttributes(Map.of("DefaultSMSType", "Promotional"), REGION);
+
+        assertThrows(AwsException.class, () -> snsService.setSmsAttributes(
+                Map.of("DefaultSMSType", "Bulk"), REGION));
+        assertThrows(AwsException.class, () -> snsService.setSmsAttributes(
+                Map.of("DeliveryStatusSuccessSamplingRate", "101"), REGION));
+        assertThrows(AwsException.class, () -> snsService.setSmsAttributes(
+                Map.of("DefaultSenderID", "12345678901"), REGION));
+        assertThrows(AwsException.class, () -> snsService.setSmsAttributes(
+                Map.of("DefaultSenderID", "TooLongSender"), REGION));
+        assertThrows(AwsException.class, () -> snsService.setSmsAttributes(
+                Map.of("DefaultSenderID", "Brand-Name"), REGION));
+        assertEquals(Map.of("DefaultSMSType", "Promotional"),
+                snsService.getSmsAttributes(List.of(), REGION));
+
+        snsService.setSmsAttributes(Map.of("DefaultSenderID", "Brand123"), REGION);
+        assertEquals(Map.of("DefaultSMSType", "Promotional", "DefaultSenderID", "Brand123"),
+                snsService.getSmsAttributes(List.of(), REGION));
+    }
+
+    @Test
+    void emptySmsAttributeResetsOnlyThatPreference() {
+        snsService.setSmsAttributes(Map.of("DefaultSMSType", "Transactional",
+                "MonthlySpendLimit", "10"), REGION);
+
+        snsService.setSmsAttributes(Map.of("DefaultSMSType", ""), REGION);
+
+        assertEquals(Map.of("MonthlySpendLimit", "10"),
+                snsService.getSmsAttributes(List.of(), REGION));
+    }
+
+    @Test
     void createTopic_fifoWithContentBasedDeduplication() {
         Topic topic = snsService.createTopic("my-topic.fifo",
                 Map.of("ContentBasedDeduplication", "true"), null, REGION);
@@ -76,6 +136,55 @@ class SnsServiceTest {
     void createTopic_requiresName() {
         assertThrows(AwsException.class, () -> snsService.createTopic(null, null, null, REGION));
         assertThrows(AwsException.class, () -> snsService.createTopic("", null, null, REGION));
+    }
+
+    @Test
+    void publish_retriesTransientSqsSubscriptionDeliveryFailure() {
+        SqsService sqs = mock(SqsService.class);
+        SnsService service = new SnsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), sqs, null);
+        Topic topic = service.createTopic("retry-topic", null, null, REGION);
+        String queueArn = "arn:aws:sqs:us-east-1:000000000000:retry-queue";
+        String queueUrl = BASE_URL + "/" + ACCOUNT + "/retry-queue";
+        service.subscribe(topic.getTopicArn(), "sqs", queueArn, REGION, Map.of());
+        doThrow(new AwsException("ServiceUnavailable", "temporarily unavailable", 503))
+                .doReturn(new Message("delivered"))
+                .when(sqs).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+
+        String messageId = service.publish(topic.getTopicArn(), null, "payload", null, REGION);
+
+        assertNotNull(messageId);
+        verify(sqs, times(2)).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+    }
+
+    @Test
+    void publish_sendsExhaustedSqsSubscriptionDeliveryToConfiguredDlq() throws Exception {
+        SqsService sqs = mock(SqsService.class);
+        SnsService service = new SnsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), sqs, null);
+        Topic topic = service.createTopic("dlq-topic", null, null, REGION);
+        String queueArn = "arn:aws:sqs:us-east-1:000000000000:unavailable-queue";
+        String queueUrl = BASE_URL + "/" + ACCOUNT + "/unavailable-queue";
+        String dlqArn = "arn:aws:sqs:us-east-1:000000000000:subscription-dlq";
+        String dlqUrl = BASE_URL + "/" + ACCOUNT + "/subscription-dlq";
+        service.subscribe(topic.getTopicArn(), "sqs", queueArn, REGION,
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + dlqArn + "\"}"));
+        doThrow(new AwsException("AWS.SimpleQueueService.NonExistentQueue", "unavailable", 400))
+                .when(sqs).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+
+        String messageId = service.publish(topic.getTopicArn(), null,
+                "payload", "subject", REGION);
+
+        assertNotNull(messageId, "SNS Publish acceptance is independent of downstream SQS delivery");
+        verify(sqs, times(3)).sendMessage(eq(queueUrl), anyString(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+        ArgumentCaptor<String> deadLetterBody = ArgumentCaptor.forClass(String.class);
+        verify(sqs).sendMessage(eq(dlqUrl), deadLetterBody.capture(), isNull(), isNull(), isNull(), anyMap(), eq(REGION));
+        JsonNode envelope = new ObjectMapper().readTree(deadLetterBody.getValue());
+        assertEquals("Notification", envelope.path("Type").asText());
+        assertEquals(topic.getTopicArn(), envelope.path("TopicArn").asText());
+        assertEquals("payload", envelope.path("Message").asText());
+        assertEquals("subject", envelope.path("Subject").asText());
+        assertTrue(envelope.hasNonNull("MessageId"));
     }
 
     @Test
@@ -147,6 +256,74 @@ class SnsServiceTest {
             assertTrue(ex.getMessage().contains("SubscriptionRoleArn"));
         }
         assertTrue(snsService.listSubscriptions(REGION).isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "http://169.254.169.254/latest/meta-data/",
+            "http://169.254.170.2/v2/credentials",
+            "https://[fe80::1]/",
+            "http://[fd00:ec2::254]/latest/meta-data/"
+    })
+    void subscribe_rejectsAnEndpointOnALinkLocalOrMetadataAddress(String endpoint) {
+        Topic topic = snsService.createTopic("ssrf-topic", null, null, REGION);
+        String protocol = endpoint.startsWith("https://") ? "https" : "http";
+
+        AwsException ex = assertThrows(AwsException.class, () -> snsService.subscribe(
+                topic.getTopicArn(), protocol, endpoint, REGION, Map.of()), endpoint);
+
+        assertEquals("InvalidParameter", ex.getErrorCode());
+        assertTrue(snsService.listSubscriptions(REGION).isEmpty(), endpoint);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "http://127.0.0.1:8080/hook",
+            "http://172.17.0.2:9000/hook",
+            "http://10.0.0.5/hook",
+            "https://example.test/hook"
+    })
+    void subscribe_stillAcceptsLoopbackPrivateAndOrdinaryEndpoints(String endpoint) {
+        Topic topic = snsService.createTopic("ok-topic", null, null, REGION);
+        String protocol = endpoint.startsWith("https://") ? "https" : "http";
+
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), protocol, endpoint, REGION, Map.of());
+
+        assertEquals(endpoint, sub.getEndpoint());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[fd00:ec2::254]/",
+            "http://169.254.170.2/v2/credentials"
+    })
+    void delivery_refusesAnEndpointThatNamesTheAddressOutright(String endpoint) {
+        // Reaches a subscription stored before Subscribe began refusing these, and costs no lookup.
+        assertFalse(SnsService.deliverable(endpoint), endpoint);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"http://127.0.0.1:8080/hook", "http://10.0.0.5/hook", "https://example.test/x"})
+    void delivery_stillAllowsLoopbackPrivateAndOrdinaryEndpoints(String endpoint) {
+        assertTrue(SnsService.deliverable(endpoint), endpoint);
+    }
+
+    @Test
+    void delivery_doesNotResolveANameAndSoAllowsOne() {
+        // Names are screened at Subscribe. Resolving again here could not decide anything, because
+        // HttpClient resolves once more when it connects, so this deliberately does not try.
+        assertTrue(SnsService.deliverable("http://sns-endpoint-that-does-not-resolve.invalid/hook"));
+    }
+
+    @Test
+    void subscribe_rejectsAnEndpointWithNoHost() {
+        Topic topic = snsService.createTopic("nohost-topic", null, null, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () -> snsService.subscribe(
+                topic.getTopicArn(), "http", "http:///no-host", REGION, Map.of()));
+
+        assertEquals("InvalidParameter", ex.getErrorCode());
     }
 
     @Test

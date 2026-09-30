@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -204,7 +205,7 @@ public class BedrockAgentCoreCredentialProviderService {
         item.put("name", name);
         item.put("credentialProviderArn", oauthCredentialProviderArn(region, name));
         item.put("credentialProviderVendor", vendor);
-        item.put("callbackUrl", "https://bedrock-agentcore." + region + ".amazonaws.com/oauth2/callback");
+        item.put("callbackUrl", "https://" + AwsEndpoints.host("bedrock-agentcore", region) + "/oauth2/callback");
         item.put("clientSecretSource", source);
         if (source.equals("EXTERNAL")) {
             item.putObject("clientSecretArn").put("secretArn", secretConfig.path("secretId").asText());

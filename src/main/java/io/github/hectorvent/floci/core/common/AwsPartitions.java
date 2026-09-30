@@ -158,6 +158,20 @@ public final class AwsPartitions {
         return Optional.empty();
     }
 
+    /** True when {@code host} is exactly a published DNS suffix ({@code amazonaws.com.cn}, {@code api.aws}, ...). */
+    public static boolean isDnsSuffix(String host) {
+        return host != null && Holder.CATALOG.dnsSuffixesLongestFirst().contains(host.trim().toLowerCase(Locale.ROOT));
+    }
+
+    /**
+     * A non-capturing regex alternation of every published DNS suffix, longest first and quoted,
+     * for patterns that must recognise a hostname in any partition.
+     */
+    public static String dnsSuffixRegex() {
+        List<String> quoted = Holder.CATALOG.dnsSuffixesLongestFirst().stream().map(Pattern::quote).toList();
+        return "(?:" + String.join("|", quoted) + ")";
+    }
+
     private static String normalize(String label) {
         if (label == null || label.isBlank()) {
             return null;
@@ -229,6 +243,10 @@ public final class AwsPartitions {
         for (JsonNode service : node.path("services")) {
             services.add(service.asText());
         }
+        Set<String> s3DualStackRegions = new LinkedHashSet<>();
+        for (JsonNode region : node.path("s3DualStackRegions")) {
+            s3DualStackRegions.add(region.asText());
+        }
         Map<String, AwsPartition.GlobalEndpoint> globalServices = new LinkedHashMap<>();
         JsonNode globalNode = node.path("globalServices");
         globalNode.fieldNames().forEachRemaining(service -> {
@@ -251,7 +269,8 @@ public final class AwsPartitions {
                 services,
                 globalServices,
                 node.path("supportsDualStack").asBoolean(false),
-                node.path("supportsFips").asBoolean(false));
+                node.path("supportsFips").asBoolean(false),
+                s3DualStackRegions);
     }
 
     private static String required(JsonNode node, String field) {

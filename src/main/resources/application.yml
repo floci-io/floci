@@ -43,8 +43,9 @@ quarkus:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
       # catalog (ec2/image-catalog.yaml), SageMaker reads its instance type
       # catalog (sagemaker/instance-type-catalog.yaml), AppSync's GraphQL
-      # parser reads its message bundles, and API Gateway's Velocity engine
-      # reads its default properties at runtime via
+      # parser reads its message bundles, EC2 security group enforcement builds
+      # its helper image from docker/*.Dockerfile, and API Gateway's Velocity
+      # engine reads its default properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
       # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
@@ -57,6 +58,7 @@ quarkus:
         - ui/*.html
         - appsync/*.mjs
         - ec2/*.yaml
+        - docker/*.Dockerfile
         - sagemaker/*.yaml
         - eks/*.json
         - aws/*.json
@@ -98,6 +100,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.config.TlsConfigSource
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoTotp
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreEventService
@@ -109,7 +112,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ssoportal.SsoPortalService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess
       - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.spectrum.SpectrumMaterializer
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ecs.exec.EcsExecSessionRegistry
       # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a
@@ -161,8 +164,8 @@ floci:
       # mount-user:           # run mounting containers as "uid[:gid]" (access point PosixUser)
       # mount-group-add:      # supplementary gid added to mounting containers
     wal:
-      # Also the cadence at which journaled stores under persistent mode (CloudWatch Logs events)
-      # fold their .wal file into the store's JSON file.
+      # Also the cadence at which journaled stores under persistent mode (CloudWatch Logs events,
+      # the S3 object index) fold their .wal file into the store's JSON file.
       compaction-interval-ms: 30000
     services:
       ssm:
@@ -249,6 +252,18 @@ floci:
       - 8.8.8.8
       - 8.8.4.4
 
+    # Transparent endpoint injection: answer A queries for every AWS partition's DNS and
+    # dual-stack suffix (and every subdomain) with Floci's container IP inside spawned
+    # containers, so SDK clients constructed with explicit real-AWS endpoints, which override
+    # AWS_ENDPOINT_URL, land on the emulator. Suffixes: amazonaws.com, api.aws,
+    # amazonaws.com.cn, api.amazonwebservices.com.cn, amazonaws.eu, api.amazonwebservices.eu,
+    # c2s.ic.gov, api.aws.ic.gov, sc2s.sgov.gov, api.aws.scloud, cloud.adc-e.uk,
+    # api.cloud-aws.adc-e.uk, csp.hci.ic.gov, api.aws.hci.ic.gov. Live suffixes like api.aws and
+    # amazonaws.eu resolve to Floci while this is on.
+    # Combine with tls.enabled so clients that hardcode https:// are served on port 443
+    # with a certificate covering those suffixes and their regional wildcards.
+    spoof-aws-endpoints: false                    # FLOCI_DNS_SPOOF_AWS_ENDPOINTS
+
   auth:
     validate-signatures: false
     presign-secret: local-emulator-secret
@@ -287,6 +302,13 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
+    # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for every Docker call Floci makes. Each
+    # live Lambda container holds 2 connections for its whole lifetime (log follow + exit watcher),
+    # so the warm-container ceiling is about max-connections / 2; past it, create/start/stop/remove
+    # wait for a free connection and the emulator stalls. 1024 covers the 500 containers the
+    # runtime API port range allows. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.maxConnections: a value set here WINS over the annotation.
+    max-connections: 1024
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
@@ -313,6 +335,10 @@ floci:
       enabled: true
       vector-index-allocation-seconds: 4   # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS. Resource allocation phase of a vector index added by UpdateTable.
       vector-index-backfill-seconds: 10    # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS. Backfilling phase that follows it.
+      backend: native                      # FLOCI_SERVICES_DYNAMODB_BACKEND: native or local
+      # local-endpoint: http://dynamodb-local:8000   # FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT
+      local-connect-timeout-seconds: 2     # FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS
+      local-request-timeout-seconds: 10    # FLOCI_SERVICES_DYNAMODB_LOCAL_REQUEST_TIMEOUT_SECONDS
     sns:
       enabled: true
     lambda:
@@ -574,10 +600,14 @@ floci:
       publish-awsvpc-ports-to-host: false
       host-volume-roots: []
       allow-unsafe-host-volumes: false
+      # Remove the ECS containers a previous run of this deployment left on the daemon before
+      # the service scheduler starts replacements. Scoped to this deployment's own containers.
+      reconcile-containers-on-startup: true
       task-role-credentials:
         enabled: false
         ttl-seconds: 21600
         port: 51679
+        proxy-image: floci/network-helper:local
     appconfig:
       enabled: true
     appconfigdata:
@@ -633,6 +663,8 @@ floci:
     eks:
       enabled: true
       mock: false
+      max-memory-mib: 0        # optional k3s container memory ceiling; 0 follows the node type
+      max-vcpus: 0             # optional k3s container CPU ceiling; 0 follows the node type
       provider: k3s
       default-image: "rancher/k3s:latest"
       # image-template: "myregistry.io/k3s:v%s" # optional custom image format template taking cluster version
@@ -648,6 +680,8 @@ floci:
       imds-pod-network: false      # route link-local IMDS traffic from ordinary pod network namespaces (requires imds: true)
       irsa-signing-key: true       # sign k3s service account tokens with the cluster OIDC key
       pod-identity-webhook: true   # register a mutating webhook that injects pod identity credentials (needs floci.tls.enabled)
+      embedded-dns: true           # point cluster containers at Floci's embedded DNS to resolve Route 53 private zones
+      vpc-route-programming: true  # program VPC routes into the cluster container for associated subnets
     mwaa:
       enabled: true
       mock: false

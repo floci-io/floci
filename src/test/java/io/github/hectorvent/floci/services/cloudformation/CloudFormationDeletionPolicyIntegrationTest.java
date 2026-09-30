@@ -34,6 +34,9 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
     private static final String CUSTOM_AUTH =
             "AWS4-HMAC-SHA256 Credential=111122223333/20260205/eu-west-1/cloudformation/aws4_request";
+    /** CUSTOM_AUTH signs for eu-west-1, whose S3 endpoint requires a matching LocationConstraint, as on AWS. */
+    private static final String EU_WEST_1_BUCKET =
+            "<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>";
 
     @Test
     void deletingNestedStacksDoesNotExhaustOperationWorkers() throws InterruptedException {
@@ -336,7 +339,8 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
     @Test
     void nestedStackIsPhysicallyDeletedWhenRemovedFromTemplateOnUpdate() throws InterruptedException {
-        given().header("Authorization", CUSTOM_AUTH).when().put("/nested-stack-templates").then().statusCode(200);
+        given().header("Authorization", CUSTOM_AUTH).contentType("application/xml").body(EU_WEST_1_BUCKET)
+                .when().put("/nested-stack-templates").then().statusCode(200);
         String childTemplate = "{\"Resources\": {\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}}}";
         given()
             .header("Authorization", CUSTOM_AUTH)
@@ -436,7 +440,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
         """.formatted(templateUrl);
         String stackName = "parent-nested-lambda-update-" + suffix;
 
-        given().header("Authorization", CUSTOM_AUTH)
+        given().header("Authorization", CUSTOM_AUTH).contentType("application/xml").body(EU_WEST_1_BUCKET)
                 .when().put("/" + bucketName).then().statusCode(200);
         given().header("Authorization", CUSTOM_AUTH)
                 .contentType("application/json").body(nestedLambdaTemplate(functionName, 3))
@@ -745,6 +749,8 @@ class CloudFormationDeletionPolicyIntegrationTest {
         try {
             awaitStackStatus(parentStackId, "ROLLBACK_COMPLETE");
             assertBucketDeleted(bucketName);
+            // The child this create made goes with the parent's rollback instead of outliving it.
+            cfnQuery("DescribeStacks", stackName + "-ChildStack").then().statusCode(400);
 
             // The parent must have stopped at the failed ChildStack resource and never reached
             // ConsumerParam: proof the child's failure was detected before its (never-computed)

@@ -26,4 +26,9 @@ public interface AppSyncDataSourceInvoker {
      * @return the value to expose as {@code ctx.result}
      */
     Object invoke(DataSource dataSource, Object request, String region);
+
+    /** VTL UNIT requests share the data source path unless their wire contract differs. */
+    default Object invokeVtl(DataSource dataSource, Object request, String region) {
+        return invoke(dataSource, request, region);
+    }
 }

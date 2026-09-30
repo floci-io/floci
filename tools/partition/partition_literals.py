@@ -92,8 +92,8 @@ CATEGORIES: tuple[Category, ...] = (
         re.compile(
             r"(?<![a-z0-9-])(?:" + REGION_PREFIXES + r")-[a-z]+-\d[a-z]?(?![a-z0-9-])"
         ),
-        False,
-        "a region or availability-zone id; report-only until the us-east-1 assumptions are swept",
+        True,
+        "a region or availability-zone id; take it from the request or the resource, or the configured default",
     ),
 )
 

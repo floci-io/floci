@@ -54,8 +54,14 @@ class GuardedMessageQueue {
 
     void addMessage(Message message) {
         try (Guard _ = hold()) {
+            int mark = messages.size();
             messages.add(message);
-            persist();
+            try {
+                persist();
+            } catch (RuntimeException e) {
+                messages.remove(mark);
+                throw e;
+            }
         }
     }
 
@@ -189,6 +195,14 @@ class GuardedMessageQueue {
         try (Guard _ = hold()) {
             messages.removeAll(toRemove);
             persist();
+        }
+    }
+
+    void removeExpired(Instant cutoff) {
+        try (Guard _ = hold()) {
+            if (messages.removeIf(msg -> msg.isExpired(cutoff))) {
+                persist();
+            }
         }
     }
 

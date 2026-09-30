@@ -51,9 +51,9 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SsoAdminService implements Resettable {
-    private static final String INSTANCE_ARN = globalArn("sso", "us-east-1", "", "instance/ssoins-7223b02a5d9f7c8e");
+    private static final String INSTANCE_ARN = globalArn("sso", "us-east-1", "", "instance/ssoins-7223b02a5d9f7c8e"); // partition-literal: seeded Identity Center instance home region
     private static final String IDENTITY_STORE_ID = "d-9067f2a3c1";
-    private static final String PRIMARY_REGION = "us-east-1";
+    private static final String PRIMARY_REGION = "us-east-1"; // partition-literal: seeded Identity Center instance home region
     private static final Pattern INSTANCE_ARN_PATTERN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso:::instance/(?:sso)?ins-[a-zA-Z0-9-.]{16}");
     private static final Pattern PERMISSION_SET_NAME = Pattern.compile("[\\w+=,.@-]+");
     private static final Pattern PERMISSION_SET_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso:::permissionSet/(?:sso)?ins-[a-zA-Z0-9-.]{16}/ps-[a-zA-Z0-9-./]{16}");

@@ -9,7 +9,6 @@ on:
       - 'pom.xml'
       - '.github/ci/**'
       - '.github/workflows/ci.yml'
-      - '.github/workflows/pr-draft-gate.yml'
   pull_request:
     # ready_for_review is not a default type: without it, marking a draft ready
     # would not start the run the draft skipped.
@@ -19,7 +18,6 @@ on:
       - 'pom.xml'
       - '.github/ci/**'
       - '.github/workflows/ci.yml'
-      - '.github/workflows/pr-draft-gate.yml'
 
 permissions:
   contents: read
@@ -35,10 +33,6 @@ env:
   SHARD_TOTAL: 4
 
 jobs:
-  # Drafts skip the suite to spare runners; it runs once the PR is ready for review.
-  draft-gate:
-    uses: ./.github/workflows/pr-draft-gate.yml
-
   test:
     name: Build and Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
@@ -46,7 +40,16 @@ jobs:
     # runner spent it. This is a runaway-job kill switch, not a budget: Actions bills the minutes a
     # job actually uses, so a higher ceiling costs nothing until something hangs.
     timeout-minutes: 20
-    needs: draft-gate
+    # Drafts skip the suite to spare runners; it runs once the PR is ready for review.
+    # Written on the job rather than as a gate job so it costs no runner. Pushes to main
+    # always run; `closed` and `edited` are excluded so widening the trigger types cannot
+    # let those events through.
+    if: >-
+      github.event_name != 'pull_request' || (
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.state != 'closed' &&
+        github.event.action != 'edited'
+      )
     strategy:
       fail-fast: false
       matrix:
@@ -74,7 +77,8 @@ jobs:
       # Derived from test sources, not target/test-classes, so shard.txt exists
       # before Compile and the image prefetch below overlaps the compile instead
       # of starting moments before the tests that need the images. Every test is
-      # a top-level class in src/test/java, so the file name is the class name.
+      # a top-level class in src/test/java, so the file name is the class name;
+      # the step after Compile fails the shard if that ever stops being true.
       - name: Compute shard include list
         run: |
           cd src/test/java
@@ -95,11 +99,45 @@ jobs:
       - name: Compile
         run: ./mvnw test-compile -B
 
+      # all-classes.txt is derived from file names, so a test class whose name
+      # differs from its file would drop out of both it and the shard union
+      # without the completeness check noticing. The compiled classes are the
+      # ground truth; fail here if the two lists ever disagree.
+      - name: Verify shard list matches compiled test classes
+        run: |
+          cd target/test-classes
+          find . \( -name '*Test.class' -o -name 'Test*.class' \
+                    -o -name '*Tests.class' -o -name '*TestCase.class' \) \
+                  ! -name '*$*' \
+            | sed 's|^\./||; s|\.class$||' | LC_ALL=C sort \
+            > "$RUNNER_TEMP/compiled-classes.txt"
+          cd "$GITHUB_WORKSPACE"
+          cmp -s all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" \
+            || { echo "::error::test class list from src/test/java differs from target/test-classes:"; diff all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" | head -50; exit 1; }
+
       - name: Run tests
         run: >
           ./mvnw surefire:test -B
           -Dsurefire.includesFile="$GITHUB_WORKSPACE/shard.txt"
           -Dsurefire.failIfNoTests=true
+
+      # The prefetch runs in the background past its own step, so its per-image
+      # results are only complete once the tests are done. A pull still running
+      # here (after an early exit) has no result line yet, so list it. The
+      # prefetch is best-effort by design, so a key that no longer matches a
+      # class, a pin the script could not read, or an image back on ECR Public
+      # that Docker Hub also carries (only the Lambda runtimes belong there) is
+      # an annotation, not a failure.
+      - name: Image prefetch results
+        if: always()
+        run: |
+          cat prefetch-images.log 2>/dev/null || echo "no prefetch log"
+          pgrep -af 'docker pull' | sed 's/^/still running: /' || true
+          grep -E 'stale prefetch key|prefetch skipped' prefetch-images.log 2>/dev/null \
+            | sed 's/^/::warning title=prefetch-images.sh::/' || true
+          grep -E '(prefetched|prefetch failed) public\.ecr\.aws/' prefetch-images.log 2>/dev/null \
+            | grep -vE 'public\.ecr\.aws/lambda/' \
+            | sed 's/^/::warning title=prefetch-images.sh::not a Lambda runtime, pull it from Docker Hub: /' || true
 
       # Save from main only, and from shard 1 only. Actions caches are ref-scoped:
       # a pull_request run's write lands in refs/pull/N/merge where no other PR can
@@ -127,6 +165,7 @@ jobs:
           path: |
             shard.txt
             all-classes.txt
+            prefetch-images.log
             target/surefire-reports/
           if-no-files-found: error
 
@@ -138,9 +177,17 @@ jobs:
     name: CI summary
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [draft-gate, test]
-    # Without the gate check, always() would run this on a draft and fail on the skipped shards.
-    if: always() && needs.draft-gate.result == 'success'
+    needs: test
+    # always() so a failed shard still reaches the partition check and report, but not on a
+    # draft: there the shards are skipped and this would fail on them. Same condition as the shards.
+    if: >-
+      always() && (
+        github.event_name != 'pull_request' || (
+          github.event.pull_request.draft == false &&
+          github.event.pull_request.state != 'closed' &&
+          github.event.action != 'edited'
+        )
+      )
     steps:
       - name: Fail if any shard failed
         if: needs.test.result != 'success'

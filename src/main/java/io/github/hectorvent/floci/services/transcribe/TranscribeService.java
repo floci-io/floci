@@ -43,7 +43,7 @@ public class TranscribeService implements Resettable {
     }
 
     TranscribeService(StorageFactory storageFactory) {
-        this(storageFactory, new RegionResolver("us-east-1", "000000000000"));
+        this(storageFactory, new RegionResolver("us-east-1", "000000000000")); // partition-literal: test-shaped constructor default
     }
 
     @PostConstruct

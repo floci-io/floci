@@ -52,8 +52,9 @@ public interface CfnResourceProvisioner {
     }
 
     /**
-     * Whether a failed update still needs this provisioner's ownership-aware delete. Opt-in:
-     * a failed resource is not otherwise assumed to own a backing entity.
+     * Whether a failed update still tracks cleanup that this provisioner's ownership-aware delete
+     * owes. The engine no longer consults it: {@code DeleteStack} deletes every
+     * {@code UPDATE_FAILED} resource that has a physical id.
      */
     default boolean hasPendingRollbackCleanup(StackResource resource) {
         return false;

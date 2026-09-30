@@ -95,6 +95,8 @@ public class CognitoJsonHandler {
             case "AdminInitiateAuth" -> handleAdminInitiateAuth(request);
             case "RespondToAuthChallenge" -> handleRespondToAuthChallenge(request);
             case "AdminRespondToAuthChallenge" -> handleAdminRespondToAuthChallenge(request);
+            case "AssociateSoftwareToken" -> handleAssociateSoftwareToken(request);
+            case "VerifySoftwareToken" -> handleVerifySoftwareToken(request);
             case "SignUp" -> handleSignUp(request);
             case "ConfirmSignUp" -> handleConfirmSignUp(request);
             case "ResendConfirmationCode" -> handleResendConfirmationCode(request);
@@ -270,7 +272,8 @@ public class CognitoJsonHandler {
                         : null,
                 request.has("EnableTokenRevocation")
                         ? request.path("EnableTokenRevocation").asBoolean()
-                        : null
+                        : null,
+                authSessionValidity(request)
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("UserPoolClient", clientToNode(client));
@@ -334,7 +337,8 @@ public class CognitoJsonHandler {
                         ? objectMapper.convertValue(request.path("RefreshTokenRotation"),
                         new TypeReference<Map<String, Object>>() {})
                         : null,
-                request.has("EnableTokenRevocation") ? request.path("EnableTokenRevocation").asBoolean() : null
+                request.has("EnableTokenRevocation") ? request.path("EnableTokenRevocation").asBoolean() : null,
+                authSessionValidity(request)
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("UserPoolClient", clientToNode(client));
@@ -914,6 +918,19 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.valueToTree(result)).build();
     }
 
+    private Response handleAssociateSoftwareToken(JsonNode request) {
+        Map<String, Object> result = service.associateSoftwareToken(
+                request.path("AccessToken").asText(null), request.path("Session").asText(null));
+        return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
+    private Response handleVerifySoftwareToken(JsonNode request) {
+        Map<String, Object> result = service.verifySoftwareToken(
+                request.path("AccessToken").asText(null), request.path("Session").asText(null),
+                request.path("UserCode").asText(null));
+        return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
     private Response handleSignUp(JsonNode request) {
         Map<String, String> attrs = new HashMap<>();
         request.path("UserAttributes").forEach(a -> attrs.put(a.path("Name").asText(), a.path("Value").asText()));
@@ -1140,6 +1157,7 @@ public class CognitoJsonHandler {
         node.put("ClientId", c.getClientId());
         node.put("UserPoolId", c.getUserPoolId());
         node.put("ClientName", c.getClientName());
+        node.put("AuthSessionValidity", c.getAuthSessionValidity());
         if (c.getClientSecret() != null) {
             node.put("ClientSecret", c.getClientSecret());
         }
@@ -1188,6 +1206,17 @@ public class CognitoJsonHandler {
         node.put("CreationDate", c.getCreationDate());
         node.put("LastModifiedDate", c.getLastModifiedDate());
         return node;
+    }
+
+    private static Integer authSessionValidity(JsonNode request) {
+        JsonNode value = request.get("AuthSessionValidity");
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new AwsException("SerializationException", "Expected integer or null", 400);
+        }
+        return value.intValue();
     }
 
     private ObjectNode resourceServerToNode(ResourceServer server) {

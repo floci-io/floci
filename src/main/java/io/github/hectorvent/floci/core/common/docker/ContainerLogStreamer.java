@@ -35,7 +35,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 
 /**
- * Streams Docker container logs to both the Floci console logger and CloudWatch Logs.
+ * Streams Docker container logs to CloudWatch Logs and, by default, the Floci console logger.
  * Consolidates the log streaming pattern used across container managers.
  */
 @ApplicationScoped
@@ -155,17 +155,28 @@ public class ContainerLogStreamer {
 
     public ResultCallback.Adapter<Frame> execLogCallbackForAccount(
             String accountId, String logGroup, String logStream, String region, String logPrefix) {
-        return frameCallback(accountId, logGroup, logStream, region, logPrefix);
+        return execLogCallbackForAccount(accountId, logGroup, logStream, region, logPrefix, true);
     }
 
     /**
-     * Shared frame handling for both the container log stream and exec streams.
+     * Returns an exec callback that always forwards to CloudWatch Logs.
+     *
+     * @param logToConsole whether to also write each frame to the Floci console at INFO level
+     */
+    public ResultCallback.Adapter<Frame> execLogCallbackForAccount(
+            String accountId, String logGroup, String logStream, String region, String logPrefix,
+            boolean logToConsole) {
+        return frameCallback(accountId, logGroup, logStream, region, logPrefix, logToConsole);
+    }
+
+    /**
+     * Handles frames from Docker exec streams.
      *
      * @param accountId account that owns the destination log stream, or {@code null} for the
      *                  default account
      */
     private ResultCallback.Adapter<Frame> frameCallback(String accountId, String logGroup, String logStream,
-                                                        String region, String logPrefix) {
+                                                        String region, String logPrefix, boolean logToConsole) {
         return new ResultCallback.Adapter<>() {
             @Override
             public void onNext(Frame frame) {
@@ -174,7 +185,9 @@ public class ContainerLogStreamer {
                 }
                 String line = new String(frame.getPayload(), StandardCharsets.UTF_8).stripTrailing();
                 if (!line.isEmpty()) {
-                    LOG.infov("[{0}] {1}", logPrefix, line);
+                    if (logToConsole) {
+                        LOG.infov("[{0}] {1}", logPrefix, line);
+                    }
                     forwardToCloudWatchLogs(accountId, logGroup, logStream, region, line);
                 }
             }

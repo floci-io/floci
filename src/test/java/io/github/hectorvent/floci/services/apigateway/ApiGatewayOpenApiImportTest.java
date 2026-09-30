@@ -477,7 +477,6 @@ class ApiGatewayOpenApiImportTest {
     @Test
     @Order(52)
     void putRestApi_modeMergeAccepted() throws Exception {
-        // mode=merge is accepted (treated as overwrite — merge semantics not yet implemented)
         String apiBody = given()
                 .contentType(ContentType.JSON)
                 .body("{\"name\": \"MergeTest\"}")

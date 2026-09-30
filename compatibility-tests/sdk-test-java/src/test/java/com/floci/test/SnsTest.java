@@ -5,6 +5,8 @@ import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sns.model.CreateTopicRequest;
 import software.amazon.awssdk.services.sns.model.CreateTopicResponse;
 import software.amazon.awssdk.services.sns.model.DeleteTopicRequest;
+import software.amazon.awssdk.services.sns.model.GetSmsAttributesRequest;
+import software.amazon.awssdk.services.sns.model.GetSmsAttributesResponse;
 import software.amazon.awssdk.services.sns.model.GetTopicAttributesRequest;
 import software.amazon.awssdk.services.sns.model.GetTopicAttributesResponse;
 import software.amazon.awssdk.services.sns.model.ListSubscriptionsByTopicRequest;
@@ -16,6 +18,7 @@ import software.amazon.awssdk.services.sns.model.PublishBatchRequestEntry;
 import software.amazon.awssdk.services.sns.model.PublishBatchResponse;
 import software.amazon.awssdk.services.sns.model.PublishRequest;
 import software.amazon.awssdk.services.sns.model.PublishResponse;
+import software.amazon.awssdk.services.sns.model.SetSmsAttributesRequest;
 import software.amazon.awssdk.services.sns.model.SetSubscriptionAttributesRequest;
 import software.amazon.awssdk.services.sns.model.SubscribeRequest;
 import software.amazon.awssdk.services.sns.model.SubscribeResponse;
@@ -575,5 +578,27 @@ class SnsTest {
         sns.deleteTopic(DeleteTopicRequest.builder().topicArn(batchTopicArn).build());
         sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
                 .queueUrl(batchQueueUrl).build());
+    }
+    @Test
+    @Order(17)
+    void smsPreferencesRoundTrip() {
+        sns.setSMSAttributes(SetSmsAttributesRequest.builder()
+                .attributes(Map.of("DefaultSMSType", "Transactional", "MonthlySpendLimit", "10"))
+                .build());
+
+        GetSmsAttributesResponse selected = sns.getSMSAttributes(GetSmsAttributesRequest.builder()
+                .attributes("DefaultSMSType")
+                .build());
+        assertThat(selected.attributes()).containsExactly(entry("DefaultSMSType", "Transactional"));
+
+        GetSmsAttributesResponse all = sns.getSMSAttributes();
+        assertThat(all.attributes()).containsEntry("DefaultSMSType", "Transactional")
+                .containsEntry("MonthlySpendLimit", "10");
+
+        sns.setSMSAttributes(SetSmsAttributesRequest.builder()
+                .attributes(Map.of("DefaultSMSType", "", "MonthlySpendLimit", ""))
+                .build());
+        assertThat(sns.getSMSAttributes().attributes())
+                .doesNotContainKeys("DefaultSMSType", "MonthlySpendLimit");
     }
 }

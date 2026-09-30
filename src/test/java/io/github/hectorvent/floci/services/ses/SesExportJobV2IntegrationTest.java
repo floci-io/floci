@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -19,6 +20,7 @@ import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -48,6 +50,15 @@ class SesExportJobV2IntegrationTest {
         return given().contentType("application/json").header("Authorization", AUTH)
                 .body(body)
         .when().post("/v2/email/export-jobs");
+    }
+
+    private static String fetchExportCsv(String url) {
+        URI uri = URI.create(url);
+        // SigV4 signs Host as well as path and query. Keep the authority from the issued URL
+        // while routing the request to the random Quarkus test listener.
+        return given().urlEncodingEnabled(false).header("Host", uri.getRawAuthority())
+                .when().get(uri.getRawPath() + "?" + uri.getRawQuery())
+                .then().statusCode(200).extract().asString();
     }
 
     private static String insightsSource() {
@@ -217,8 +228,7 @@ class SesExportJobV2IntegrationTest {
 
         // The URL is Floci's own S3 emulation, so the object is fetched back through it.
         String url = job.path("ExportDestination.S3Url");
-        String path = url.substring(url.indexOf('/', url.indexOf("//") + 2));
-        String body = given().when().get(path).then().statusCode(200).extract().asString();
+        String body = fetchExportCsv(url);
         assertTrue(body.startsWith("\"messageid\",\"sendtimestamp\""), body.substring(0, 60));
         assertTrue(body.contains("reader@example.com"), "the send should be in the export");
     }
@@ -240,8 +250,7 @@ class SesExportJobV2IntegrationTest {
         String url = given().header("Authorization", AUTH)
         .when().get("/v2/email/export-jobs/" + jobId).then().statusCode(200)
                 .extract().path("ExportDestination.S3Url");
-        String path = url.substring(url.indexOf('/', url.indexOf("//") + 2));
-        String body = given().when().get(path).then().statusCode(200).extract().asString();
+        String body = fetchExportCsv(url);
 
         assertTrue(body.startsWith("ISP,SEND_VOLUME\n"), body);
         assertTrue(body.contains("UNKNOWN_ISP,1.0000"), body);
@@ -338,8 +347,7 @@ class SesExportJobV2IntegrationTest {
         String url = given().header("Authorization", AUTH)
         .when().get("/v2/email/export-jobs/" + jobId).then().statusCode(200)
                 .extract().path("ExportDestination.S3Url");
-        String path = url.substring(url.indexOf('/', url.indexOf("//") + 2));
-        return given().when().get(path).then().statusCode(200).extract().asString();
+        return fetchExportCsv(url);
     }
 
     @Test
@@ -383,8 +391,7 @@ class SesExportJobV2IntegrationTest {
         String url = given().header("Authorization", AUTH)
         .when().get("/v2/email/export-jobs/" + jobId).then().statusCode(200)
                 .extract().path("ExportDestination.S3Url");
-        String path = url.substring(url.indexOf('/', url.indexOf("//") + 2));
-        String body = given().when().get(path).then().statusCode(200).extract().asString();
+        String body = fetchExportCsv(url);
 
         assertTrue(body.startsWith("EMAIL_IDENTITY,SEND_VOLUME\n"), body);
         assertTrue(body.contains(SENDER), "a domain filter has to match the addresses inside it");
@@ -395,7 +402,17 @@ class SesExportJobV2IntegrationTest {
     void malformedPagingAndResultLimitsAreRefused() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"PageSize\": \"ten\"}")
-        .when().post("/v2/email/list-export-jobs").then().statusCode(400);
+        .when().post("/v2/email/list-export-jobs").then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+        // The body is deserialized before any member is validated, so a mistyped member wins.
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"JobStatus\": \"BOGUS\", \"PageSize\": \"ten\"}")
+        .when().post("/v2/email/list-export-jobs").then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"ExportSourceType\": \"BOGUS\", \"NextToken\": 5}")
+        .when().post("/v2/email/list-export-jobs").then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
 
         create("""
             {"ExportDataSource": {"MessageInsightsDataSource":
@@ -454,18 +471,21 @@ class SesExportJobV2IntegrationTest {
 
     @Test
     @Order(16)
-    void listExportJobs_acceptsAPageSizeAboveTheDefault() {
-        // PageSize carries no bound in the model, so a large page is a normal request.
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"PageSize\": 250}")
-        .when().post("/v2/email/list-export-jobs").then().statusCode(200);
+    void listExportJobs_boundsPagingTheWaySesDoes() {
+        for (String size : new String[] {"0", "101", "250"}) {
+            given().contentType("application/json").header("Authorization", AUTH)
+                    .body("{\"PageSize\": %s}".formatted(size))
+            .when().post("/v2/email/list-export-jobs").then().statusCode(400)
+                    .body("__type", equalTo("BadRequestException"))
+                    .body("message", equalTo("PageSize must be between 1 and 100"));
+        }
+        for (String token : new String[] {"garbage", ""}) {
+            given().contentType("application/json").header("Authorization", AUTH)
+                    .body("{\"NextToken\": \"%s\"}".formatted(token))
+            .when().post("/v2/email/list-export-jobs").then().statusCode(400)
+                    .body("message", equalTo("Failed to deserialize token. "));
+        }
 
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"PageSize\": 0}")
-        .when().post("/v2/email/list-export-jobs").then().statusCode(400);
-
-        // A page size at the int ceiling is clamped, not refused, and must not report a further
-        // page: the paginator adds the page size to the offset as an int.
         String token = given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"PageSize\": 1}")
         .when().post("/v2/email/list-export-jobs").then().statusCode(200)
@@ -473,9 +493,10 @@ class SesExportJobV2IntegrationTest {
         assertNotNull(token, "the fixture needs more than one job for this to mean anything");
 
         given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"PageSize\": 2147483647, \"NextToken\": \"%s\"}".formatted(token))
+                .body("{\"PageSize\": 100, \"NextToken\": \"%s\"}".formatted(token))
         .when().post("/v2/email/list-export-jobs").then().statusCode(200)
-                .body("$", not(hasKey("NextToken")));
+                .body("$", hasKey("NextToken"))
+                .body("NextToken", nullValue());
     }
 
     @Test

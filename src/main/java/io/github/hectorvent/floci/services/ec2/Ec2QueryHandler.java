@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.*;
@@ -18,6 +19,7 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -32,8 +34,8 @@ public class Ec2QueryHandler {
 
     /** ReplaceRoute targets AWS accepts that a stored {@code Route} cannot represent here. */
     private static final List<String> UNSUPPORTED_ROUTE_TARGETS = List.of(
-            "CarrierGatewayId", "CoreNetworkArn", "EgressOnlyInternetGatewayId", "InstanceId",
-            "LocalGatewayId", "NetworkInterfaceId", "OdbNetworkArn",
+            "CarrierGatewayId", "CoreNetworkArn", "EgressOnlyInternetGatewayId",
+            "LocalGatewayId", "OdbNetworkArn",
             "TransitGatewayId", "VpcEndpointId");
 
     /** The gateway id a route table's built-in route carries (see Ec2Service#createRouteTable). */
@@ -348,6 +350,17 @@ public class Ec2QueryHandler {
     private String firstPresent(MultivaluedMap<String, String> p, String first, String second) {
         String value = p.getFirst(first);
         return value != null && !value.isBlank() ? value : p.getFirst(second);
+    }
+
+    private List<String> getListOrSingle(MultivaluedMap<String, String> p, String prefix) {
+        List<String> result = getList(p, prefix);
+        if (result.isEmpty()) {
+            String single = p.getFirst(prefix);
+            if (single != null && !single.isBlank()) {
+                result.add(single);
+            }
+        }
+        return result;
     }
 
     private int parseIntParam(MultivaluedMap<String, String> p, String name, int defaultValue) {
@@ -1531,7 +1544,12 @@ public class Ec2QueryHandler {
     private Response handleDescribeVpcs(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "VpcId");
         Map<String, List<String>> filters = getFilters(p);
+        // Resolve the lookup first so unsupported filters retain their error precedence.
         List<Vpc> vpcs = service.describeVpcs(region, ids, filters);
+        // Shared service callers decide their own missing-resource behavior, as with subnets.
+        for (String vpcId : ids) {
+            service.requireVpc(region, vpcId);
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1579,9 +1597,11 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    // The common AWS interface-endpoint services, as short names. Rendered as
-    // com.amazonaws.<region>.<name>. CDK's InterfaceVpcEndpoint (lookupSupportedAzs)
-    // calls DescribeVpcEndpointServices at synth time; an empty set aborts synth.
+    // The common AWS interface-endpoint services, as short names. Rendered with the
+    // region's interface-endpoint prefix: com.amazonaws.<region>.<name>, or the reversed
+    // suffix for the (region, service) pairs AwsRegionFacts lists (cn.com.amazonaws in
+    // China). CDK's InterfaceVpcEndpoint (lookupSupportedAzs) calls
+    // DescribeVpcEndpointServices at synth time; an empty set aborts synth.
     private static final List<String> INTERFACE_ENDPOINT_SERVICES = List.of(
             "ec2", "ec2messages", "ssm", "ssmmessages", "logs", "monitoring", "sts",
             "secretsmanager", "kms", "ecr.api", "ecr.dkr", "ecs", "ecs-agent", "ecs-telemetry",
@@ -1597,6 +1617,10 @@ public class Ec2QueryHandler {
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("serviceNameSet");
+        // S3 is the one service with both offerings. The gateway keeps com.amazonaws in every
+        // partition; the interface takes the region's prefix, so in China the two are named apart.
+        String s3Gateway = "com.amazonaws." + region + ".s3";
+        String s3Interface = AwsRegionFacts.vpcEndpointServiceName(region, "s3");
         List<String> fullNames = new ArrayList<>();
         // An explicit ServiceName filter wins: the emulator supports any
         // interface service in every AZ, so echo exactly what was asked. CDK's
@@ -1605,22 +1629,31 @@ public class Ec2QueryHandler {
         if (!requested.isEmpty()) {
             fullNames.addAll(requested);
         } else {
-            // S3 has both a Gateway and an Interface offering; keep it in the set.
             for (String name : INTERFACE_ENDPOINT_SERVICES) {
-                fullNames.add("com.amazonaws." + region + "." + name);
+                fullNames.add(AwsRegionFacts.vpcEndpointServiceName(region, name));
             }
-            fullNames.add("com.amazonaws." + region + ".s3");
+            fullNames.add(s3Gateway);
+            if (!s3Interface.equals(s3Gateway)) {
+                fullNames.add(s3Interface);
+            }
         }
         for (String full : fullNames) {
             xml.elem("item", full);
         }
         xml.end("serviceNameSet").start("serviceDetailSet");
         for (String full : fullNames) {
-            // S3 is the one service with both offerings, and AWS reports both
-            // types on its single service detail. Everything else is Interface.
-            List<String> serviceTypes = full.endsWith(".s3")
-                    ? List.of("Gateway", "Interface")
-                    : List.of("Interface");
+            // Where both S3 offerings share a name, AWS reports both types on that one
+            // service detail. Everything else is Interface.
+            List<String> serviceTypes;
+            if (full.equals(s3Interface) && !s3Interface.equals(s3Gateway)) {
+                serviceTypes = List.of("Interface");
+            } else if (full.endsWith(".s3")) {
+                serviceTypes = s3Interface.equals(s3Gateway)
+                        ? List.of("Gateway", "Interface")
+                        : List.of("Gateway");
+            } else {
+                serviceTypes = List.of("Interface");
+            }
             xml.start("item")
                     .elem("serviceName", full)
                     .start("serviceType");
@@ -3639,7 +3672,10 @@ public class Ec2QueryHandler {
         // egress route is not silently rewritten into a targetless one.
         String eigwId = p.getFirst("EgressOnlyInternetGatewayId");
         String pcxId = p.getFirst("VpcPeeringConnectionId");
-        service.createRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, eigwId, pcxId);
+        String instanceId = p.getFirst("InstanceId");
+        String networkInterfaceId = p.getFirst("NetworkInterfaceId");
+        service.createRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, eigwId, pcxId,
+                instanceId, networkInterfaceId);
         return booleanResponse("CreateRoute");
     }
 
@@ -3660,16 +3696,19 @@ public class Ec2QueryHandler {
         String gwId = p.getFirst("GatewayId");
         String natGwId = p.getFirst("NatGatewayId");
         String pcxId = p.getFirst("VpcPeeringConnectionId");
+        String instanceId = p.getFirst("InstanceId");
+        String networkInterfaceId = p.getFirst("NetworkInterfaceId");
         // Resetting a route to the local target is expressible: `local` is the gateway id the
         // route table's built-in route already carries, so it needs no new field on Route.
         if (Boolean.parseBoolean(p.getFirst("LocalTarget"))) {
-            if (gwId != null || natGwId != null || pcxId != null) {
+            if (gwId != null || natGwId != null || pcxId != null || instanceId != null || networkInterfaceId != null) {
                 throw new AwsException("InvalidParameterCombination",
                         "ReplaceRoute takes exactly one target.", 400);
             }
             gwId = LOCAL_GATEWAY_ID;
         }
         service.replaceRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, pcxId,
+                instanceId, networkInterfaceId,
                 Boolean.parseBoolean(p.getFirst("DryRun")));
         return booleanResponse("ReplaceRoute");
     }
@@ -4338,6 +4377,11 @@ public class Ec2QueryHandler {
                 .elem("availabilityZone", ni.getAvailabilityZone())
                 .elem("description", ni.getDescription())
                 .elem("ownerId", ni.getOwnerId())
+                // AWS emits requesterManaged on every interface, false included -- see the
+                // DescribeNetworkInterfaces sample response -- and requesterId only where
+                // there is a requester. floci leaves requesterId unset; see the field's javadoc.
+                .elem("requesterId", ni.getRequesterId())
+                .elem("requesterManaged", ni.isRequesterManaged())
                 .elem("status", ni.getStatus())
                 .elem("interfaceType", ni.getInterfaceType())
                 .elem("macAddress", ni.getMacAddress())
@@ -4728,7 +4772,10 @@ public class Ec2QueryHandler {
                     .elem("destinationIpv6CidrBlock", r.getDestinationIpv6CidrBlock())
                     .elem("destinationPrefixListId", r.getDestinationPrefixListId())
                     .elem("gatewayId", r.getGatewayId())
+                    .elem("instanceId", r.getInstanceId())
+                    .elem("instanceOwnerId", r.getInstanceOwnerId())
                     .elem("natGatewayId", r.getNatGatewayId())
+                    .elem("networkInterfaceId", r.getNetworkInterfaceId())
                     .elem("egressOnlyInternetGatewayId", r.getEgressOnlyInternetGatewayId())
                     .elem("vpcPeeringConnectionId", r.getVpcPeeringConnectionId())
                     .elem("state", r.getState())
@@ -5567,6 +5614,19 @@ public class Ec2QueryHandler {
             xml.start("item").elem("groupId", securityGroupId).end("item");
         }
         xml.end("groupSet");
+        // AWS reports an interface endpoint's ENIs here, and the Terraform provider
+        // surfaces them as aws_vpc_endpoint.network_interface_ids. Floci already
+        // synthesizes those interfaces deterministically for flow-log attribution; until
+        // now nothing said so on the wire, so the attribute came back empty and
+        // propagated into every module that feeds it downstream.
+        List<String> endpointEniIds = service.endpointNetworkInterfaceIds(endpoint);
+        if (!endpointEniIds.isEmpty()) {
+            xml.start("networkInterfaceIdSet");
+            for (String eniId : endpointEniIds) {
+                xml.elem("item", eniId);
+            }
+            xml.end("networkInterfaceIdSet");
+        }
         List<VpcEndpointDnsEntry> dnsEntries = service.endpointDnsEntries(endpoint);
         if (!dnsEntries.isEmpty()) {
             xml.start("dnsEntrySet");
@@ -6040,14 +6100,62 @@ public class Ec2QueryHandler {
      * clients such as Karpenter to distinguish an empty result from an unsupported action.</p>
      */
     private Response handleDescribeSpotPriceHistory(MultivaluedMap<String, String> p, String region) {
+        List<String> instanceTypes = getListOrSingle(p, "InstanceType");
+        List<String> productDescriptions = getListOrSingle(p, "ProductDescription");
+        String availabilityZone = p.getFirst("AvailabilityZone");
+        if (availabilityZone == null) {
+            availabilityZone = p.getFirst("AvailabilityZone.1");
+        }
+        String availabilityZoneId = p.getFirst("AvailabilityZoneId");
+        if (availabilityZoneId == null) {
+            availabilityZoneId = p.getFirst("AvailabilityZoneId.1");
+        }
+        Instant startTime = instantOrNull(p, "StartTime");
+        Instant endTime = instantOrNull(p, "EndTime");
+        Map<String, List<String>> filters = getFilters(p);
+        String nextToken = p.getFirst("NextToken");
+
+        int maxResults = 0;
+        String maxResultsStr = p.getFirst("MaxResults");
+        if (maxResultsStr != null && !maxResultsStr.isEmpty()) {
+            try {
+                maxResults = Integer.parseInt(maxResultsStr);
+                if (maxResults < 1) {
+                    throw new AwsException("InvalidParameterValue",
+                            "The parameter MaxResults must be greater than or equal to 1", 400);
+                }
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidParameterValue",
+                        "The specified value for MaxResults is not valid.", 400);
+            }
+        }
+
+        service.validateSpotPriceHistory(productDescriptions, availabilityZone, availabilityZoneId, startTime, endTime, filters);
         checkDryRun(p);
+
+        SpotPriceHistoryResult result = service.describeSpotPriceHistory(region,
+                instanceTypes, productDescriptions, availabilityZone, availabilityZoneId,
+                startTime, endTime, filters, maxResults, nextToken);
+
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeSpotPriceHistoryResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
-                .elem("nextToken", "")
-                .start("spotPriceHistorySet")
-                .end("spotPriceHistorySet")
-                .end("DescribeSpotPriceHistoryResponse");
+                .start("spotPriceHistorySet");
+        for (SpotPrice sp : result.spotPrices()) {
+            xml.start("item")
+                    .elem("instanceType", sp.instanceType())
+                    .elem("productDescription", sp.productDescription())
+                    .elem("spotPrice", sp.spotPrice())
+                    .elem("timestamp", ISO_FMT.format(sp.timestamp()))
+                    .elem("availabilityZone", sp.availabilityZone());
+            if (sp.availabilityZoneId() != null) {
+                xml.elem("availabilityZoneId", sp.availabilityZoneId());
+            }
+            xml.end("item");
+        }
+        xml.end("spotPriceHistorySet");
+        xml.elem("nextToken", result.nextToken() != null ? result.nextToken() : "");
+        xml.end("DescribeSpotPriceHistoryResponse");
         return xmlResponse(xml.build());
     }
 

@@ -104,6 +104,8 @@ class ElastiCacheQueryHandlerTest {
         assertTrue(body.contains("<CacheClusterId>grp-0002-001</CacheClusterId>"));
         assertFalse(body.contains("<PrimaryEndpoint>"),
                 "Cluster-mode node groups carry Slots, not a PrimaryEndpoint");
+        assertTrue(body.contains(
+                "<ConfigurationEndpoint><Address>localhost</Address><Port>6379</Port></ConfigurationEndpoint>"), body);
     }
 
     @Test
@@ -125,6 +127,8 @@ class ElastiCacheQueryHandlerTest {
         assertTrue(body.contains("<ClusterId>grp-001</ClusterId>"));
         assertTrue(body.contains("<PrimaryEndpoint><Address>localhost</Address><Port>6379</Port></PrimaryEndpoint>"));
         assertTrue(body.contains("<CurrentRole>primary</CurrentRole>"));
+        assertFalse(body.contains("<ConfigurationEndpoint>"),
+                "A cluster-mode-disabled group reports its endpoints under NodeGroups only");
     }
 
     @Test

@@ -24,6 +24,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -177,6 +180,39 @@ class SqsServiceTest {
                     sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
                             .get("MaximumMessageSize"));
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"59", "1209601", "abc", "60.5", "", "-1", " 60", "60 ", "99999999999"})
+    void messageRetentionPeriodOutsideAwsRangeIsRejected(String invalid) {
+        String region = "eu-west-1";
+        AwsException onCreate = assertThrows(AwsException.class,
+                () -> sqsService.createQueue("retention-range", Map.of("MessageRetentionPeriod", invalid), region));
+        assertEquals("InvalidAttributeValue", onCreate.getErrorCode());
+        assertEquals("Invalid value for the parameter MessageRetentionPeriod.", onCreate.getMessage());
+
+        Queue queue = sqsService.createQueue("retention-range", null, region);
+        AwsException onSet = assertThrows(AwsException.class,
+                () -> sqsService.setQueueAttributes(queue.getQueueUrl(),
+                        Map.of("MessageRetentionPeriod", invalid), region));
+        assertEquals("InvalidAttributeValue", onSet.getErrorCode());
+        assertEquals("Invalid value for the parameter MessageRetentionPeriod.", onSet.getMessage());
+        assertEquals("345600", sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("MessageRetentionPeriod"), region).get("MessageRetentionPeriod"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"60, 60", "1209600, 1209600", "060, 60", "+60, 60"})
+    void messageRetentionPeriodIsStoredInCanonicalForm(String value, String stored) {
+        String region = "eu-west-1";
+        Queue created = sqsService.createQueue("retention-created", Map.of("MessageRetentionPeriod", value), region);
+        assertEquals(stored, sqsService.getQueueAttributes(created.getQueueUrl(),
+                List.of("MessageRetentionPeriod"), region).get("MessageRetentionPeriod"));
+
+        Queue updated = sqsService.createQueue("retention-updated", null, region);
+        sqsService.setQueueAttributes(updated.getQueueUrl(), Map.of("MessageRetentionPeriod", value), region);
+        assertEquals(stored, sqsService.getQueueAttributes(updated.getQueueUrl(),
+                List.of("MessageRetentionPeriod"), region).get("MessageRetentionPeriod"));
     }
 
     @Test
@@ -565,6 +601,206 @@ class SqsServiceTest {
     }
 
     @Test
+    void fifoDeduplicationStillSuppressesMessageAfterOriginalIsDeleted() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("deleted-original.fifo", null, region);
+        Message original = sqsService.sendMessage(
+                queue.getQueueUrl(), "original", 0, "group-a", "dedup-a", region);
+
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        assertEquals(1, received.size());
+        sqsService.deleteMessage(queue.getQueueUrl(), received.getFirst().getReceiptHandle(), region);
+
+        Message duplicateResponse = sqsService.sendMessage(
+                queue.getQueueUrl(), "duplicate", 0, "group-a", "dedup-a", region);
+
+        assertNotNull(duplicateResponse.getMessageId());
+        assertEquals(original.getMessageId(), duplicateResponse.getMessageId());
+        assertEquals(original.getSequenceNumber(), duplicateResponse.getSequenceNumber());
+        assertEquals("dedup-a", duplicateResponse.getMessageDeduplicationId());
+        assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty(),
+                "A duplicate must remain suppressed after its original message is deleted");
+        assertTrue(sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).isEmpty());
+    }
+
+    @Test
+    void fifoDeduplicationIdentitySurvivesRestartAfterOriginalIsDeleted() {
+        String region = "us-east-1";
+        InMemoryStorage<String, Queue> queueStore = new InMemoryStorage<>();
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>();
+        InMemoryStorage<String, Map<String, Long>> dedupStore = new InMemoryStorage<>();
+        InMemoryStorage<String, Map<String, Map<String, String>>> identityStore = new InMemoryStorage<>();
+        RegionResolver regionResolver = new RegionResolver(region, "000000000000");
+        SqsService initialService = new SqsService(queueStore, messageStore, dedupStore, identityStore,
+                30, 1048576, BASE_URL, regionResolver, false, null, clock);
+        Queue queue = initialService.createQueue("deleted-before-restart.fifo", null, region);
+        Message original = initialService.sendMessage(
+                queue.getQueueUrl(), "original", 0, "group-a", "dedup-a", region);
+        List<Message> received = initialService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        initialService.deleteMessage(queue.getQueueUrl(), received.getFirst().getReceiptHandle(), region);
+
+        SqsService restartedService = new SqsService(queueStore, messageStore, dedupStore, identityStore,
+                30, 1048576, BASE_URL, regionResolver, false, null, clock);
+        Message duplicateResponse = restartedService.sendMessage(
+                queue.getQueueUrl(), "duplicate", 0, "group-a", "dedup-a", region);
+
+        assertEquals(original.getMessageId(), duplicateResponse.getMessageId());
+        assertEquals(original.getSequenceNumber(), duplicateResponse.getSequenceNumber());
+        assertTrue(restartedService.peekMessages(queue.getQueueUrl(), region).isEmpty());
+    }
+
+    @Test
+    void fifoDeduplicationExpiresAtTheFiveMinuteBoundary() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("expired-dedup.fifo", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "original", 0, "group-a", "dedup-a", region);
+
+        clock.advance(Duration.ofMinutes(5));
+        sqsService.sendMessage(queue.getQueueUrl(), "after-window", 0, "group-a", "dedup-a", region);
+
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 2, 30, 0, region);
+        assertEquals(2, received.size());
+        assertTrue(received.stream().anyMatch(message -> "after-window".equals(message.getBody())));
+    }
+
+    @Test
+    void concurrentFifoSendsAfterExpiryKeepTheNewDeduplicationEntry() throws Exception {
+        String region = "eu-west-1";
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 25; round++) {
+                Queue queue = sqsService.createQueue("expired-concurrent-" + round + ".fifo", null, region);
+                String queueUrl = queue.getQueueUrl();
+                sqsService.sendMessage(queueUrl, "original", 0, "group-a", "dedup-a", region);
+                Message original = sqsService.receiveMessage(queueUrl, 1, 30, 0, region).getFirst();
+                sqsService.deleteMessage(queueUrl, original.getReceiptHandle(), region);
+                clock.advance(Duration.ofMinutes(5));
+
+                CountDownLatch ready = new CountDownLatch(2);
+                CountDownLatch start = new CountDownLatch(1);
+                Future<Message> first = executor.submit(() -> {
+                    ready.countDown();
+                    start.await();
+                    return sqsService.sendMessage(queueUrl, "renewed", 0, "group-a", "dedup-a", region);
+                });
+                Future<Message> second = executor.submit(() -> {
+                    ready.countDown();
+                    start.await();
+                    return sqsService.sendMessage(queueUrl, "renewed", 0, "group-a", "dedup-a", region);
+                });
+                assertTrue(ready.await(5, TimeUnit.SECONDS));
+                start.countDown();
+
+                Message firstResponse = first.get(5, TimeUnit.SECONDS);
+                Message secondResponse = second.get(5, TimeUnit.SECONDS);
+                assertEquals(firstResponse.getMessageId(), secondResponse.getMessageId());
+                assertEquals(firstResponse.getSequenceNumber(), secondResponse.getSequenceNumber());
+                assertEquals(1, sqsService.peekMessages(queueUrl, region).size());
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void duplicateInAnotherGroupDoesNotWaitForBlockedMessageWrite() throws Exception {
+        String region = "us-east-1";
+        CountDownLatch writing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, List<Message> messages) {
+                if (messages.stream().anyMatch(message -> "slow".equals(message.getBody()))) {
+                    writing.countDown();
+                    try {
+                        if (!release.await(5, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("Timed out waiting to release message write");
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(e);
+                    }
+                }
+                super.put(key, messages);
+            }
+        };
+        SqsService service = new SqsService(new InMemoryStorage<>(), messageStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), 30, 1048576, BASE_URL,
+                new RegionResolver(region, "000000000000"), false, null, clock);
+        Queue queue = service.createQueue("unrelated-send.fifo", null, region);
+        Message original = service.sendMessage(queue.getQueueUrl(), "original", 0,
+                "group-a", "dedup-a", region);
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Message> slow = executor.submit(() -> service.sendMessage(queue.getQueueUrl(),
+                    "slow", 0, "group-b", "dedup-b", region));
+            assertTrue(writing.await(5, TimeUnit.SECONDS));
+            Future<Message> duplicate = executor.submit(() -> service.sendMessage(queue.getQueueUrl(),
+                    "duplicate", 0, "group-a", "dedup-a", region));
+            assertEquals(original.getMessageId(), duplicate.get(2, TimeUnit.SECONDS).getMessageId());
+            release.countDown();
+            slow.get(5, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentFifoSendsRetainAllDeduplicationEntriesAfterRestart() throws Exception {
+        String region = "us-east-1";
+        InMemoryStorage<String, Queue> queueStore = new InMemoryStorage<>();
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>();
+        InMemoryStorage<String, Map<String, Long>> dedupStore = new InMemoryStorage<>();
+        InMemoryStorage<String, Map<String, Map<String, String>>> identityStore = new InMemoryStorage<>();
+        RegionResolver regionResolver = new RegionResolver(region, "000000000000");
+        SqsService service = new SqsService(queueStore, messageStore, dedupStore, identityStore,
+                30, 1048576, BASE_URL, regionResolver, false, null, clock);
+        Queue queue = service.createQueue("concurrent-persist.fifo", null, region);
+        ExecutorService executor = Executors.newFixedThreadPool(8);
+        try {
+            List<Future<Message>> sent = new ArrayList<>();
+            for (int i = 0; i < 32; i++) {
+                int id = i;
+                sent.add(executor.submit(() -> service.sendMessage(queue.getQueueUrl(),
+                        "message-" + id, 0, "group-" + id, "dedup-" + id, region)));
+            }
+            List<Message> originals = new ArrayList<>();
+            for (Future<Message> send : sent) {
+                originals.add(send.get(5, TimeUnit.SECONDS));
+            }
+            SqsService restarted = new SqsService(queueStore, messageStore, dedupStore, identityStore,
+                    30, 1048576, BASE_URL, regionResolver, false, null, clock);
+            for (int i = 0; i < originals.size(); i++) {
+                Message duplicate = restarted.sendMessage(queue.getQueueUrl(),
+                        "duplicate-" + i, 0, "group-" + i, "dedup-" + i, region);
+                assertEquals(originals.get(i).getMessageId(), duplicate.getMessageId());
+            }
+            assertEquals(32, restarted.peekMessages(queue.getQueueUrl(), region).size());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void contentBasedFifoDeduplicationStillSuppressesMessageAfterOriginalIsDeleted() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("content-deleted-original.fifo",
+                Map.of("ContentBasedDeduplication", "true"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "same-body", 0, "group-a", null, region);
+
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        assertEquals(1, received.size());
+        sqsService.deleteMessage(queue.getQueueUrl(), received.getFirst().getReceiptHandle(), region);
+
+        sqsService.sendMessage(queue.getQueueUrl(), "same-body", 0, "group-a", null, region);
+
+        assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty(),
+                "Content-based duplicate IDs must remain suppressed after deletion");
+    }
+
+    @Test
     void fifoQueueReceiveReturnsMultipleMessagesPerGroupInOrder() {
         // AWS FIFO: a single ReceiveMessage call may return multiple messages
         // from the same MessageGroupId (in order), up to MaxNumberOfMessages.
@@ -761,13 +997,13 @@ class SqsServiceTest {
         assertTrue(sqsService.receiveMessage(queue.getQueueUrl(), 10, 0, 0, region).isEmpty(),
                 "Queue must be empty after purge");
 
-        // Re-send with same dedup ID — dedup cache fires but finds no message (purged),
-        // so it falls through and creates a new message
+        // Re-send with the same dedup ID. Purging removed the original message,
+        // but does not end its five-minute deduplication interval.
         sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1", region);
 
         List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0, region);
-        assertEquals(1, received.size(),
-                "Re-send after purge must produce exactly one message in the queue");
+        assertTrue(received.isEmpty(),
+                "A duplicate must remain suppressed after purge during the deduplication interval");
     }
 
     @Test
@@ -1524,7 +1760,7 @@ class SqsServiceTest {
 
     private static void awaitMoveTaskStatus(SqsService service, String sourceArn, String taskHandle,
                                             String expectedStatus) throws Exception {
-        for (int attempt = 0; attempt < 100; attempt++) {
+        for (int attempt = 0; attempt < 500; attempt++) {
             boolean reachedStatus = service.listMessageMoveTasks(sourceArn, "us-east-1").stream()
                     .anyMatch(task -> task.taskHandle().equals(taskHandle)
                             && expectedStatus.equals(task.status()));
@@ -1811,5 +2047,132 @@ class SqsServiceTest {
                 "A long poll driven by the queue attribute must return as soon as a message arrives");
         assertEquals(1, result.get().size());
         assertEquals("wake-up", result.get().get(0).getBody());
+    }
+
+    @Test
+    void messagePastRetentionPeriodIsNotReturned() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("retention-queue",
+                Map.of("MessageRetentionPeriod", "60"), region);
+        Message sent = sqsService.sendMessage(queue.getQueueUrl(), "old", 0, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "fresh", 0, region);
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("ApproximateNumberOfMessages"), region);
+        assertEquals("1", attrs.get("ApproximateNumberOfMessages"));
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0, region);
+        assertEquals(List.of("fresh"), received.stream().map(Message::getBody).toList());
+    }
+
+    @Test
+    void shorterRetentionPeriodExpiresExistingMessages() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("retention-shrink", null, region);
+        Message sent = sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        sent.setSentTimestamp(Instant.now().minusSeconds(120));
+        assertEquals(1, sqsService.peekMessages(queue.getQueueUrl(), region).size());
+
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("MessageRetentionPeriod", "60"), region);
+
+        assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty());
+    }
+
+    @Test
+    void standardDeadLetterQueueKeepsOriginalEnqueueTimeForRetention() {
+        String region = "us-east-1";
+        Queue dlq = sqsService.createQueue("retention-dlq",
+                Map.of("MessageRetentionPeriod", "60"), region);
+        Queue source = sqsService.createQueue("retention-src",
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + queueArn("retention-dlq")
+                        + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "msg", 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        assertEquals(1, sqsService.peekMessages(dlq.getQueueUrl(), region).size());
+
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+
+        assertTrue(sqsService.peekMessages(dlq.getQueueUrl(), region).isEmpty());
+    }
+
+    @Test
+    void fifoDeadLetterQueueRestartsRetentionPeriod() {
+        String region = "us-east-1";
+        Queue dlq = sqsService.createQueue("retention-dlq.fifo",
+                Map.of("FifoQueue", "true", "MessageRetentionPeriod", "60"), region);
+        Queue source = sqsService.createQueue("retention-src.fifo",
+                Map.of("FifoQueue", "true", "RedrivePolicy", "{\"deadLetterTargetArn\":\""
+                        + queueArn("retention-dlq.fifo") + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "msg", 0, "g1", "d1", region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+
+        assertEquals(1, sqsService.peekMessages(dlq.getQueueUrl(), region).size());
+    }
+
+    @Test
+    void messageMoveTaskRestartsRetentionPeriod() {
+        String region = "us-east-1";
+        sqsService.createQueue("retention-mv-dlq", null, region);
+        Queue source = sqsService.createQueue("retention-mv-src",
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + queueArn("retention-mv-dlq")
+                        + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Queue dest = sqsService.createQueue("retention-mv-dest",
+                Map.of("MessageRetentionPeriod", "60"), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "msg", 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        Instant sentAt = Instant.now().minusSeconds(61);
+        sent.setSentTimestamp(sentAt);
+
+        sqsService.startMessageMoveTask(queueArn("retention-mv-dlq"), queueArn("retention-mv-dest"), region);
+
+        List<Message> moved = sqsService.peekMessages(dest.getQueueUrl(), region);
+        assertEquals(1, moved.size());
+        assertEquals(sentAt, moved.get(0).getSentTimestamp());
+    }
+
+    @Test
+    void rateLimitedMessageMoveTaskDropsMessagesThatExpireDuringTheMove() throws Exception {
+        String region = "us-east-1";
+        sqsService.createQueue("retention-rl-dlq", Map.of("MessageRetentionPeriod", "60"), region);
+        Queue source = sqsService.createQueue("retention-rl-src",
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + queueArn("retention-rl-dlq")
+                        + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Queue dest = sqsService.createQueue("retention-rl-dest", null, region);
+        sqsService.sendMessage(source.getQueueUrl(), "first", 0, region);
+        Message second = sqsService.sendMessage(source.getQueueUrl(), "second", 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 10, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 10, 0, 0, region);
+        String dlqArn = queueArn("retention-rl-dlq");
+        // Still live when the task starts, expired when the worker reaches it a second later.
+        second.setSentTimestamp(Instant.now().minusSeconds(59));
+
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, queueArn("retention-rl-dest"), 1, region);
+        awaitMoveTaskStatus(dlqArn, taskHandle, "COMPLETED");
+        assertEquals(2, sqsService.listMessageMoveTasks(dlqArn, region).get(0).approximateNumberOfMessagesToMove());
+
+        List<Message> moved = sqsService.peekMessages(dest.getQueueUrl(), region);
+        assertEquals(List.of("first"), moved.stream().map(Message::getBody).toList());
+    }
+
+    @Test
+    void deleteExpiredMessagesRemovesThemFromStorage() {
+        String region = "us-east-1";
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>();
+        SqsService service = new SqsService(new InMemoryStorage<>(), messageStore, new InMemoryStorage<>(),
+                30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"));
+        Queue queue = service.createQueue("retention-sweep", Map.of("MessageRetentionPeriod", "60"), region);
+        Message sent = service.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+        String storageKey = region + "::/000000000000/retention-sweep";
+        assertEquals(1, messageStore.get(storageKey).orElseThrow().size());
+
+        service.deleteExpiredMessages();
+
+        assertTrue(messageStore.get(storageKey).orElseThrow().isEmpty());
     }
 }

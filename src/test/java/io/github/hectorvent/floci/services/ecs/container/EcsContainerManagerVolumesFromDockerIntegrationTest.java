@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -40,7 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class EcsContainerManagerVolumesFromDockerIntegrationTest {
 
-    private static final String BUSYBOX_IMAGE = "public.ecr.aws/docker/library/busybox:latest";
+    private static final String BUSYBOX_IMAGE = TestImages.BUSYBOX;
 
     @Inject
     EcsContainerManager containerManager;
@@ -110,11 +111,11 @@ class EcsContainerManagerVolumesFromDockerIntegrationTest {
 
     private void buildSourceImage(String tag) throws Exception {
         String dockerfile = """
-                FROM public.ecr.aws/docker/library/busybox:latest
+                FROM %s
                 RUN mkdir -p /shared && printf '#!/bin/sh\\nexec "$@"\\n' > /shared/wrapper \
                     && chmod +x /shared/wrapper
                 VOLUME ["/shared"]
-                """;
+                """.formatted(TestImages.BUSYBOX);
 
         byte[] dockerfileBytes = dockerfile.getBytes(StandardCharsets.UTF_8);
         ByteArrayOutputStream context = new ByteArrayOutputStream();

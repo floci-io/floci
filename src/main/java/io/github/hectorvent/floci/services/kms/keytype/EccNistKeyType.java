@@ -20,6 +20,11 @@ final class EccNistKeyType implements KmsKeyType {
     }
 
     @Override
+    public void importKeyMaterial(KmsKey key, byte[] material) {
+        BcEcKeys.importPrivateKey(key, material, key.getKeySpec().curveName());
+    }
+
+    @Override
     public byte[] sign(KmsKey key, byte[] message, KmsKeySpec.Algorithm algorithm, KmsMessageType messageType)
             throws GeneralSecurityException {
         PrivateKey privateKey = AsymmetricKeys.privateKey(key, "EC");

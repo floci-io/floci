@@ -141,6 +141,7 @@ floci:
       enabled: true
       vector-index-allocation-seconds: 0
       vector-index-backfill-seconds: 0
+      backend: native
     sns:
       enabled: true
     lambda:
@@ -331,9 +332,12 @@ floci:
     eks:
       enabled: true
       mock: true
+      max-memory-mib: 0
+      max-vcpus: 0
       ecr-registry-mirror: true
       imds: false
       irsa-signing-key: true
+      embedded-dns: true
     mwaa:
       enabled: true
       mock: true

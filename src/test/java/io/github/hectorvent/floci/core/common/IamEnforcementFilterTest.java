@@ -2,24 +2,32 @@ package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayController;
+import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
-import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.s3.S3Controller;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.core.http.HttpServerRequest;
+import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.inject.Instance;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
-import jakarta.ws.rs.container.ContainerRequestContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -35,6 +43,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -94,6 +103,10 @@ class IamEnforcementFilterTest {
     }
 
     private IamEnforcementFilter newFilter() {
+        return newFilter(mock(CurrentVertxRequest.class));
+    }
+
+    private IamEnforcementFilter newFilter(CurrentVertxRequest currentVertxRequest) {
         @SuppressWarnings("unchecked")
         Instance<ScpProvider> scpProvider =
                 mock(Instance.class);
@@ -102,8 +115,20 @@ class IamEnforcementFilterTest {
                 config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
                 requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
-                mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
+                currentVertxRequest,
                 catalog, scpProvider, sessionAccountLookup);
+    }
+
+    private IamEnforcementFilter newFilter(ResourceInfo resourceInfo) {
+        @SuppressWarnings("unchecked")
+        Instance<ScpProvider> scpProvider = mock(Instance.class);
+        when(scpProvider.isResolvable()).thenReturn(false);
+        return new IamEnforcementFilter(
+                config, accountResolver, iamService, evaluator, actionRegistry,
+                new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
+                conditionContextResolver, mock(CloudTrailService.class),
+                mock(CurrentVertxRequest.class),
+                catalog, scpProvider, sessionAccountLookup, null, resourceInfo);
     }
 
     @Test
@@ -148,7 +173,6 @@ class IamEnforcementFilterTest {
     @Test
     void jsonProtocolActionComesFromTheTargetNotTheSignedScope() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
-        // Signed for lambda, but X-Amz-Target sends it to DynamoDB, which is where it will run.
         String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260629/us-east-1/lambda/aws4_request, "
                 + "SignedHeaders=host, Signature=abc";
         requestContext.setAccountId("000000000000");
@@ -174,7 +198,38 @@ class IamEnforcementFilterTest {
         verify(actionRegistry).resolve(eq("dynamodb"), eq(containerRequest));
         ArgumentCaptor<Response> denied = ArgumentCaptor.captor();
         verify(containerRequest).abortWith(denied.capture());
-        assertEquals(403, denied.getValue().getStatus());
+        assertEquals(400, denied.getValue().getStatus());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "AWS_JSON_1_0, application/json, 400",
+            "AWS_JSON_1_1, application/json, 400",
+            "REST, application/x-amz-json-1.1, 403"
+    })
+    void denialStatusUsesTheClaimedProtocolRatherThanContentType(WireProtocol protocol, String contentType,
+                                                               int expectedStatus) {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260629/us-east-1/dynamodb/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getMediaType()).thenReturn(MediaType.valueOf(contentType));
+        stubClaim(containerRequest, protocol, dynamoDbDescriptor());
+        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
+        when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:PutItem");
+        when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), eq("dynamodb:PutItem"), any(), any()))
+                .thenReturn(IamPolicyEvaluator.Decision.DENY);
+
+        newFilter().filter(containerRequest);
+
+        ArgumentCaptor<Response> denied = ArgumentCaptor.captor();
+        verify(containerRequest).abortWith(denied.capture());
+        assertEquals(expectedStatus, denied.getValue().getStatus());
+        assertEquals(MediaType.APPLICATION_JSON_TYPE, denied.getValue().getMediaType());
+        assertTrue(entityString(denied.getValue()).contains("\"__type\":\"AccessDeniedException\""));
+        assertTrue(entityString(denied.getValue()).contains("User is not authorized to perform: dynamodb:PutItem"));
     }
 
     @Test
@@ -217,6 +272,138 @@ class IamEnforcementFilterTest {
         verify(actionRegistry).resolve(eq("dynamodb"), eq(containerRequest));
     }
 
+    @Test
+    void aTargetHeaderOnARequestThatIsNotDispatchedOnItDoesNotMoveTheAuthorization() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260629/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getHeaderString("X-Amz-Target")).thenReturn("DynamoDB_20120810.DescribeTable");
+        lenient().when(catalog.matchTarget("DynamoDB_20120810.DescribeTable")).thenReturn(Optional.of(
+                new ServiceCatalog.TargetMatch(dynamoDbDescriptor(), "DynamoDB_20120810.", "DescribeTable")));
+        when(containerRequest.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY)).thenReturn(ProtocolClaim.rest());
+        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
+
+        newFilter().filter(containerRequest);
+
+        verify(actionRegistry).resolve(eq("s3"), eq(containerRequest));
+    }
+
+    @Test
+    void restRouteAuthorizesTheServiceThatMatchedTheRequest() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/us-east-1/iam/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        requestContext.setRegion("us-east-1");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                .thenReturn(ProtocolClaim.rest());
+        when(catalog.byResourceClass(ApiGatewayController.class))
+                .thenReturn(Optional.of(descriptor("apigateway", ServiceProtocol.REST_JSON,
+                        Set.of("apigateway", "execute-api"), ApiGatewayController.class)));
+        when(actionRegistry.resolve("apigateway", containerRequest)).thenReturn("apigateway:POST");
+        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
+
+        IamEnforcementFilter filter = newFilter(resourceInfo(ApiGatewayController.class));
+        filter.filter(containerRequest);
+
+        verify(actionRegistry).resolve("apigateway", containerRequest);
+        verify(actionRegistry, never()).resolve("iam", containerRequest);
+        verify(arnBuilder).buildResources("apigateway", containerRequest,
+                "us-east-1", "000000000000");
+        verify(conditionContextResolver).resolve("apigateway", "apigateway:POST", containerRequest);
+    }
+
+    @Test
+    void s3RouteDoesNotUseApiGatewayRules() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/us-east-1/iam/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                .thenReturn(ProtocolClaim.rest());
+        when(catalog.byResourceClass(S3Controller.class))
+                .thenReturn(Optional.of(descriptor("s3", ServiceProtocol.REST_XML,
+                        Set.of("s3", "s3express"), S3Controller.class)));
+        when(catalog.canonicalCredentialScope("s3express")).thenReturn("s3");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:CreateBucket");
+        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
+
+        IamEnforcementFilter filter = newFilter(resourceInfo(S3Controller.class));
+        filter.filter(containerRequest);
+
+        verify(actionRegistry).resolve("s3", containerRequest);
+        verify(actionRegistry, never()).resolve("apigateway", containerRequest);
+    }
+
+    @Test
+    void queryActionAuthorizesTheServiceSelectedByDispatch() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/us-east-1/lambda/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        requestContext.setRegion("us-east-1");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        stubQueryRequest(containerRequest);
+        when(containerRequest.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                .thenReturn(new ProtocolClaim(WireProtocol.AWS_QUERY, null, null, null));
+        when(actionRegistry.queryAction(containerRequest)).thenReturn("CreateUser");
+        when(catalog.byCredentialScope("lambda")).thenReturn(Optional.of(
+                descriptor("lambda", ServiceProtocol.REST_JSON, Set.of("lambda"), null)));
+        when(catalog.byExternalKey("iam")).thenReturn(Optional.of(
+                descriptor("iam", ServiceProtocol.QUERY, Set.of("iam"), null)));
+        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
+
+        newFilter().filter(containerRequest);
+
+        verify(actionRegistry).queryAction(containerRequest);
+        verify(actionRegistry, never()).resolve("lambda", containerRequest);
+        verify(arnBuilder).buildResources("iam", containerRequest,
+                "us-east-1", "000000000000");
+        verify(conditionContextResolver).resolve("iam", "iam:CreateUser", containerRequest);
+    }
+
+    @Test
+    void queryActionUsesTheDispatchServiceWithoutAProtocolClaim() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/us-east-1/lambda/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        requestContext.setRegion("us-east-1");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        stubQueryRequest(containerRequest);
+        when(actionRegistry.queryAction(containerRequest)).thenReturn("CreateUser");
+        when(catalog.byCredentialScope("lambda")).thenReturn(Optional.of(
+                descriptor("lambda", ServiceProtocol.REST_JSON, Set.of("lambda"), null)));
+        when(catalog.byExternalKey("iam")).thenReturn(Optional.of(
+                descriptor("iam", ServiceProtocol.QUERY, Set.of("iam"), null)));
+        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
+
+        newFilter().filter(containerRequest);
+
+        verify(actionRegistry).queryAction(containerRequest);
+        verify(actionRegistry, never()).resolve("lambda", containerRequest);
+        verify(arnBuilder).buildResources("iam", containerRequest,
+                "us-east-1", "000000000000");
+        verify(conditionContextResolver).resolve("iam", "iam:CreateUser", containerRequest);
+    }
+
+    private static void stubQueryRequest(ContainerRequestContext ctx) {
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(ctx.getMethod()).thenReturn("POST");
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(uriInfo.getPath()).thenReturn("");
+        when(ctx.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
+    }
+
     private static void stubClaim(ContainerRequestContext ctx, WireProtocol protocol,
                                   ServiceDescriptor descriptor) {
         when(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
@@ -229,43 +416,17 @@ class IamEnforcementFilterTest {
                 Set.of("dynamodb"), Set.of(), Set.of());
     }
 
-    @Test
-    void aTargetHeaderOnARequestThatIsNotDispatchedOnItDoesNotMoveTheAuthorization() {
-        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
-        // An S3 REST delete carrying a DynamoDB target. JAX-RS routes it to S3 whatever the header
-        // says, so the header must not decide which service gets authorized.
-        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260629/us-east-1/s3/aws4_request, "
-                + "SignedHeaders=host, Signature=abc";
-        requestContext.setAccountId("000000000000");
-        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
-        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
-        when(containerRequest.getHeaderString("X-Amz-Target")).thenReturn("DynamoDB_20120810.DescribeTable");
-        // The target does resolve to DynamoDB; what must stop it is that this request was never
-        // claimed for target dispatch, so the header is not what routes it.
-        lenient().when(catalog.matchTarget("DynamoDB_20120810.DescribeTable")).thenReturn(Optional.of(
-                new ServiceCatalog.TargetMatch(dynamoDbDescriptor(), "DynamoDB_20120810.", "DescribeTable")));
-        when(containerRequest.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY)).thenReturn(ProtocolClaim.rest());
-        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
-
-        newFilter().filter(containerRequest);
-
-        verify(actionRegistry).resolve(eq("s3"), eq(containerRequest));
+    private static ResourceInfo resourceInfo(Class<?> resourceClass) {
+        ResourceInfo resourceInfo = mock(ResourceInfo.class);
+        doReturn(resourceClass).when(resourceInfo).getResourceClass();
+        return resourceInfo;
     }
 
-    @Test
-    void aQueryClaimNeverOverridesTheScopeItWasBuiltFrom() {
-        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
-        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260629/us-east-1/lambda/aws4_request, "
-                + "SignedHeaders=host, Signature=abc";
-        requestContext.setAccountId("000000000000");
-        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
-        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
-        stubClaim(containerRequest, WireProtocol.AWS_QUERY, dynamoDbDescriptor());
-        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
-
-        newFilter().filter(containerRequest);
-
-        verify(actionRegistry).resolve(eq("lambda"), eq(containerRequest));
+    private static ServiceDescriptor descriptor(String service, ServiceProtocol protocol,
+                                                Set<String> scopes, Class<?> resourceClass) {
+        Set<Class<?>> resourceClasses = resourceClass == null ? Set.of() : Set.of(resourceClass);
+        return new ServiceDescriptor(service, service, true, true, service, "memory", 0L,
+                null, protocol, Set.of(protocol), Set.of(), scopes, Set.of(), resourceClasses);
     }
 
     @Test
@@ -351,6 +512,91 @@ class IamEnforcementFilterTest {
 
         verify(containerRequest, never()).abortWith(any());
         verifyNoInteractions(evaluator);
+    }
+
+    @Test
+    void presignedCredentialCannotBypassAnUnmappedAction() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getMethod()).thenReturn("POST");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn(null);
+        when(iamService.presignedScope("ASIASCOPE"))
+                .thenReturn(Optional.of(new IamService.PresignedScope(
+                        "s3:GetObject", "arn:aws:s3:::bucket/key")));
+
+        newFilter().filter(containerRequest);
+
+        verify(containerRequest).abortWith(any());
+    }
+
+    @Test
+    void scopedPresignedRequestWithoutRoutingContextIsDenied() {
+        assertScopedPresignedRequestWithoutHttpRequestIsDenied(null);
+    }
+
+    @Test
+    void scopedPresignedRequestWithoutHttpRequestIsDenied() {
+        assertScopedPresignedRequestWithoutHttpRequestIsDenied(mock(RoutingContext.class));
+    }
+
+    @Test
+    void scopedPresignedRequestUsesWirePathForAbsoluteFormProxyTarget() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        CurrentVertxRequest currentVertxRequest = mock(CurrentVertxRequest.class);
+        RoutingContext routingContext = mock(RoutingContext.class);
+        HttpServerRequest httpRequest = mock(HttpServerRequest.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext("ASIASCOPE"))
+                .thenReturn(CallerContext.of(List.of("{\"Version\":\"2012-10-17\",\"Statement\":[]}")));
+        when(iamService.presignedScope("ASIASCOPE"))
+                .thenReturn(Optional.of(new IamService.PresignedScope(
+                        "s3:GetObject", "arn:aws:s3:::bucket//key")));
+        when(currentVertxRequest.getCurrent()).thenReturn(routingContext);
+        when(routingContext.request()).thenReturn(httpRequest);
+        when(httpRequest.uri()).thenReturn("https://proxy.example/bucket//key?X-Amz-Algorithm=AWS4-HMAC-SHA256");
+        when(httpRequest.path()).thenReturn("/bucket//key");
+        when(conditionContextResolver.resolveRemainingTargets("s3", "s3:GetObject", containerRequest))
+                .thenReturn(List.of());
+        when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), any(), any(), any()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+
+        newFilter(currentVertxRequest).filter(containerRequest);
+
+        verify(containerRequest, never()).abortWith(any());
+        verify(evaluator).evaluateResolvedResourcePolicy(any(), any(), any(),
+                eq("s3:GetObject"), eq("arn:aws:s3:::bucket//key"), any());
+    }
+
+    private void assertScopedPresignedRequestWithoutHttpRequestIsDenied(RoutingContext routingContext) {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        CurrentVertxRequest currentVertxRequest = mock(CurrentVertxRequest.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASCOPE/20260927/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASCOPE");
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext("ASIASCOPE"))
+                .thenReturn(CallerContext.of(List.of("{\"Version\":\"2012-10-17\",\"Statement\":[]}")));
+        when(iamService.presignedScope("ASIASCOPE"))
+                .thenReturn(Optional.of(new IamService.PresignedScope(
+                        "s3:GetObject", "arn:aws:s3:::bucket/key")));
+        if (routingContext != null) {
+            when(currentVertxRequest.getCurrent()).thenReturn(routingContext);
+        }
+
+        newFilter(currentVertxRequest).filter(containerRequest);
+
+        ArgumentCaptor<Response> response = ArgumentCaptor.forClass(Response.class);
+        verify(containerRequest).abortWith(response.capture());
+        assertEquals(403, response.getValue().getStatus());
     }
 
     @Test
@@ -766,7 +1012,7 @@ class IamEnforcementFilterTest {
                 config, accountResolver, iamService, new IamPolicyEvaluator(new ObjectMapper()),
                 actionRegistry, arnBuilder, requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
-                mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
+                mock(CurrentVertxRequest.class),
                 catalog, scpProvider, sessionAccountLookup);
     }
 
@@ -1185,9 +1431,10 @@ class IamEnforcementFilterTest {
     void jsonProtocolGetsJsonErrorResponse() {
         // DynamoDB / Cognito / Kinesis / ... — JSON 1.0/1.1, JSON error response.
         Response r = IamEnforcementFilter.accessDeniedResponse(
-                "dynamodb:PutItem", "dynamodb", MediaType.valueOf("application/x-amz-json-1.0"));
+                "dynamodb:PutItem", "dynamodb", MediaType.valueOf("application/x-amz-json-1.0"),
+                null, WireProtocol.AWS_JSON_1_0);
 
-        assertEquals(403, r.getStatus());
+        assertEquals(400, r.getStatus());
         assertEquals(MediaType.APPLICATION_JSON_TYPE, r.getMediaType());
         String body = entityString(r);
         assertTrue(body.contains("\"__type\":\"AccessDeniedException\""), body);
@@ -1317,7 +1564,7 @@ class IamEnforcementFilterTest {
                 config, accountResolver, iamService, evaluator, actionRegistry, arnBuilder,
                 requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
-                mock(io.quarkus.vertx.http.runtime.CurrentVertxRequest.class),
+                mock(CurrentVertxRequest.class),
                 catalog, scpProvider, sessionAccountLookup, providers);
     }
 }

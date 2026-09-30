@@ -38,8 +38,8 @@ import java.nio.charset.StandardCharsets;
  * <p>Implements {@link ContainerTeardown} rather than observing {@code ShutdownEvent} directly:
  * {@code ContainerTeardowns.stopAll} already runs every implementation both at process shutdown
  * and on {@code /state/reset}/{@code /state/nuke}, so this is what actually stops every
- * repository's container on reset, not the generic {@code CodeArtifactService} repository-record
- * walk, which only knows about repositories that still exist in storage.
+ * repository's container on reset, driven by what {@link #pool} is really tracking rather than by
+ * which repository records still exist in storage.
  */
 @ApplicationScoped
 public class VerdaccioSidecarManager implements RepositorySidecarManager, ContainerTeardown {

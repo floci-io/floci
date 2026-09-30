@@ -58,12 +58,15 @@ import java.io.StringReader;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
@@ -87,6 +90,24 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2ServiceTest {
+
+    @Test
+    void sharedDescribeVpcsOmitsUnknownIdsButExplicitLookupStillRejectsThem() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String unknown = "vpc-0000000000000dead";
+        Vpc known = service.createVpc(region, "10.95.0.0/16", false);
+
+        assertTrue(service.describeVpcs(region, List.of(unknown), Map.of()).isEmpty());
+        assertEquals(List.of(known), service.describeVpcs(region, List.of(known.getVpcId(), unknown), Map.of()));
+        assertTrue(service.describeVpcs("eu-west-1", List.of(known.getVpcId()), Map.of()).isEmpty());
+        assertTrue(service.describeVpcs(region, List.of(known.getVpcId()),
+                Map.of("cidr-block", List.of("10.96.0.0/16"))).isEmpty());
+        assertEquals("InvalidVpcID.NotFound", assertThrows(AwsException.class,
+                () -> service.requireVpc(region, unknown)).getErrorCode());
+    }
 
     @Test
     void deleteVpcRemovesVpcOwnedDefaultResourcesAndRules() {
@@ -2060,6 +2081,130 @@ class Ec2ServiceTest {
 
         assertDoesNotThrow(service::restoreMetadataRegistrations);
         verify(vpcNetworks, times(2)).reservePrivateIp("us-east-1", "subnet-a", "10.0.1.10");
+    }
+
+    @Test
+    void synthesisedAddressesStayInsideTheSubnetCidrPastTheFirstOctetBoundary() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.70.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.70.0.0/23", "us-east-1a").getSubnetId();
+
+        Set<String> addresses = new HashSet<>();
+        for (int i = 0; i < 300; i++) {
+            String address = service.createNetworkInterface("us-east-1", subnetId, null,
+                    null, List.of(), List.of(), List.of()).getPrivateIpAddress();
+            assertTrue(address.matches("10\\.70\\.[01]\\.(\\d{1,3})"), address);
+            assertTrue(Integer.parseInt(address.substring(address.lastIndexOf('.') + 1)) <= 255, address);
+            assertTrue(addresses.add(address), "handed out twice: " + address);
+        }
+        assertTrue(addresses.contains("10.70.1.10"), "the counter must carry into the next /24 octet");
+    }
+
+    @Test
+    void synthesisedAddressesSkipReservedOnesAndReportExhaustion() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.71.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.71.0.0/28", "us-east-1a").getSubnetId();
+
+        Set<String> addresses = new HashSet<>();
+        for (int i = 0; i < 11; i++) {
+            addresses.add(service.createNetworkInterface("us-east-1", subnetId, null,
+                    null, List.of(), List.of(), List.of()).getPrivateIpAddress());
+        }
+
+        Set<String> usable = new HashSet<>();
+        for (int host = 4; host <= 14; host++) {
+            usable.add("10.71.0." + host);
+        }
+        assertEquals(usable, addresses);
+        assertEquals("InsufficientFreeAddressesInSubnet", assertThrows(AwsException.class,
+                () -> service.createNetworkInterface("us-east-1", subnetId, null,
+                        null, List.of(), List.of(), List.of())).getErrorCode());
+    }
+
+    @Test
+    void aLaunchTooLargeForTheSubnetStoresNoneOfItsInstances() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.74.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.74.0.0/28", "us-east-1a").getSubnetId();
+        int volumesBefore = service.describeVolumes("us-east-1", List.of(), Map.of()).size();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                        12, 12, null, List.of(), subnetId, null, List.of(), null, null));
+
+        assertEquals("InsufficientFreeAddressesInSubnet", error.getErrorCode());
+        assertTrue(service.describeInstances("us-east-1", List.of(),
+                Map.of("subnet-id", List.of(subnetId))).isEmpty());
+        assertEquals(volumesBefore, service.describeVolumes("us-east-1", List.of(), Map.of()).size());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                11, 11, null, List.of(), subnetId, null, List.of(), null, null);
+        assertEquals(11, reservation.getInstances().stream().map(Instance::getPrivateIpAddress).distinct().count());
+    }
+
+    @Test
+    void concurrentCreatesInASmallSubnetNeverShareASynthesisedAddress() throws Exception {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.73.0.0/16", false).getVpcId();
+        int rounds = 20;
+        int usable = 11;
+        ExecutorService executor = Executors.newFixedThreadPool(usable);
+        try {
+            for (int round = 0; round < rounds; round++) {
+                String subnetId = service.createSubnet("us-east-1", vpcId, "10.73." + round + ".0/28",
+                        "us-east-1a").getSubnetId();
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<String>> creates = new ArrayList<>();
+                for (int i = 0; i < usable; i++) {
+                    creates.add(executor.submit(() -> {
+                        start.await();
+                        return service.createNetworkInterface("us-east-1", subnetId, null,
+                                null, List.of(), List.of(), List.of()).getPrivateIpAddress();
+                    }));
+                }
+                start.countDown();
+                Set<String> addresses = new HashSet<>();
+                for (Future<String> create : creates) {
+                    String address = create.get(10, TimeUnit.SECONDS);
+                    assertTrue(addresses.add(address), "handed out twice: " + address);
+                }
+                assertEquals(usable, addresses.size());
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void synthesisedAddressesAreNotReusedAfterARestart() {
+        Map<String, AccountAwareStorageBackend<?>> stores = Map.of(
+                "ec2-vpcs.json", AccountAwareStorageBackend.<Vpc>inMemory("000000000000"),
+                "ec2-subnets.json", AccountAwareStorageBackend.<Subnet>inMemory("000000000000"),
+                "ec2-network-interfaces.json", AccountAwareStorageBackend.<NetworkInterface>inMemory("000000000000"));
+        Ec2Service before = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(stores));
+        String vpcId = before.createVpc("us-east-1", "10.72.0.0/16", false).getVpcId();
+        String subnetId = before.createSubnet("us-east-1", vpcId, "10.72.1.0/24", "us-east-1a").getSubnetId();
+        String held = before.createNetworkInterface("us-east-1", subnetId, null,
+                null, List.of(), List.of(), List.of()).getPrivateIpAddress();
+
+        Ec2Service after = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(stores));
+        String next = after.createNetworkInterface("us-east-1", subnetId, null,
+                null, List.of(), List.of(), List.of()).getPrivateIpAddress();
+
+        assertEquals("10.72.1.10", held);
+        assertNotEquals(held, next);
     }
 
     private static Instance persistedInstance(String instanceId, String privateIp, InstanceState state) {

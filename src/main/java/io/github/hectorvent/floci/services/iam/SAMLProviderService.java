@@ -183,11 +183,6 @@ public class SAMLProviderService {
     }
 
     public void untag(String accountId, String arn, List<String> tagKeys) {
-        if (tagKeys != null && tagKeys.size() > MAX_TAGS_PER_SAML_PROVIDER) {
-            throw new AwsException("ValidationError",
-                    "Value at 'tagKeys' failed to satisfy constraint: Member must have length "
-                            + "less than or equal to " + MAX_TAGS_PER_SAML_PROVIDER, 400);
-        }
         synchronized (providerLock) {
             SAMLProvider provider = getForAccount(accountId, arn);
             Map<String, String> remaining = new LinkedHashMap<>(provider.getTags());

@@ -170,6 +170,8 @@ Implementation notes:
 - Vert.x MQTT handles the wire protocol and connection lifecycle.
 - Floci-owned session, subscription, and retained-message state drives local AWS IoT compatibility behavior.
 - Normal client publishes call `IotService.publish(...)` so retained-message storage, event recording, and rule evaluation remain service-owned.
+- An MQTT publish stores the retained message and records the publish on the event loop, then hands topic rule evaluation to a single-thread worker the broker owns, which runs the rules of MQTT publishes one at a time in the order they arrived. A slow rule action therefore delays the rules of later publishes from every connection, but not their PUBACK or fan-out, and not other services' work.
+- A state reset or a broker shutdown skips the rules of MQTT publishes still waiting, and an MQTT publish received during the reset or while the broker is stopped never runs its rules. An evaluation already running finishes.
 - Internal broker publishes fan out only to MQTT subscribers and do not recursively evaluate IoT topic rules.
 
 Current accepted limitation:
@@ -177,6 +179,7 @@ Current accepted limitation:
 - Certificate and `iot:Connect` checks are enforced on 8883 only; topic-level authorization is not enforced on either port yet.
 - Persistent offline sessions are not modeled yet.
 - QoS 2 and advanced MQTT 5 property semantics remain follow-up scope.
+- At most 1,000 MQTT publishes are pending rule evaluation, running or waiting. While that many are pending, further publishes are still delivered to subscribers but their topic rules are skipped, with one warning logged until the backlog drains.
 
 ## Implementation Shape
 
@@ -211,9 +214,9 @@ Supported rule behavior:
 - Rule SQL parsing and evaluation for the subset described under [Rule SQL](#rule-sql): the `SELECT` projection,
   the `FROM` topic filter, and the `WHERE` predicate.
 - MQTT-style topic filter matching for exact topics, `+`, and terminal `#`.
-- IoT Data `Publish` and MQTT publishes use the same rule dispatch path.
+- IoT Data `Publish` and MQTT publishes use the same rule dispatch path. An IoT Data `Publish` evaluates its rules before it returns. An MQTT publish evaluates them on the broker's rule worker, so neither its PUBACK nor its fan-out waits for rule actions, and a republished message can reach subscribers before or after the source message's other deliveries; AWS gives no ordering guarantee there either.
 - Rule matching is region-scoped: an IoT Data `Publish` evaluates the rules of the region named by its SigV4 credential, and a rule's actions target the rule's own region.
-- Publishes that carry no region — MQTT, or an IoT Data `Publish` whose `Authorization` header is absent or not SigV4 — are evaluated against every region's rules.
+- Publishes that carry no region (MQTT, or an IoT Data `Publish` whose `Authorization` header is absent or not SigV4) are evaluated against every region's rules.
 - Actions receive the projected document, which is the payload itself for a statement that selects only `*`.
 - `republish` action republishes to another MQTT topic through `IotMqttBrokerService`.
 - `sqs` action sends to an SQS queue through Floci's SQS service boundary.

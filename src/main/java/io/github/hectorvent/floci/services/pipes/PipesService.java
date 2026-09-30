@@ -219,6 +219,7 @@ public class PipesService implements TagHandler, ResourceProvider {
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Pipe " + name + " does not exist.", 404));
         poller.stopPolling(pipe);
+        poller.forget(pipe);
         storage.delete(key);
         LOG.infov("Deleted pipe: {0}", name);
     }

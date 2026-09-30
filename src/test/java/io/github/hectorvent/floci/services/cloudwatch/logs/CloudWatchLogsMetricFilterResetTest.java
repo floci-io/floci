@@ -115,6 +115,6 @@ class CloudWatchLogsMetricFilterResetTest {
         when(resettables.iterator()).thenAnswer(call -> List.of(resettable).iterator());
         Instance<ContainerTeardown> teardowns = mock(Instance.class);
         when(teardowns.iterator()).thenAnswer(call -> List.<ContainerTeardown>of().iterator());
-        return new EmulatorInfoController(null, null, f.factory, resettables, teardowns, null, null);
+        return new EmulatorInfoController(null, null, f.factory, resettables, teardowns, null, null, null);
     }
 }

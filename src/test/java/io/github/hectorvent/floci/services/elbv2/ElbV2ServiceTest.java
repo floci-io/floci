@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elbv2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -123,6 +124,87 @@ class ElbV2ServiceTest {
         verify(dataPlane).restartListener(any(Listener.class), eq(REGION), anyList());
         verify(dataPlane, never()).stopListener(anyString());
         verify(dataPlane, never()).startListener(any(Listener.class), anyString(), anyList());
+    }
+
+    @Test
+    void setRulePrioritiesIgnoresPrioritiesHeldOnOtherListeners() {
+        String tgArn = createTargetGroup("sample-tg");
+        String publicListener = createListener("public-lb", tgArn);
+        String internalListener = createListener("internal-lb", tgArn);
+        service.createRule(REGION, publicListener, List.of(pathPattern("/signup/*")),
+                100, List.of(forwardAction(tgArn)), Map.of());
+        Rule moved = service.createRule(REGION, internalListener, List.of(pathPattern("/documents/*")),
+                230, List.of(forwardAction(tgArn)), Map.of());
+
+        service.setRulePriorities(REGION, Map.of(moved.getRuleArn(), 100));
+
+        assertEquals("100", service.describeRules(REGION, null, List.of(moved.getRuleArn())).getFirst().getPriority());
+    }
+
+    @Test
+    void setRulePrioritiesChecksEachListenerOnlyAgainstItsOwnRules() {
+        String tgArn = createTargetGroup("sample-tg");
+        String firstListener = createListener("first-lb", tgArn);
+        String secondListener = createListener("second-lb", tgArn);
+        Rule first = service.createRule(REGION, firstListener, List.of(pathPattern("/a/*")),
+                10, List.of(forwardAction(tgArn)), Map.of());
+        service.createRule(REGION, secondListener, List.of(pathPattern("/b/*")),
+                100, List.of(forwardAction(tgArn)), Map.of());
+        Rule second = service.createRule(REGION, secondListener, List.of(pathPattern("/c/*")),
+                20, List.of(forwardAction(tgArn)), Map.of());
+
+        service.setRulePriorities(REGION, Map.of(first.getRuleArn(), 100, second.getRuleArn(), 200));
+
+        assertEquals("100", service.describeRules(REGION, null, List.of(first.getRuleArn())).getFirst().getPriority());
+        assertEquals("200", service.describeRules(REGION, null, List.of(second.getRuleArn())).getFirst().getPriority());
+    }
+
+    @Test
+    void setRulePrioritiesRejectsPriorityHeldOnSameListener() {
+        String tgArn = createTargetGroup("sample-tg");
+        String listenerArn = createListener("sample-lb", tgArn);
+        service.createRule(REGION, listenerArn, List.of(pathPattern("/a/*")),
+                100, List.of(forwardAction(tgArn)), Map.of());
+        Rule moved = service.createRule(REGION, listenerArn, List.of(pathPattern("/b/*")),
+                230, List.of(forwardAction(tgArn)), Map.of());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.setRulePriorities(REGION, Map.of(moved.getRuleArn(), 100)));
+
+        assertEquals("PriorityInUse", e.getErrorCode());
+        assertEquals("230", service.describeRules(REGION, null, List.of(moved.getRuleArn())).getFirst().getPriority());
+    }
+
+    @Test
+    void setRulePrioritiesRejectsDuplicatePrioritiesForSameListener() {
+        String tgArn = createTargetGroup("sample-tg");
+        String listenerArn = createListener("sample-lb", tgArn);
+        Rule first = service.createRule(REGION, listenerArn, List.of(pathPattern("/a/*")),
+                10, List.of(forwardAction(tgArn)), Map.of());
+        Rule second = service.createRule(REGION, listenerArn, List.of(pathPattern("/b/*")),
+                20, List.of(forwardAction(tgArn)), Map.of());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.setRulePriorities(REGION, Map.of(first.getRuleArn(), 50, second.getRuleArn(), 50)));
+
+        assertEquals("PriorityInUse", e.getErrorCode());
+        assertEquals("10", service.describeRules(REGION, null, List.of(first.getRuleArn())).getFirst().getPriority());
+        assertEquals("20", service.describeRules(REGION, null, List.of(second.getRuleArn())).getFirst().getPriority());
+    }
+
+    @Test
+    void setRulePrioritiesAllowsSwappingPrioritiesOnSameListener() {
+        String tgArn = createTargetGroup("sample-tg");
+        String listenerArn = createListener("sample-lb", tgArn);
+        Rule first = service.createRule(REGION, listenerArn, List.of(pathPattern("/a/*")),
+                10, List.of(forwardAction(tgArn)), Map.of());
+        Rule second = service.createRule(REGION, listenerArn, List.of(pathPattern("/b/*")),
+                20, List.of(forwardAction(tgArn)), Map.of());
+
+        service.setRulePriorities(REGION, Map.of(first.getRuleArn(), 20, second.getRuleArn(), 10));
+
+        assertEquals("20", service.describeRules(REGION, null, List.of(first.getRuleArn())).getFirst().getPriority());
+        assertEquals("10", service.describeRules(REGION, null, List.of(second.getRuleArn())).getFirst().getPriority());
     }
 
     @Test
@@ -321,6 +403,15 @@ class ElbV2ServiceTest {
                 "ipv4", Map.of()).getTargetGroupArn();
     }
 
+    private String createListener(String loadBalancerName, String targetGroupArn) {
+        String lbArn = service.createLoadBalancer(
+                REGION, loadBalancerName, "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        return service.createListener(
+                REGION, lbArn, "HTTP", 80, null, List.of(),
+                List.of(forwardAction(targetGroupArn)), List.of(), Map.of()).getListenerArn();
+    }
+
     private static Action forwardAction(String targetGroupArn) {
         Action action = new Action();
         action.setType("forward");
@@ -389,5 +480,31 @@ class ElbV2ServiceTest {
                                                      TypeReference<Map<String, V>> typeReference) {
             return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName, ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
         }
+    }
+
+    /**
+     * A balancer stored before the zone was looked up per region and type carries the one fixed
+     * zone every balancer used to report; a restart gives it the zone of its region and type back.
+     */
+    @Test
+    void aRestoredNetworkLoadBalancerTakesTheHostedZoneOfItsRegionAndType() {
+        SharedStorageFactory storageFactory = new SharedStorageFactory();
+        ElbV2Service first = serviceWithStorage(storageFactory, mock(ElbV2DataPlane.class),
+                mock(ElbV2HealthChecker.class));
+        first.createLoadBalancer(REGION, "stored-nlb", "internal", "network", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of());
+        first.describeLoadBalancers(REGION, null, List.of("stored-nlb"), null, null).getFirst()
+                .setCanonicalHostedZoneId("Z35SXDOTRQ7X7K");
+
+        ElbV2Service reloaded = serviceWithStorage(storageFactory, mock(ElbV2DataPlane.class),
+                mock(ElbV2HealthChecker.class));
+        assertEquals("Z35SXDOTRQ7X7K", reloaded.describeLoadBalancers(REGION, null, List.of("stored-nlb"), null, null)
+                .getFirst().getCanonicalHostedZoneId());
+
+        reloaded.restorePersistedRuntime();
+
+        assertEquals(AwsRegionFacts.nlbHostedZoneId(REGION).orElseThrow(),
+                reloaded.describeLoadBalancers(REGION, null, List.of("stored-nlb"), null, null)
+                        .getFirst().getCanonicalHostedZoneId());
     }
 }

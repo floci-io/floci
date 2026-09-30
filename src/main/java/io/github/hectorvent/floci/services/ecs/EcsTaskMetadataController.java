@@ -60,7 +60,7 @@ public class EcsTaskMetadataController {
     private static final DateTimeFormatter TIMESTAMP = DateTimeFormatter.ISO_INSTANT;
     private static final String SERVICE_GROUP_PREFIX = "service:";
     /** The search domain an instance gets, which us-east-1 spells differently from every other region. */
-    private static final String LEGACY_SEARCH_DOMAIN_REGION = "us-east-1";
+    private static final String LEGACY_SEARCH_DOMAIN_REGION = "us-east-1"; // partition-literal: ec2.internal is us-east-1's own search domain
 
     /**
      * Docker's stats document, written back out the way the daemon sent it. docker-java's model
@@ -454,15 +454,9 @@ public class EcsTaskMetadataController {
         if (subnet.getVpcId() == null || region == null) {
             return null;
         }
-        try {
-            return ec2Service.describeVpcs(region, List.of(subnet.getVpcId()), Map.of()).stream()
-                    .findFirst()
-                    .orElse(null);
-        } catch (AwsException e) {
-            LOG.debugv("Subnet {0} references a VPC that is gone: {1}",
-                    subnet.getSubnetId(), e.getMessage());
-            return null;
-        }
+        return ec2Service.describeVpcs(region, List.of(subnet.getVpcId()), Map.of()).stream()
+                .findFirst()
+                .orElse(null);
     }
 
     private static String taskSubnetId(EcsTask task) {

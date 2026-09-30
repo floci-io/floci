@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -101,6 +102,35 @@ class SesEventPublisherTest {
         ArrayNode arr = (ArrayNode) resources;
         assertEquals(1, arr.size());
         assertEquals(arn, arr.get(0).asText());
+    }
+
+    @Test
+    void publishEventBridge_failedEntries_doesNotThrow() {
+        when(eventBridgeService.putEvents(any(), anyString()))
+                .thenReturn(new EventBridgeService.PutEventsResult(1, List.of(Map.of("ErrorCode", "InternalFailure"))));
+
+        // A failed PutEvents entry is logged by the publisher but must not propagate
+        // back into the SES send path.
+        assertDoesNotThrow(() -> publisher.publish(
+                configurationSetWithEventBridgeDestination(DEFAULT_BUS_ARN),
+                SesRecipientEvent.of("SEND", Cause.SIMULATOR, List.of()), "msg-2", null, null,
+                "000000000000", "subj", List.of("to@example.com"), null, null,
+                List.of("to@example.com"), null, null, Instant.now(), "us-east-1"));
+        verify(eventBridgeService).putEvents(any(), anyString());
+    }
+
+    @Test
+    void publishEventBridge_putEventsThrows_doesNotThrow() {
+        when(eventBridgeService.putEvents(any(), anyString()))
+                .thenThrow(new RuntimeException("event bridge unavailable"));
+
+        // Downstream delivery failures must never fail the email send.
+        assertDoesNotThrow(() -> publisher.publish(
+                configurationSetWithEventBridgeDestination(DEFAULT_BUS_ARN),
+                SesRecipientEvent.of("SEND", Cause.SIMULATOR, List.of()), "msg-3", null, null,
+                "000000000000", "subj", List.of("to@example.com"), null, null,
+                List.of("to@example.com"), null, null, Instant.now(), "us-east-1"));
+        verify(eventBridgeService).putEvents(any(), anyString());
     }
 
     @SuppressWarnings("unchecked")

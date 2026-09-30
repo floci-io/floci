@@ -38,6 +38,7 @@ import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -270,20 +271,19 @@ public class IotMqttWebSocketIntegrationTest {
         String topic = "ws/fanout/" + System.nanoTime();
         byte[] payload = "to everyone".getBytes(StandardCharsets.UTF_8);
         int clients = 16;
-        List<WsClient> subscribers = new ArrayList<>();
+        List<WsClient> subscribers = new CopyOnWriteArrayList<>();
+        List<Thread> threads = new ArrayList<>();
         try {
             CountDownLatch connected = new CountDownLatch(clients);
-            List<Thread> threads = new ArrayList<>();
-            List<Throwable> failures = new java.util.concurrent.CopyOnWriteArrayList<>();
+            List<Throwable> failures = new CopyOnWriteArrayList<>();
             for (int i = 0; i < clients; i++) {
                 String clientId = "ws-fanout-" + i + "-" + System.nanoTime();
                 Thread thread = new Thread(() -> {
+                    WsClient subscriber = null;
                     try {
-                        WsClient subscriber = WsClient.connect(ws("/mqtt"), clientId, null, null);
+                        subscriber = WsClient.connect(ws("/mqtt"), clientId, null, null);
+                        subscribers.add(subscriber);
                         subscriber.subscribe(topic);
-                        synchronized (subscribers) {
-                            subscribers.add(subscriber);
-                        }
                     } catch (Exception e) {
                         failures.add(e);
                     } finally {
@@ -304,8 +304,23 @@ public class IotMqttWebSocketIntegrationTest {
                 assertArrayEquals(payload, subscriber.takePayload());
             }
         } finally {
+            for (Thread thread : threads) {
+                thread.interrupt();
+            }
+            for (Thread thread : threads) {
+                try {
+                    thread.join(1000);
+                } catch (InterruptedException ignored) {
+                    // Safe to ignore during teardown; restore interrupt status for the calling thread.
+                    Thread.currentThread().interrupt();
+                }
+            }
             for (WsClient subscriber : subscribers) {
-                subscriber.close();
+                try {
+                    subscriber.close();
+                } catch (Exception ignored) {
+                    // Safe to ignore teardown close errors on partially-connected or already closed clients.
+                }
             }
         }
     }
@@ -418,6 +433,7 @@ public class IotMqttWebSocketIntegrationTest {
             MqttConnectOptions options = new MqttConnectOptions();
             options.setCleanSession(true);
             options.setConnectionTimeout(10);
+            options.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
             if (url.startsWith("wss://")) {
                 options.setSocketFactory(trustOnlyFlociCa().getSocketFactory());
             }

@@ -45,6 +45,38 @@ class IamManagedPolicyCatalogTest {
     }
 
     @Test
+    void aManagedPolicyResolvesUnderThePartitionItsArnNames() {
+        IamPolicy china = iamService.getPolicy("arn:aws-cn:iam::aws:policy/AdministratorAccess");
+        assertEquals("arn:aws-cn:iam::aws:policy/AdministratorAccess", china.getArn());
+        assertEquals("AdministratorAccess", china.getPolicyName());
+        IamPolicy govcloud = iamService.getPolicy("arn:aws-us-gov:iam::aws:policy/AWSLambdaExecute");
+        assertTrue(govcloud.getVersions().get(govcloud.getDefaultVersionId()).getDocument()
+                .contains("arn:aws-us-gov:logs:"));
+
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> iamService.getPolicy("arn:aws-xyz:iam::aws:policy/AdministratorAccess"));
+        assertEquals("NoSuchEntity", unknown.getErrorCode());
+        AwsException denied = assertThrows(AwsException.class,
+                () -> iamService.deletePolicy("arn:aws-cn:iam::aws:policy/AdministratorAccess"));
+        assertEquals("AccessDenied", denied.getErrorCode());
+    }
+
+    @Test
+    void aChinaDeploymentListsTheChinaCatalog() {
+        IamService china = new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new RegionResolver("cn-north-1", "000000000000"));
+        List<IamPolicy> listed = china.listPolicies("AWS", "/");
+        assertEquals(AwsManagedPolicies.POLICIES.size(), listed.size());
+        assertTrue(listed.stream().allMatch(p -> p.getArn().startsWith("arn:aws-cn:iam::aws:policy/")),
+                "every listed ARN carries the deployment's partition");
+        assertTrue(iamService.listPolicies("AWS", "/").stream()
+                .allMatch(p -> p.getArn().startsWith("arn:aws:iam::aws:policy/")));
+    }
+
+    @Test
     void catalogCarriesTheFullPublishedListNotAHandfulOfEntries() {
         assertTrue(AwsManagedPolicies.POLICIES.size() > 1000,
                 "expected the full AWS catalog, found " + AwsManagedPolicies.POLICIES.size());

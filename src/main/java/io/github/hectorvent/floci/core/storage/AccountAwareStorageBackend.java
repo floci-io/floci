@@ -154,6 +154,19 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return delegate.scan(k -> true);
     }
 
+    /** Removes matching values using their actual stored keys, including unprefixed legacy keys. */
+    public int deleteAllAccountsMatching(Predicate<V> valueFilter) {
+        int removed = 0;
+        for (String rawKey : new ArrayList<>(delegate.keys())) {
+            if (delegate.get(rawKey).filter(valueFilter).isEmpty()) {
+                continue;
+            }
+            delegate.delete(rawKey);
+            removed++;
+        }
+        return removed;
+    }
+
     /**
      * Returns every stored entry with its raw delegate key intact.
      *

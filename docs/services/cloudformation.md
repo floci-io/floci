@@ -269,6 +269,7 @@ accepts, not only by name:
 - Replacement-only changes such as `FunctionName` or `PackageType` changes create a replacement function and remove the old one.
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
 - Hot-reload code (`S3Bucket: hot-reload`) is compared by host path: the same path is a no-op, a different path updates the bind mount in place.
+- `Tags` are applied when the function is created, including a replacement function. On `UpdateStack` the template's tags are applied and only the keys the previous template set and the new one drops are removed, so a tag added outside the template is kept, as in AWS.
 
 ## RDS Credential Dynamic References
 
@@ -309,6 +310,9 @@ before provisioning:
 
 The `AWS::SSM::Parameter` **resource** type exposes `Value`, `Type`, `Name`, and `Arn` attributes through
 `Ref` / `Fn::GetAtt` so downstream resources can consume a parameter the same stack creates.
+`Tags` are applied when the parameter is created. On `UpdateStack` the template's tags are applied and
+only the keys the previous template set and the new one drops are removed, so a tag added outside the
+template is kept, as in AWS.
 
 ## AWS::Include (`Fn::Transform`)
 
@@ -416,6 +420,20 @@ attribute is honored on `DeleteStack` and on the rollback of a failed `CreateSta
 A kept resource is reported as `DELETE_SKIPPED` in `DescribeStackEvents` and does not fail the
 deletion — the stack still reaches `DELETE_COMPLETE` while the resource keeps existing. This also
 lets a stack owning a non-empty S3 bucket be deleted, since the bucket is never touched.
+
+Otherwise `DeleteStack` deletes each resource that has a physical id and is in one of these
+statuses:
+
+- `CREATE_COMPLETE`, `UPDATE_COMPLETE`
+- `UPDATE_FAILED`, which a failed update rollback leaves on the resources it could not restore, so
+  deleting a stack in `UPDATE_ROLLBACK_FAILED` removes them
+- `DELETE_FAILED`, which a retried `DeleteStack` attempts again
+- `CREATE_FAILED`, only when the stack created the backing entity, since a failed create can name
+  an entity that existed before and belongs to someone else
+
+Resources in any other status (`DELETE_COMPLETE`, `DELETE_SKIPPED`, an in-progress status) and
+resources without a physical id are skipped. A resource that cannot be deleted leaves the stack in
+`DELETE_FAILED`, named in the status reason.
 
 Deviations from AWS to be aware of:
 

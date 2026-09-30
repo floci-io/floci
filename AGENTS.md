@@ -80,9 +80,14 @@ Floci follows a layered design:
 Typical service structure:
 
 - `services/<svc>/`
-  - `*Controller.java`
+  - `*Controller.java` (REST JSON / REST XML services, via JAX-RS)
+  - `*QueryHandler.java` (AWS Query/XML protocol services)
+  - `*JsonHandler.java` (AWS JSON 1.1 protocol services)
   - `*Service.java`
   - `model/`
+
+The entry-point class name depends on the service's AWS protocol (see "AWS Protocol
+Rules" below); `Controller` is not universal.
 
 Rule:
 Copy an existing service pattern before introducing a new one.
@@ -124,6 +129,9 @@ run `make partition-baseline` and commit the smaller baseline.
 - Mint ARNs through `AwsArnUtils.Arn.of(...)` / `RegionResolver.buildArn(...)`, recognise
   them with `AwsArnUtils.isArn` / `PARTITION_REGEX`, and derive hosts from the region's
   DNS suffix (`AwsRegions.dnsSuffixFor`).
+- A service principal is `ServicePrincipals.of("<service>")`, never a literal: it is
+  `<service>.amazonaws.com` in every partition, and `ServicePrincipals.canonical` folds the
+  legacy per-partition forms a policy may still use before matching.
 - A literal that is genuinely partition-invariant (an XML namespace URI, an S3 canned-ACL
   grantee URI) goes in `tools/partition/allowlist.yaml` with a reason, or ends its line
   with `// partition-literal: <reason>`. Both are printed by `make partition-audit`.
@@ -273,13 +281,14 @@ When adding functionality:
 
 ## Adding a New AWS Service
 
-1. Create a package under `services/<svc>/` with a Controller, a Service, and `model/`
+1. Create a package under `services/<svc>/` with a Controller or protocol-specific handler,
+   a Service, and `model/`
 2. Add a `<Svc>ServiceConfig` interface and its accessor on `ServicesConfig` in `EmulatorConfig`
 3. Add one `descriptor(...)` entry in `ResolvedServiceCatalog`. This is the registration point;
    `ServiceRegistry` only reads the catalog and has no registration API
 4. Add `floci.services.<key>.enabled` to both `src/main/resources/application.yml` and
    `src/test/resources/application.yml`
-5. JSON 1.1 only: inject the handler in `AwsJson11Controller`
+5. JSON 1.1 only: inject the `<Svc>JsonHandler` in `AwsJson11Controller`
 6. Obtain storage through `StorageFactory` and implement `Resettable`
 7. List any static `Random` or `SecureRandom` field under `--initialize-at-run-time` in
    `application.yml`

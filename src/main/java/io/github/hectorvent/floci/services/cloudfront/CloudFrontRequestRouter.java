@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
@@ -36,10 +37,10 @@ public final class CloudFrontRequestRouter {
     private static final int PATTERN_CACHE_CAPACITY = 256;
     private static final String REGION_PATTERN = "[a-z0-9-]+-[0-9]+";
     private static final Pattern AWS_S3_ENDPOINT = Pattern.compile(
-            "(?:s3|s3\\.(?:dualstack\\.)?" + REGION_PATTERN
+            "(?:s3|s3(?:-fips)?\\.(?:dualstack\\.)?" + REGION_PATTERN
                     + "|s3-" + REGION_PATTERN
                     + "|s3-website[.-]" + REGION_PATTERN
-                    + "|s3-accelerate(?:\\.dualstack)?)\\.amazonaws\\.com(?:\\.cn)?");
+                    + "|s3-accelerate(?:\\.dualstack)?)\\." + AwsPartitions.dnsSuffixRegex());
     private static final Pattern LOCAL_S3_ENDPOINT = Pattern.compile(
             "(?:s3(?:\\." + REGION_PATTERN + ")?"
                     + "|s3-website[.-]" + REGION_PATTERN

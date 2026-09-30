@@ -19,10 +19,13 @@ import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
+import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.http.HttpVersion;
 import io.vertx.core.http.RequestOptions;
+import io.vertx.core.net.NetSocket;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -40,6 +43,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -53,6 +57,8 @@ public class ElbV2DataPlane {
             "connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailers", "proxy-authorization", "proxy-authenticate"
     );
     private static final String PRESERVE_HOST_HEADER_ATTRIBUTE = "routing.http.preserve_host_header.enabled";
+    private static final String IDLE_TIMEOUT_ATTRIBUTE = "idle_timeout.timeout_seconds";
+    private static final long DEFAULT_IDLE_TIMEOUT_SECONDS = 60;
     private static final int MAX_LAMBDA_BODY_BYTES = 1024 * 1024;
 
     @Inject
@@ -432,6 +438,10 @@ public class ElbV2DataPlane {
         }
 
         if ("lambda".equals(tg.getTargetType())) {
+            if (isWebSocketUpgrade(req)) {
+                req.response().setStatusCode(400).end("WebSockets are not supported for Lambda targets");
+                return;
+            }
             List<TargetDescription> targets = tg.getTargets();
             if (targets.isEmpty()) {
                 req.response().setStatusCode(503).end("No Lambda targets registered");
@@ -455,19 +465,39 @@ public class ElbV2DataPlane {
         int idx = Math.abs(counter.getAndIncrement() % candidates.size());
         TargetDescription target = candidates.get(idx);
         int targetPort = ElbV2HealthChecker.effectivePort(target, tg);
-        proxyRequest(req, ElbV2TargetResolver.resolveHost(ec2Service, tg, target), targetPort,
-                preserveHostHeader(listenerArn, region));
+        String host = ElbV2TargetResolver.resolveHost(ec2Service, tg, target);
+        boolean preserveHostHeader = Boolean.parseBoolean(
+                loadBalancerAttribute(listenerArn, region, PRESERVE_HOST_HEADER_ATTRIBUTE));
+        if (isWebSocketUpgrade(req)) {
+            proxyUpgrade(req, host, targetPort, preserveHostHeader, idleTimeoutMillis(listenerArn, region));
+            return;
+        }
+        proxyRequest(req, host, targetPort, preserveHostHeader);
     }
 
-    private boolean preserveHostHeader(String listenerArn, String region) {
+    private String loadBalancerAttribute(String listenerArn, String region, String key) {
         ListenerBinding binding = listenerBindings.get(listenerArn);
         if (binding == null) {
-            return false;
+            return null;
         }
         LoadBalancer loadBalancer = elbV2Service.getLoadBalancer(region, binding.loadBalancerArn());
-        return loadBalancer != null
-                && loadBalancer.getAttributes() != null
-                && Boolean.parseBoolean(loadBalancer.getAttributes().get(PRESERVE_HOST_HEADER_ATTRIBUTE));
+        if (loadBalancer == null || loadBalancer.getAttributes() == null) {
+            return null;
+        }
+        return loadBalancer.getAttributes().get(key);
+    }
+
+    private long idleTimeoutMillis(String listenerArn, String region) {
+        String configured = loadBalancerAttribute(listenerArn, region, IDLE_TIMEOUT_ATTRIBUTE);
+        long seconds = DEFAULT_IDLE_TIMEOUT_SECONDS;
+        if (configured != null) {
+            try {
+                seconds = Long.parseLong(configured.trim());
+            } catch (NumberFormatException e) {
+                LOG.debugv("Ignoring non-numeric {0} value {1}", IDLE_TIMEOUT_ATTRIBUTE, configured);
+            }
+        }
+        return Math.max(1, seconds) * 1000;
     }
 
     private void invokeLambdaTarget(io.vertx.core.http.HttpServerRequest req, String functionArn, String region) {
@@ -698,7 +728,7 @@ public class ElbV2DataPlane {
                         }
                     });
                     if (!preserveHostHeader) {
-                        clientReq.putHeader("Host", host + ":" + port);
+                        clientReq.putHeader("Host", ElbV2TargetResolver.hostHeader(host, port));
                     }
                     AtomicBoolean responseStarted = new AtomicBoolean();
                     AtomicBoolean requestFailed = new AtomicBoolean();
@@ -743,6 +773,165 @@ public class ElbV2DataPlane {
                     req.resume();
                     req.response().setStatusCode(503).end("Service unavailable");
                 });
+    }
+
+    /**
+     * An ALB forwards a WebSocket handshake to an instance or ip target with its upgrade headers
+     * intact, which an ordinary proxied request cannot do: {@code Connection} and {@code Upgrade}
+     * are hop-by-hop and are stripped. AWS only tunnels WebSocket upgrades, over HTTP/1.1.
+     */
+    static boolean isWebSocketUpgrade(HttpServerRequest req) {
+        if (req.version() != HttpVersion.HTTP_1_1 || req.method() != HttpMethod.GET) {
+            return false;
+        }
+        if (!"websocket".equalsIgnoreCase(req.getHeader("Upgrade"))) {
+            return false;
+        }
+        for (String connection : req.headers().getAll("Connection")) {
+            for (String token : connection.split(",")) {
+                if ("upgrade".equalsIgnoreCase(token.trim())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private void proxyUpgrade(HttpServerRequest req, String host, int port, boolean preserveHostHeader,
+                              long idleTimeoutMillis) {
+        req.pause();
+        if (ElbV2TargetResolver.isIpLiteral(host)) {
+            try {
+                proxyUpgradeTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port,
+                        preserveHostHeader, idleTimeoutMillis);
+            } catch (IOException e) {
+                rejectTarget(req, host, e);
+            }
+            return;
+        }
+        vertx.<String>executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
+                .onSuccess(address -> proxyUpgradeTo(req, address, host, port, preserveHostHeader,
+                        idleTimeoutMillis))
+                .onFailure(err -> rejectTarget(req, host, err));
+    }
+
+    /**
+     * Sends the handshake to the target and, once it answers {@code 101 Switching Protocols},
+     * relays that answer and joins the two connections into a byte tunnel. Any other answer means
+     * the target refused the upgrade and is relayed as an ordinary response.
+     */
+    private void proxyUpgradeTo(HttpServerRequest req, String address, String host, int port,
+                                boolean preserveHostHeader, long idleTimeoutMillis) {
+        RequestOptions opts = new RequestOptions()
+                .setHost(address)
+                .setPort(port)
+                .setURI(req.uri())
+                .setMethod(req.method());
+        proxyClient.request(opts)
+                .onSuccess(clientReq -> {
+                    req.headers().forEach(entry -> {
+                        if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
+                            clientReq.putHeader(entry.getKey(), entry.getValue());
+                        }
+                    });
+                    clientReq.putHeader("Connection", "Upgrade");
+                    clientReq.putHeader("Upgrade", req.getHeader("Upgrade"));
+                    if (!preserveHostHeader) {
+                        clientReq.putHeader("Host", ElbV2TargetResolver.hostHeader(host, port));
+                    }
+                    clientReq.connect()
+                            .onSuccess(resp -> {
+                                req.response().setStatusCode(resp.statusCode());
+                                resp.headers().forEach(entry -> {
+                                    if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
+                                        req.response().putHeader(entry.getKey(), entry.getValue());
+                                    }
+                                });
+                                if (resp.statusCode() != 101) {
+                                    req.resume();
+                                    if (resp.getHeader("Content-Length") == null) {
+                                        req.response().setChunked(true);
+                                    }
+                                    resp.pipeTo(req.response());
+                                    return;
+                                }
+                                req.response().putHeader("Connection", "Upgrade");
+                                req.response().putHeader("Upgrade", resp.getHeader("Upgrade"));
+                                NetSocket targetSocket = resp.netSocket();
+                                req.toNetSocket()
+                                        .onSuccess(clientSocket ->
+                                                tunnel(clientSocket, targetSocket, idleTimeoutMillis))
+                                        .onFailure(err -> {
+                                            LOG.debugv("WebSocket upgrade to {0}:{1} lost the client: {2}",
+                                                    host, String.valueOf(port), err.getMessage());
+                                            targetSocket.close();
+                                        });
+                            })
+                            .onFailure(err -> {
+                                LOG.debugv("WebSocket upgrade to {0}:{1} failed: {2}",
+                                        host, String.valueOf(port), err.getMessage());
+                                req.resume();
+                                if (req.response().headWritten()) {
+                                    req.response().close();
+                                } else {
+                                    req.response().setStatusCode(502).end("Bad gateway");
+                                }
+                            });
+                })
+                .onFailure(err -> {
+                    req.resume();
+                    req.response().setStatusCode(503).end("Service unavailable");
+                });
+    }
+
+    /**
+     * Relays bytes both ways until either side closes or no data crosses the tunnel in either
+     * direction for the load balancer's {@code idle_timeout.timeout_seconds}, as an ALB does.
+     */
+    private void tunnel(NetSocket client, NetSocket target, long idleTimeoutMillis) {
+        AtomicLong lastActivity = new AtomicLong(System.nanoTime());
+        AtomicLong timerId = new AtomicLong(-1);
+        AtomicBoolean closed = new AtomicBoolean();
+        Runnable close = () -> {
+            if (closed.compareAndSet(false, true)) {
+                vertx.cancelTimer(timerId.get());
+                client.close();
+                target.close();
+            }
+        };
+        relay(client, target, lastActivity, close);
+        relay(target, client, lastActivity, close);
+        scheduleIdleCheck(idleTimeoutMillis, idleTimeoutMillis, lastActivity, timerId, closed, close);
+    }
+
+    private void scheduleIdleCheck(long delayMillis, long idleTimeoutMillis, AtomicLong lastActivity,
+                                   AtomicLong timerId, AtomicBoolean closed, Runnable close) {
+        if (closed.get()) {
+            return;
+        }
+        timerId.set(vertx.setTimer(delayMillis, ignored -> {
+            long idleMillis = (System.nanoTime() - lastActivity.get()) / 1_000_000;
+            if (idleMillis >= idleTimeoutMillis) {
+                close.run();
+            } else {
+                scheduleIdleCheck(idleTimeoutMillis - idleMillis, idleTimeoutMillis, lastActivity, timerId,
+                        closed, close);
+            }
+        }));
+    }
+
+    private static void relay(NetSocket source, NetSocket destination, AtomicLong lastActivity, Runnable close) {
+        source.handler(buffer -> {
+            lastActivity.set(System.nanoTime());
+            destination.write(buffer);
+            if (destination.writeQueueFull()) {
+                source.pause();
+                destination.drainHandler(ignored -> source.resume());
+            }
+        });
+        source.endHandler(ignored -> close.run());
+        source.closeHandler(ignored -> close.run());
+        source.exceptionHandler(err -> close.run());
     }
 
     private void executeRedirect(io.vertx.core.http.HttpServerRequest req, Action action) {

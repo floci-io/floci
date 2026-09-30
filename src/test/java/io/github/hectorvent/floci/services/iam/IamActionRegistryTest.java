@@ -41,6 +41,53 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void resolvesOperationFromFormEncodedBody() {
+        ContainerRequestContext ctx = mockCtx(
+                "POST", "/",
+                new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_FORM_URLENCODED_TYPE,
+                "Operation=CreateUser&Version=2010-05-08&UserName=alice");
+        assertEquals("CreateUser", registry.queryAction(ctx));
+    }
+
+    @Test
+    void actionTakesPrecedenceOverOperation() {
+        ContainerRequestContext ctx = mockCtx(
+                "POST", "/",
+                new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_FORM_URLENCODED_TYPE,
+                "Action=ListUsers&Operation=CreateUser");
+        assertEquals("ListUsers", registry.queryAction(ctx));
+    }
+
+    @Test
+    void restActionIgnoresOperationFromFormBody() {
+        ContainerRequestContext ctx = mockCtx(
+                "PUT", "/bucket/key",
+                new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_FORM_URLENCODED_TYPE,
+                "Operation=ListBucket");
+        assertEquals("s3:PutObject", registry.resolve("s3", ctx));
+    }
+
+    @Test
+    void restActionIgnoresActionFromUrl() {
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("Action", "ListBucket");
+        ContainerRequestContext ctx = mockCtx(
+                "PUT", "/bucket/key", query, null, "");
+        assertEquals("s3:PutObject", registry.resolve("s3", ctx));
+    }
+
+    @Test
+    void restActionIgnoresActionFromFormBody() {
+        ContainerRequestContext ctx = mockCtx(
+                "PUT", "/bucket/key", new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_FORM_URLENCODED_TYPE, "Action=ListBucket");
+        assertEquals("s3:PutObject", registry.resolve("s3", ctx));
+    }
+
+    @Test
     void resolvesUrlEncodedActionValueFromFormBody() {
         ContainerRequestContext ctx = mockCtx(
                 "POST", "/",
@@ -51,9 +98,8 @@ class IamActionRegistryTest {
     }
 
     @Test
-    void prefersUrlQueryActionOverFormBody() {
-        // Some clients (older AWS CLI, curl) send Query-protocol requests with
-        // Action in the URL query string; that path must keep working.
+    void formBodyActionTakesPrecedenceOverUrlQueryAction() {
+        // The controller dispatches the form body, even when the URL names another action.
         MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
         query.add("Action", "ListUsers");
         ContainerRequestContext ctx = mockCtx(
@@ -61,7 +107,17 @@ class IamActionRegistryTest {
                 query,
                 MediaType.APPLICATION_FORM_URLENCODED_TYPE,
                 "Action=DeleteUser");
-        assertEquals("iam:ListUsers", registry.resolve("iam", ctx));
+        assertEquals("iam:DeleteUser", registry.resolve("iam", ctx));
+    }
+
+    @Test
+    void urlQueryActionDoesNotAuthorizeAnAbsentFormAction() {
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("Action", "ListUsers");
+        ContainerRequestContext ctx = mockCtx(
+                "POST", "/", query, MediaType.APPLICATION_FORM_URLENCODED_TYPE,
+                "Version=2010-05-08");
+        assertNull(registry.queryAction(ctx));
     }
 
     @Test

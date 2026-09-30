@@ -1,10 +1,10 @@
 package io.github.hectorvent.floci.services.cloudmap;
 
+import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsRecordSource;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.util.List;
 import java.util.Optional;
 
 /**
@@ -27,7 +27,12 @@ public class CloudMapDnsRecordSource implements DnsRecordSource {
     }
 
     @Override
-    public Optional<List<String>> resolveIpv4(String name) {
+    public Optional<DnsAnswer> resolveIpv4(String name) {
         return cloudMapService.resolveDnsNameIfOwned(name);
+    }
+
+    @Override
+    public Optional<DnsAnswer> resolve(String name, int type) {
+        return cloudMapService.resolveDnsNameIfOwned(name, type);
     }
 }

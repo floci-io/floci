@@ -341,7 +341,7 @@ public class AppSyncExecutionController {
 
     private AuthRequestInfo authRequestInfo(ParsedRequest parsed, HttpHeaders headers, String rawBody) {
         String accountId = requestContext.getAccountId() != null ? requestContext.getAccountId() : "000000000000";
-        String region = requestContext.getRegion() != null ? requestContext.getRegion() : "us-east-1";
+        String region = requestContext.getRegion() != null ? requestContext.getRegion() : "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
         String requestId = headers.getHeaderString("x-amzn-RequestId");
         if (requestId == null || requestId.isBlank()) {
             requestId = UUID.randomUUID().toString();

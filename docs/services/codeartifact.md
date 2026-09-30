@@ -60,13 +60,26 @@ upstream repositories or an external connection, but not both, matching AWS; `Cr
 and `UpdateRepository` also cap direct upstreams at 10, AWS's own repository limit.
 
 `PublishPackageVersion` creates a package version in the `Unfinished` state when the `unfinished`
-flag is set, and `Published` otherwise; once `Published`, a repeat publish to the same
-domain/repository/package/version fails with `ConflictException`, matching AWS's real rule that a
-published version cannot accept additional assets. Every publish returns a fresh
-`versionRevision`, and each asset's hashes (`MD5`, `SHA-1`, `SHA-256`, `SHA-512`) are computed from
-the bytes Floci actually received, not echoed from the request. Floci enforces AWS's own published
-quotas for this action: a 5 GB max asset file size and a 350-asset cap per package version, both
-returning `ServiceQuotaExceededException`.
+flag is set, and `Published` otherwise. While still `Unfinished`, publishing a new asset name is
+always accepted; once `Published`, a new asset name always conflicts, since real CodeArtifact never
+lets a `Published` generic version grow beyond the assets it already has. Republishing an asset name
+that already exists is only accepted when the content is byte-identical to what's already stored
+(AWS's own "Overwriting package assets" rule: idempotent on a matching retry, `ConflictException` on
+genuinely different content), and that rule applies the same way regardless of the version's status,
+since a client is just as likely to retry the terminal publish call (the one that leaves a version
+`Published`) as any earlier one. The comparison itself is against each asset's persisted SHA-256,
+not its raw bytes, so deciding whether content matches costs no disk read and needs no special case
+for a backing file that happens to be missing (e.g. a partial restore); each asset's hashes (`MD5`,
+`SHA-1`, `SHA-256`, `SHA-512`) are computed from the bytes Floci actually received, not echoed from
+the request. An idempotent retry still separately verifies the backing file's actual bytes (streamed
+in fixed-size chunks, not loaded whole) before deciding there's nothing to do: an intact file stays
+a true no-op needing no write capacity at all, while a file that's missing or has been corrupted
+independently of Floci gets rewritten, so that kind of gap doesn't survive indefinitely just because
+its recorded checksum still matched. A publish that adds or changes something returns a fresh
+`versionRevision`; an idempotent no-op retry returns the version's existing one unchanged. Floci
+enforces AWS's own published quotas for this action: a 5 GB max asset file size and a 350-asset cap
+per package version, both returning
+`ServiceQuotaExceededException`.
 
 ## The Maven repository endpoint
 

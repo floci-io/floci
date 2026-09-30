@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -85,12 +87,15 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         applyBucketTags(bucketName, props, ctx);
         r.setPhysicalId(bucketName);
         r.getAttributes().put("Arn", AwsArnUtils.Arn.of("s3", "", "", bucketName).toString());
-        r.getAttributes().put("DomainName", bucketName + ".s3.amazonaws.com");
-        r.getAttributes().put("RegionalDomainName", bucketName + ".s3." + ctx.region() + ".amazonaws.com");
-        r.getAttributes().put("DualStackDomainName",
-                bucketName + ".s3.dualstack." + ctx.region() + ".amazonaws.com");
-        r.getAttributes().put("WebsiteURL",
-                "http://" + bucketName + ".s3-website." + ctx.region() + ".amazonaws.com");
+        r.getAttributes().put("DomainName", AwsEndpoints.s3Host(bucketName, ctx.region()));
+        r.getAttributes().put("RegionalDomainName", AwsEndpoints.s3RegionalHost(bucketName, ctx.region()));
+        if (AwsPartitions.forRegionOrCommercial(ctx.region()).supportsS3DualStack(ctx.region())) {
+            r.getAttributes().put("DualStackDomainName", AwsEndpoints.s3DualStackHost(bucketName, ctx.region()));
+        } else {
+            // An update arrives with the prior attributes already on the resource.
+            r.getAttributes().remove("DualStackDomainName");
+        }
+        r.getAttributes().put("WebsiteURL", AwsEndpoints.s3WebsiteUrl(bucketName, ctx.region()));
         r.getAttributes().put("BucketName", bucketName);
     }
 

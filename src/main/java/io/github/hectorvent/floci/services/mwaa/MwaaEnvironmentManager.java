@@ -4,18 +4,16 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
-import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
-import com.github.dockerjava.api.model.Frame;
-import com.github.dockerjava.api.model.StreamType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -356,7 +354,7 @@ public class MwaaEnvironmentManager {
         }
         copyFileIntoContainer(containerId, "/tmp", "mwaa-requirements.txt", requirementsContent);
         try {
-            ExecResult result = execInContainer(containerId,
+            ContainerExec.Result result = execInContainer(containerId,
                     new String[]{"pip", "install", "--no-cache-dir", "-r", "/tmp/mwaa-requirements.txt"});
             if (result.exitCode() != 0) {
                 LOG.warnv("pip install -r requirements.txt exited {0} for environment {1}: {2}",
@@ -369,9 +367,89 @@ public class MwaaEnvironmentManager {
         }
     }
 
-    /** Runs {@code airflow <cliCommand>} inside the Airflow container via {@code sh -c}. */
-    public ExecResult runAirflowCli(String airflowContainerId, String cliCommand) throws Exception {
-        return execInContainer(airflowContainerId, new String[]{"sh", "-c", "airflow " + cliCommand});
+    /**
+     * Runs {@code airflow <cliCommand>} inside the Airflow container. The command is split into
+     * arguments with POSIX quoting rules and executed without a shell, so shell syntax such as
+     * {@code ;}, {@code |} or {@code $(...)} reaches Airflow as plain arguments.
+     */
+    public ContainerExec.Result runAirflowCli(String airflowContainerId, String cliCommand) throws Exception {
+        List<String> argv = new ArrayList<>();
+        argv.add("airflow");
+        argv.addAll(splitCliArguments(cliCommand));
+        return execInContainer(airflowContainerId, argv.toArray(new String[0]));
+    }
+
+    /**
+     * Splits a CLI command line into arguments using POSIX shell quoting without any expansion:
+     * spaces, tabs and newlines separate arguments, single quotes are literal, double quotes honour
+     * backslash escapes of {@code $}, backtick, {@code "}, backslash and newline, an unquoted
+     * backslash escapes the next character, and a backslash-newline pair is removed.
+     */
+    private static List<String> splitCliArguments(String command) {
+        List<String> args = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inWord = false;
+        int i = 0;
+        while (i < command.length()) {
+            char c = command.charAt(i);
+            if (c == ' ' || c == '\t' || c == '\n') {
+                if (inWord) {
+                    args.add(current.toString());
+                    current.setLength(0);
+                    inWord = false;
+                }
+                i++;
+            } else if (c == '\'') {
+                int end = command.indexOf('\'', i + 1);
+                if (end < 0) {
+                    throw new IllegalArgumentException("Unterminated single quote in CLI command");
+                }
+                current.append(command, i + 1, end);
+                inWord = true;
+                i = end + 1;
+            } else if (c == '"') {
+                i++;
+                boolean closed = false;
+                while (i < command.length()) {
+                    char d = command.charAt(i);
+                    if (d == '"') {
+                        closed = true;
+                        i++;
+                        break;
+                    }
+                    if (d == '\\' && i + 1 < command.length() && "$`\"\\\n".indexOf(command.charAt(i + 1)) >= 0) {
+                        if (command.charAt(i + 1) != '\n') {
+                            current.append(command.charAt(i + 1));
+                        }
+                        i += 2;
+                    } else {
+                        current.append(d);
+                        i++;
+                    }
+                }
+                if (!closed) {
+                    throw new IllegalArgumentException("Unterminated double quote in CLI command");
+                }
+                inWord = true;
+            } else if (c == '\\') {
+                if (i + 1 >= command.length()) {
+                    throw new IllegalArgumentException("Trailing backslash in CLI command");
+                }
+                if (command.charAt(i + 1) != '\n') {
+                    current.append(command.charAt(i + 1));
+                    inWord = true;
+                }
+                i += 2;
+            } else {
+                current.append(c);
+                inWord = true;
+                i++;
+            }
+        }
+        if (inWord) {
+            args.add(current.toString());
+        }
+        return args;
     }
 
     /** Routed through {@link ContainerStorageHelper} so multiple Floci instances sharing one Docker
@@ -398,7 +476,7 @@ public class MwaaEnvironmentManager {
     }
 
     static String environmentRegion(Environment environment) {
-        return AwsArnUtils.regionOrDefault(environment.getArn(), "us-east-1");
+        return AwsArnUtils.regionOrDefault(environment.getArn(), "us-east-1"); // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
     }
 
     /**
@@ -531,7 +609,7 @@ public class MwaaEnvironmentManager {
         Exception last = null;
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
-                ExecResult result = execInContainer(containerId,
+                ContainerExec.Result result = execInContainer(containerId,
                         new String[]{"pg_isready", "-h", "127.0.0.1", "-U", "airflow"});
                 if (result.exitCode() == 0) {
                     return;
@@ -608,35 +686,8 @@ public class MwaaEnvironmentManager {
         }
     }
 
-    ExecResult execInContainer(String containerId, String[] cmd) throws Exception {
-        var dockerClient = lifecycleManager.getDockerClient();
-        var exec = dockerClient.execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec();
-
-        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
-        boolean completed = dockerClient.execStartCmd(exec.getId())
-                .exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onNext(Frame frame) {
-                        if (frame.getStreamType() == StreamType.STDERR) {
-                            stderr.writeBytes(frame.getPayload());
-                        } else {
-                            stdout.writeBytes(frame.getPayload());
-                        }
-                    }
-                })
-                .awaitCompletion(30, TimeUnit.SECONDS);
-
-        if (!completed) {
-            throw new RuntimeException("exec timed out in container " + containerId);
-        }
-        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-        return new ExecResult(exitCode != null ? exitCode : -1,
-                stdout.toString(StandardCharsets.UTF_8), stderr.toString(StandardCharsets.UTF_8));
+    ContainerExec.Result execInContainer(String containerId, String[] cmd) throws Exception {
+        return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, 30).throwIfTimedOut(containerId);
     }
 
     private static String generateSecret(int bytes) {
@@ -652,5 +703,4 @@ public class MwaaEnvironmentManager {
         return Base64.getUrlEncoder().encodeToString(buf);
     }
 
-    public record ExecResult(long exitCode, String stdout, String stderr) {}
 }

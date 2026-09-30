@@ -124,6 +124,11 @@ following combinations:
 | Symmetric encryption key (`SYMMETRIC_DEFAULT`) | **Wrapping algorithms:** `RSAES_OAEP_SHA_256`, `RSAES_OAEP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
 | HMAC key (`HMAC_*`) | **Wrapping algorithms:** `RSAES_OAEP_SHA_256`, `RSAES_OAEP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
 | Asymmetric RSA private key (`RSA_*`) | **Wrapping algorithms:** `RSA_AES_KEY_WRAP_SHA_256`, `RSA_AES_KEY_WRAP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
+| Asymmetric elliptic curve private key (`ECC_NIST_P256`, `ECC_NIST_P384`, `ECC_NIST_P521`, `ECC_SECG_P256K1`) | **Wrapping algorithms:** `RSA_AES_KEY_WRAP_SHA_256`, `RSA_AES_KEY_WRAP_SHA_1`, `RSAES_OAEP_SHA_256`, `RSAES_OAEP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
+
+As on AWS, `ECC_NIST_P521` material cannot use an `RSAES_OAEP_*` algorithm with the `RSA_2048`
+wrapping key spec: `GetParametersForImport` rejects that combination with
+`UnsupportedOperationException`. Use a larger wrapping key or an `RSA_AES_KEY_WRAP_*` algorithm.
 
 The hybrid `RSA_AES_KEY_WRAP_*` algorithms require a 256-bit AES key. `RSAES_PKCS1_V1_5` is
 rejected, matching AWS, which stopped supporting it on October 10, 2023.
@@ -157,8 +162,12 @@ own the material and cannot rotate it.
 
 **Deviations:**
 
-- `Origin=EXTERNAL` supports `SYMMETRIC_DEFAULT`, the `HMAC_*` key specs and the `RSA_*` key specs. 
-- Other asymmetric key specs are rejected at `CreateKey` with `UnsupportedOperationException`.
+- `Origin=EXTERNAL` supports `SYMMETRIC_DEFAULT`, the `HMAC_*` key specs, the `RSA_*` key specs, and
+  `ECC_NIST_P256`, `ECC_NIST_P384`, `ECC_NIST_P521` and `ECC_SECG_P256K1`. Imported elliptic curve
+  material is a PKCS#8 private key on the key spec's named curve; as on AWS, the public key is
+  derived from it, and an embedded public key must match.
+- Other asymmetric key specs, including `ECC_NIST_EDWARDS25519`, which AWS can import, are rejected at
+  `CreateKey` with `UnsupportedOperationException`.
 - Holding several imported key materials on one symmetric key, which real KMS uses for on-demand
   rotation of imported material, is not emulated. `ImportType=NEW_KEY_MATERIAL` on a key that
   already has key material is rejected with `UnsupportedOperationException`, and

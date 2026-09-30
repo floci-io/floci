@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Runs the resolver attached to a field: its handlers, its data source, and, for a PIPELINE
@@ -46,8 +47,9 @@ import java.util.Map;
  * there the error fails the field.
  *
  * <p>Two things stop resolver execution early. {@code runtime.earlyReturn(value)} or VTL
- * {@code #return(value)} makes {@code value} the field's result immediately, skipping everything
- * left including the after step, and {@code util.error()} fails the field.
+ * {@code #return(value)} in a resolver template makes {@code value} the field's result immediately,
+ * skipping everything left including the after step, and {@code util.error()} fails the field. A
+ * VTL function's {@code #return(value)} only returns from that function and the pipeline continues.
  * {@code util.appendError} does neither: it collects errors that are returned <em>alongside</em>
  * the data, which is why a {@link ResolverOutcome} carries both rather than being a bare value.
  */
@@ -57,6 +59,11 @@ public class AppSyncResolverExecutor {
     private static final Logger LOG = Logger.getLogger(AppSyncResolverExecutor.class);
     private static final String REQUEST = "request";
     private static final String RESPONSE = "response";
+    private static final Set<String> NONE_VTL_REQUEST_MEMBERS = Set.of("version", "payload");
+    private static final Set<String> LAMBDA_VTL_REQUEST_MEMBERS =
+            Set.of("version", "operation", "payload", "invocationType");
+    private static final Set<String> DYNAMODB_VTL_OPERATIONS =
+            Set.of("GetItem", "PutItem", "UpdateItem", "DeleteItem", "Query", "Scan");
 
     private final AppSyncService appSyncService;
     private final AppSyncJsRuntime jsRuntime;
@@ -121,7 +128,8 @@ public class AppSyncResolverExecutor {
      * as if it had no handler instead of saying it is unsupported.
      */
     private record Stage(String code, ResolverRuntimeName runtime, boolean vtl,
-                         String requestTemplate, String responseTemplate) {
+                         String requestTemplate, String responseTemplate,
+                         String functionVersion, boolean function) {
 
         static Stage of(Resolver resolver) {
             return new Stage(resolver.getCode(), resolver.getRuntime() == null
@@ -129,7 +137,8 @@ public class AppSyncResolverExecutor {
                     isVtl(resolver.getCode(), resolver.getRuntime() == null
                                     ? null : resolver.getRuntime().getName(),
                             resolver.getRequestMappingTemplate(), resolver.getResponseMappingTemplate()),
-                    resolver.getRequestMappingTemplate(), resolver.getResponseMappingTemplate());
+                    resolver.getRequestMappingTemplate(), resolver.getResponseMappingTemplate(),
+                    null, false);
         }
 
         static Stage of(FunctionConfiguration function) {
@@ -138,7 +147,8 @@ public class AppSyncResolverExecutor {
                     isVtl(function.getCode(), function.getRuntime() == null
                                     ? null : function.getRuntime().getName(),
                             function.getRequestMappingTemplate(), function.getResponseMappingTemplate()),
-                    function.getRequestMappingTemplate(), function.getResponseMappingTemplate());
+                    function.getRequestMappingTemplate(), function.getResponseMappingTemplate(),
+                    function.getFunctionVersion(), true);
         }
 
         private static boolean isVtl(String code, ResolverRuntimeName runtime, String requestTemplate,
@@ -167,6 +177,8 @@ public class AppSyncResolverExecutor {
         /** Set when a handler called runtime.earlyReturn: the pipeline stops and this is the value. */
         private boolean returned;
         private Object earlyReturnValue;
+        /** A VTL function return stops only that function, not the whole resolver pipeline. */
+        private boolean vtlFunctionReturned;
 
         private Execution(Resolver resolver, ResolverInvocation invocation) {
             this.apiId = invocation.apiId();
@@ -185,13 +197,14 @@ public class AppSyncResolverExecutor {
         private ResolverOutcome runUnit() {
             Stage stage = Stage.of(resolver);
             DataSource vtlDataSource = stage.vtl()
-                    ? requireVtlNoneDataSource(resolver.getDataSourceName()) : null;
+                    ? requireVtlDataSource(resolver.getDataSourceName(), "UNIT resolver") : null;
             Object request = callHandler(stage, REQUEST, null, null, null);
             if (returned) {
                 return result(earlyReturnValue);
             }
             Invocation invocation = stage.vtl()
-                    ? invokeDataSource(vtlDataSource, normalizeVtlNoneRequest(request))
+                    ? invokeDataSource(vtlDataSource,
+                            prepareVtlDataSourceRequest(stage, vtlDataSource, request), true)
                     : invokeDataSource(resolver.getDataSourceName(), request);
             Object response = callHandler(stage, RESPONSE,
                     invocation.result(), invocation.error(), invocation.result());
@@ -202,7 +215,6 @@ public class AppSyncResolverExecutor {
             // The before step's job is usually to fill ctx.stash for the functions; its return value
             // is not the field's result, but it is what the first function sees as ctx.prev.result.
             Stage resolverStage = Stage.of(resolver);
-            rejectVtlPipelineStage(resolverStage, "resolver");
             Object before = callHandler(resolverStage, REQUEST, null, null, null);
             if (returned) {
                 return result(earlyReturnValue);
@@ -212,16 +224,30 @@ public class AppSyncResolverExecutor {
 
             for (FunctionConfiguration function : functions) {
                 Stage functionStage = Stage.of(function);
+                if (functionStage.vtl()) {
+                    validateVtlFunctionVersion(functionStage);
+                }
                 Object request = callHandler(functionStage, REQUEST, null, null, null);
                 if (returned) {
                     return result(earlyReturnValue);
                 }
-                Invocation invocation = invokeDataSource(function.getDataSourceName(), request);
+                if (consumeVtlFunctionReturn()) {
+                    previousResult = request;
+                    continue;
+                }
+                DataSource vtlDataSource = functionStage.vtl()
+                        ? requireVtlDataSource(function.getDataSourceName(),
+                                "function " + function.getName()) : null;
+                Invocation invocation = functionStage.vtl()
+                        ? invokeDataSource(vtlDataSource,
+                                prepareVtlDataSourceRequest(functionStage, vtlDataSource, request), true)
+                        : invokeDataSource(function.getDataSourceName(), request);
                 Object response = callHandler(functionStage, RESPONSE,
                         invocation.result(), invocation.error(), invocation.result());
                 if (returned) {
                     return result(earlyReturnValue);
                 }
+                consumeVtlFunctionReturn();
                 // Missing response handler: the data source result passes through, which is what a
                 // function with only a request handler does on AppSync.
                 previousResult = response;
@@ -262,31 +288,28 @@ public class AppSyncResolverExecutor {
             List<FunctionConfiguration> functions = new ArrayList<>();
             for (String functionId : pipelineFunctionIds()) {
                 FunctionConfiguration function = function(functionId);
-                rejectVtlPipelineStage(Stage.of(function), "function " + function.getName());
                 functions.add(function);
             }
             return functions;
         }
 
-        private void rejectVtlPipelineStage(Stage stage, String stageName) {
-            if (stage.vtl()) {
-                throw new AwsException("UnsupportedOperation",
-                        "Floci does not yet execute VTL " + stageName + " stages in PIPELINE resolvers", 400);
-            }
-        }
-
-        private DataSource requireVtlNoneDataSource(String dataSourceName) {
+        private DataSource requireVtlDataSource(String dataSourceName, String stageName) {
             if (dataSourceName == null || dataSourceName.isBlank()) {
                 throw new AwsException("UnsupportedOperation",
-                        "Floci currently executes VTL UNIT resolvers only with NONE data sources", 400);
+                        "A VTL " + stageName + " must name a supported data source", 400);
             }
             DataSource dataSource = dataSource(dataSourceName);
-            if (dataSource.getType() != DataSourceType.NONE) {
-                throw new AwsException("UnsupportedOperation",
-                        "Floci currently executes VTL UNIT resolvers only with NONE data sources; "
-                                + dataSourceName + " uses " + dataSource.getType(), 400);
-            }
-            return dataSource;
+            DataSourceType type = dataSource.getType();
+            return switch (type) {
+                case NONE, AMAZON_DYNAMODB, AWS_LAMBDA, RELATIONAL_DATABASE -> dataSource;
+                default -> throw unsupportedVtlDataSource(type, dataSourceName, stageName);
+            };
+        }
+
+        private boolean consumeVtlFunctionReturn() {
+            boolean functionReturned = vtlFunctionReturned;
+            vtlFunctionReturned = false;
+            return functionReturned;
         }
 
         private Invocation invokeDataSource(String dataSourceName, Object request) {
@@ -295,7 +318,7 @@ public class AppSyncResolverExecutor {
                 // the local functions AppSync allows: the request is the result.
                 return new Invocation(request, null);
             }
-            return invokeDataSource(dataSource(dataSourceName), request);
+            return invokeDataSource(dataSource(dataSourceName), request, false);
         }
 
         private DataSource dataSource(String dataSourceName) {
@@ -315,10 +338,12 @@ public class AppSyncResolverExecutor {
             return dataSource;
         }
 
-        private Invocation invokeDataSource(DataSource dataSource, Object request) {
+        private Invocation invokeDataSource(DataSource dataSource, Object request, boolean vtl) {
             try {
-                return new Invocation(dataSourceInvokers.invoke(dataSource, request, regionOf(dataSource)),
-                        null);
+                Object result = vtl
+                        ? dataSourceInvokers.invokeVtl(dataSource, request, regionOf(dataSource))
+                        : dataSourceInvokers.invoke(dataSource, request, regionOf(dataSource));
+                return new Invocation(result, null);
             } catch (AwsException e) {
                 // What the store or function answered: the resolver sees it as ctx.error and decides.
                 // Deliberately only AwsException: an unexpected RuntimeException is a defect in the
@@ -330,11 +355,115 @@ public class AppSyncResolverExecutor {
             }
         }
 
-        private Object normalizeVtlNoneRequest(Object request) {
-            if (request instanceof Map<?, ?> map && !map.containsKey("payload")) {
-                return null;
+        private Object prepareVtlDataSourceRequest(Stage stage, DataSource dataSource, Object request) {
+            if (!(request instanceof Map<?, ?> map)) {
+                throw mappingTemplateError("VTL request mapping template must render a JSON object");
+            }
+            validateVtlRequestVersion(map);
+            return switch (dataSource.getType()) {
+                case NONE -> prepareVtlNoneRequest(map);
+                case AMAZON_DYNAMODB -> prepareVtlDynamoDbRequest(map);
+                case AWS_LAMBDA -> prepareVtlLambdaRequest(map);
+                case RELATIONAL_DATABASE -> prepareVtlRdsRequest(map);
+                default -> throw unsupportedVtlDataSource(dataSource.getType(), dataSource.getName(),
+                        stage.function() ? "function" : "UNIT resolver");
+            };
+        }
+
+        private void validateVtlFunctionVersion(Stage stage) {
+            if (!"2018-05-29".equals(stage.functionVersion())) {
+                throw new AwsException("UnsupportedOperation",
+                        "Floci does not execute AppSync VTL function version "
+                                + stage.functionVersion(), 400);
+            }
+        }
+
+        private Object prepareVtlNoneRequest(Map<?, ?> request) {
+            validateVtlRequestMembers(request, NONE_VTL_REQUEST_MEMBERS, "NONE");
+            return request.containsKey("payload") ? request : null;
+        }
+
+        private Object prepareVtlDynamoDbRequest(Map<?, ?> request) {
+            String operation = requireVtlOperation(request, "DynamoDB");
+            if (!DYNAMODB_VTL_OPERATIONS.contains(operation)) {
+                throw new AwsException("UnsupportedOperation",
+                        "Floci's AppSync VTL DynamoDB data source does not implement the "
+                                + operation + " operation yet", 400);
             }
             return request;
+        }
+
+        private Object prepareVtlLambdaRequest(Map<?, ?> request) {
+            validateVtlRequestMembers(request, LAMBDA_VTL_REQUEST_MEMBERS, "Lambda");
+            String operation = requireVtlOperation(request, "Lambda");
+            if (!"Invoke".equals(operation)) {
+                throw new AwsException("UnsupportedOperation",
+                        "Floci's AppSync VTL Lambda data source does not implement the "
+                                + operation + " operation yet", 400);
+            }
+            Object invocationType = request.get("invocationType");
+            if (invocationType != null && !(invocationType instanceof String)) {
+                throw mappingTemplateError("VTL Lambda invocationType must be a string");
+            }
+            if ("Event".equals(invocationType)) {
+                throw new AwsException("UnsupportedOperation",
+                        "Floci's AppSync Lambda data source does not implement Event invocation yet", 400);
+            }
+            if (invocationType != null && !"RequestResponse".equals(invocationType)) {
+                throw mappingTemplateError(
+                        "VTL Lambda invocationType must be RequestResponse or Event");
+            }
+            return request;
+        }
+
+        private Object prepareVtlRdsRequest(Map<?, ?> request) {
+            Object statements = request.get("statements");
+            if (!(statements instanceof List<?> list) || list.isEmpty()) {
+                throw mappingTemplateError("VTL RDS request must contain a non-empty statements array");
+            }
+            if (list.size() > 2) {
+                throw mappingTemplateError("VTL RDS request supports at most two statements");
+            }
+            if (list.stream().anyMatch(statement -> !(statement instanceof String))) {
+                throw mappingTemplateError("VTL RDS statements must be strings");
+            }
+            validateOptionalMap(request, "variableMap", "VTL RDS variableMap must be an object");
+            validateOptionalMap(request, "variableTypeHintMap",
+                    "VTL RDS variableTypeHintMap must be an object");
+            return request;
+        }
+
+        private String requireVtlOperation(Map<?, ?> request, String dataSourceType) {
+            Object operation = request.get("operation");
+            if (!(operation instanceof String text) || text.isBlank()) {
+                throw mappingTemplateError(
+                        "VTL " + dataSourceType + " request must contain a non-empty operation");
+            }
+            return text;
+        }
+
+        private void validateVtlRequestMembers(Map<?, ?> request, Set<String> allowed,
+                                               String dataSourceType) {
+            for (Object key : request.keySet()) {
+                if (!(key instanceof String name) || !allowed.contains(name)) {
+                    throw mappingTemplateError("VTL " + dataSourceType
+                            + " request contains unsupported member " + key);
+                }
+            }
+        }
+
+        private void validateOptionalMap(Map<?, ?> request, String member, String message) {
+            Object value = request.get(member);
+            if (value != null && !(value instanceof Map<?, ?>)) {
+                throw mappingTemplateError(message);
+            }
+        }
+
+        private AwsException unsupportedVtlDataSource(DataSourceType type, String name,
+                                                      String stageName) {
+            return new AwsException("UnsupportedOperation",
+                    "Floci does not yet execute VTL " + stageName + " over " + type
+                            + " data sources (data source " + name + ")", 400);
         }
 
         /**
@@ -438,16 +567,16 @@ public class AppSyncResolverExecutor {
             }
 
             if (evaluation.returned()) {
-                this.returned = true;
-                this.earlyReturnValue = evaluation.output();
+                if (stage.function()) {
+                    this.vtlFunctionReturned = true;
+                } else {
+                    this.returned = true;
+                    this.earlyReturnValue = evaluation.output();
+                }
                 return evaluation.output();
             }
 
-            Object value = parseRenderedJson(evaluation.output(), handler);
-            if (REQUEST.equals(handler)) {
-                validateVtlRequest(value);
-            }
-            return value;
+            return parseRenderedJson(evaluation.output(), handler);
         }
 
         private Map<String, Object> identityMap() {
@@ -484,18 +613,10 @@ public class AppSyncResolverExecutor {
             }
         }
 
-        private void validateVtlRequest(Object request) {
-            if (!(request instanceof Map<?, ?> map)) {
-                throw mappingTemplateError("VTL request mapping template must render a JSON object");
-            }
+        private void validateVtlRequestVersion(Map<?, ?> map) {
             Object version = map.get("version");
             if (!"2018-05-29".equals(version)) {
                 throw mappingTemplateError("VTL request mapping template must use version 2018-05-29");
-            }
-            for (Object key : map.keySet()) {
-                if (!"version".equals(key) && !"payload".equals(key)) {
-                    throw mappingTemplateError("VTL NONE request mapping template supports only version and payload");
-                }
             }
         }
 

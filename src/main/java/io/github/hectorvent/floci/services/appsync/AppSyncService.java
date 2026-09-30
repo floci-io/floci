@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -735,7 +736,7 @@ public class AppSyncService {
         dn.setDescription((String) request.get("description"));
         dn.setCertificateArn((String) request.get("certificateArn"));
         String shortId = generateShortId();
-        dn.setAppsyncDomainName(shortId + ".appsync-api.us-east-1.amazonaws.com");
+        dn.setAppsyncDomainName(shortId + "." + AwsEndpoints.host("appsync-api", regionResolver.getDefaultRegion()));
         dn.setHostedZoneId("Z" + generateShortId());
         dn.setDomainNameArn(regionResolver.buildArn("appsync", regionResolver.getDefaultRegion(),
             "domainnames/" + domainName));

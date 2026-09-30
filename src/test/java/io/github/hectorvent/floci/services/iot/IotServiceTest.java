@@ -52,6 +52,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -75,6 +76,7 @@ class IotServiceTest {
     private final DynamoDbItemAccess dynamoDb = mock(DynamoDbItemAccess.class);
     private final FirehoseService firehose = mock(FirehoseService.class);
     private final CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
+    private final IotPublishEventRecorder recorder = new IotPublishEventRecorder();
     private IotService service;
 
     @BeforeEach
@@ -99,7 +101,7 @@ class IotServiceTest {
                 config,
                 new RegionResolver(REGION, ACCOUNT),
                 mapper,
-                new IotPublishEventRecorder(),
+                recorder,
                 mock(IotMqttBrokerService.class),
                 sqs,
                 mock(SnsService.class),
@@ -142,13 +144,42 @@ class IotServiceTest {
     }
 
     private void publish(String payload) {
-        service.handlePublish(TOPIC, payload.getBytes(StandardCharsets.UTF_8), true, REGION, null);
+        service.handlePublish(TOPIC, payload.getBytes(StandardCharsets.UTF_8), true, REGION, null, Runnable::run);
     }
 
     private JsonNode capturedInvocationPayload(String functionArn) throws Exception {
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
         verify(lambda).invoke(eq(REGION), eq(functionArn), payload.capture(), eq(InvocationType.Event));
         return mapper.readTree(payload.getValue());
+    }
+
+    @Test
+    void publishRecordsAndStoresTheRetainedMessageAtOnceButRunsTheRulesOnlyOnTheRuleRunner() throws Exception {
+        createRule("metricsRule", sqsThenLambdaRule(null));
+        List<Runnable> deferred = new ArrayList<>();
+        byte[] payload = "{\"v\":1}".getBytes(StandardCharsets.UTF_8);
+
+        service.publish(TOPIC, payload, true, 1, null, "sensor-1", deferred::add);
+
+        assertEquals(TOPIC, recorder.recentEvents().get(0).topic());
+        assertEquals(Base64.getEncoder().encodeToString(payload), service.getRetainedMessage(TOPIC).getPayload());
+        verifyNoInteractions(sqs, lambda);
+        assertEquals(1, deferred.size());
+
+        deferred.get(0).run();
+
+        verify(sqs).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), eq(0), eq(REGION));
+        verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
+    }
+
+    @Test
+    void publishWithoutARuleRunnerRunsTheRuleActionsBeforeItReturns() throws Exception {
+        createRule("metricsRule", sqsThenLambdaRule(null));
+
+        service.publish(TOPIC, "{\"v\":1}".getBytes(StandardCharsets.UTF_8), false, 0, null, null);
+
+        verify(sqs).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), eq(0), eq(REGION));
+        verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
     }
 
     @Test

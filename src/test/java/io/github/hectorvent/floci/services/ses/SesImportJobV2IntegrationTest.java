@@ -220,7 +220,10 @@ class SesImportJobV2IntegrationTest {
         String s3AuthA = accountAuth("111111111111", "s3");
         String bucketA = BUCKET + "-a";
 
-        given().header("Authorization", s3AuthA).when().put("/" + bucketA).then().statusCode(200);
+        // A regional S3 endpoint requires a LocationConstraint naming its region, as on AWS.
+        given().header("Authorization", s3AuthA).contentType("application/xml")
+                .body("<CreateBucketConfiguration><LocationConstraint>eu-west-3</LocationConstraint></CreateBucketConfiguration>")
+        .when().put("/" + bucketA).then().statusCode(200);
         given().header("Authorization", s3AuthA).contentType("text/plain").body("account-a@example.com,BOUNCE\n")
         .when().put("/" + bucketA + "/suppress.csv").then().statusCode(200);
 

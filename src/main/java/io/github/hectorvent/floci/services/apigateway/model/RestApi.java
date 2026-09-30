@@ -24,6 +24,15 @@ public class RestApi {
     private List<String> binaryMediaTypes = new ArrayList<>();
     /** Resource policy document, stored exactly as the caller sent it. */
     private String policy;
+    private List<String> warnings = new ArrayList<>();
+
+    public List<String> getWarnings() {
+        return warnings;
+    }
+
+    public void setWarnings(List<String> warnings) {
+        this.warnings = warnings != null ? new ArrayList<>(warnings) : new ArrayList<>();
+    }
 
     public String getPolicy() {
         return policy;

@@ -33,6 +33,8 @@ import software.amazon.awssdk.services.iam.model.DeleteSamlProviderRequest;
 import software.amazon.awssdk.services.iam.model.DeleteUserRequest;
 import software.amazon.awssdk.services.iam.model.DetachRolePolicyRequest;
 import software.amazon.awssdk.services.iam.model.DetachUserPolicyRequest;
+import software.amazon.awssdk.services.iam.model.GenerateServiceLastAccessedDetailsRequest;
+import software.amazon.awssdk.services.iam.model.GenerateServiceLastAccessedDetailsResponse;
 import software.amazon.awssdk.services.iam.model.GetAccountSummaryResponse;
 import software.amazon.awssdk.services.iam.model.GetGroupRequest;
 import software.amazon.awssdk.services.iam.model.GetGroupResponse;
@@ -50,6 +52,10 @@ import software.amazon.awssdk.services.iam.model.GetRoleRequest;
 import software.amazon.awssdk.services.iam.model.GetRoleResponse;
 import software.amazon.awssdk.services.iam.model.GetSamlProviderRequest;
 import software.amazon.awssdk.services.iam.model.GetSamlProviderResponse;
+import software.amazon.awssdk.services.iam.model.GetServiceLastAccessedDetailsRequest;
+import software.amazon.awssdk.services.iam.model.GetServiceLastAccessedDetailsResponse;
+import software.amazon.awssdk.services.iam.model.GetServiceLastAccessedDetailsWithEntitiesRequest;
+import software.amazon.awssdk.services.iam.model.GetServiceLastAccessedDetailsWithEntitiesResponse;
 import software.amazon.awssdk.services.iam.model.GetUserRequest;
 import software.amazon.awssdk.services.iam.model.GetUserResponse;
 import software.amazon.awssdk.services.iam.model.ListAccessKeysRequest;
@@ -64,6 +70,9 @@ import software.amazon.awssdk.services.iam.model.ListGroupsForUserResponse;
 import software.amazon.awssdk.services.iam.model.ListInstanceProfileTagsRequest;
 import software.amazon.awssdk.services.iam.model.ListInstanceProfileTagsResponse;
 import software.amazon.awssdk.services.iam.model.ListInstanceProfilesResponse;
+import software.amazon.awssdk.services.iam.model.ListPoliciesGrantingServiceAccessEntry;
+import software.amazon.awssdk.services.iam.model.ListPoliciesGrantingServiceAccessRequest;
+import software.amazon.awssdk.services.iam.model.ListPoliciesGrantingServiceAccessResponse;
 import software.amazon.awssdk.services.iam.model.ListRolePoliciesRequest;
 import software.amazon.awssdk.services.iam.model.ListRolePoliciesResponse;
 import software.amazon.awssdk.services.iam.model.ListRolesResponse;
@@ -798,5 +807,77 @@ class IamTest {
                 .userName(USER_NAME)
                 .policyArn(AWS_MANAGED_POLICY_PREFIX + "NoSuchManagedPolicyXyz").build()))
                 .isInstanceOf(NoSuchEntityException.class);
+    }
+
+    // ── Last-Accessed Reporting ────────────────────────────────────────
+
+    @Test
+    @Order(102)
+    void generateAndGetServiceLastAccessedDetails() {
+        GenerateServiceLastAccessedDetailsResponse generated = iam.generateServiceLastAccessedDetails(
+                GenerateServiceLastAccessedDetailsRequest.builder()
+                        .arn("arn:aws:iam::000000000000:user/" + USER_NAME).build());
+
+        assertThat(generated.jobId()).hasSize(36);
+
+        GetServiceLastAccessedDetailsResponse details = iam.getServiceLastAccessedDetails(
+                GetServiceLastAccessedDetailsRequest.builder().jobId(generated.jobId()).build());
+
+        assertThat(details.jobStatusAsString()).isEqualTo("COMPLETED");
+        assertThat(details.jobCreationDate()).isNotNull();
+        assertThat(details.jobCompletionDate()).isNotNull();
+        // A service the entity could reach is listed even though it was never used, so the
+        // attempt details are the part that stays null, not the service itself.
+        assertThat(details.servicesLastAccessed())
+                .allSatisfy(service -> {
+                    assertThat(service.serviceNamespace()).isNotBlank();
+                    assertThat(service.lastAuthenticated()).isNull();
+                    assertThat(service.totalAuthenticatedEntities()).isNull();
+                });
+    }
+
+    @Test
+    @Order(103)
+    void getServiceLastAccessedDetailsWithEntitiesDescribesReachingEntities() {
+        GenerateServiceLastAccessedDetailsResponse generated = iam.generateServiceLastAccessedDetails(
+                GenerateServiceLastAccessedDetailsRequest.builder()
+                        .arn("arn:aws:iam::000000000000:user/" + USER_NAME).build());
+
+        GetServiceLastAccessedDetailsWithEntitiesResponse details =
+                iam.getServiceLastAccessedDetailsWithEntities(
+                        GetServiceLastAccessedDetailsWithEntitiesRequest.builder()
+                                .jobId(generated.jobId()).serviceNamespace("s3").build());
+
+        assertThat(details.jobStatusAsString()).isEqualTo("COMPLETED");
+        // Entities are those that could reach the service, so the access time is what stays null.
+        assertThat(details.entityDetailsList())
+                .allSatisfy(entity -> {
+                    assertThat(entity.entityInfo().arn()).isNotBlank();
+                    assertThat(entity.entityInfo().id()).isNotBlank();
+                    assertThat(entity.entityInfo().typeAsString()).isIn("USER", "ROLE", "GROUP");
+                    assertThat(entity.lastAuthenticated()).isNull();
+                });
+    }
+
+    @Test
+    @Order(104)
+    void getServiceLastAccessedDetailsForUnknownJobThrows() {
+        assertThatThrownBy(() -> iam.getServiceLastAccessedDetails(
+                GetServiceLastAccessedDetailsRequest.builder()
+                        .jobId("00000000-0000-0000-0000-000000000000").build()))
+                .isInstanceOf(NoSuchEntityException.class);
+    }
+
+    @Test
+    @Order(105)
+    void listPoliciesGrantingServiceAccessEchoesEachRequestedNamespace() {
+        ListPoliciesGrantingServiceAccessResponse response = iam.listPoliciesGrantingServiceAccess(
+                ListPoliciesGrantingServiceAccessRequest.builder()
+                        .arn("arn:aws:iam::000000000000:user/" + USER_NAME)
+                        .serviceNamespaces("s3", "dynamodb").build());
+
+        assertThat(response.policiesGrantingServiceAccess())
+                .extracting(ListPoliciesGrantingServiceAccessEntry::serviceNamespace)
+                .containsExactly("s3", "dynamodb");
     }
 }

@@ -59,6 +59,8 @@ class AslExecutorResultWriterTest {
         // An exported Map run is retained through the service, so a Map state needs one to run.
         Instance<StepFunctionsService> sfnService = mock(Instance.class);
         when(sfnService.get()).thenReturn(mock(StepFunctionsService.class));
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.defaultRegion()).thenReturn("us-east-1");
         executor = new AslExecutor(
                 mock(LambdaExecutorService.class),
                 mock(LambdaFunctionStore.class),
@@ -76,7 +78,7 @@ class AslExecutorResultWriterTest {
                 mapper,
                 new JsonataEvaluator(mapper),
                 sfnService,
-                mock(EmulatorConfig.class),
+                config,
                 null,
                 null);
 

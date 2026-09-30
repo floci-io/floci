@@ -67,6 +67,12 @@ class S3VirtualHostFilterTest {
             "my-bucket.s3.amazonaws.com:443,            localhost, my-bucket",
             "my-bucket.s3.us-east-1.amazonaws.com,      localhost, my-bucket",
             "my-bucket.s3.eu-west-1.amazonaws.com:443,  localhost, my-bucket",
+            // The same in every other partition: the longest published suffix wins, so .cn survives
+            "my-bucket.s3.cn-north-1.amazonaws.com.cn,  localhost, my-bucket",
+            "my-bucket.s3.amazonaws.com.cn,             localhost, my-bucket",
+            "my-bucket.s3.us-gov-west-1.amazonaws.com,  localhost, my-bucket",
+            "my-bucket.s3.us-iso-east-1.c2s.ic.gov,     localhost, my-bucket",
+            "my-bucket.s3.eusc-de-east-1.amazonaws.eu,  localhost, my-bucket",
             // LocalStack-compatible domains (*.localhost.localstack.cloud resolves to 127.0.0.1 via public DNS)
             "my-bucket.s3.localhost.localstack.cloud,           localhost, my-bucket",
             "my-bucket.s3.localhost.localstack.cloud:4566,      localhost, my-bucket",

@@ -1,11 +1,9 @@
 package io.github.hectorvent.floci.services.eks;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.ExecCreateCmdResponse;
-import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
@@ -21,11 +19,9 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -185,7 +181,7 @@ class EksImdsDockerIntegrationTest {
             // and fails because port 80 is redirected to 9999.
             execInContainer(containerId, new String[]{"sh", "-c",
                     "iptables -t nat -D PREROUTING -j FLOCI-LINK-LOCAL"});
-            ExecResult intercepted = execInContainerWithExitCode(containerId, new String[]{"sh", "-c",
+            ContainerExec.Result intercepted = execInContainerWithExitCode(containerId, new String[]{"sh", "-c",
                     "ip netns exec pod-test wget -q -O - -T 2 http://169.254.169.254/latest/meta-data/instance-id"});
             assertNotEquals(0, intercepted.exitCode(),
                     "Without FLOCI-LINK-LOCAL chain, pod request should be intercepted by CNI-HOSTPORT-DNAT and fail");
@@ -217,42 +213,12 @@ class EksImdsDockerIntegrationTest {
         }
     }
 
-    record ExecResult(long exitCode, String stdout, String stderr) {}
-
-    private ExecResult execInContainerWithExitCode(String containerId, String[] cmd) throws Exception {
-        ExecCreateCmdResponse exec = dockerClient.execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec();
-
-        StringBuilder stdout = new StringBuilder();
-        StringBuilder stderr = new StringBuilder();
-        boolean completed = dockerClient.execStartCmd(exec.getId())
-                .exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onNext(Frame frame) {
-                        if (frame != null && frame.getPayload() != null) {
-                            String text = new String(frame.getPayload(), StandardCharsets.UTF_8);
-                            if (frame.getStreamType() == com.github.dockerjava.api.model.StreamType.STDERR) {
-                                stderr.append(text);
-                            } else {
-                                stdout.append(text);
-                            }
-                        }
-                    }
-                })
-                .awaitCompletion(30, TimeUnit.SECONDS);
-
-        if (!completed) {
-            throw new RuntimeException("exec timed out in container " + containerId);
-        }
-        Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-        return new ExecResult(exitCode != null ? exitCode : -1L, stdout.toString(), stderr.toString());
+    private ContainerExec.Result execInContainerWithExitCode(String containerId, String[] cmd) {
+        return ContainerExec.run(dockerClient, containerId, cmd, 30).throwIfTimedOut(containerId);
     }
 
     private String execInContainer(String containerId, String[] cmd) throws Exception {
-        ExecResult result = execInContainerWithExitCode(containerId, cmd);
+        ContainerExec.Result result = execInContainerWithExitCode(containerId, cmd);
         if (result.exitCode() != 0) {
             throw new RuntimeException("exec failed with code " + result.exitCode() + ": " + result.stderr());
         }

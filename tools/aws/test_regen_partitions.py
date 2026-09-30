@@ -84,6 +84,8 @@ ENDPOINTS = {
                 "nohost": {"endpoints": {"aws-global": {"credentialScope": {"region": "us-east-1"}}},
                            "isRegionalized": False, "partitionEndpoint": "aws-global"},
                 "sqs": {"endpoints": {"us-east-1": {}}},
+                "s3": {"defaults": {"variants": [{"hostname": "{service}.dualstack.{region}.{dnsSuffix}", "tags": ["dualstack"]}]},
+                       "endpoints": {"us-east-1": {}, "eu-north-1": {}, "aws-global": {"hostname": "s3.amazonaws.com"}}},
             },
         },
         {
@@ -98,6 +100,8 @@ ENDPOINTS = {
                                                         "hostname": "iam.cn-north-1.amazonaws.com.cn"}},
                         "isRegionalized": False, "partitionEndpoint": "aws-cn-global"},
                 "sqs": {"endpoints": {"cn-north-1": {}}},
+                "s3": {"endpoints": {"cn-north-1": {"variants": [{"hostname": "s3.dualstack.cn-north-1.amazonaws.com.cn", "tags": ["dualstack"]}]},
+                                     "cn-northwest-1": {}}},
             },
         },
         {
@@ -177,7 +181,14 @@ def test_build_carries_partition_outputs_and_names():
     assert cn["implicitGlobalRegion"] == "cn-northwest-1"
     assert cn["regionRegex"] == "^cn\\-\\w+\\-\\d+$"
     assert cn["supportsDualStack"] is True and cn["supportsFips"] is True
-    assert cn["services"] == ["iam", "sqs"]
+    assert cn["services"] == ["iam", "s3", "sqs"]
+
+
+def test_build_lists_the_regions_with_an_s3_dualstack_variant():
+    document = r.build(PARTITIONS, ENDPOINTS, r.parse_cdk_entities(ENTITIES), None, "test")
+    assert by_id(document, "aws")["s3DualStackRegions"] == ["eu-north-1", "us-east-1"]
+    assert by_id(document, "aws-cn")["s3DualStackRegions"] == ["cn-north-1"]
+    assert by_id(document, "aws-eusc")["s3DualStackRegions"] == []
 
 
 def test_build_derives_global_services_from_partition_endpoint():

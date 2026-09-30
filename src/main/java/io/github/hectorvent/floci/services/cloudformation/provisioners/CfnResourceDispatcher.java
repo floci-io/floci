@@ -218,7 +218,7 @@ public class CfnResourceDispatcher {
                 .orElse(null);
     }
 
-    /** Only an opted-in provisioner may identify cleanup owed by an UPDATE_FAILED resource. */
+    /** Whether an opted-in provisioner still tracks cleanup owed by an UPDATE_FAILED resource. */
     public boolean hasPendingRollbackCleanup(StackResource resource) {
         return registry.forType(resource.getResourceType())
                 .map(owner -> owner.hasPendingRollbackCleanup(resource))

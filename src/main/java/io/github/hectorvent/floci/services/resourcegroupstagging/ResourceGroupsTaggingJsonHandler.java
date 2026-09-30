@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.resourcegroupstagging.model.ResourceTagMapping;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -70,11 +71,10 @@ public class ResourceGroupsTaggingJsonHandler {
         Map<String, String> tags = new LinkedHashMap<>();
         request.path("Tags").fields().forEachRemaining(e -> tags.put(e.getKey(), e.getValue().asText()));
 
-        service.tagResources(arns, tags, region);
+        Map<String, AwsException> failures = service.applyTags(arns, tags, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        // FailedResourcesMap is empty on success
-        response.set("FailedResourcesMap", objectMapper.createObjectNode());
+        response.set("FailedResourcesMap", failedResourcesMap(failures));
         return Response.ok(response).build();
     }
 
@@ -84,10 +84,10 @@ public class ResourceGroupsTaggingJsonHandler {
         List<String> arns = toStringList(request.path("ResourceARNList"));
         List<String> tagKeys = toStringList(request.path("TagKeys"));
 
-        service.untagResources(arns, tagKeys, region);
+        Map<String, AwsException> failures = service.removeTags(arns, tagKeys, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("FailedResourcesMap", objectMapper.createObjectNode());
+        response.set("FailedResourcesMap", failedResourcesMap(failures));
         return Response.ok(response).build();
     }
 
@@ -125,6 +125,18 @@ public class ResourceGroupsTaggingJsonHandler {
     }
 
     // ─── Helpers ───────────────────────────────────────────────────────────────
+
+    // AWS reports the owning service's own error, although the model's ErrorCode enum names only two codes.
+    private ObjectNode failedResourcesMap(Map<String, AwsException> failures) {
+        ObjectNode map = objectMapper.createObjectNode();
+        failures.forEach((arn, e) -> {
+            ObjectNode info = map.putObject(arn);
+            info.put("StatusCode", e.getHttpStatus());
+            info.put("ErrorCode", e.getErrorCode());
+            info.put("ErrorMessage", e.getMessage());
+        });
+        return map;
+    }
 
     private List<String> toStringList(JsonNode node) {
         List<String> result = new ArrayList<>();

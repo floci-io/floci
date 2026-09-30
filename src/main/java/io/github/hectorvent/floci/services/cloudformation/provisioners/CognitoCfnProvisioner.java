@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
@@ -193,7 +194,7 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         // ProviderName is what a template feeds into an identity pool's CognitoIdentityProviders,
         // cognito-idp.<region>.amazonaws.com/<pool id> on AWS. ProviderURL stays the issuer Floci
         // mints tokens with, so a template wiring it into a JWT authorizer validates locally.
-        r.getAttributes().put("ProviderName", "cognito-idp." + ctx.region() + ".amazonaws.com/" + pool.getId());
+        r.getAttributes().put("ProviderName", AwsEndpoints.host("cognito-idp", ctx.region()) + "/" + pool.getId());
         r.getAttributes().put("ProviderURL", cognitoService.getIssuer(pool.getId()));
     }
 

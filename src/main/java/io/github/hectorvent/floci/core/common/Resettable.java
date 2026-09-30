@@ -7,6 +7,12 @@ package io.github.hectorvent.floci.core.common;
  * controller never holds StorageFactory's monitor while invoking them.
  */
 public interface Resettable {
+    /**
+     * Throw to refuse an emulator-wide reset. Runs on every service before anything is stopped or
+     * cleared, so a refusal leaves all state intact.
+     */
+    default void checkReset() {}
+
     /** Stop accepting work and drain active writes before any storage is cleared. */
     default void beforeReset() {}
 

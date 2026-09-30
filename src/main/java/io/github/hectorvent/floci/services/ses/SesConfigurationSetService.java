@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -8,6 +9,7 @@ import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
+import io.github.hectorvent.floci.services.ses.model.EventBridgeDestination;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
@@ -473,9 +475,9 @@ public class SesConfigurationSetService {
     // ──────────────────────────── Event destinations ────────────────────────────
 
     public void createEventDestination(String configSetName, String eventDestinationName,
-                                       EventDestination dest, String region) {
+                                       EventDestination dest, String accountId, String region) {
         validateEventDestinationName(eventDestinationName);
-        validateEventDestination(dest);
+        validateEventDestination(dest, accountId, region);
         ConfigurationSet cs = get(configSetName, region);
         if (indexOfEventDestination(cs.getEventDestinations(), eventDestinationName) >= 0) {
             throw new AwsException("AlreadyExists",
@@ -494,9 +496,9 @@ public class SesConfigurationSetService {
     }
 
     public void updateEventDestination(String configSetName, String eventDestinationName,
-                                       EventDestination dest, String region) {
+                                       EventDestination dest, String accountId, String region) {
         validateEventDestinationName(eventDestinationName);
-        validateEventDestination(dest);
+        validateEventDestination(dest, accountId, region);
         ConfigurationSet cs = get(configSetName, region);
         int index = indexOfEventDestination(cs.getEventDestinations(), eventDestinationName);
         if (index < 0) {
@@ -549,7 +551,7 @@ public class SesConfigurationSetService {
         }
     }
 
-    static void validateEventDestination(EventDestination dest) {
+    static void validateEventDestination(EventDestination dest, String accountId, String region) {
         if (dest == null) {
             throw new AwsException("InvalidParameterValue", "EventDestination is required.", 400);
         }
@@ -615,6 +617,42 @@ public class SesConfigurationSetService {
             throw new AwsException("InvalidParameterValue",
                     "Invalid Pinpoint application ARN provided: "
                             + dest.getPinpointDestination().getApplicationArn() + ".", 400);
+        }
+        if (dest.getEventBridgeDestination() != null) {
+            validateEventBridgeDestination(dest.getEventBridgeDestination(), accountId, region);
+        }
+    }
+
+    // SES publishes email events only to the default EventBridge bus, so the
+    // EventBusArn member must name event-bus/default of the events service in the
+    // configuration set's account and region. All supported AWS partitions are accepted.
+    private static void validateEventBridgeDestination(
+            EventBridgeDestination eventBridge, String accountId, String region) {
+        String busArn = eventBridge.getEventBusArn();
+        if (busArn == null || busArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue",
+                    "EventBridgeDestination requires a non-blank EventBusArn.", 400);
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(busArn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "EventBridgeDestination EventBusArn is not a valid ARN: " + busArn + ".", 400);
+        }
+        if (!arn.partition().matches(AwsArnUtils.PARTITION_REGEX)
+                || arn.region().isBlank()
+                || !arn.accountId().matches("[0-9]{12}")
+                || !"events".equals(arn.service())
+                || !"event-bus/default".equals(arn.resource())) {
+            throw new AwsException("InvalidParameterValue",
+                    "EventBridgeDestination EventBusArn must be a valid default event bus ARN: "
+                            + busArn + ".", 400);
+        }
+        if (!arn.accountId().equals(accountId) || !arn.region().equals(region)) {
+            throw new AwsException("InvalidParameterValue",
+                    "EventBridgeDestination EventBusArn must match the configuration set's account and Region: "
+                            + busArn + ".", 400);
         }
     }
 

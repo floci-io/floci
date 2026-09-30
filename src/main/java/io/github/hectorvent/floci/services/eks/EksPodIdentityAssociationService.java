@@ -119,7 +119,7 @@ public class EksPodIdentityAssociationService {
 
         String associationId = generateAssociationId();
         String partition = "aws";
-        String region = "us-east-1";
+        String region = "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
         String accountId = cluster.getAccountId() != null ? cluster.getAccountId() : "000000000000";
         if (cluster.getArn() != null) {
             String[] clusterArn = cluster.getArn().split(":", 6);

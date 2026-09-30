@@ -66,16 +66,59 @@ did before.
 - **DescribeRegions**: the request's partition's regions, with the partition's endpoints.
   As on AWS, a commercial deployment lists the 17 regions that need no opt-in by default and
   all 34 with `AllRegions=true`, where opt-in regions report `not-opted-in`.
-- **Hostname recognition**: every published region id, in every partition, is a region label
-  in an S3 virtual-host or execute-api hostname.
+- **Hostnames**: AWS-shaped hosts in responses (an HTTP API's `ApiEndpoint`, a bucket's
+  `RegionalDomainName` and `WebsiteURL`, Cognito and EKS OIDC issuers, EC2 public DNS names)
+  use the DNS suffix of their region's partition, so a `cn-north-1` API answers
+  `<id>.execute-api.cn-north-1.amazonaws.com.cn`. `DualStackDomainName` is only returned where
+  S3 publishes a dual-stack endpoint.
+- **Hostname recognition**: every published region id and DNS suffix, in every partition, is
+  recognised in an S3 virtual-host, execute-api, ECR image or CloudFront origin hostname.
+- **S3 CreateBucket**: as on AWS, the `us-east-1` endpoint takes any `LocationConstraint` but
+  its own, and every other regional endpoint requires a constraint naming exactly its region
+  (`IllegalLocationConstraintException` otherwise). A China or GovCloud client must send the
+  constraint, which the AWS SDKs do; `GetBucketLocation` still answers an empty constraint only
+  for `us-east-1`, in every partition.
+- **Hosted zones and console URLs**: load balancer and S3 website hosted zone ids come from a
+  per-region table (`aws/region-facts.json`, generated from the Terraform provider and the CDK,
+  which transcribe the AWS General Reference); Network load balancers have their own zone,
+  distinct from the Application/Classic one. The CloudFront hosted zone is published for `aws`
+  and `aws-cn`; the SAML sign-on URL for five partitions. The ISO and EUSC regions have no load
+  balancer hosted zones, and only the two ISO-F regions have an S3 website zone; where a table has
+  no row the field is omitted rather than guessed. An `EDGE` API Gateway custom domain is refused
+  outside the commercial partition (`BadRequestException`): GovCloud and ISO have no CloudFront,
+  and China has no edge-optimized API Gateway
+  ([China API Gateway](https://docs.amazonaws.cn/en_us/aws/latest/userguide/api-gateway.html)).
+- **VPC endpoint service names**: interface endpoints (as `DescribeVpcEndpointServices` lists them)
+  are `com.amazonaws.<region>.<service>` everywhere, except the (region, service) pairs the CDK
+  lists for China, ISO and EUSC, which reverse the DNS suffix (`cn.com.amazonaws.cn-north-1.lambda`).
+  GovCloud keeps `com.amazonaws`. Gateway endpoints and their AWS-managed prefix lists (S3,
+  DynamoDB) are `com.amazonaws.<region>.<service>` in every partition. S3 offers both kinds: where
+  the two names agree it is one service carrying both types, and in China it is listed twice, the
+  gateway `com.amazonaws.cn-north-1.s3` and the interface `cn.com.amazonaws.cn-north-1.s3`.
+- **Lambda runtime images** pull from ECR Public (`public.ecr.aws`), which exists only in the
+  commercial partition; point `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI` at a mirror elsewhere.
+- **WAF `CLOUDFRONT` scope**: available only where CloudFront exists (`aws`, `aws-cn`), and its
+  resources live in the partition's implicit global region (`cn-northwest-1` in China).
 
 ## What does not change
 
 - **Service principals** are `<service>.amazonaws.com` in every partition; that is the rule
-  the AWS CDK applies today, and the older per-partition forms (`.amazonaws.com.cn`) are legacy.
+  the AWS CDK applies today, and everything Floci emits (generated trust policies, CloudTrail's
+  `eventSource`, service-linked role paths) uses it. The older per-partition forms the CDK
+  retired (`elasticmapreduce.amazonaws.com.cn`, `logs.<region>.amazonaws.com.cn`,
+  `config.c2s.ic.gov`) are still accepted wherever Floci matches a principal against a policy,
+  such as a role's trust policy, so a policy written in either form works; matching stays exact
+  and case-sensitive. `CreateServiceLinkedRole` given a legacy form creates the same role as the
+  universal one: its name, path and trust policy all use `<service>.amazonaws.com`.
 - **XML namespaces** and the S3 canned-ACL group URIs (`http://acs.amazonaws.com/groups/...`)
   are identifiers, not hosts.
 - **AWS managed policy ARNs** keep the literal `aws` account slot: `arn:aws-cn:iam::aws:policy/AdministratorAccess`.
+  The catalog Floci bundles is the commercial one; every other partition's is derived from it on
+  first use, with the partition in every ARN (what AWS's own SAM translator does) and the
+  partition's DNS suffix in the region-bearing `kms:ViaService` hosts (`s3.*.amazonaws.com.cn`).
+  Service principals and service-linked role paths are the same in every partition and are left
+  alone. Whether AWS's China or GovCloud documents differ in content beyond that is an open
+  question below.
 
 ## Partition-absent services
 
@@ -96,7 +139,9 @@ the commercial value or Floci's own base host until sourced:
 - the Lambda function-URL host outside the commercial partition;
 - whether AWS managed policy documents differ in content in China or GovCloud;
 - the API Gateway regional hosted zone per region;
-- S3 `LocationConstraint` enum values and Route 53 hosted zones for the ISO and EUSC regions.
+- S3 `LocationConstraint` enum values and Route 53 hosted zones for the ISO and EUSC regions;
+- the SAML sign-on URL in `aws-iso-e`, `aws-iso-f` and `aws-eusc`, where assertions keep being
+  checked against the commercial `https://signin.aws.amazon.com/saml`.
 
 ## Related
 

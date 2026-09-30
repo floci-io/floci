@@ -239,7 +239,7 @@ public class NativeDynamoDbTableService {
             if (settings.streamEnabled()) {
                 enableStream(table, settings.streamViewType(), region);
             } else {
-                streamService.disableStream(table.getTableName(), region);
+                streamService.disableStream(table.getTableArn());
                 table.setStreamEnabled(false);
             }
         }

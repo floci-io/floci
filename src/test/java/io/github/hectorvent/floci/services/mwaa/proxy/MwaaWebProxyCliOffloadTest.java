@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.mwaa.proxy;
 
-import io.github.hectorvent.floci.services.mwaa.MwaaEnvironmentManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.buffer.Buffer;
@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Confirms {@code POST /aws_mwaa/cli} runs its Docker exec off the Vert.x event loop.
  * {@code MwaaEnvironmentManager#execInContainer} can block for up to 30 seconds
- * ({@code awaitCompletion(30, TimeUnit.SECONDS)}), so running it synchronously on the event
+ * (its exec timeout), so running it synchronously on the event
  * loop that also serves the rest of this environment's proxied Airflow traffic would stall
  * every other request for the duration of one CLI call.
  *
@@ -62,7 +62,7 @@ class MwaaWebProxyCliOffloadTest {
             if (!releaseCli.await(5, TimeUnit.SECONDS)) {
                 throw new IllegalStateException("test did not release the CLI exec in time");
             }
-            return new MwaaEnvironmentManager.ExecResult(0, "dag1\ndag2\n", "");
+            return new ContainerExec.Result(0, "dag1\ndag2\n", "", false);
         };
 
         MwaaWebProxy proxy = new MwaaWebProxy("env1", vertx, "127.0.0.1", backend.actualPort(),
@@ -138,7 +138,7 @@ class MwaaWebProxyCliOffloadTest {
             if (!releaseCli.await(5, TimeUnit.SECONDS)) {
                 throw new IllegalStateException("test did not release the CLI exec in time");
             }
-            return new MwaaEnvironmentManager.ExecResult(0, "", "");
+            return new ContainerExec.Result(0, "", "", false);
         };
         MwaaWebProxy proxy = new MwaaWebProxy("env1", vertx, "127.0.0.1", 1,
                 (environmentName, token) -> true, slowExecutor);

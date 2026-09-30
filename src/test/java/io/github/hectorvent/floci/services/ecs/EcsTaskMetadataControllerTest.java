@@ -265,6 +265,21 @@ class EcsTaskMetadataControllerTest {
     }
 
     @Test
+    void aDeletedVpcOmitsResolverMetadataWithoutLosingTheSubnetDetails() {
+        task.setLaunchType(LaunchType.EC2);
+        when(ec2Service.describeVpcs(anyString(), anyList(), anyMap())).thenReturn(List.of());
+
+        Response response = controller.task(METADATA_ID);
+        assertEquals(200, response.getStatus());
+        JsonNode metadata = body(response);
+        assertEquals("vpc-0a1b2c3d", metadata.path("VPCID").asText());
+        JsonNode network = metadata.path("Containers").get(0).path("Networks").get(0);
+        assertFalse(network.has("DomainNameServers"));
+        assertEquals("172.31.32.0/20", network.path("IPv4SubnetCIDRBlock").asText());
+        assertEquals("172.31.32.1/20", network.path("SubnetGatewayIpv4Address").asText());
+    }
+
+    @Test
     void taskWithTagsAddsTheTaskAndContainerInstanceTags() {
         task.setLaunchType(LaunchType.EC2);
         task.setContainerInstanceArn(

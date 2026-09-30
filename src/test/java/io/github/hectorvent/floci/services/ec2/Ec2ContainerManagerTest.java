@@ -76,6 +76,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.atLeastOnce;
@@ -1329,6 +1330,68 @@ class Ec2ContainerManagerTest {
         assertTrue(mkdirIndex < sshdIndex,
                 "/run/sshd must be created before sshd starts, otherwise sshd exits with "
                         + "\"Missing privilege separation directory\"");
+    }
+
+    @Test
+    void anAttachStreamErrorOnOneSshdPathStillTriesTheNext() throws Exception {
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.21");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        doAnswer(invocation -> {
+            ExecStartCmd execStart = mock(ExecStartCmd.class);
+            when(execStart.exec(any())).thenAnswer(startInvocation -> {
+                ResultCallback<Frame> callback = startInvocation.getArgument(0);
+                String[] command = harness.executedCommands.get(harness.executedCommands.size() - 1);
+                if (Arrays.equals(command, new String[]{"/usr/sbin/sshd"})) {
+                    callback.onError(new IllegalStateException("attach stream broke"));
+                } else {
+                    callback.onComplete();
+                }
+                return callback;
+            });
+            return execStart;
+        }).when(harness.dockerClient).execStartCmd(anyString());
+
+        harness.manager.launch(instance("i-sshd-retry"), "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> commandIndex(harness.executedCommands, "/usr/local/sbin/sshd") >= 0, Duration.ofSeconds(2));
+        assertTrue(commandIndex(harness.executedCommands, "/usr/sbin/sshd")
+                < commandIndex(harness.executedCommands, "/usr/local/sbin/sshd"));
+    }
+
+    @Test
+    void anInterruptWhileStartingSshdStopsTryingFurtherSshdPaths() throws Exception {
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.22");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        doAnswer(invocation -> {
+            ExecStartCmd execStart = mock(ExecStartCmd.class);
+            when(execStart.exec(any())).thenAnswer(startInvocation -> {
+                ResultCallback<Frame> callback = startInvocation.getArgument(0);
+                String[] command = harness.executedCommands.get(harness.executedCommands.size() - 1);
+                if (Arrays.equals(command, new String[]{"/usr/sbin/sshd"})) {
+                    Thread.currentThread().interrupt();
+                } else {
+                    callback.onComplete();
+                }
+                return callback;
+            });
+            return execStart;
+        }).when(harness.dockerClient).execStartCmd(anyString());
+        Instance instance = instance("i-sshd-interrupted");
+        instance.setUserData("#!/bin/sh\necho ready\n");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        // UserData is the next step after sshd, so its exec marks sshd startup as finished.
+        awaitUntil(() -> commandIndex(harness.executedCommands, "/var/lib/user-data.sh") >= 0, Duration.ofSeconds(2));
+        assertEquals(-1, commandIndex(harness.executedCommands, "/usr/local/sbin/sshd"));
     }
 
     @Test

@@ -74,7 +74,7 @@ public class TableDefinition {
     public TableDefinition(String tableName,
                             List<KeySchemaElement> keySchema,
                             List<AttributeDefinition> attributeDefinitions) {
-        this(tableName, keySchema, attributeDefinitions, "us-east-1", "000000000000");
+        this(tableName, keySchema, attributeDefinitions, "us-east-1", "000000000000"); // partition-literal: test-shaped constructor default
     }
 
     public TableDefinition(String tableName,

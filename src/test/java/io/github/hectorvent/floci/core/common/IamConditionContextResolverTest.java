@@ -56,7 +56,7 @@ class IamConditionContextResolverTest {
     @BeforeEach
     void setUp() {
         dynamoDbService = mock(DynamoDbService.class);
-        NativeDynamoDbBackend dynamoDbBackend = new NativeDynamoDbBackend(null, null, dynamoDbService, mapper);
+        NativeDynamoDbBackend dynamoDbBackend = new NativeDynamoDbBackend(null, null, dynamoDbService, null, null, mapper);
         dynamoDbFacadeInstance = mock(Instance.class);
         when(dynamoDbFacadeInstance.isResolvable()).thenReturn(true);
         when(dynamoDbFacadeInstance.get()).thenReturn(new DynamoDbFacade(dynamoDbBackend, dynamoDbBackend,
@@ -507,6 +507,7 @@ class IamConditionContextResolverTest {
         assertEquals(List.of("000000000000"), conditions.get("aws:ResourceAccount"));
         assertEquals(List.of("000000000000"), conditions.get("aws:PrincipalAccount"));
         assertEquals(List.of("eu-west-2"), conditions.get("aws:RequestedRegion"));
+        assertEquals(List.of("false"), conditions.get("aws:PrincipalIsAWSService"));
     }
 
     @Test

@@ -252,7 +252,7 @@ public final class AmiImageTool {
                     "library/ubuntu:24.04",
                     "docker.io/ubuntu:24.04",
                     "docker.io/library/ubuntu:24.04",
-                    "public.ecr.aws/docker/library/ubuntu:24.04" -> true;
+                    "public.ecr.aws/docker/library/ubuntu:24.04" -> true; // partition-literal: the AMI build tool pulls its base image from ECR Public
             default -> false;
         };
     }

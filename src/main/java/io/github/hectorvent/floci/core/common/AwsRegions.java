@@ -37,7 +37,7 @@ public final class AwsRegions {
     public static final String DEFAULT_PARTITION = AwsPartitions.COMMERCIAL_ID;
 
     /** The DNS suffix of the commercial partition, shared with {@code aws-us-gov}. */
-    public static final String DEFAULT_DNS_SUFFIX = "amazonaws.com";
+    public static final String DEFAULT_DNS_SUFFIX = "amazonaws.com"; // partition-literal: the commercial suffix, by definition
 
     /**
      * The regions a partition publishes, in botocore order, e.g. the 34 commercial regions for

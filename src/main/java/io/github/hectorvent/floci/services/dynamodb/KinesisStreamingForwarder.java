@@ -374,6 +374,12 @@ public class KinesisStreamingForwarder {
         }
     }
 
+    /** Emulator reset and shutdown: discard every destination's buffer, stop its drains, and drop its state. */
+    public void clear() {
+        states.values().forEach(this::invalidate);
+        states.clear();
+    }
+
     @PreDestroy
     public void shutdown() {
         scheduler.shutdown();

@@ -95,6 +95,14 @@ class OrganizationsFeatureSetIntegrationTest {
             .statusCode(200)
             .body("Organization.FeatureSet", equalTo("ALL"))
             .body("Organization.AvailablePolicyTypes.Type", hasItem("SERVICE_CONTROL_POLICY"));
+
+        // Upgrading makes policy types available; it does not enable any of them on the root.
+        organizations("ListRoots", "{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Roots[0].PolicyTypes", empty());
     }
 
     @Test

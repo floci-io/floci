@@ -417,8 +417,8 @@ public class CognitoOAuthController {
         try {
             UserPool pool = cognitoService.describeUserPool(consumedCode.userPoolId());
             CognitoUser user = cognitoService.adminGetUser(consumedCode.userPoolId(), consumedCode.userId());
-            Map<String, Object> authentication = cognitoService.generateAuthResult(user, pool, client,
-                    nonceClaim(consumedCode.nonce()));
+            Map<String, Object> authentication = cognitoService.generateAuthResultForHostedAuth(user, pool, client,
+                    nonceClaim(consumedCode.nonce()), consumedCode.scopes());
             ObjectNode body = objectMapper.createObjectNode();
             body.put("access_token", (String) authentication.get("AccessToken"));
             body.put("id_token", (String) authentication.get("IdToken"));

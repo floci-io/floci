@@ -441,14 +441,30 @@ class S3IntegrationTest {
             .statusCode(204);
     }
 
+    /**
+     * A regional endpoint requires a LocationConstraint naming its region (moto's
+     * {@code aws_verified} matrix); only the us-east-1 endpoint accepts an empty body. The
+     * signing region alone never places a bucket.
+     */
     @Test
     @Order(21)
-    void createBucketUsesSigningRegionWhenBodyEmpty() {
+    void createBucketWithoutConstraintOnARegionalEndpointIsRejected() {
         String bucket = "signed-region-bucket";
+        String regionalAuth =
+                "AWS4-HMAC-SHA256 Credential=test/20260325/eu-west-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=test";
 
         given()
-            .header("Authorization",
-                    "AWS4-HMAC-SHA256 Credential=test/20260325/eu-west-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=test")
+            .header("Authorization", regionalAuth)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>IllegalLocationConstraintException</Code>"));
+
+        given()
+            .header("Authorization", regionalAuth)
+            .contentType("application/xml")
+            .body("<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>")
         .when()
             .put("/" + bucket)
         .then()
@@ -457,10 +473,10 @@ class S3IntegrationTest {
 
         given()
         .when()
-            .head("/" + bucket)
+            .get("/" + bucket + "?location")
         .then()
             .statusCode(200)
-            .header("x-amz-bucket-region", equalTo("eu-west-1"));
+            .body(containsString(">eu-west-1</LocationConstraint>"));
 
         given()
         .when()

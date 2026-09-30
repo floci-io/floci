@@ -1,12 +1,14 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryController;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
-import io.github.hectorvent.floci.core.common.AccountResolver;
+import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
+import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.WebIdentityToken;
@@ -19,6 +21,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
@@ -40,7 +43,7 @@ public class StsQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(StsQueryHandler.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    private static final String STS_AUDIENCE = "sts.amazonaws.com";
+    private static final String STS_AUDIENCE = "sts.amazonaws.com"; // partition-literal: web-identity audience; no source outside the commercial partition (P9)
 
     private final IamService iamService;
     private final AccountResolver accountResolver;
@@ -58,6 +61,9 @@ public class StsQueryHandler {
 
     @Context
     HttpHeaders headers;
+
+    @Context
+    UriInfo uriInfo;
 
     @Inject
     public StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
@@ -119,7 +125,7 @@ public class StsQueryHandler {
         String callerAccountId = regionResolver.getAccountId();
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
-        AssumeRoleTrustOutcome trustOutcome = enforceTrustPolicy(roleArn, roleName, accountId);
+        AssumeRoleTrustOutcome trustOutcome = enforceTrustPolicy(roleArn, roleName, accountId, params);
         if (trustOutcome.denial() != null) {
             return trustOutcome.denial();
         }
@@ -132,7 +138,9 @@ public class StsQueryHandler {
 
         // Register session so IAM enforcement can resolve the role's policies, RDS/ElastiCache
         // IAM token validation can find the temporary secret key, and account routing can map
-        // these temporary credentials to the assumed role's account.
+        // these temporary credentials to the assumed role's account. The session records the
+        // role's own ARN, path included: it is the session's aws:PrincipalArn, and it keeps naming
+        // the role that issued the session even if a role of the same name replaces it later.
         String sessionPolicy = getParam(params, "Policy");
         iamService.registerSession(
                 accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, sessionPolicy, callerAccountId,
@@ -153,18 +161,31 @@ public class StsQueryHandler {
      * Resolves the target role and evaluates its trust policy when IAM enforcement is enabled.
      * Returns the role on success or the AWS error response on denial.
      */
-    private AssumeRoleTrustOutcome enforceTrustPolicy(String roleArn, String roleName, String roleAccountId) {
+    private AssumeRoleTrustOutcome enforceTrustPolicy(String roleArn, String roleName, String roleAccountId,
+                                                      MultivaluedMap<String, String> params) {
         Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
         boolean enforcement = config.services().iam().enforcementEnabled();
-        String auth = headers == null ? null : headers.getHeaderString("Authorization");
+        String auth = IamEnforcementFilter.requestAuthorization(
+                headers == null ? null : headers.getHeaderString("Authorization"),
+                uriInfo == null ? null : uriInfo.getQueryParameters());
         String callerAccount = accountResolver.resolve(auth);
         String callerArn = iamService.resolveCallerArn(
                         auth == null ? null : accountResolver.extractAccessKeyId(auth))
                 .orElse(AwsArnUtils.Arn.global(regionResolver.getPartition(), "iam", callerAccount, "root").toString());
+        String accessKeyId = auth == null ? null : accountResolver.extractAccessKeyId(auth);
+        String principalArn = iamService.resolvePrincipalArn(accessKeyId).orElse(callerArn);
+        Map<String, List<String>> requestContext = IamConditionContextResolver.withGlobalContext(
+                null, roleArn, regionResolver.getRegion(), callerAccount, roleAccountId);
+        requestContext.put("sts:RoleSessionName", List.of(getParam(params, "RoleSessionName")));
+        String externalId = getParam(params, "ExternalId");
+        if (externalId != null) {
+            requestContext.put("sts:ExternalId", List.of(externalId));
+        }
         boolean permitted = role.isPresent()
                 && roleArnMatches(roleArn, role.get())
                 && (!enforcement
-                    || trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, callerAccount));
+                    || trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, principalArn,
+                            callerAccount, requestContext));
         if (permitted) {
             return AssumeRoleTrustOutcome.allow(role.get());
         }
@@ -294,7 +315,7 @@ public class StsQueryHandler {
 
         String provider = verified != null ? verified.issuer()
                 : (providerId != null && !providerId.isBlank() ? providerId : "accounts.google.com");
-        String audience = verified != null ? verified.audience() : "sts.amazonaws.com";
+        String audience = verified != null ? verified.audience() : STS_AUDIENCE;
         String subject = verified != null ? verified.subject() : "web-identity-subject";
 
         String sessionPolicy = getParam(params, "Policy");

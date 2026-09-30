@@ -48,6 +48,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -102,6 +103,8 @@ public class EksService implements TagHandler, ResourceProvider {
     private final EksAddonService addons;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, UserDataClaim> appliedClusterUserData = new ConcurrentHashMap<>();
+    private final Map<String, Object> nodeGroupCapacityLocks = new ConcurrentHashMap<>();
+    private final Map<String, CompletableFuture<Boolean>> pendingFirstNodeGroups = new ConcurrentHashMap<>();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -126,6 +129,9 @@ public class EksService implements TagHandler, ResourceProvider {
         this.accessEntries = accessEntries;
         this.podIdentityAssociations = podIdentityAssociations;
         this.addons = addons;
+        if (this.clusterManager != null) {
+            this.clusterManager.setEc2Service(this.ec2Service);
+        }
     }
 
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -201,6 +207,10 @@ public class EksService implements TagHandler, ResourceProvider {
                 LOG.infov("Restoring k3s container for persisted EKS cluster {0}", cluster.getName());
                 cluster.setStatus(ClusterStatus.CREATING);
                 cluster.setPodCidr(EksClusterManager.DEFAULT_POD_CIDR);
+                if (cluster.getNodeInstanceType() == null) {
+                    firstNodeGroup(cluster.getName(), entry.accountId()).ifPresent(group ->
+                            cluster.setNodeInstanceType(selectedNodeInstanceType(group)));
+                }
                 clusterManager.restoreCluster(cluster);
             } catch (Exception e) {
                 if (!clusterManager.isDockerReachable()) {
@@ -228,6 +238,22 @@ public class EksService implements TagHandler, ResourceProvider {
                         cluster.getAccountId() != null ? cluster.getAccountId() : regionResolver.getAccountId(),
                         cluster.getName(), cluster))
                 .toList();
+    }
+
+    private Optional<Nodegroup> firstNodeGroup(String clusterName, String accountId) {
+        String prefix = clusterName + "/";
+        List<Nodegroup> groups;
+        if (nodeGroupStorage instanceof AccountAwareStorageBackend<Nodegroup> aware) {
+            groups = aware.scanAllAccountEntries(key -> key.startsWith(prefix)).stream()
+                    .filter(entry -> accountId.equals(entry.accountId()))
+                    .map(AccountAwareStorageBackend.AccountEntry::value).toList();
+        } else {
+            groups = nodeGroupStorage.scan(key -> key.startsWith(prefix));
+        }
+        return groups.stream().filter(group -> group.getStatus() == NodegroupStatus.ACTIVE)
+                .min(Comparator.comparing(Nodegroup::getCreatedAt,
+                        Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(Nodegroup::getNodegroupName));
     }
 
     /**
@@ -437,10 +463,15 @@ public class EksService implements TagHandler, ResourceProvider {
         if (!config.services().eks().mock()) {
             boolean keepRunning = config.services().eks().keepRunningOnShutdown();
             for (Cluster cluster : allClusters()) {
-                if (keepRunning) {
-                    clusterManager.detachCluster(cluster);
-                } else {
-                    clusterManager.stopCluster(cluster);
+                try {
+                    if (keepRunning) {
+                        clusterManager.detachCluster(cluster);
+                    } else {
+                        clusterManager.stopCluster(cluster);
+                    }
+                } catch (RuntimeException e) {
+                    LOG.warnv("Could not clean up EKS cluster {0} during shutdown: {1}",
+                            cluster.getName(), e.getMessage());
                 }
             }
         }
@@ -710,13 +741,128 @@ public class EksService implements TagHandler, ResourceProvider {
         nodeGroup.setLabels(request.getLabels() != null ? new HashMap<>(request.getLabels()) : null);
         nodeGroup.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
 
-        if (launchTemplateData != null && launchTemplateData.getUserData() != null
-                && !launchTemplateData.getUserData().isBlank()) {
-            applyNodeGroupUserData(cluster, nodegroupName, launchTemplateData.getUserData(), nodeGroup);
-        }
+        String capacityKey = accountId + "/" + clusterName;
+        Object capacityLock = nodeGroupCapacityLocks.computeIfAbsent(capacityKey,
+                ignored -> new Object());
+        boolean hasUserData = launchTemplateData != null && launchTemplateData.getUserData() != null
+                && !launchTemplateData.getUserData().isBlank();
+        Cluster currentCluster;
+        CompletableFuture<Boolean> pendingFirst;
+        boolean ownsPendingFirst = false;
+        synchronized (capacityLock) {
+            if (nodeGroupStorage.get(storageKey).isPresent()) {
+                throw new AwsException("ResourceInUseException",
+                        "Nodegroup already exists: " + nodegroupName, 409);
+            }
+            currentCluster = describeCluster(clusterName);
+            pendingFirst = pendingFirstNodeGroups.get(capacityKey);
+            boolean firstGroup = firstNodeGroup(clusterName, accountId).isEmpty() && pendingFirst == null;
+            if (firstGroup && !config.services().eks().mock() && clusterManager != null) {
+                applyFirstNodeGroupCapacity(clusterName, nodegroupName, currentCluster, nodeGroup);
+            } else if (!firstGroup && pendingFirst == null
+                    && !config.services().eks().mock() && clusterManager != null) {
+                if (currentCluster.getNodeInstanceType() == null) {
+                    firstNodeGroup(clusterName, accountId).ifPresent(group ->
+                            currentCluster.setNodeInstanceType(selectedNodeInstanceType(group)));
+                    storage.put(clusterName, currentCluster);
+                }
+                if (!nodeGroup.getInstanceTypes().isEmpty()
+                        && !nodeGroup.getInstanceTypes().contains(currentCluster.getNodeInstanceType())) {
+                    LOG.warnv("EKS cluster {0} has one shared node; nodegroup {1} cannot change its capacity from {2}",
+                            clusterName, nodegroupName, currentCluster.getNodeInstanceType());
+                }
+            }
 
-        nodeGroupStorage.put(storageKey, nodeGroup);
+            if (nodeGroup.getStatus() == NodegroupStatus.ACTIVE && (hasUserData || pendingFirst != null)) {
+                nodeGroup.setStatus(NodegroupStatus.CREATING);
+                if (firstGroup && hasUserData) {
+                    pendingFirst = new CompletableFuture<>();
+                    ownsPendingFirst = true;
+                }
+            }
+            nodeGroupStorage.put(storageKey, nodeGroup);
+            if (ownsPendingFirst) {
+                pendingFirstNodeGroups.put(capacityKey, pendingFirst);
+            }
+        }
+        if (nodeGroup.getStatus() == NodegroupStatus.CREATING && hasUserData) {
+            try {
+                applyNodeGroupUserData(currentCluster, nodegroupName, launchTemplateData.getUserData(), nodeGroup);
+            } catch (Throwable e) {
+                synchronized (capacityLock) {
+                    if (nodeGroupStorage.get(storageKey)
+                            .filter(saved -> arn.equals(saved.getNodegroupArn())).isPresent()) {
+                        nodeGroupStorage.delete(storageKey);
+                    }
+                    if (ownsPendingFirst) {
+                        pendingFirstNodeGroups.remove(capacityKey, pendingFirst);
+                        pendingFirst.complete(false);
+                    }
+                }
+                throw e;
+            }
+        }
+        if (pendingFirst != null && !ownsPendingFirst) {
+            pendingFirst.join();
+        }
+        synchronized (capacityLock) {
+            boolean stored = false;
+            try {
+                if (nodeGroupStorage.get(storageKey)
+                        .filter(saved -> arn.equals(saved.getNodegroupArn())).isPresent()) {
+                    if (nodeGroup.getStatus() == NodegroupStatus.CREATING) {
+                        if (!ownsPendingFirst && firstNodeGroup(clusterName, accountId).isEmpty()
+                                && !config.services().eks().mock() && clusterManager != null) {
+                            Cluster refreshedCluster = describeCluster(clusterName);
+                            applyFirstNodeGroupCapacity(clusterName, nodegroupName, refreshedCluster, nodeGroup);
+                        }
+                        if (nodeGroup.getStatus() == NodegroupStatus.CREATING) {
+                            nodeGroup.setStatus(NodegroupStatus.ACTIVE);
+                        }
+                    }
+                    nodeGroupStorage.put(storageKey, nodeGroup);
+                    stored = true;
+                }
+            } finally {
+                if (ownsPendingFirst) {
+                    pendingFirstNodeGroups.remove(capacityKey, pendingFirst);
+                    pendingFirst.complete(stored && nodeGroup.getStatus() == NodegroupStatus.ACTIVE);
+                }
+            }
+        }
         return nodeGroup;
+    }
+
+    private void applyFirstNodeGroupCapacity(String clusterName, String nodegroupName,
+                                              Cluster currentCluster, Nodegroup nodeGroup) {
+        String selectedType = selectedNodeInstanceType(nodeGroup);
+        String previousType = EksClusterManager.nodeInstanceType(currentCluster);
+        currentCluster.setNodeInstanceType(selectedType);
+        if (currentCluster.getContainerId() != null && !selectedType.equals(previousType)) {
+            currentCluster.setStatus(ClusterStatus.CREATING);
+            try {
+                if (!clusterManager.restartForNodeCapacity(currentCluster, previousType)) {
+                    nodeGroup.setStatus(NodegroupStatus.CREATE_FAILED);
+                    nodeGroup.setHealth(failedNodeGroupHealth(nodegroupName,
+                            "Could not apply node capacity; the previous node was restored"));
+                }
+            } catch (RuntimeException e) {
+                currentCluster.setNodeInstanceType(previousType);
+                currentCluster.setStatus(ClusterStatus.FAILED);
+                nodeGroup.setStatus(NodegroupStatus.CREATE_FAILED);
+                nodeGroup.setHealth(failedNodeGroupHealth(nodegroupName, e.getMessage()));
+                LOG.errorv("EKS cluster {0} could not recover after node capacity change: {1}",
+                        clusterName, e.getMessage());
+            }
+        }
+        storage.put(clusterName, currentCluster);
+    }
+
+    private String selectedNodeInstanceType(Nodegroup group) {
+        String requestedType = group.getInstanceTypes() == null || group.getInstanceTypes().isEmpty()
+                ? null : group.getInstanceTypes().getFirst();
+        String selectedType = clusterManager.selectNodeInstanceType(requestedType);
+        return selectedType != null ? selectedType : EksClusterManager.DEFAULT_NODE_INSTANCE_TYPE;
     }
 
     private LaunchTemplateData validateLaunchTemplate(String region, Object launchTemplateObj) {
@@ -772,11 +918,15 @@ public class EksService implements TagHandler, ResourceProvider {
     }
 
     public Nodegroup deleteNodeGroup(String clusterName, String nodegroupName) {
-        Nodegroup nodeGroup = describeNodeGroup(clusterName, nodegroupName);
-        nodeGroup.setStatus(NodegroupStatus.DELETING);
-        nodeGroup.setModifiedAt(Instant.now());
-        nodeGroupStorage.delete(nodeGroupKey(clusterName, nodegroupName));
-        return nodeGroup;
+        Object capacityLock = nodeGroupCapacityLocks.computeIfAbsent(
+                regionResolver.getAccountId() + "/" + clusterName, ignored -> new Object());
+        synchronized (capacityLock) {
+            Nodegroup nodeGroup = describeNodeGroup(clusterName, nodegroupName);
+            nodeGroup.setStatus(NodegroupStatus.DELETING);
+            nodeGroup.setModifiedAt(Instant.now());
+            nodeGroupStorage.delete(nodeGroupKey(clusterName, nodegroupName));
+            return nodeGroup;
+        }
     }
 
     public FargateProfile createFargateProfile(String clusterName, CreateFargateProfileRequest request) {
