@@ -12,11 +12,15 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.security.cert.X509Certificate;
+import java.util.Arrays;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class CloudHsmCertificateChainIntegrationTest {
@@ -27,7 +31,7 @@ class CloudHsmCertificateChainIntegrationTest {
     }
 
     @Test
-    void createClusterIssuesVerifiableHardwareCertificateChain() throws Exception {
+    void createClusterIssuesTwoCertificatesForTheSameHardwareKey() throws Exception {
         JsonPath response = given()
                 .header("X-Amz-Target", "BaldrApiService.CreateCluster")
                 .contentType("application/x-amz-json-1.1")
@@ -48,20 +52,43 @@ class CloudHsmCertificateChainIntegrationTest {
         X509Certificate hsm = generator.parseCertificate(
                 response.getString("Cluster.Certificates.HsmCertificate"));
 
-        assertIssuedBy(manufacturer, manufacturer);
-        assertIssuedBy(aws, manufacturer);
+        assertEquals(manufacturer.getSubjectX500Principal(), aws.getSubjectX500Principal());
+        assertArrayEquals(manufacturer.getPublicKey().getEncoded(), aws.getPublicKey().getEncoded());
+        assertArrayEquals(subjectKeyIdentifier(manufacturer), subjectKeyIdentifier(aws));
+        assertTrue(manufacturer.getBasicConstraints() >= 0);
+        assertTrue(aws.getBasicConstraints() >= 0);
+        assertTrue(manufacturer.getKeyUsage()[5]);
+        assertTrue(aws.getKeyUsage()[5]);
+
+        assertNotEquals(manufacturer.getSubjectX500Principal(), manufacturer.getIssuerX500Principal());
+        assertNotEquals(aws.getSubjectX500Principal(), aws.getIssuerX500Principal());
+        assertNotEquals(manufacturer.getIssuerX500Principal(), aws.getIssuerX500Principal());
+        assertFalse(Arrays.equals(authorityKeyIdentifier(manufacturer), authorityKeyIdentifier(aws)));
+        assertFalse(Arrays.equals(subjectKeyIdentifier(manufacturer), authorityKeyIdentifier(manufacturer)));
+        assertFalse(Arrays.equals(subjectKeyIdentifier(aws), authorityKeyIdentifier(aws)));
+
+        assertEquals(-1, hsm.getBasicConstraints());
+        assertFalse(Arrays.equals(hsm.getPublicKey().getEncoded(), aws.getPublicKey().getEncoded()));
         assertIssuedBy(hsm, aws);
+        assertIssuedBy(hsm, manufacturer);
     }
 
     private static void assertIssuedBy(X509Certificate certificate, X509Certificate issuer) throws Exception {
         assertEquals(issuer.getSubjectX500Principal(), certificate.getIssuerX500Principal());
         assertNotNull(certificate.getExtensionValue(Extension.subjectKeyIdentifier.getId()));
-        assertNotNull(certificate.getExtensionValue(Extension.authorityKeyIdentifier.getId()));
-        byte[] issuerKeyId = SubjectKeyIdentifier.getInstance(ASN1OctetString.getInstance(
-                issuer.getExtensionValue(Extension.subjectKeyIdentifier.getId())).getOctets()).getKeyIdentifier();
-        byte[] authorityKeyId = AuthorityKeyIdentifier.getInstance(ASN1OctetString.getInstance(
-                certificate.getExtensionValue(Extension.authorityKeyIdentifier.getId())).getOctets()).getKeyIdentifier();
-        assertArrayEquals(issuerKeyId, authorityKeyId);
+        assertArrayEquals(subjectKeyIdentifier(issuer), authorityKeyIdentifier(certificate));
         certificate.verify(issuer.getPublicKey());
+    }
+
+    private static byte[] subjectKeyIdentifier(X509Certificate certificate) {
+        assertNotNull(certificate.getExtensionValue(Extension.subjectKeyIdentifier.getId()));
+        return SubjectKeyIdentifier.getInstance(ASN1OctetString.getInstance(
+                certificate.getExtensionValue(Extension.subjectKeyIdentifier.getId())).getOctets()).getKeyIdentifier();
+    }
+
+    private static byte[] authorityKeyIdentifier(X509Certificate certificate) {
+        assertNotNull(certificate.getExtensionValue(Extension.authorityKeyIdentifier.getId()));
+        return AuthorityKeyIdentifier.getInstance(ASN1OctetString.getInstance(
+                certificate.getExtensionValue(Extension.authorityKeyIdentifier.getId())).getOctets()).getKeyIdentifier();
     }
 }

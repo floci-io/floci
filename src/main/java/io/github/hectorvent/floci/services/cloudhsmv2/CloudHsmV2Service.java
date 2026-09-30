@@ -29,6 +29,7 @@ import java.io.StringWriter;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Backup;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.BackupRetentionPolicy;
 import java.time.temporal.ChronoUnit;
@@ -170,24 +171,40 @@ public class CloudHsmV2Service {
         certs.setClusterCsr(generateCsr(clusterId));
 
         try {
-            KeyPair mfrKeyPair = generateKeyPair();
-            X500Name mfrName = new X500Name("CN=HSM Manufacturer CA,O=AWS,C=US");
-            certs.setManufacturerHardwareCertificate(certificateGenerator.toPem(certificateGenerator.signCertificate(
-                    mfrName, mfrKeyPair.getPublic(), mfrName, mfrKeyPair.getPrivate(), List.of(), true, null, 365)));
-
             Instant certificateNotBefore = Instant.now();
             Instant certificateNotAfter = certificateNotBefore.plus(365, ChronoUnit.DAYS);
-            KeyPair awsKeyPair = generateKeyPair();
-            X500Name awsName = new X500Name("CN=AWS CloudHSM Hardware CA,O=AWS,C=US");
+            Instant rootNotAfter = certificateNotBefore.plus(3650, ChronoUnit.DAYS);
+
+            KeyPair manufacturerRootKeyPair = generateKeyPair();
+            X500Name manufacturerRootName = new X500Name("CN=HSM Manufacturer Root CA,O=AWS,C=US");
+            X509Certificate manufacturerRoot = certificateGenerator.signCertificate(
+                    manufacturerRootName, manufacturerRootKeyPair.getPublic(), manufacturerRootName,
+                    manufacturerRootKeyPair.getPrivate(), List.of(), true, null,
+                    certificateNotBefore, rootNotAfter);
+
+            KeyPair awsRootKeyPair = generateKeyPair();
+            X500Name awsRootName = new X500Name("CN=AWS CloudHSM Root CA,O=AWS,C=US");
+            X509Certificate awsRoot = certificateGenerator.signCertificate(
+                    awsRootName, awsRootKeyPair.getPublic(), awsRootName,
+                    awsRootKeyPair.getPrivate(), List.of(), true, null,
+                    certificateNotBefore, rootNotAfter);
+
+            KeyPair hardwareKeyPair = generateKeyPair();
+            X500Name hardwareName = new X500Name("CN=HSM Hardware " + clusterId + ",O=AWS,C=US");
+            certs.setManufacturerHardwareCertificate(certificateGenerator.toPem(certificateGenerator.signCertificate(
+                    hardwareName, hardwareKeyPair.getPublic(), manufacturerRootName,
+                    manufacturerRootKeyPair.getPrivate(), List.of(), true, null,
+                    certificateNotBefore, certificateNotAfter, manufacturerRoot.getPublicKey())));
             certs.setAwsHardwareCertificate(certificateGenerator.toPem(certificateGenerator.signCertificate(
-                    awsName, awsKeyPair.getPublic(), mfrName, mfrKeyPair.getPrivate(), List.of(), true, null,
-                    certificateNotBefore, certificateNotAfter, mfrKeyPair.getPublic())));
+                    hardwareName, hardwareKeyPair.getPublic(), awsRootName,
+                    awsRootKeyPair.getPrivate(), List.of(), true, null,
+                    certificateNotBefore, certificateNotAfter, awsRoot.getPublicKey())));
 
             KeyPair hsmKeyPair = generateKeyPair();
             X500Name hsmName = new X500Name("CN=HSM Instance " + clusterId + ",O=AWS,C=US");
             certs.setHsmCertificate(certificateGenerator.toPem(certificateGenerator.signCertificate(
-                    hsmName, hsmKeyPair.getPublic(), awsName, awsKeyPair.getPrivate(), List.of(), false, null,
-                    certificateNotBefore, certificateNotAfter, awsKeyPair.getPublic())));
+                    hsmName, hsmKeyPair.getPublic(), hardwareName, hardwareKeyPair.getPrivate(), List.of(), false, null,
+                    certificateNotBefore, certificateNotAfter, hardwareKeyPair.getPublic())));
         } catch (Exception e) {
             LOG.warnv("Failed to generate emulated hardware certs: {0}", e.getMessage());
         }
