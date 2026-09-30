@@ -179,6 +179,67 @@ Floci tags the cluster security group with the standard AWS system tags:
 - **Backfill**: Existing persisted clusters that were created before this feature receive an auto-generated cluster security group during startup backfill if their VPC is present.
 - **Rules**: In accordance with AWS EKS behavior, the cluster security group includes a self-referencing inbound rule allowing all traffic from members of the same security group to enable control plane and node communication, a self-referencing outbound rule for Elastic Fabric Adapter (EFA) traffic, and the standard EC2 outbound rule.
 
+## Custom control-plane and node arguments (emulator affordance)
+
+Floci allows callers to pass custom flags to k3s server components when creating an EKS cluster via resource tags. This is an emulator affordance with no direct AWS equivalent, intended for testing configurations that require custom kubelet or control plane flags in local environments.
+
+### Tag formats
+
+Custom arguments are supplied as tags in `CreateCluster`:
+
+- Prefixed flag tag: `floci:kubelet-arg:<flag>=<value>` or `floci:kubelet-arg:<flag>` with tag value set to `<value>` (for example, `floci:kubelet-arg:max-pods` = `250`).
+- Plural tag: `floci:kubelet-args` with tag value set to a JSON array of flag strings (for example, `["max-pods=250", "image-gc-high-threshold-percent=80"]`) or newline-separated lines.
+- Singular tag: `floci:kubelet-arg` with tag value set to `<flag>=<value>`.
+
+The supported component prefixes correspond to k3s server argument flags:
+- `kubelet` (`--kubelet-arg`): worker node kubelet settings.
+- `kube-apiserver` or `apiserver` (`--kube-apiserver-arg`): Kubernetes API server settings.
+- `kube-controller-manager` or `controller-manager` (`--kube-controller-manager-arg`): controller manager settings.
+- `kube-scheduler` or `scheduler` (`--kube-scheduler-arg`): scheduler settings.
+- `kube-cloud-controller-manager` (`--kube-cloud-controller-manager-arg`): cloud controller manager settings.
+
+### Common examples
+
+- **Kubelet capacity**: `floci:kubelet-arg:max-pods=250` raises the pod ceiling on the local node.
+- **Kubelet garbage collection**: `floci:kubelet-args` = `["image-gc-high-threshold-percent=70", "image-gc-low-threshold-percent=50"]`.
+- **API server feature gates**: `floci:kube-apiserver-arg:feature-gates=CSIStorageCapacity=true`.
+- **Controller manager single-node tuning**: `floci:kube-controller-manager-arg:leader-elect=false`.
+
+### Collision rules and Floci-managed arguments
+
+Floci manages a specific set of flags required for container networking, IAM authentication, audit logging, and topology emulation. Passing a conflicting value for any of these flags causes `CreateCluster` to reject the request with `InvalidParameterException` (HTTP 400).
+
+Floci manages the following 14 flags:
+- Kubelet:
+  - `provider-id`: manages EC2 worker node identity.
+  - `node-labels`: manages topology zones and instance types.
+  - `system-reserved`: manages memory and CPU reservations.
+  - `kube-reserved`: manages kubelet resource allocations.
+  - `eviction-hard`: manages memory pressure thresholds.
+- API server:
+  - `authentication-token-webhook-config-file`: manages worker IAM authentication.
+  - `authentication-token-webhook-version`: token webhook protocol version.
+  - `authentication-token-webhook-cache-ttl`: webhook cache duration.
+  - `service-account-issuer`: IRSA OIDC discovery issuer URL.
+  - `service-account-key-file`: IRSA public signing key.
+  - `service-account-signing-key-file`: IRSA private signing key.
+  - `audit-policy-file`: EKS control plane audit policy.
+  - `audit-log-path`: audit log destination.
+  - `audit-log-maxage`: audit log retention days.
+  - `audit-log-maxbackup`: audit log file rotation count.
+  - `audit-log-maxsize`: audit log rotation size.
+
+### Refused arguments
+
+The following flags are refused outright because k3s uses an embedded SQLite (kine) engine and overriding them corrupts the datastore:
+- `storage-backend`
+- `etcd-servers`
+
+### Error handling and tag stripping
+
+- **Malformed arguments**: If an argument tag is blank, contains control characters, or cannot be parsed, Floci logs a warning and proceeds with cluster creation.
+- **Tag privacy and immutability**: All `floci:*` tags are stripped from public responses and are not returned by `DescribeCluster` or `ListTagsForResource`. Modification via `TagResource` after creation is rejected with `ValidationException`.
+
 ## Encryption and logging configuration
 
 EKS clusters support configuring KMS envelope encryption for secrets and control plane logging export.

@@ -528,6 +528,11 @@ public class EksClusterManager
             }
         }
 
+        List<String> callerArgs = resolveCallerArgs(cluster);
+        if (!callerArgs.isEmpty()) {
+            serverArgs.addAll(callerArgs);
+        }
+
         if (config.services().eks().disableCni()) {
             // A container's /sys mount defaults to private propagation, which breaks
             // Cilium's BPF filesystem mount ("mounted on /sys but it is not a shared or
@@ -1237,6 +1242,29 @@ public class EksClusterManager
         wrappedCmd.add("floci-k3s");
         wrappedCmd.addAll(serverArgs);
         return wrappedCmd;
+    }
+
+    /**
+     * Resolves caller-supplied k3s arguments configured on the cluster or in its creation tags.
+     */
+    List<String> resolveCallerArgs(Cluster cluster) {
+        if (cluster == null) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        if (cluster.getClusterArgs() != null && !cluster.getClusterArgs().isEmpty()) {
+            EksClusterArgs.validateClusterArgs(cluster.getClusterArgs());
+            result.addAll(cluster.getClusterArgs());
+        }
+        if (cluster.getTags() != null && !cluster.getTags().isEmpty()) {
+            List<String> fromTags = EksClusterArgs.parseAndValidateClusterArgs(cluster.getTags(), cluster.getName());
+            for (String arg : fromTags) {
+                if (!result.contains(arg)) {
+                    result.add(arg);
+                }
+            }
+        }
+        return result;
     }
 
     /**

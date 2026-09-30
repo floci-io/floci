@@ -92,12 +92,13 @@ public class EksController {
      * causes Jackson to omit the property due to @JsonInclude(NON_DEFAULT).
      */
     private Cluster toClusterResponse(Cluster cluster) {
-        if (cluster == null || (!cluster.isExplicitVersion() && cluster.getNodeInstanceType() == null)) {
+        if (cluster == null || (!cluster.isExplicitVersion() && cluster.getNodeInstanceType() == null && cluster.getClusterArgs() == null)) {
             return cluster;
         }
         Cluster response = cluster.copy();
         response.setExplicitVersion(false);
         response.setNodeInstanceType(null);
+        response.setClusterArgs(null);
         return response;
     }
 
