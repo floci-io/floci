@@ -2874,7 +2874,7 @@ public class AslExecutor {
                             : resolveParameters(itemTransform, mapInput, iterContext);
                 }
                 if (!distributed) {
-                    iterationChain.publish("MapIterationStarted", Map.of("name", name, "index", i));
+                    iterationChain.publishIterationStart("MapIterationStarted", Map.of("name", name, "index", i));
                 }
                 iterationStarted = true;
                 if (hasResultWriter) {
@@ -2925,9 +2925,9 @@ public class AslExecutor {
         if (childCount > 0) {
             List<JsonNode> itemOutputs;
             // The iterations a failure cuts, each read and cut in one step before it is cancelled,
-            // as a Parallel does with its branches (cutAfterFailure). Filled on this thread. An
-            // iteration that has recorded its end is not cut: the scheduler names every iteration it
-            // has not yet taken off its queue, ended or not.
+            // as a Parallel does with its branches (cutAfterFailure). Filled on this thread. Only an
+            // iteration whose start is recorded and whose end is not gets recorded: the scheduler
+            // names every iteration it has not yet taken off its queue, started or ended or not.
             List<CutIteration> cutIterations = new ArrayList<>();
             try {
                 itemOutputs = MapIterationScheduler.execute(
@@ -2943,11 +2943,17 @@ public class AslExecutor {
                 // A Distributed Map's chain stays at MapRunStarted, as on AWS.
                 if (!distributed) {
                     chain.continueFrom(iterationChains.get(e.index).lastEventId());
-                    // One condition for both, so the cut iterations are never recorded without the
-                    // MapIterationFailed of the iteration that cut them: a States.Runtime failure
-                    // records neither, even when it is a declared tolerance it exceeded.
-                    if (e.recordFailed) {
+                    // Each event follows the rule of the one it accompanies. The cut iterations are
+                    // recorded right before MapStateFailed and follow its rule: the failure that ends
+                    // the Map is not States.Runtime. MapIterationFailed follows the iteration's own:
+                    // it started, and its own error is not States.Runtime. The two differ for an
+                    // ItemSelector that fails before the iteration starts, which cuts the others but
+                    // has no iteration to report, and for a States.Runtime failure that exceeds a
+                    // declared tolerance, where the Map ends with the tolerance error instead.
+                    if (!e.failure.isRuntimeError()) {
                         publishCutIterations(chain, name, cutIterations);
+                    }
+                    if (e.recordFailed) {
                         chain.publishBeside("MapIterationFailed", Map.of("name", name, "index", e.index));
                     }
                 } else {
@@ -5877,7 +5883,7 @@ public class AslExecutor {
 
     private static void cutIteration(HistoryChain iteration, int index, List<CutIteration> cutIterations) {
         HistoryChain.IterationCut cut = iteration.abandonIteration();
-        if (!cut.ended()) {
+        if (cut.recorded()) {
             cutIterations.add(new CutIteration(index, cut.stateType()));
         }
     }

@@ -277,19 +277,71 @@ class AslExecutorParallelCutTest {
     }
 
     /**
-     * A States.Runtime failure records no MapIterationFailed, and the iterations it cuts are then
-     * not recorded either, even when what ends the Map is the tolerance it exceeded.
+     * Each event follows the rule of the one it accompanies. A States.Runtime failure in an
+     * iteration records no MapIterationFailed; when what ends the Map is the tolerance it exceeded,
+     * MapStateFailed is recorded, and so are the iterations that failure cut, right before it.
      */
     @Test
-    void aRuntimeFailureThatExceedsTheToleranceRecordsNeitherTheIterationNorTheOnesItCut() {
+    void aRuntimeFailureThatExceedsTheToleranceRecordsTheOnesItCutButNotItself() {
         String map = MAP_WITH_A_FAILING_ITERATION.replace("\"Type\":\"Map\",", "\"Type\":\"Map\",\"ToleratedFailureCount\":0,")
                 .replace("\"Default\":\"Nest\",", "");
         Execution execution = run(map, sleeper(1), 0, "[{\"kind\":\"wait\"},{\"kind\":\"nomatch\"}]");
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.ExceedToleratedFailureThreshold", execution.getError());
-        assertTrue(types().stream().noneMatch(type -> type.contains("Aborted") || type.equals("MapIterationFailed")),
+        assertTrue(types().stream().noneMatch("MapIterationFailed"::equals), types().toString());
+        int stateFailed = types().indexOf("MapStateFailed");
+        assertEquals(List.of("MapIterationAborted", "WaitStateAborted"), types().subList(stateFailed - 2, stateFailed),
                 types().toString());
+    }
+
+    /**
+     * A States.Runtime failure that ends the Map records no MapStateFailed, and nothing for the
+     * iterations it cut either.
+     */
+    @Test
+    void aRuntimeFailureThatEndsTheMapRecordsNothingForTheOnesItCut() {
+        String map = MAP_WITH_A_FAILING_ITERATION.replace("\"Default\":\"Nest\",", "");
+        Execution execution = run(map, sleeper(1), 0, "[{\"kind\":\"wait\"},{\"kind\":\"nomatch\"}]");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.Runtime", execution.getError());
+        assertTrue(types().stream().noneMatch(type -> type.contains("Aborted") || type.endsWith("Failed")
+                && !type.equals("ExecutionFailed")), types().toString());
+    }
+
+    /**
+     * An ItemSelector that fails does so before its iteration starts, so there is no
+     * MapIterationFailed to record, but the Map fails with the expression's error and the
+     * iterations it cut are recorded before MapStateFailed. Which state the other iteration had
+     * reached by then is a race the test does not fix, so it asserts the invariant over many runs:
+     * an iteration is recorded cut exactly when its start is recorded and its end is not.
+     */
+    @Test
+    void anItemSelectorFailureRecordsTheIterationsItCutOnlyOnceTheyStarted() {
+        String map = """
+                {"Type":"Map","End":true,"QueryLanguage":"JSONata","Items":"{% $states.input %}",
+                  "ItemSelector":{"kind":"{% $states.context.Map.Item.Value.kind %}",
+                                  "v":"{% $states.context.Map.Item.Value.v %}"},
+                  "ItemProcessor":{"ProcessorConfig":{"Mode":"INLINE"},"StartAt":"Long","States":{
+                    "Long":{"Type":"Wait","Seconds":20,"End":true}}}}""";
+        for (int round = 0; round < 40; round++) {
+            Execution execution = run(map, nanos -> TimeUnit.NANOSECONDS.sleep(nanos), 0,
+                    "[{\"kind\":\"wait\",\"v\":1},{\"kind\":\"selector\"}]");
+
+            assertEquals("FAILED", execution.getStatus(), types().toString());
+            assertEquals("States.QueryEvaluationError", execution.getError(), types().toString());
+            assertTrue(types().contains("MapStateFailed"), types().toString());
+            assertTrue(types().stream().noneMatch("MapIterationFailed"::equals), types().toString());
+            boolean started = types().contains("MapIterationStarted");
+            boolean ended = types().contains("MapIterationSucceeded");
+            assertEquals(started && !ended, types().contains("MapIterationAborted"), "round " + round + ": " + types());
+            boolean inWait = types().contains("WaitStateEntered") && !types().contains("WaitStateExited");
+            assertEquals(started && !ended && inWait, types().contains("WaitStateAborted"), "round " + round + ": " + types());
+            if (types().contains("MapIterationAborted")) {
+                assertTrue(types().indexOf("MapIterationAborted") < types().indexOf("MapStateFailed"), types().toString());
+            }
+        }
     }
 
     @Test

@@ -21,6 +21,7 @@ final class HistoryChain {
     private final HistoryChain parent;
     private volatile boolean abandoned;
     private String activeStateType;
+    private boolean iterationStarted;
     private boolean iterationEnded;
     private long lastEventId;
     private long tailEventId;
@@ -122,6 +123,16 @@ final class HistoryChain {
     }
 
     /**
+     * Publishes the event that starts a Map iteration and marks it started, under the same lock a
+     * cut takes, so an iteration is reported cut only when its start is recorded.
+     */
+    synchronized void publishIterationStart(String type, Map<String, Object> details) {
+        if (publish(type, details) > 0) {
+            iterationStarted = true;
+        }
+    }
+
+    /**
      * Publishes the event that ends a Map iteration and marks the iteration ended, under the same
      * lock a cut takes, so an iteration is reported either ended or cut, never both.
      */
@@ -137,19 +148,24 @@ final class HistoryChain {
     }
 
     /**
-     * What a cut found an iteration doing: already ended, or else inside {@code stateType}, or
-     * between states when that is null.
+     * What a cut found an iteration doing: not yet started, already ended, or else inside
+     * {@code stateType}, or between states when that is null.
      */
-    record IterationCut(boolean ended, String stateType) {}
+    record IterationCut(boolean started, boolean ended, String stateType) {
+        /** True for an iteration whose start is recorded and whose end never will be. */
+        boolean recorded() {
+            return started && !ended;
+        }
+    }
 
     /**
-     * Cuts the chain like {@link #abandonInState} and also reports whether the iteration had already
-     * recorded its end. An iteration cut first records no end event afterwards; one that ended first
-     * is not reported as cut.
+     * Cuts the chain like {@link #abandonInState} and also reports whether the iteration had
+     * recorded its start and its end. An iteration cut first records neither afterwards; one that
+     * ended first is not reported as cut, and one that had not started is not reported at all.
      */
     synchronized IterationCut abandonIteration() {
         abandoned = true;
-        return new IterationCut(iterationEnded, activeStateType);
+        return new IterationCut(iterationStarted, iterationEnded, activeStateType);
     }
 
     private boolean isAbandoned() {
