@@ -14,14 +14,18 @@ import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.AdditionalMatchers.aryEq;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -240,6 +244,26 @@ class LambdaArnInvocationAccountTest {
         assertTrue(rawFunctions.get(targetAccount + "/" + functionKey).isEmpty());
         assertEquals(foreignAlias, rawAliases.get(aliasKey).orElseThrow());
         assertTrue(rawAliases.get(targetAccount + "/" + aliasKey).isEmpty());
+    }
+
+    @Test
+    void deleteFunctionDropsPendingEventsBeforeAndAfterRemovingTheFunction() {
+        String defaultAccount = "000000000000";
+        String region = "ap-south-1";
+        String functionName = "deleted-function";
+        LambdaFunctionStore functionStore = new LambdaFunctionStore(
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, defaultAccount));
+        functionStore.save(region, function(functionName,
+                "arn:aws:lambda:" + region + ":" + defaultAccount + ":function:" + functionName, "$LATEST"));
+        LambdaExecutorService executor = mock(LambdaExecutorService.class);
+        LambdaService service = service(functionStore, null, executor, region, defaultAccount);
+        List<Boolean> storedAtEachDrop = new ArrayList<>();
+        doAnswer(invocation -> storedAtEachDrop.add(service.isLive(invocation.getArgument(0))))
+                .when(executor).dropPending(any());
+
+        service.deleteFunction(region, functionName);
+
+        assertEquals(List.of(true, false), storedAtEachDrop);
     }
 
     private static LambdaFunction function(String functionName, String functionArn, String version) {

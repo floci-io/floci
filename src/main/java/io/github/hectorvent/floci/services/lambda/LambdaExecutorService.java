@@ -198,8 +198,8 @@ public class LambdaExecutorService implements Resettable {
             AsyncEvent event = new AsyncEvent(fn, payload, requestId, chainDepth, invokedQualifier,
                     maxRetries, clock.millis() + maxEventAgeSeconds * 1000L, generation.get(),
                     deletions.getOrDefault(functionKey(fn), 0L));
-            // The deletion count is read above, before this store check, and DeleteFunction removes the
-            // function from the store before it moves the count. So either this check sees the function
+            // The deletion count is read above, before this store check, and DeleteFunction moves the count
+            // again after it removes the function from the store. So either this check sees the function
             // gone, or the count moves after the event's snapshot and stale() drops the event.
             if (lambdaService != null && !lambdaService.isLive(fn)) {
                 permit.close();
@@ -351,8 +351,10 @@ public class LambdaExecutorService implements Resettable {
 
     /**
      * Drops the pending asynchronous events of a deleted function: AWS runs no further attempt and
-     * delivers no record for them. Must be called only after the function has left the store, which is
-     * what lets an Event invoke racing the delete drop its own event.
+     * delivers no record for them. DeleteFunction calls it twice. The call before it deletes anything
+     * stops the events already queued or running, so none starts, or reports a failure for, a function
+     * whose code is being removed. The call after the function has left the store stops an Event invoke
+     * that read the count between the two calls and still found the function stored.
      */
     void dropPending(LambdaFunction fn) {
         // ponytail: deleting a single published version does not drop its pending events; they fail
@@ -375,6 +377,15 @@ public class LambdaExecutorService implements Resettable {
     public void shutdown() {
         generation.incrementAndGet();
         asyncExecutor.shutdownNow();
+    }
+
+    /**
+     * Drops pending events before storage is wiped, so a retry whose timer fires during the wipe neither
+     * runs nor delivers a record. {@link #clear()} moves the generation again for events accepted in between.
+     */
+    @Override
+    public void beforeReset() {
+        generation.incrementAndGet();
     }
 
     @Override

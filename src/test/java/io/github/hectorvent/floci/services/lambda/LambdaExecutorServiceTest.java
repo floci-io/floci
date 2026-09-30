@@ -508,6 +508,28 @@ class LambdaExecutorServiceTest {
     }
 
     @Test
+    void eventInvocation_resetDropsAPendingRetryBeforeStorageIsWiped() {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaExecutorService retryExecutor =
+                retryingExecutor(router, eventInvokeConfig(2, 21600), Duration.ofMillis(500));
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-before-reset", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        InvokeResult failure = failedAttempt("req-before-reset");
+        doAnswer(invocation -> {
+            retryExecutor.beforeReset();
+            PendingInvocation pendingInvocation = invocation.getArgument(0);
+            pendingInvocation.getResultFuture().complete(failure);
+            return pendingInvocation.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        retryExecutor.invoke(fn, "{}".getBytes(), InvocationType.Event);
+
+        verify(router, after(1500).never()).route(any(), any(), any(), anyInt(), anyInt(), any());
+        verify(rtas, times(1)).enqueue(any(PendingInvocation.class));
+    }
+
+    @Test
     void eventInvocation_dropsThePendingRetryOfADeletedFunction() {
         AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
         LambdaExecutorService retryExecutor = retryingExecutor(router, eventInvokeConfig(2, 21600), Duration.ZERO);

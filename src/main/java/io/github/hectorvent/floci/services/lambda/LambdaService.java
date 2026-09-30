@@ -1001,6 +1001,10 @@ public class LambdaService implements ResourceProvider {
         functionName = fn.getFunctionName();
         String arn = fn.getFunctionArn();
         warmPool.drainFunction(functionName);
+        // Before anything is deleted, so no queued or running event starts or reports on a function being removed.
+        if (executorService != null) {
+            executorService.dropPending(fn);
+        }
         // Take the same per-function lock used by Put/DeleteFunctionConcurrency
         // so a concurrent concurrency mutation cannot interleave with the
         // limiter reset and store delete and leave the two views out of sync.
@@ -1014,9 +1018,7 @@ public class LambdaService implements ResourceProvider {
             }
             codeStore.delete(ownerAccount(fn), region, functionName);
             functionStore.delete(region, functionName);
-            // Only once the function has left the store: an Event invoke reads the deletion count
-            // before it checks the store, so it either finds the function gone or has its event
-            // dropped by this count.
+            // Again now the function is gone, for an Event invoke that read the count after the first call.
             if (executorService != null) {
                 executorService.dropPending(fn);
             }
