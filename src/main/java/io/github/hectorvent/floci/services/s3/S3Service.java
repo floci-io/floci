@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicy
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.s3.model.*;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -3538,12 +3539,161 @@ public class S3Service implements Resettable, ResourceProvider {
     // --- Notification Configuration ---
 
     public void putBucketNotificationConfiguration(String bucketName, NotificationConfiguration config) {
+        putBucketNotificationConfiguration(bucketName, config, false);
+    }
+
+    public void putBucketNotificationConfiguration(String bucketName, NotificationConfiguration config,
+                                                   boolean skipDestinationValidation) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
+
+        List<NotificationDestination> destinations = notificationDestinations(config);
+        if (!skipDestinationValidation) {
+            List<DestinationFailure> failures = new ArrayList<>();
+            for (NotificationDestination destination : destinations) {
+                if (!notificationDestinationExists(destination)) {
+                    failures.add(missingDestination(destination));
+                }
+            }
+            if (!failures.isEmpty()) {
+                throw invalidNotificationDestinations(failures);
+            }
+
+            String testEvent = s3TestEvent(bucketName);
+            for (NotificationDestination destination : destinations) {
+                try {
+                    if ("sqs".equals(destination.service())) {
+                        sqsService.sendMessage(sqsUrlFromArn(destination.arn()), testEvent, 0,
+                                destination.region());
+                    } else if ("sns".equals(destination.service())) {
+                        snsService.publish(destination.arn(), null, testEvent, "Amazon S3 Notification",
+                                destination.region());
+                    }
+                } catch (AwsException e) {
+                    failures.add(new DestinationFailure(destination, e.getMessage()));
+                }
+            }
+            if (!failures.isEmpty()) {
+                throw invalidNotificationDestinations(failures);
+            }
+        }
+
         bucket.setNotificationConfiguration(config);
         bucketStore.put(bucketName, bucket);
         LOG.infov("Set notification configuration for bucket: {0}", bucketName);
+    }
+
+    private record NotificationDestination(String arn, String service, String region, String accountId) {}
+
+    private record DestinationFailure(NotificationDestination destination, String reason) {}
+
+    private static List<NotificationDestination> notificationDestinations(NotificationConfiguration config) {
+        List<NotificationDestination> destinations = new ArrayList<>();
+        for (QueueNotification queue : config.getQueueConfigurations()) {
+            destinations.add(notificationDestination(queue.queueArn(), "Queue", "sqs"));
+        }
+        for (TopicNotification topic : config.getTopicConfigurations()) {
+            destinations.add(notificationDestination(topic.topicArn(), "Topic", "sns"));
+        }
+        for (LambdaNotification lambda : config.getLambdaFunctionConfigurations()) {
+            destinations.add(notificationDestination(lambda.functionArn(), "CloudFunction", "lambda"));
+        }
+        return destinations;
+    }
+
+    private static NotificationDestination notificationDestination(String arn, String argumentName,
+                                                                   String service) {
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(arn);
+        } catch (IllegalArgumentException e) {
+            throw invalidNotificationArn(arn, argumentName);
+        }
+        boolean validResource = switch (service) {
+            case "sqs" -> parsed.resource().matches("[A-Za-z0-9_-]{1,80}")
+                    || parsed.resource().matches("[A-Za-z0-9_-]{1,75}\\.fifo");
+            case "sns" -> parsed.resource().matches("[A-Za-z0-9_-]{1,256}")
+                    || parsed.resource().matches("[A-Za-z0-9_-]{1,251}\\.fifo");
+            case "lambda" -> parsed.resource().matches(
+                    "function:[A-Za-z0-9_-]{1,64}(?::[A-Za-z0-9_$-]{1,128})?");
+            default -> false;
+        };
+        if (!parsed.partition().matches(AwsArnUtils.PARTITION_REGEX)
+                || !parsed.service().equals(service)
+                || !parsed.region().matches("[a-z0-9-]+")
+                || !parsed.accountId().matches("[0-9]{12}")
+                || !validResource
+                || AwsRegions.isRegionId(parsed.region())
+                        && !parsed.partition().equals(AwsRegions.partitionFor(parsed.region()))) {
+            throw invalidNotificationArn(arn, argumentName);
+        }
+        return new NotificationDestination(arn, service, parsed.region(), parsed.accountId());
+    }
+
+    private static AwsException invalidNotificationArn(String arn, String argumentName) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("ArgumentName", argumentName);
+        details.put("ArgumentValue", arn);
+        return new AwsException("InvalidArgument", "The ARN could not be parsed", 400, details);
+    }
+
+    private boolean notificationDestinationExists(NotificationDestination destination) {
+        return switch (destination.service()) {
+            case "sqs" -> sqsService != null
+                    && sqsService.queueExists(sqsUrlFromArn(destination.arn()), destination.region());
+            case "sns" -> snsService != null && snsService.topicExists(destination.arn(), destination.region());
+            case "lambda" -> lambdaNotificationDestinationExists(destination);
+            default -> false;
+        };
+    }
+
+    private boolean lambdaNotificationDestinationExists(NotificationDestination destination) {
+        LambdaService service = resolveLambdaService();
+        if (service == null) {
+            return false;
+        }
+        try {
+            LambdaFunction function = service.getFunction(destination.region(), destination.arn(), null);
+            return destination.accountId().equals(AwsArnUtils.accountOrDefault(function.getFunctionArn(), null));
+        } catch (AwsException e) {
+            return false;
+        }
+    }
+
+    private static DestinationFailure missingDestination(NotificationDestination destination) {
+        String reason = switch (destination.service()) {
+            case "sqs" -> "The destination queue does not exist";
+            case "sns" -> "The destination topic does not exist";
+            case "lambda" -> "Not authorized to invoke function [" + destination.arn() + "]";
+            default -> "The destination does not exist";
+        };
+        return new DestinationFailure(destination, reason);
+    }
+
+    private static AwsException invalidNotificationDestinations(List<DestinationFailure> failures) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        for (int index = 0; index < failures.size(); index++) {
+            DestinationFailure failure = failures.get(index);
+            NotificationDestination destination = failure.destination();
+            String argument = "lambda".equals(destination.service())
+                    ? destination.arn() + ", null" : destination.arn();
+            details.put("ArgumentName" + (index + 1), argument);
+            details.put("ArgumentValue" + (index + 1), failure.reason());
+        }
+        return new AwsException("InvalidArgument",
+                "Unable to validate the following destination configurations", 400, details);
+    }
+
+    private String s3TestEvent(String bucketName) {
+        ObjectNode event = objectMapper.createObjectNode();
+        event.put("Service", "Amazon S3");
+        event.put("Event", "s3:TestEvent");
+        event.put("Time", Instant.now().toString());
+        event.put("Bucket", bucketName);
+        event.put("RequestId", UUID.randomUUID().toString());
+        event.put("HostId", UUID.randomUUID().toString());
+        return event.toString();
     }
 
     public NotificationConfiguration getBucketNotificationConfiguration(String bucketName) {
@@ -4447,7 +4597,8 @@ public class S3Service implements Resettable, ResourceProvider {
         for (TopicNotification tn : config.getTopicConfigurations()) {
             if (tn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && tn.matchesKey(key)) {
                 try {
-                    snsService.publish(tn.topicArn(), null, eventJson, "Amazon S3 Notification", region);
+                    snsService.publish(tn.topicArn(), null, eventJson, "Amazon S3 Notification",
+                            extractRegionFromArn(tn.topicArn()));
                     LOG.debugv("Fired S3 event {0} to SNS {1}", eventName, tn.topicArn());
                 } catch (Exception e) {
                     LOG.warnv("Failed to deliver S3 event to SNS {0}: {1}", tn.topicArn(), e.getMessage());
