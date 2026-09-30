@@ -579,6 +579,24 @@ class MwaaEnvironmentManagerTest {
         }
 
         @Test
+        void backslashNewlineJoinsTheTextOnEitherSide() throws Exception {
+            List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, AIRFLOW_ID, 0, "", "");
+
+            manager.runAirflowCli(AIRFLOW_ID, "variables set greeting hel\\\nlo \"wor\\\nld\"");
+
+            assertEquals(List.of(List.of("airflow", "variables", "set", "greeting", "hello", "world")), commands);
+        }
+
+        @Test
+        void onlySpacesTabsAndNewlinesSeparateArguments() throws Exception {
+            List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, AIRFLOW_ID, 0, "", "");
+
+            manager.runAirflowCli(AIRFLOW_ID, "variables\tset\ngreeting hello\u2003world");
+
+            assertEquals(List.of(List.of("airflow", "variables", "set", "greeting", "hello\u2003world")), commands);
+        }
+
+        @Test
         void unterminatedQuoteIsRejectedWithoutRunningAnything() {
             List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, AIRFLOW_ID, 0, "", "");
 

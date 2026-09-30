@@ -381,8 +381,9 @@ public class MwaaEnvironmentManager {
 
     /**
      * Splits a CLI command line into arguments using POSIX shell quoting without any expansion:
-     * single quotes are literal, double quotes honour backslash escapes of {@code $}, backtick,
-     * {@code "}, backslash and newline, and an unquoted backslash escapes the next character.
+     * spaces, tabs and newlines separate arguments, single quotes are literal, double quotes honour
+     * backslash escapes of {@code $}, backtick, {@code "}, backslash and newline, an unquoted
+     * backslash escapes the next character, and a backslash-newline pair is removed.
      */
     private static List<String> splitCliArguments(String command) {
         List<String> args = new ArrayList<>();
@@ -391,7 +392,7 @@ public class MwaaEnvironmentManager {
         int i = 0;
         while (i < command.length()) {
             char c = command.charAt(i);
-            if (Character.isWhitespace(c)) {
+            if (c == ' ' || c == '\t' || c == '\n') {
                 if (inWord) {
                     args.add(current.toString());
                     current.setLength(0);
@@ -417,7 +418,9 @@ public class MwaaEnvironmentManager {
                         break;
                     }
                     if (d == '\\' && i + 1 < command.length() && "$`\"\\\n".indexOf(command.charAt(i + 1)) >= 0) {
-                        current.append(command.charAt(i + 1));
+                        if (command.charAt(i + 1) != '\n') {
+                            current.append(command.charAt(i + 1));
+                        }
                         i += 2;
                     } else {
                         current.append(d);
@@ -432,8 +435,10 @@ public class MwaaEnvironmentManager {
                 if (i + 1 >= command.length()) {
                     throw new IllegalArgumentException("Trailing backslash in CLI command");
                 }
-                current.append(command.charAt(i + 1));
-                inWord = true;
+                if (command.charAt(i + 1) != '\n') {
+                    current.append(command.charAt(i + 1));
+                    inWord = true;
+                }
                 i += 2;
             } else {
                 current.append(c);
