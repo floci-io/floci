@@ -4288,7 +4288,7 @@ class RdsServiceTest {
     }
 
     @Test
-    void clusterMemberRestartWithoutBackendResetsRelayWarning() {
+    void clusterMemberRestartWithoutBackendKeepsRelayWarningUntilRecovery() {
         when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(null);
         DbCluster cluster = rdsService.createDbCluster("restart-log-cluster", "aurora-postgresql", "16.3",
@@ -4297,8 +4297,9 @@ class RdsServiceTest {
                 "admin", "password", "dbname", "db.serverless", 0, false, null, null,
                 "restart-log-cluster");
         IllegalStateException firstFailure = new IllegalStateException("first relay failed");
-        IllegalStateException afterRestartFailure = new IllegalStateException("relay failed after restart");
-        doThrow(firstFailure).doThrow(afterRestartFailure)
+        IllegalStateException ongoingFailure = new IllegalStateException("relay still failed after restart");
+        IllegalStateException afterRecoveryFailure = new IllegalStateException("relay failed after recovery");
+        doThrow(firstFailure).doThrow(ongoingFailure).doNothing().doThrow(afterRecoveryFailure)
                 .when(proxyManager).startProxy(eq("rds-resource:" + member.getDbInstanceArn()),
                         any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
         RdsContainerHandle handle = new RdsContainerHandle("restart-log-container",
@@ -4313,13 +4314,19 @@ class RdsServiceTest {
             assertEquals(DbInstanceStatus.AVAILABLE, member.getStatus());
             assertNull(member.getContainerHost());
             rdsService.ensureClusterBackend("restart-log-cluster", "us-east-1");
+            assertEquals(DbInstanceStatus.FAILED, member.getStatus());
+            rdsService.ensureClusterBackend("restart-log-cluster", "us-east-1");
+            assertEquals(DbInstanceStatus.AVAILABLE, member.getStatus());
+            member.setContainerHost(null);
+            member.setContainerPort(0);
+            rdsService.ensureClusterBackend("restart-log-cluster", "us-east-1");
         });
         List<LogRecord> failures = records.stream()
                 .filter(record -> record.getMessage().contains("Failed to restore RDS cluster member"))
                 .toList();
-        assertEquals(List.of("WARN", "WARN"),
+        assertEquals(List.of("WARN", "DEBUG", "WARN"),
                 failures.stream().map(record -> record.getLevel().getName()).toList());
-        assertEquals(List.of(firstFailure, afterRestartFailure),
+        assertEquals(List.of(firstFailure, ongoingFailure, afterRecoveryFailure),
                 failures.stream().map(LogRecord::getThrown).toList());
     }
 

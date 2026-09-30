@@ -3333,10 +3333,10 @@ public class RdsService implements Resettable, ResourceProvider {
                     member.setContainerHost(cluster.getContainerHost());
                     member.setContainerPort(cluster.getContainerPort());
                 }
+                // A restart without a backend has not restored the relay; retry success clears the warning.
                 if (restart) {
                     member.setStatus(DbInstanceStatus.AVAILABLE);
                     putInstanceForScope(accountId, region, memberId, member);
-                    reportedMemberRelayFailures.remove(member.getDbInstanceArn());
                 }
             } catch (RuntimeException e) {
                 member.setStatus(DbInstanceStatus.FAILED);
