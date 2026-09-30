@@ -88,6 +88,11 @@ public class LambdaService implements ResourceProvider {
                     + "\\d{12}:access-point/fsap-[a-f0-9]{17}$");
     private static final Pattern FILE_SYSTEM_LOCAL_MOUNT_PATH = Pattern.compile("^/mnt/[A-Za-z0-9._-]+$");
     private static final Pattern LOG_GROUP_PATTERN = Pattern.compile("[.\\-_/#A-Za-z0-9]+");
+    // The model's Topic shape: 1-249 characters, pattern [^.]([a-zA-Z0-9\-_.]+); Topics holds at most 1.
+    private static final Pattern TOPIC_PATTERN = Pattern.compile("[^.]([a-zA-Z0-9\\-_.]+)");
+    private static final int MAX_TOPIC_LENGTH = 249;
+    private static final int MAX_TOPICS = 1;
+    private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
     // The model's own Role pattern, which AWS quotes verbatim in its validation message; it
     // already accepts every partition.
     private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
@@ -1429,6 +1434,7 @@ public class LambdaService implements ResourceProvider {
                 throw new AwsException("InvalidParameterValueException",
                         "Topics must be a non-empty list of strings", 400);
             }
+            validateTopicConstraints(topicList);
             List<String> validatedTopics = new ArrayList<>();
             for (Object item : topicList) {
                 if (!(item instanceof String s) || s.isBlank()) {
@@ -1446,6 +1452,7 @@ public class LambdaService implements ResourceProvider {
                         throw new AwsException("InvalidParameterValueException",
                                 "SourceAccessConfigurations must be a list", 400);
                     }
+                    validateMaxItems(accessList, "sourceAccessConfigurations", MAX_SOURCE_ACCESS_CONFIGURATIONS);
                     List<Map<String, Object>> typedAccess = new ArrayList<>();
                     for (Object item : accessList) {
                         if (!(item instanceof Map<?, ?> m)) {
@@ -2150,6 +2157,7 @@ public class LambdaService implements ResourceProvider {
                 throw new AwsException("InvalidParameterValueException",
                         "Topics must be a non-empty list of strings", 400);
             }
+            validateTopicConstraints(topicList);
             List<String> validatedTopics = new ArrayList<>();
             for (Object item : topicList) {
                 if (!(item instanceof String s) || s.isBlank()) {
@@ -2168,6 +2176,7 @@ public class LambdaService implements ResourceProvider {
                     throw new AwsException("InvalidParameterValueException",
                             "SourceAccessConfigurations must be a list", 400);
                 }
+                validateMaxItems(accessList, "sourceAccessConfigurations", MAX_SOURCE_ACCESS_CONFIGURATIONS);
                 List<Map<String, Object>> typedAccess = new ArrayList<>();
                 for (Object item : accessList) {
                     if (!(item instanceof Map<?, ?> m)) {
@@ -2765,6 +2774,22 @@ public class LambdaService implements ResourceProvider {
                     "1 validation error detected: Value '" + (value == null ? "" : value) + "' at '" + field
                             + "' failed to satisfy constraint: Member must have length greater than or equal to 1",
                     400);
+        }
+    }
+
+    /** Topics: at most MAX_TOPICS entries, each at most MAX_TOPIC_LENGTH characters matching TOPIC_PATTERN. */
+    private static void validateTopicConstraints(List<?> topics) {
+        validateArnList(topics, "topics", TOPIC_PATTERN, MAX_TOPICS);
+        for (Object topic : topics) {
+            validateMaxLength(topic, "topics.member", MAX_TOPIC_LENGTH);
+        }
+    }
+
+    private static void validateMaxItems(List<?> list, String field, int maxItems) {
+        if (list.size() > maxItems) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at '" + field + "' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to " + maxItems, 400);
         }
     }
 

@@ -2356,4 +2356,75 @@ class LambdaServiceTest {
         LambdaFunction updatedFn = service.getFunction(REGION, "revision-lock-func");
         assertNotEquals(initialRevisionId, updatedFn.getRevisionId());
     }
+
+    @Test
+    void createEventSourceMapping_moreThanOneTopic_isRejected() {
+        // Catches: a Topics list longer than the model's maximum of 1 is stored instead of rejected
+        service.createFunction(REGION, baseRequest("kafka-topics-max-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-topics-max-fn", List.of("topic-a", "topic-b"), List.of())));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'topics' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 1", error.getMessage());
+    }
+
+    @Test
+    void createEventSourceMapping_topicStartingWithADot_isRejected() {
+        // Catches: a Topic that doesn't match the model pattern [^.]([a-zA-Z0-9\-_.]+) is stored
+        service.createFunction(REGION, baseRequest("kafka-topic-pattern-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-topic-pattern-fn", List.of(".hidden"), List.of())));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value '.hidden' at 'topics.member' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [^.]([a-zA-Z0-9\\-_.]+)", error.getMessage());
+    }
+
+    @Test
+    void createEventSourceMapping_moreThan23SourceAccessConfigurations_isRejected() {
+        // Catches: a SourceAccessConfigurations list longer than the model's maximum of 23 is stored
+        service.createFunction(REGION, baseRequest("kafka-access-max-fn"));
+        List<Map<String, Object>> access = new ArrayList<>();
+        for (int i = 0; i < 24; i++) {
+            access.add(Map.of("Type", "BASIC_AUTH", "URI", "arn:aws:secretsmanager:us-east-1:000000000000:secret:s" + i));
+        }
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-access-max-fn", List.of("my-topic"), access)));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'sourceAccessConfigurations' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 23", error.getMessage());
+    }
+
+    @Test
+    void updateEventSourceMapping_moreThanOneTopic_isRejectedAndLeavesTheMappingUnchanged() {
+        // Catches: UpdateEventSourceMapping accepting (or half-applying) a Topics list longer than 1
+        service.createFunction(REGION, baseRequest("kafka-update-topics-fn"));
+        EventSourceMapping esm = service.createEventSourceMapping(REGION,
+                kafkaMappingRequest("kafka-update-topics-fn", List.of("my-topic"), List.of()));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(),
+                Map.of("BatchSize", 5, "Topics", List.of("topic-a", "topic-b"))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        EventSourceMapping stored = service.getEventSourceMapping(esm.getUuid());
+        assertEquals(List.of("my-topic"), stored.getTopics());
+        assertEquals(10, stored.getBatchSize());
+    }
+
+    private static Map<String, Object> kafkaMappingRequest(String functionName, List<String> topics,
+                                                            List<Map<String, Object>> sourceAccessConfigurations) {
+        Map<String, Object> request = new HashMap<>();
+        request.put("FunctionName", functionName);
+        request.put("Topics", topics);
+        request.put("SelfManagedEventSource", Map.of("Endpoints", Map.of("KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092"))));
+        if (!sourceAccessConfigurations.isEmpty()) {
+            request.put("SourceAccessConfigurations", sourceAccessConfigurations);
+        }
+        return request;
+    }
 }
