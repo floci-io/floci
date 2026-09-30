@@ -26,9 +26,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
-import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -86,6 +86,36 @@ class ApiGatewayApiKeyCfnProvisionerTest {
         ObjectNode props = mapper.createObjectNode();
         props.putArray("Tags").addObject().put("Key", k).put("Value", v);
         return props;
+    }
+
+    /**
+     * Stubs the key's lookups and writes the way the in-memory store behaves: every call sees the one
+     * stored key object, and a write changes that object in place.
+     */
+    private void storeHolds(ApiKey stored) {
+        when(apiGateway.findApiKey(REGION, stored.getId())).thenReturn(Optional.of(stored));
+        when(apiGateway.getApiKey(REGION, stored.getId())).thenReturn(stored);
+        when(apiGateway.replaceApiKeyTags(eq(REGION), eq(stored.getId()), anyMap())).thenAnswer(inv -> {
+            Map<String, String> replaced = inv.getArgument(2);
+            stored.setTags(new HashMap<>(replaced));
+            return stored;
+        });
+        when(apiGateway.updateApiKey(eq(REGION), eq(stored.getId()), anyList())).thenAnswer(inv -> {
+            applyPatches(stored, inv.getArgument(2));
+            return stored;
+        });
+    }
+
+    /** Applies patch operations to the key the way {@code ApiGatewayService.updateApiKey} does. */
+    private static void applyPatches(ApiKey key, List<Map<String, String>> ops) {
+        for (Map<String, String> op : ops) {
+            switch (op.get("path")) {
+                case "/customerId" -> key.setCustomerId(op.get("value"));
+                case "/description" -> key.setDescription(op.get("value"));
+                case "/enabled" -> key.setEnabled(Boolean.parseBoolean(op.get("value")));
+                default -> throw new IllegalArgumentException(op.toString());
+            }
+        }
     }
 
     @Test
@@ -274,9 +304,7 @@ class ApiGatewayApiKeyCfnProvisionerTest {
     void aFailedStackUpdatePutsBackEveryValueTheUpdateChanged() {
         ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of("team", "core"));
         existing.setCustomerId("customer-1");
-        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
-        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenReturn(existing);
-        when(apiGateway.replaceApiKeyTags(eq(REGION), eq("abc123"), anyMap())).thenReturn(existing);
+        storeHolds(existing);
         ObjectNode props = tags("team", "platform")
                 .put("Name", "my-key")
                 .put("CustomerId", "customer-2")
@@ -321,34 +349,51 @@ class ApiGatewayApiKeyCfnProvisionerTest {
     }
 
     @Test
+    void aRollbackWritesOnlyTheValuesThatDiffer() {
+        ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of("team", "core"));
+        storeHolds(existing);
+        ObjectNode props = tags("team", "core").put("Name", "my-key").put("Description", "new").put("Enabled", "true");
+        StackResource r = resource("abc123");
+        provisioner.provision(r, props, ctx("abc123"));
+        clearInvocations(apiGateway);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(apiGateway, never()).replaceApiKeyTags(any(), any(), anyMap());
+        verify(apiGateway).updateApiKey(REGION, "abc123",
+                List.of(Map.of("op", "replace", "path", "/description", "value", "old")));
+        assertEquals("old", existing.getDescription());
+    }
+
+    @Test
     void aRefusedTagChangeLeavesTheOtherValuesUnpatched() {
         ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of());
-        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
-        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenReturn(existing);
-        when(apiGateway.replaceApiKeyTags(REGION, "abc123", Map.of("_custom_id_", "other")))
-                .thenThrow(new AwsException("BadRequestException",
-                        "Reserved tag key _custom_id_ can only be supplied during resource creation.", 400));
+        storeHolds(existing);
+        doThrow(new AwsException("BadRequestException",
+                "Reserved tag key _custom_id_ can only be supplied during resource creation.", 400))
+                .when(apiGateway).replaceApiKeyTags(REGION, "abc123", Map.of("_custom_id_", "other"));
         ObjectNode props = tags("_custom_id_", "other").put("Name", "my-key").put("Description", "new");
 
         assertThrows(AwsException.class, () -> provisioner.provision(resource("abc123"), props, ctx("abc123")));
 
-        verify(apiGateway, never()).updateApiKey(any(), any(), argThat((List<Map<String, String>> ops) ->
-                ops.stream().anyMatch(op -> "/description".equals(op.get("path")) && "new".equals(op.get("value")))));
+        verify(apiGateway, never()).updateApiKey(any(), any(), anyList());
+        verify(apiGateway, times(1)).replaceApiKeyTags(any(), any(), anyMap());
     }
 
     @Test
     void aFailedPatchPutsTheWholeKeyBack() {
         ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of("team", "core"));
         existing.setCustomerId("customer-1");
-        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
-        // The service swaps the tag map on the stored key object, which is the one findApiKey returned.
-        when(apiGateway.replaceApiKeyTags(eq(REGION), eq("abc123"), anyMap())).thenAnswer(inv -> {
-            Map<String, String> replaced = inv.getArgument(2);
-            existing.setTags(new HashMap<>(replaced));
-            return existing;
-        });
+        storeHolds(existing);
         RuntimeException failure = new IllegalStateException("store write failed");
-        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenThrow(failure).thenReturn(existing);
+        // The first patch changes the stored key and then fails to save it, as a failing store write does.
+        doAnswer(inv -> {
+            applyPatches(existing, inv.getArgument(2));
+            throw failure;
+        }).doAnswer(inv -> {
+            applyPatches(existing, inv.getArgument(2));
+            return existing;
+        }).when(apiGateway).updateApiKey(eq(REGION), eq("abc123"), anyList());
         ObjectNode props = tags("team", "platform")
                 .put("Name", "my-key")
                 .put("CustomerId", "customer-2")
@@ -378,12 +423,11 @@ class ApiGatewayApiKeyCfnProvisionerTest {
     @Test
     void aFailedUndoOfAFailedUpdateMarksTheRollbackFailed() {
         ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of("team", "core"));
-        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
+        storeHolds(existing);
         RuntimeException restoreFailure = new IllegalStateException("store write failed again");
-        when(apiGateway.replaceApiKeyTags(REGION, "abc123", Map.of("team", "platform"))).thenReturn(existing);
-        when(apiGateway.replaceApiKeyTags(REGION, "abc123", Map.of("team", "core"))).thenThrow(restoreFailure);
+        doThrow(restoreFailure).when(apiGateway).replaceApiKeyTags(REGION, "abc123", Map.of("team", "core"));
         RuntimeException failure = new IllegalStateException("store write failed");
-        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenThrow(failure);
+        doThrow(failure).when(apiGateway).updateApiKey(eq(REGION), eq("abc123"), anyList());
         ObjectNode props = tags("team", "platform").put("Name", "my-key").put("Description", "new");
         StackResource r = resource("abc123");
 
@@ -398,6 +442,27 @@ class ApiGatewayApiKeyCfnProvisionerTest {
     }
 
     @Test
+    void aRestoreRethrowingTheUpdateFailureIsNotSuppressedInItself() {
+        ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of());
+        storeHolds(existing);
+        RuntimeException failure = new IllegalStateException("store write failed");
+        // Every patch changes the stored key and then fails to save it with the same exception object.
+        doAnswer(inv -> {
+            applyPatches(existing, inv.getArgument(2));
+            throw failure;
+        }).when(apiGateway).updateApiKey(eq(REGION), eq("abc123"), anyList());
+        ObjectNode props = mapper.createObjectNode().put("Name", "my-key").put("Description", "new").put("Enabled", "true");
+        StackResource r = resource("abc123");
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> provisioner.provision(r, props, ctx("abc123")));
+
+        assertSame(failure, thrown);
+        assertEquals(0, thrown.getSuppressed().length);
+        assertTrue(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
     void aRollbackOfAKeyDeletedSinceTheUpdateFails() {
         ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of());
         when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
@@ -405,6 +470,7 @@ class ApiGatewayApiKeyCfnProvisionerTest {
         StackResource r = resource("abc123");
         provisioner.provision(r, mapper.createObjectNode().put("Name", "my-key"), ctx("abc123"));
         AwsException gone = new AwsException("NotFoundException", "Invalid API Key identifier specified", 404);
+        doThrow(gone).when(apiGateway).getApiKey(REGION, "abc123");
         doThrow(gone).when(apiGateway).updateApiKey(eq(REGION), eq("abc123"), anyList());
         doThrow(gone).when(apiGateway).replaceApiKeyTags(eq(REGION), eq("abc123"), anyMap());
 

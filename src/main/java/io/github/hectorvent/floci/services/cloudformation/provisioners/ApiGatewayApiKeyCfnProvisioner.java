@@ -131,21 +131,10 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
-        List<Map<String, String>> patches = new ArrayList<>();
-        String customerId = ctx.resolveOptional(props, "CustomerId");
-        if (!Objects.equals(blankToNull(customerId), blankToNull(existing.getCustomerId()))) {
-            patches.add(patch("/customerId", customerId));
-        }
-        String description = ctx.resolveOptional(props, "Description");
-        if (!Objects.equals(blankToNull(description), blankToNull(existing.getDescription()))) {
-            patches.add(patch("/description", description));
-        }
         // Enabled defaults to false when the template omits it, as in the AWS registry schema.
         Boolean enabled = resolveBoolean(props, "Enabled", ctx);
-        boolean desiredEnabled = enabled != null && enabled;
-        if (desiredEnabled != existing.isEnabled()) {
-            patches.add(patch("/enabled", Boolean.toString(desiredEnabled)));
-        }
+        List<Map<String, String>> patches = patchesTo(existing, ctx.resolveOptional(props, "CustomerId"),
+                ctx.resolveOptional(props, "Description"), enabled != null && enabled);
         Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
         boolean tagsChanged = !desiredTags.equals(existing.getTags());
         if (!patches.isEmpty() || tagsChanged) {
@@ -170,11 +159,32 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
                 r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
                         "Could not roll back the update of API key " + existing.getId() + ": "
                                 + restoreFailure.getMessage());
-                failure.addSuppressed(restoreFailure);
+                if (restoreFailure != failure) {
+                    failure.addSuppressed(restoreFailure);
+                }
             }
             throw failure;
         }
         record(r, key);
+    }
+
+    /**
+     * The patches that set the key's customer id, description and enabled flag to the given values,
+     * one for each value that differs from the key's. A blank string and no value count as equal.
+     */
+    private static List<Map<String, String>> patchesTo(ApiKey key, String customerId, String description,
+                                                       boolean enabled) {
+        List<Map<String, String>> patches = new ArrayList<>();
+        if (!Objects.equals(blankToNull(customerId), blankToNull(key.getCustomerId()))) {
+            patches.add(patch("/customerId", customerId));
+        }
+        if (!Objects.equals(blankToNull(description), blankToNull(key.getDescription()))) {
+            patches.add(patch("/description", description));
+        }
+        if (enabled != key.isEnabled()) {
+            patches.add(patch("/enabled", Boolean.toString(enabled)));
+        }
+        return patches;
     }
 
     /**
@@ -243,10 +253,12 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
      * one of its own mutating calls fails. When the update created the key because
      * the one at the prior physical id was gone, the created key is deleted and the resource names
      * the prior id again. Otherwise the customer id, description, enabled flag and tags are put
-     * back. With no snapshot on the resource the update changed nothing, since every mutating call
-     * is preceded by the snapshot or followed by the creation record, so there is nothing to undo.
-     * Putting values back on a key deleted since the update fails with NotFoundException, and the
-     * stack reports the rollback as failed.
+     * back, writing only the values where the live key differs from the snapshot, so an update that
+     * failed before it changed anything writes nothing. With no snapshot on the resource the update
+     * changed nothing, since every mutating call is preceded by the snapshot or followed by the
+     * creation record, so there is nothing to undo.
+     * A key deleted since the update fails the rollback with NotFoundException, and the stack
+     * reports the rollback as failed.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
@@ -276,13 +288,17 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
             return true;
         }
         String id = snapshot.path("id").asText();
+        ApiKey live = apiGatewayService.getApiKey(region, id);
         Map<String, String> tags = new HashMap<>();
         snapshot.path("tags").fields().forEachRemaining(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
-        apiGatewayService.replaceApiKeyTags(region, id, tags);
-        apiGatewayService.updateApiKey(region, id, List.of(
-                patch("/customerId", snapshotText(snapshot, "customerId")),
-                patch("/description", snapshotText(snapshot, "description")),
-                patch("/enabled", Boolean.toString(snapshot.path("enabled").asBoolean()))));
+        if (!tags.equals(live.getTags())) {
+            apiGatewayService.replaceApiKeyTags(region, id, tags);
+        }
+        List<Map<String, String>> patches = patchesTo(live, snapshotText(snapshot, "customerId"),
+                snapshotText(snapshot, "description"), snapshot.path("enabled").asBoolean());
+        if (!patches.isEmpty()) {
+            apiGatewayService.updateApiKey(region, id, patches);
+        }
         resource.getAttributes().remove(CfnRollback.API_KEY_UPDATE_SNAPSHOT_ATTR);
         return true;
     }
