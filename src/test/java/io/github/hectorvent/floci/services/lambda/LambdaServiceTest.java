@@ -1971,7 +1971,7 @@ class LambdaServiceTest {
                 "FunctionResponseTypes", List.of("Bogus"))));
 
         EventSourceMapping stored = service.getEventSourceMapping(esm.getUuid());
-        assertEquals(10, stored.getBatchSize());
+        assertEquals(100, stored.getBatchSize());
         assertTrue(stored.isEnabled());
     }
 
@@ -2535,5 +2535,18 @@ class LambdaServiceTest {
 
         assertEquals("ValidationException", error.getErrorCode());
         assertEquals("original", service.getAlias(REGION, "alias-description-fn", "live").getDescription());
+    }
+
+    @Test
+    void createEventSourceMapping_selfManagedKafkaWithoutBatchSize_defaultsTo100() {
+        // Catches: every event source defaulting to BatchSize 10, where AWS uses 10 only for SQS
+        service.createFunction(REGION, baseRequest("kafka-default-batch-fn"));
+
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "kafka-default-batch-fn",
+                "Topics", List.of("my-topic"),
+                "SelfManagedEventSource", Map.of("Endpoints", Map.of("KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")))));
+
+        assertEquals(100, esm.getBatchSize());
     }
 }

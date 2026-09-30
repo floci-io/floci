@@ -97,6 +97,8 @@ public class LambdaService implements ResourceProvider {
     private static final Pattern S3_BUCKET_PATTERN = Pattern.compile("[0-9A-Za-z\\.\\-_]*(?<!\\.)");
     // Create/UpdateAlias FunctionVersion (VersionWithLatestPublished: 1-1024, pattern below) and Description (max 256).
     private static final Pattern ALIAS_FUNCTION_VERSION_PATTERN = Pattern.compile("(\\$LATEST(\\.PUBLISHED)?|[0-9]+)");
+    private static final int DEFAULT_SQS_BATCH_SIZE = 10;
+    private static final int DEFAULT_STREAM_BATCH_SIZE = 100;
     // The model's own Role pattern, which AWS quotes verbatim in its validation message; it
     // already accepts every partition.
     private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
@@ -1506,7 +1508,10 @@ public class LambdaService implements ResourceProvider {
 
         ResolvedFunctionTarget target = resolveFunctionTarget(resolvedRegion, fnRef);
 
-        int batchSize = toInt(request.get("BatchSize"), 10);
+        // The model documents a per-source default: 10 for SQS, 100 for every other source type.
+        int defaultBatchSize = eventSourceArn != null && eventSourceArn.contains(":sqs:")
+                ? DEFAULT_SQS_BATCH_SIZE : DEFAULT_STREAM_BATCH_SIZE;
+        int batchSize = toInt(request.get("BatchSize"), defaultBatchSize);
         Integer maximumBatchingWindowInSeconds = parseMaximumBatchingWindow(request);
         boolean enabled = !Boolean.FALSE.equals(request.get("Enabled"));
 
