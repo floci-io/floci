@@ -1845,4 +1845,26 @@ class EsmIntegrationTest {
             given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid);
         }
     }
+    @Test
+    @Order(94)
+    void sqsEventSourceMappingWithoutBatchSizeDefaultsTo10() {
+        // Catches: the per-source BatchSize default also raising SQS mappings from 10 to 100
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s"
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("BatchSize", equalTo(10))
+        .extract()
+            .path("UUID");
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
 }

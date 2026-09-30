@@ -88,6 +88,8 @@ public class LambdaService implements ResourceProvider {
                     + "\\d{12}:access-point/fsap-[a-f0-9]{17}$");
     private static final Pattern FILE_SYSTEM_LOCAL_MOUNT_PATH = Pattern.compile("^/mnt/[A-Za-z0-9._-]+$");
     private static final Pattern LOG_GROUP_PATTERN = Pattern.compile("[.\\-_/#A-Za-z0-9]+");
+    private static final int DEFAULT_SQS_BATCH_SIZE = 10;
+    private static final int DEFAULT_STREAM_BATCH_SIZE = 100;
     // The model's own Role pattern, which AWS quotes verbatim in its validation message; it
     // already accepts every partition.
     private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
@@ -1490,7 +1492,10 @@ public class LambdaService implements ResourceProvider {
 
         ResolvedFunctionTarget target = resolveFunctionTarget(resolvedRegion, fnRef);
 
-        int batchSize = toInt(request.get("BatchSize"), 10);
+        // The model documents a per-source default: 10 for SQS, 100 for every other source type.
+        int defaultBatchSize = eventSourceArn != null && eventSourceArn.contains(":sqs:")
+                ? DEFAULT_SQS_BATCH_SIZE : DEFAULT_STREAM_BATCH_SIZE;
+        int batchSize = toInt(request.get("BatchSize"), defaultBatchSize);
         Integer maximumBatchingWindowInSeconds = parseMaximumBatchingWindow(request);
         boolean enabled = !Boolean.FALSE.equals(request.get("Enabled"));
 
