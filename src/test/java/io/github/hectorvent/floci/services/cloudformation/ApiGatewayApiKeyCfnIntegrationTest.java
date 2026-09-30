@@ -23,8 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
  * with every mutable property set, a key with no properties at all, and a key with a caller-chosen
  * value and a distinct id. Asserts that {@code Ref} and {@code Fn::GetAtt APIKeyId} both resolve to
  * the id {@code GetApiKey} serves rather than the literal the stub arm would leave, that an update
- * changes description, enabled flag and tags on the same key, and that deleting the stack removes
- * every key.
+ * changes description, enabled flag and tags on the same key, that an update which fails on a later
+ * resource puts the key's customer id, description, enabled flag and tags back, and that deleting
+ * the stack removes every key.
  */
 @QuarkusTest
 class ApiGatewayApiKeyCfnIntegrationTest {
@@ -67,6 +68,34 @@ class ApiGatewayApiKeyCfnIntegrationTest {
           }
         }
         """.formatted(NAMED, CHOSEN_VALUE);
+
+    private static final String ROLLBACK_STACK = "apigw-apikey-cfn-rollback-it";
+
+    /** One key with the given properties, optionally followed by more resources. */
+    private static final String ROLLBACK_TEMPLATE = """
+        {
+          "Resources": {
+            "Key": {
+              "Type": "AWS::ApiGateway::ApiKey",
+              "Properties": {%s}
+            }%s
+          },
+          "Outputs": {"KeyRef": {"Value": {"Ref": "Key"}}}
+        }
+        """;
+
+    /** A resource that fails after the key, so the update rolls back. */
+    private static final String FAILING_RESOURCE = """
+        ,
+            "BadSecret": {
+              "Type": "AWS::SecretsManager::Secret",
+              "DependsOn": "Key",
+              "Properties": {
+                "Name": "apigw-apikey-cfn-rollback-it",
+                "SecretString": "explicit",
+                "GenerateSecretString": {"PasswordLength": 32}
+              }
+            }""";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -124,18 +153,50 @@ class ApiGatewayApiKeyCfnIntegrationTest {
         getApiKey(distinctId).statusCode(404);
     }
 
+    @Test
+    void aFailedUpdatePutsTheKeyBackAsItWas() {
+        String original = """
+            "CustomerId": "customer-1", "Description": "original", "Enabled": "true",
+            "Tags": [{"Key": "stack", "Value": "v1"}]""";
+        cloudFormation(ROLLBACK_STACK, "CreateStack", ROLLBACK_TEMPLATE.formatted(original, ""), Map.of());
+        String keyId = outputValue(describeStacks(ROLLBACK_STACK, "CREATE_COMPLETE"), "KeyRef");
+
+        // Enabled is omitted, which disables the key, before the secret fails the update.
+        String changed = """
+            "CustomerId": "customer-2", "Description": "changed",
+            "Tags": [{"Key": "stack", "Value": "v2"}]""";
+        cloudFormation(ROLLBACK_STACK, "UpdateStack", ROLLBACK_TEMPLATE.formatted(changed, FAILING_RESOURCE), Map.of());
+        assertEquals(keyId, outputValue(describeStacks(ROLLBACK_STACK, "UPDATE_ROLLBACK_COMPLETE"), "KeyRef"));
+
+        getApiKey(keyId)
+            .statusCode(200)
+            .body("customerId", equalTo("customer-1"))
+            .body("description", equalTo("original"))
+            .body("enabled", equalTo(true))
+            .body("tags", equalTo(Map.of("stack", "v1")));
+
+        cloudFormation(ROLLBACK_STACK, "DeleteStack", null, Map.of());
+        CfnStackWaits.awaitStackDeleted(ROLLBACK_STACK);
+        getApiKey(keyId).statusCode(404);
+    }
+
     private static Map<String, String> parameters(String description, String enabled, String tagValue) {
         return Map.of("Description", description, "Enabled", enabled, "TagValue", tagValue);
     }
 
     private static void cloudFormation(String action, Map<String, String> parameters) {
+        cloudFormation(STACK, action, "DeleteStack".equals(action) ? null : TEMPLATE, parameters);
+    }
+
+    private static void cloudFormation(String stack, String action, String templateBody,
+                                       Map<String, String> parameters) {
         RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
             .formParam("Action", action)
-            .formParam("StackName", STACK);
-        if (!"DeleteStack".equals(action)) {
-            request.formParam("TemplateBody", TEMPLATE);
+            .formParam("StackName", stack);
+        if (templateBody != null) {
+            request.formParam("TemplateBody", templateBody);
         }
         int index = 1;
         for (Map.Entry<String, String> parameter : parameters.entrySet()) {
@@ -147,11 +208,15 @@ class ApiGatewayApiKeyCfnIntegrationTest {
     }
 
     private static String describeStacks(String expectedStatus) {
+        return describeStacks(STACK, expectedStatus);
+    }
+
+    private static String describeStacks(String stack, String expectedStatus) {
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", STACK)
+            .formParam("StackName", stack)
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();

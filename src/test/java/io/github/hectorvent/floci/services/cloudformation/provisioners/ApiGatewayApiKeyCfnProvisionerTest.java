@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -262,6 +263,87 @@ class ApiGatewayApiKeyCfnProvisionerTest {
 
         assertEquals("new1", r.getPhysicalId());
         assertEquals("new1", r.getAttributes().get("APIKeyId"));
+    }
+
+    @Test
+    void aFailedStackUpdatePutsBackEveryValueTheUpdateChanged() {
+        ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of("team", "core"));
+        existing.setCustomerId("customer-1");
+        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
+        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenReturn(existing);
+        when(apiGateway.replaceApiKeyTags(eq(REGION), eq("abc123"), anyMap())).thenReturn(existing);
+        ObjectNode props = tags("team", "platform")
+                .put("Name", "my-key")
+                .put("CustomerId", "customer-2")
+                .put("Description", "new");
+        StackResource r = resource("abc123");
+        provisioner.provision(r, props, ctx("abc123"));
+        clearInvocations(apiGateway);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(apiGateway).replaceApiKeyTags(REGION, "abc123", Map.of("team", "core"));
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, String>>> patches = ArgumentCaptor.forClass(List.class);
+        verify(apiGateway).updateApiKey(eq(REGION), eq("abc123"), patches.capture());
+        assertTrue(patches.getValue().stream().anyMatch(op ->
+                "/customerId".equals(op.get("path")) && "customer-1".equals(op.get("value"))), patches.getValue().toString());
+        assertTrue(patches.getValue().stream().anyMatch(op ->
+                "/description".equals(op.get("path")) && "old".equals(op.get("value"))), patches.getValue().toString());
+        assertTrue(patches.getValue().stream().anyMatch(op ->
+                "/enabled".equals(op.get("path")) && "true".equals(op.get("value"))), patches.getValue().toString());
+    }
+
+    @Test
+    void anUnchangedUpdateLeavesNothingForARollbackToUndo() {
+        ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of());
+        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
+        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenReturn(existing);
+        StackResource r = resource("abc123");
+        // An earlier update that changed the key and committed, then one that changes nothing.
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "my-key"), ctx("abc123"));
+        ObjectNode unchanged = mapper.createObjectNode()
+                .put("Name", "my-key")
+                .put("Description", "old")
+                .put("Enabled", "true");
+        provisioner.provision(r, unchanged, ctx("abc123"));
+        clearInvocations(apiGateway);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(apiGateway, never()).updateApiKey(any(), any(), anyList());
+        verify(apiGateway, never()).replaceApiKeyTags(any(), any(), anyMap());
+    }
+
+    @Test
+    void aRefusedTagChangeLeavesTheOtherValuesUnpatched() {
+        ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of());
+        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
+        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenReturn(existing);
+        when(apiGateway.replaceApiKeyTags(eq(REGION), eq("abc123"), anyMap()))
+                .thenThrow(new AwsException("BadRequestException",
+                        "Reserved tag key _custom_id_ can only be supplied during resource creation.", 400));
+        ObjectNode props = tags("_custom_id_", "other").put("Name", "my-key").put("Description", "new");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource("abc123"), props, ctx("abc123")));
+
+        verify(apiGateway, never()).updateApiKey(any(), any(), anyList());
+    }
+
+    @Test
+    void aRollbackOfAKeyDeletedSinceTheUpdateFails() {
+        ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of());
+        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
+        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenReturn(existing);
+        StackResource r = resource("abc123");
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "my-key"), ctx("abc123"));
+        AwsException gone = new AwsException("NotFoundException", "Invalid API Key identifier specified", 404);
+        doThrow(gone).when(apiGateway).updateApiKey(eq(REGION), eq("abc123"), anyList());
+        doThrow(gone).when(apiGateway).replaceApiKeyTags(eq(REGION), eq("abc123"), anyMap());
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertEquals("NotFoundException", e.getErrorCode());
     }
 
     @Test

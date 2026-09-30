@@ -79,6 +79,14 @@ public final class CfnRollback {
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
 
     /**
+     * Holds the customer id, description, enabled flag and tags an API key carried before an
+     * in-place update changed them, so a failed stack update can put them back. Written by
+     * {@code ApiGatewayApiKeyCfnProvisioner} before its first mutating call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String API_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociApiKeyUpdateSnapshot";
+
+    /**
      * Holds the complete prior metric filter, identity, name mode and per-address mutation outcomes
      * and ownership states.
      * Written before either an in-place put or a delete-then-create replacement; retained across
