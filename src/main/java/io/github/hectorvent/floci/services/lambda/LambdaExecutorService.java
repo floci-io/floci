@@ -2,6 +2,9 @@ package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
 import io.github.hectorvent.floci.services.lambda.model.FunctionEventInvokeConfig;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -15,13 +18,17 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Orchestrates Lambda function invocations.
@@ -29,14 +36,23 @@ import java.util.concurrent.TimeoutException;
  *
  * <p>An Event invocation answers 202 straight away and, once the function has finished on the
  * pool, hands its result to {@link AsyncInvokeDestinationRouter}, which delivers it to the
- * function's configured destination when it has one.
+ * function's configured destination when it has one. A failed attempt is retried after the
+ * configured delay, as AWS waits one minute and then two.
  */
 @ApplicationScoped
-public class LambdaExecutorService {
+public class LambdaExecutorService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(LambdaExecutorService.class);
     /** Extra time for a newly started runtime to request its first invocation. */
     private static final int RUNTIME_DISPATCH_GRACE_SECONDS = 2;
+    /** How long a retry that found the function's concurrency in use waits before asking again. */
+    private static final long THROTTLED_RETRY_POLL_MS = 1000;
+    /**
+     * Retries run on virtual threads rather than the pool: once the pool's queue is full its
+     * caller-runs fallback would run a whole attempt on the JDK's shared delay thread, which also
+     * fires the invocation timeouts that attempt may be waiting on.
+     */
+    private static final Executor RETRY_THREADS = task -> Thread.ofVirtual().name("lambda-async-retry").start(task);
 
     private final WarmPool warmPool;
     private final ObjectMapper objectMapper;
@@ -46,6 +62,9 @@ public class LambdaExecutorService {
     private final Instance<LambdaService> lambdaServiceInstance;
     private final LambdaService directLambdaService;
     private final Clock clock;
+    private final long asyncRetryDelayMs;
+    /** Moved on by a reset so that retries still waiting from before it are dropped. */
+    private final AtomicLong generation = new AtomicLong();
     private final ExecutorService asyncExecutor = new ThreadPoolExecutor(
             Math.max(4, Runtime.getRuntime().availableProcessors() * 2),
             Math.max(8, Runtime.getRuntime().availableProcessors() * 4),
@@ -59,8 +78,10 @@ public class LambdaExecutorService {
                                  LambdaConcurrencyLimiter concurrencyLimiter,
                                  AsyncInvokeDestinationRouter destinationRouter,
                                  Instance<LambdaService> lambdaServiceInstance,
-                                 Clock clock) {
-        this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, lambdaServiceInstance, null, clock);
+                                 Clock clock,
+                                 EmulatorConfig config) {
+        this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, lambdaServiceInstance, null, clock,
+                Duration.ofSeconds(config.services().lambda().asyncRetryDelaySeconds()));
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -69,7 +90,7 @@ public class LambdaExecutorService {
                           AsyncInvokeDestinationRouter destinationRouter,
                           LambdaService directLambdaService) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService,
-                Clock.systemUTC());
+                Clock.systemUTC(), Duration.ZERO);
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -77,8 +98,10 @@ public class LambdaExecutorService {
                           LambdaConcurrencyLimiter concurrencyLimiter,
                           AsyncInvokeDestinationRouter destinationRouter,
                           LambdaService directLambdaService,
-                          Clock clock) {
-        this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService, clock);
+                          Clock clock,
+                          Duration asyncRetryDelay) {
+        this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService, clock,
+                asyncRetryDelay);
     }
 
     private LambdaExecutorService(WarmPool warmPool,
@@ -87,7 +110,8 @@ public class LambdaExecutorService {
                                   AsyncInvokeDestinationRouter destinationRouter,
                                   Instance<LambdaService> lambdaServiceInstance,
                                   LambdaService directLambdaService,
-                                  Clock clock) {
+                                  Clock clock,
+                                  Duration asyncRetryDelay) {
         this.warmPool = warmPool;
         this.objectMapper = objectMapper;
         this.concurrencyLimiter = concurrencyLimiter;
@@ -95,6 +119,7 @@ public class LambdaExecutorService {
         this.lambdaServiceInstance = lambdaServiceInstance;
         this.directLambdaService = directLambdaService;
         this.clock = clock;
+        this.asyncRetryDelayMs = asyncRetryDelay.toMillis();
     }
 
     /** Package-private constructor for testing without CDI, leaving destinations unrouted. */
@@ -102,7 +127,7 @@ public class LambdaExecutorService {
                           ObjectMapper objectMapper,
                           LambdaConcurrencyLimiter concurrencyLimiter) {
         this(warmPool, objectMapper, concurrencyLimiter, null, (Instance<LambdaService>) null, null,
-                Clock.systemUTC());
+                Clock.systemUTC(), Duration.ZERO);
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -110,7 +135,7 @@ public class LambdaExecutorService {
                           LambdaConcurrencyLimiter concurrencyLimiter,
                           AsyncInvokeDestinationRouter destinationRouter) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter,
-                (Instance<LambdaService>) null, null, Clock.systemUTC());
+                (Instance<LambdaService>) null, null, Clock.systemUTC(), Duration.ZERO);
     }
 
     public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type) {
@@ -165,46 +190,11 @@ public class LambdaExecutorService {
             int maxEventAgeSeconds = eventInvokeConfig != null
                     && eventInvokeConfig.getMaximumEventAgeInSeconds() != null
                     ? eventInvokeConfig.getMaximumEventAgeInSeconds() : 21600;
-            long submitTimeMs = clock.millis();
 
+            AsyncEvent event = new AsyncEvent(fn, payload, requestId, chainDepth, invokedQualifier,
+                    maxRetries, clock.millis() + maxEventAgeSeconds * 1000L, generation.get());
             try {
-                asyncExecutor.submit(() -> {
-                    int attempt = 0;
-                    InvokeResult asyncResult = null;
-                    try {
-                        while (attempt <= maxRetries) {
-                            long elapsedSeconds = (clock.millis() - submitTimeMs) / 1000;
-                            if (elapsedSeconds >= maxEventAgeSeconds) {
-                                break;
-                            }
-
-                            attempt++;
-                            asyncResult = executeSync(fn, payload, requestId);
-                            if (asyncResult.getFunctionError() == null && asyncResult.getStatusCode() < 300) {
-                                break;
-                            }
-                        }
-                    } catch (Exception e) {
-                        LOG.warnv("Error in async Lambda execution for {0}: {1}", fn.getFunctionName(), e.getMessage());
-                        if (asyncResult == null) {
-                            asyncResult = new InvokeResult(500, "Unhandled",
-                                    buildErrorPayload("Error executing Lambda: " + e.getMessage(), "Lambda.UnknownError"),
-                                    null, requestId);
-                        }
-                    } finally {
-                        permit.close();
-                    }
-                    if (destinationRouter != null) {
-                        if (asyncResult == null) {
-                            // This Floci-only placeholder covers expiry before any attempt; AWS documents no payload.
-                            asyncResult = new InvokeResult(200, "Unhandled",
-                                    buildErrorPayload("Event age exceeded", "EventAgeExceeded"),
-                                    null, requestId);
-                        }
-                        destinationRouter.route(fn, payload, asyncResult, attempt,
-                                chainDepth, invokedQualifier);
-                    }
-                });
+                asyncExecutor.submit(() -> attempt(event, 1, null, permit));
             } catch (RuntimeException e) {
                 permit.close();
                 throw e;
@@ -229,6 +219,70 @@ public class LambdaExecutorService {
         return null;
     }
 
+    /**
+     * Runs one attempt of an asynchronous event and either routes the outcome or schedules the next
+     * attempt. Retry n waits n times the configured delay, never past the event's maximum age. The
+     * concurrency permit covers only the attempt; {@code held} is the one the invoke itself took.
+     */
+    private void attempt(AsyncEvent event, int attempt, InvokeResult previous,
+                         LambdaConcurrencyLimiter.Permit held) {
+        if (event.generation() != generation.get() || clock.millis() >= event.expiresAtMs()) {
+            if (held != null) {
+                held.close();
+            }
+            if (event.generation() == generation.get()) {
+                route(event, previous, attempt - 1);
+            }
+            return;
+        }
+        LambdaConcurrencyLimiter.Permit permit = held;
+        if (permit == null) {
+            try {
+                permit = concurrencyLimiter.acquire(event.fn());
+            } catch (AwsException throttled) {
+                // ponytail: AWS backs a throttled retry off exponentially, up to five minutes; one
+                // fixed poll is enough locally, and the event still expires on time.
+                schedule(event, THROTTLED_RETRY_POLL_MS, () -> attempt(event, attempt, previous, null));
+                return;
+            }
+        }
+        InvokeResult result;
+        LambdaConcurrencyLimiter.Permit acquired = permit;
+        try (acquired) {
+            result = executeSync(event.fn(), event.payload(), event.requestId());
+        } catch (RuntimeException e) {
+            LOG.warnv("Error in async Lambda execution for {0}: {1}", event.fn().getFunctionName(), e.getMessage());
+            result = new InvokeResult(500, "Unhandled",
+                    buildErrorPayload("Error executing Lambda: " + e.getMessage(), "Lambda.UnknownError"),
+                    null, event.requestId());
+        }
+        if ((result.getFunctionError() == null && result.getStatusCode() < 300) || attempt > event.maxRetries()) {
+            route(event, result, attempt);
+            return;
+        }
+        InvokeResult failed = result;
+        schedule(event, asyncRetryDelayMs * attempt, () -> attempt(event, attempt + 1, failed, null));
+    }
+
+    private void schedule(AsyncEvent event, long delayMs, Runnable next) {
+        long waitMs = Math.max(0, Math.min(delayMs, event.expiresAtMs() - clock.millis()));
+        CompletableFuture.delayedExecutor(waitMs, TimeUnit.MILLISECONDS, RETRY_THREADS).execute(next);
+    }
+
+    private void route(AsyncEvent event, InvokeResult result, int attempts) {
+        if (destinationRouter == null) {
+            return;
+        }
+        InvokeResult outcome = result;
+        if (outcome == null) {
+            // This Floci-only placeholder covers expiry before any attempt; AWS documents no payload.
+            outcome = new InvokeResult(200, "Unhandled",
+                    buildErrorPayload("Event age exceeded", "EventAgeExceeded"), null, event.requestId());
+        }
+        destinationRouter.route(event.fn(), event.payload(), outcome, attempts,
+                event.chainDepth(), event.invokedQualifier());
+    }
+
     private InvokeResult executeSync(LambdaFunction fn, byte[] payload, String requestId) {
         ContainerHandle handle;
         try {
@@ -243,11 +297,11 @@ public class LambdaExecutorService {
             long deadlineMs = System.currentTimeMillis() + (long) fn.getTimeout() * 1000;
             PendingInvocation invocation = new PendingInvocation(
                     requestId, payload, deadlineMs, fn.getFunctionArn(),
-                    new java.util.concurrent.CompletableFuture<>());
+                    new CompletableFuture<>());
 
             handle.getRuntimeApiServer().enqueue(invocation);
 
-            java.util.concurrent.CompletableFuture.anyOf(
+            CompletableFuture.anyOf(
                             invocation.getDispatchedFuture(), invocation.getResultFuture())
                     .get(fn.getTimeout() + RUNTIME_DISPATCH_GRACE_SECONDS, TimeUnit.SECONDS);
             InvokeResult result = invocation.getResultFuture().get();
@@ -277,8 +331,17 @@ public class LambdaExecutorService {
 
     @PreDestroy
     public void shutdown() {
+        generation.incrementAndGet();
         asyncExecutor.shutdownNow();
     }
+
+    @Override
+    public void clear() {
+        generation.incrementAndGet();
+    }
+
+    private record AsyncEvent(LambdaFunction fn, byte[] payload, String requestId, int chainDepth,
+                              String invokedQualifier, int maxRetries, long expiresAtMs, long generation) {}
 
     private byte[] buildErrorPayload(String message, String errorType) {
         try {

@@ -149,6 +149,7 @@ floci:
       docker-flags: ""
       honour-architectures: false
       zip-max-entries: 100000
+      async-retry-delay-seconds: 1
       # aws-config-path:
       hot-reload:
         enabled: true

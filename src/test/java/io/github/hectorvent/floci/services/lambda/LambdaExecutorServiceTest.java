@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.FunctionEventInvokeConfig;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.testing.MutableClock;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -19,9 +21,13 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -50,6 +56,7 @@ class LambdaExecutorServiceTest {
     @Mock WarmPool warmPool;
     @Mock LambdaConcurrencyLimiter concurrencyLimiter;
 
+    private final List<LambdaExecutorService> retryExecutors = new ArrayList<>();
     private LambdaExecutorService executor;
     private LambdaFunction fn;
 
@@ -63,6 +70,13 @@ class LambdaExecutorServiceTest {
         fn.setTimeout(1);
 
         when(concurrencyLimiter.acquire(any())).thenReturn(() -> {});
+    }
+
+    @AfterEach
+    void shutDownRetryExecutors() {
+        for (LambdaExecutorService retryExecutor : retryExecutors) {
+            retryExecutor.shutdown();
+        }
     }
 
     @Test
@@ -349,8 +363,8 @@ class LambdaExecutorServiceTest {
         config.setMaximumEventAgeInSeconds(1);
         when(lambdaService.findEventInvokeConfig(fn, null)).thenReturn(Optional.of(config));
         MutableClock clock = new MutableClock();
-        LambdaExecutorService retryExecutor =
-                new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, router, lambdaService, clock);
+        LambdaExecutorService retryExecutor = new LambdaExecutorService(warmPool, new ObjectMapper(),
+                concurrencyLimiter, router, lambdaService, clock, Duration.ZERO);
 
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("cid-age-after-failure", "test-fn", rtas, ContainerState.WARM);
@@ -381,6 +395,146 @@ class LambdaExecutorServiceTest {
                 "age expiration should preserve the last invocation result");
     }
 
+    @Test
+    void eventInvocation_waitsLongerBeforeEachRetry() throws Exception {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaExecutorService retryExecutor =
+                retryingExecutor(router, eventInvokeConfig(2, 21600), Duration.ofMillis(300));
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        InvokeResult failure = failedAttempt("req-wait");
+        List<Long> enqueuedAt = failEveryAttempt(rtas, failure);
+        CountDownLatch routed = countRoutes(router);
+
+        byte[] payload = "{}".getBytes();
+        retryExecutor.invoke(fn, payload, InvocationType.Event);
+
+        assertTrue(routed.await(10, TimeUnit.SECONDS), "destination routing never ran");
+        assertEquals(3, enqueuedAt.size());
+        long firstWaitMs = TimeUnit.NANOSECONDS.toMillis(enqueuedAt.get(1) - enqueuedAt.get(0));
+        long secondWaitMs = TimeUnit.NANOSECONDS.toMillis(enqueuedAt.get(2) - enqueuedAt.get(1));
+        assertTrue(firstWaitMs >= 300, "first retry came after " + firstWaitMs + " ms");
+        assertTrue(secondWaitMs >= 600, "second retry came after " + secondWaitMs + " ms");
+        verify(router).route(eq(fn), eq(payload), eq(failure), eq(3), eq(0), isNull());
+    }
+
+    @Test
+    void eventInvocation_releasesTheConcurrencyPermitBetweenAttempts() throws Exception {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaExecutorService retryExecutor = retryingExecutor(router, eventInvokeConfig(2, 21600), Duration.ZERO);
+        LambdaConcurrencyLimiter.Permit permit = mock(LambdaConcurrencyLimiter.Permit.class);
+        when(concurrencyLimiter.acquire(fn)).thenReturn(permit);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        failEveryAttempt(rtas, failedAttempt("req-permit"));
+        CountDownLatch routed = countRoutes(router);
+
+        retryExecutor.invoke(fn, "{}".getBytes(), InvocationType.Event);
+
+        assertTrue(routed.await(10, TimeUnit.SECONDS), "destination routing never ran");
+        verify(concurrencyLimiter, times(3)).acquire(fn);
+        verify(permit, times(3)).close();
+    }
+
+    @Test
+    void eventInvocation_throttledRetryPollsAgainWithoutSpendingAnAttempt() throws Exception {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaExecutorService retryExecutor = retryingExecutor(router, eventInvokeConfig(1, 21600), Duration.ZERO);
+        LambdaConcurrencyLimiter.Permit permit = mock(LambdaConcurrencyLimiter.Permit.class);
+        when(concurrencyLimiter.acquire(fn))
+                .thenReturn(permit)
+                .thenThrow(new AwsException("TooManyRequestsException", "Rate exceeded", 429))
+                .thenReturn(permit);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        List<Long> enqueuedAt = failEveryAttempt(rtas, failedAttempt("req-throttled"));
+        CountDownLatch routed = countRoutes(router);
+
+        byte[] payload = "{}".getBytes();
+        retryExecutor.invoke(fn, payload, InvocationType.Event);
+
+        assertTrue(routed.await(10, TimeUnit.SECONDS), "destination routing never ran");
+        assertEquals(2, enqueuedAt.size());
+        verify(concurrencyLimiter, times(3)).acquire(fn);
+        verify(router).route(eq(fn), eq(payload), any(InvokeResult.class), eq(2), eq(0), isNull());
+    }
+
+    @Test
+    void eventInvocation_expiryDuringTheRetryWaitRoutesTheLastAttempt() throws Exception {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaExecutorService retryExecutor =
+                retryingExecutor(router, eventInvokeConfig(2, 1), Duration.ofSeconds(10));
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        InvokeResult failure = failedAttempt("req-expiry");
+        List<Long> enqueuedAt = failEveryAttempt(rtas, failure);
+        CountDownLatch routed = countRoutes(router);
+
+        byte[] payload = "{}".getBytes();
+        retryExecutor.invoke(fn, payload, InvocationType.Event);
+
+        assertTrue(routed.await(5, TimeUnit.SECONDS),
+                "the retry wait should end when the event expires, not after the full delay");
+        assertEquals(1, enqueuedAt.size());
+        verify(router).route(eq(fn), eq(payload), eq(failure), eq(1), eq(0), isNull());
+    }
+
+    @Test
+    void eventInvocation_resetDropsAPendingRetry() throws Exception {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaExecutorService retryExecutor =
+                retryingExecutor(router, eventInvokeConfig(2, 21600), Duration.ofMillis(500));
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        List<Long> enqueuedAt = failEveryAttempt(rtas, failedAttempt("req-reset"));
+
+        retryExecutor.invoke(fn, "{}".getBytes(), InvocationType.Event);
+        verify(rtas, timeout(5000).atLeastOnce()).enqueue(any(PendingInvocation.class));
+        retryExecutor.clear();
+        Thread.sleep(1500);
+
+        assertEquals(1, enqueuedAt.size());
+        verify(router, never()).route(any(), any(), any(), anyInt(), anyInt(), any());
+    }
+
+    private LambdaExecutorService retryingExecutor(AsyncInvokeDestinationRouter router, LambdaService lambdaService,
+                                                   Duration asyncRetryDelay) {
+        LambdaExecutorService retryExecutor = new LambdaExecutorService(warmPool, new ObjectMapper(),
+                concurrencyLimiter, router, lambdaService, Clock.systemUTC(), asyncRetryDelay);
+        retryExecutors.add(retryExecutor);
+        return retryExecutor;
+    }
+
+    private LambdaService eventInvokeConfig(int maximumRetryAttempts, int maximumEventAgeInSeconds) {
+        FunctionEventInvokeConfig config = new FunctionEventInvokeConfig();
+        config.setMaximumRetryAttempts(maximumRetryAttempts);
+        config.setMaximumEventAgeInSeconds(maximumEventAgeInSeconds);
+        LambdaService lambdaService = mock(LambdaService.class);
+        when(lambdaService.findEventInvokeConfig(fn, null)).thenReturn(Optional.of(config));
+        return lambdaService;
+    }
+
+    private static InvokeResult failedAttempt(String requestId) {
+        return new InvokeResult(200, "Unhandled", "{\"errorMessage\":\"fails\"}".getBytes(), null, requestId);
+    }
+
+    /** Makes every attempt fail with {@code failure}; the list records when each one reached the runtime. */
+    private List<Long> failEveryAttempt(RuntimeApiServer rtas, InvokeResult failure) {
+        ContainerHandle handle = new ContainerHandle("cid-failing", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        List<Long> enqueuedAt = new CopyOnWriteArrayList<>();
+        doAnswer(invocation -> {
+            enqueuedAt.add(System.nanoTime());
+            PendingInvocation pendingInvocation = invocation.getArgument(0);
+            pendingInvocation.getResultFuture().complete(failure);
+            return pendingInvocation.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+        return enqueuedAt;
+    }
+
+    private static CountDownLatch countRoutes(AsyncInvokeDestinationRouter router) {
+        CountDownLatch routed = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            routed.countDown();
+            return null;
+        }).when(router).route(any(), any(), any(), anyInt(), anyInt(), any());
+        return routed;
+    }
     @Test
     void exceptionDuringInvocation_destroysHandle_doesNotRelease() {
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);

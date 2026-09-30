@@ -348,6 +348,7 @@ floci:
       code-path: ./data/lambda-code
       zip-max-entries: 100000
       poll-interval-ms: 1000
+      async-retry-delay-seconds: 60           # FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS - a failed Event invocation waits this before its first retry and twice this before its second (AWS: 1 min, then 2); 0 retries back to back
       container-idle-timeout-seconds: 300
       region-concurrency-limit: 1000
       unreserved-concurrency-min: 100

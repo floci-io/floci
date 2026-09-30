@@ -2663,6 +2663,13 @@ public interface EmulatorConfig {
         @WithDefault("1000")
         long pollIntervalMs();
 
+        /**
+         * Seconds before the first retry of a failed asynchronous invocation. Retry n waits n times
+         * this, so the default of 60 matches AWS: one minute, then two. Zero retries back to back.
+         */
+        @WithDefault("60")
+        int asyncRetryDelaySeconds();
+
         @WithDefault("false")
         boolean ephemeral();
 
