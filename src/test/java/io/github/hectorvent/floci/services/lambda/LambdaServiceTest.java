@@ -2452,4 +2452,29 @@ class LambdaServiceTest {
         assertEquals("1 validation error detected: Value at 's3Key' failed to satisfy constraint: "
                 + "Member must have length less than or equal to 1024", error.getMessage());
     }
+    @Test
+    void createAlias_functionVersionOutsideTheModelPattern_isRejected() {
+        // Catches: CreateAlias storing a FunctionVersion that isn't $LATEST, $LATEST.PUBLISHED or a number
+        service.createFunction(REGION, baseRequest("alias-version-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createAlias(REGION, "alias-version-fn", "live", "v1", null, null));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value 'v1' at 'functionVersion' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: (\\$LATEST(\\.PUBLISHED)?|[0-9]+)", error.getMessage());
+    }
+
+    @Test
+    void updateAlias_descriptionLongerThan256_isRejectedAndLeavesTheAliasUnchanged() {
+        // Catches: UpdateAlias accepting (or half-applying) a Description over the model's 256-character maximum
+        service.createFunction(REGION, baseRequest("alias-description-fn"));
+        service.createAlias(REGION, "alias-description-fn", "live", "$LATEST", "original", null);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.updateAlias(REGION, "alias-description-fn", "live", "$LATEST", "d".repeat(257), null));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("original", service.getAlias(REGION, "alias-description-fn", "live").getDescription());
+    }
 }
