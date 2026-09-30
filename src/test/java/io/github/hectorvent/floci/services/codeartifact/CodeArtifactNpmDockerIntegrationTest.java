@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.codeartifact;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -331,9 +332,9 @@ class CodeArtifactNpmDockerIntegrationTest {
                 "state reset must stop reset-repo's Verdaccio container");
     }
 
-    private static int runningVerdaccioTestContainerCount() throws IOException, InterruptedException {
+    private int runningVerdaccioTestContainerCount() throws IOException, InterruptedException {
         Process process = new ProcessBuilder("docker", "ps", "-q",
-                "--filter", "name=floci-aws-" + SidecarContainersProfile.NAMESPACE + "-verdaccio-")
+                "--filter", "name=" + ContainerStorageHelper.dockerName(config, "floci-verdaccio-"))
                 .redirectErrorStream(true).start();
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         process.waitFor();
