@@ -12,9 +12,11 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
+import software.amazon.awssdk.services.sqs.model.SetQueueAttributesRequest;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -34,6 +36,14 @@ class S3NotificationValidationTest {
                     String queueArn = sqs.getQueueAttributes(request -> request.queueUrl(queueUrl)
                             .attributeNames(QueueAttributeName.QUEUE_ARN))
                             .attributes().get(QueueAttributeName.QUEUE_ARN);
+                    String policy = """
+                            {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                            "Principal":{"Service":"s3.amazonaws.com"},"Action":"sqs:SendMessage",
+                            "Resource":"%s","Condition":{"ArnEquals":{"aws:SourceArn":"arn:aws:s3:::%s"},
+                            "StringEquals":{"aws:SourceAccount":"000000000000"}}}]}
+                            """.formatted(queueArn, bucket);
+                    sqs.setQueueAttributes(SetQueueAttributesRequest.builder().queueUrl(queueUrl)
+                            .attributes(Map.of(QueueAttributeName.POLICY, policy)).build());
                     NotificationConfiguration valid = configuration(queueArn);
                     s3.putBucketNotificationConfiguration(request -> request.bucket(bucket)
                             .notificationConfiguration(valid));

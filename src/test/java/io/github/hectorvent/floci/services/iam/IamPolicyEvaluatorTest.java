@@ -629,6 +629,92 @@ class IamPolicyEvaluatorTest {
     }
 
     @Test
+    void serviceResourcePolicyRequiresServicePrincipalType() {
+        String resource = "arn:aws:sqs:us-east-1:000000000000:notifications";
+        for (String type : List.of("Federated", "CanonicalUser", "AWS")) {
+            String policy = """
+                    {"Statement":[{"Effect":"Allow","Principal":{"%s":"s3.amazonaws.com"},
+                    "Action":"sqs:SendMessage","Resource":"%s"}]}
+                    """.formatted(type, resource);
+            assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateServiceResourcePolicy(
+                    List.of(policy), "s3.amazonaws.com", "sqs:SendMessage", resource, null));
+        }
+
+        String legacyChinaPrincipal = """
+                {"Statement":[{"Effect":"Allow","Principal":{"Service":"s3.amazonaws.com.cn"},
+                "Action":"sqs:SendMessage","Resource":"%s"}]}
+                """.formatted(resource);
+        assertEquals(ResourcePolicyDecision.ALLOW, evaluator.evaluateServiceResourcePolicy(
+                List.of(legacyChinaPrincipal), "s3.amazonaws.com", "sqs:SendMessage", resource, null));
+
+        String partialServiceWildcard = """
+                {"Statement":[{"Effect":"Allow","Principal":{"Service":"s3*.amazonaws.com"},
+                "Action":"sqs:SendMessage","Resource":"%s"}]}
+                """.formatted(resource);
+        assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateServiceResourcePolicy(
+                List.of(partialServiceWildcard), "s3.amazonaws.com", "sqs:SendMessage", resource, null));
+
+        String missingEffect = """
+                {"Statement":[{"Principal":{"Service":"s3.amazonaws.com"},
+                "Action":"sqs:SendMessage","Resource":"%s"}]}
+                """.formatted(resource);
+        assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateServiceResourcePolicy(
+                List.of(missingEffect), "s3.amazonaws.com", "sqs:SendMessage", resource, null));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateResourcePolicy(
+                List.of(missingEffect), "s3.amazonaws.com", "sqs:SendMessage", resource, null));
+
+        String conflictingPrincipals = """
+                {"Statement":[{"Effect":"Allow","Principal":{"Service":"s3.amazonaws.com"},
+                "NotPrincipal":{"Service":"s3.amazonaws.com"},
+                "Action":"sqs:SendMessage","Resource":"%s"}]}
+                """.formatted(resource);
+        assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateServiceResourcePolicy(
+                List.of(conflictingPrincipals), "s3.amazonaws.com", "sqs:SendMessage", resource, null));
+
+        String wildcardPrincipal = """
+                {"Statement":[{"Effect":"Allow","Principal":"*",
+                "Action":"sqs:SendMessage","Resource":"%s"}]}
+                """.formatted(resource);
+        assertEquals(ResourcePolicyDecision.ALLOW, evaluator.evaluateServiceResourcePolicy(
+                List.of(wildcardPrincipal), "s3.amazonaws.com", "sqs:SendMessage", resource, null));
+
+        String awsWildcardPrincipal = """
+                {"Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},
+                "Action":"sqs:SendMessage","Resource":"%s"}]}
+                """.formatted(resource);
+        assertEquals(ResourcePolicyDecision.ALLOW, evaluator.evaluateServiceResourcePolicy(
+                List.of(awsWildcardPrincipal), "s3.amazonaws.com", "sqs:SendMessage", resource, null));
+    }
+
+    @Test
+    void serviceResourcePolicyAppliesExplicitDenyAndNotPrincipal() {
+        String resource = "arn:aws:sqs:us-east-1:000000000000:notifications";
+        String policy = """
+                {"Statement":[
+                {"Effect":"Allow","Principal":{"Service":"s3.amazonaws.com"},
+                "Action":"sqs:SendMessage","Resource":"%s"},
+                {"Effect":"Deny","NotPrincipal":{"Service":"sns.amazonaws.com"},
+                "Action":"sqs:SendMessage","Resource":"%s"}]}
+                """.formatted(resource, resource);
+        assertEquals(ResourcePolicyDecision.EXPLICIT_DENY, evaluator.evaluateServiceResourcePolicy(
+                List.of(policy), "s3.amazonaws.com", "sqs:SendMessage", resource, null));
+
+        String excludedService = """
+                {"Statement":[{"Effect":"Deny","NotPrincipal":{"Service":"s3.amazonaws.com"},
+                "Action":"sqs:SendMessage","Resource":"%s"}]}
+                """.formatted(resource);
+        assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateServiceResourcePolicy(
+                List.of(excludedService), "s3.amazonaws.com", "sqs:SendMessage", resource, null));
+
+        String excludedByAwsWildcard = """
+                {"Statement":[{"Effect":"Allow","NotPrincipal":{"AWS":"*"},
+                "Action":"sqs:SendMessage","Resource":"%s"}]}
+                """.formatted(resource);
+        assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateServiceResourcePolicy(
+                List.of(excludedByAwsWildcard), "s3.amazonaws.com", "sqs:SendMessage", resource, null));
+    }
+
+    @Test
     void evaluatesResourcePolicyConditionsAndIdentityParity() {
         String condPolicy = """
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:*","Resource":"*",

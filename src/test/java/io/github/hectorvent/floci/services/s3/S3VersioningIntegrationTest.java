@@ -419,6 +419,20 @@ class S3VersioningIntegrationTest {
             .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
 
         try {
+            String policy = """
+                    {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                    "Principal":{"Service":"s3.amazonaws.com"},"Action":"sqs:SendMessage",
+                    "Resource":"arn:aws:sqs:us-east-1:000000000000:version-delete-notif-queue",
+                    "Condition":{"ArnEquals":{"aws:SourceArn":"arn:aws:s3:::%s"},
+                    "StringEquals":{"aws:SourceAccount":"000000000000"}}}]}
+                    """.formatted(notifBucket);
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "SetQueueAttributes")
+                    .formParam("QueueUrl", queueUrl)
+                    .formParam("Attribute.1.Name", "Policy")
+                    .formParam("Attribute.1.Value", policy)
+                    .when().post("/").then().statusCode(200);
+
             given()
                 .contentType("application/xml")
                 .queryParam("notification", "")

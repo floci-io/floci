@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsServiceNamespaces;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.PolicyStatement;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -204,6 +205,68 @@ public class IamPolicyEvaluator {
             return ResourcePolicyDecision.ALLOW;
         }
         return ResourcePolicyDecision.NEUTRAL;
+    }
+
+    public ResourcePolicyDecision evaluateServiceResourcePolicy(
+            List<String> resourcePolicies,
+            String servicePrincipal,
+            String action,
+            String resource,
+            Map<String, List<String>> conditionCtx) {
+        if (resourcePolicies == null || resourcePolicies.isEmpty()) {
+            return ResourcePolicyDecision.NEUTRAL;
+        }
+        Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
+        String loweredAction = lowercase(action);
+        List<PolicyStatement> statements = parseAll(resourcePolicies);
+        for (PolicyStatement statement : statements) {
+            if (statement.isDeny() && matchesServiceResourceStatement(
+                    statement, servicePrincipal, loweredAction, resource, ctx)) {
+                return ResourcePolicyDecision.EXPLICIT_DENY;
+            }
+        }
+        for (PolicyStatement statement : statements) {
+            if (statement.isAllow() && matchesServiceResourceStatement(
+                    statement, servicePrincipal, loweredAction, resource, ctx)) {
+                return ResourcePolicyDecision.ALLOW;
+            }
+        }
+        return ResourcePolicyDecision.NEUTRAL;
+    }
+
+    private boolean matchesServiceResourceStatement(PolicyStatement statement, String servicePrincipal,
+                                                     String action, String resource, Map<String, List<String>> ctx) {
+        Map<String, List<String>> principals = statement.getPrincipals();
+        Map<String, List<String>> notPrincipals = statement.getNotPrincipals();
+        if ((principals == null) == (notPrincipals == null)) {
+            return false;
+        }
+        if (principals != null && !matchesServicePrincipal(principals, servicePrincipal)) {
+            return false;
+        }
+        if (principals == null && matchesServicePrincipal(notPrincipals, servicePrincipal)) {
+            return false;
+        }
+        return matchesAction(statement, action)
+                && matchesResource(statement, resource)
+                && matchesConditions(statement.getConditions(), ctx);
+    }
+
+    private boolean matchesServicePrincipal(Map<String, List<String>> principals, String servicePrincipal) {
+        for (Map.Entry<String, List<String>> entry : principals.entrySet()) {
+            if (("*".equals(entry.getKey()) || "AWS".equalsIgnoreCase(entry.getKey()))
+                    && entry.getValue().contains("*")) {
+                return true;
+            }
+            if ("Service".equalsIgnoreCase(entry.getKey())) {
+                for (String pattern : entry.getValue()) {
+                    if (ServicePrincipals.canonical(pattern).equals(ServicePrincipals.canonical(servicePrincipal))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     private Decision evaluateParsed(
@@ -1177,7 +1240,7 @@ public class IamPolicyEvaluator {
     }
 
     private PolicyStatement parseStatement(JsonNode stmt) {
-        String effect = stmt.path("Effect").asText("Allow");
+        String effect = stmt.path("Effect").asText();
         Map<String, List<String>> principals = parsePrincipals(stmt.get("Principal"));
         Map<String, List<String>> notPrincipals = parsePrincipals(stmt.get("NotPrincipal"));
         // Action names are case-insensitive on AWS, so they are lowercased once here instead of
