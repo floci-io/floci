@@ -84,6 +84,8 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_TOPIC_LENGTH = 249;
     private static final int MAX_TOPICS = 1;
     private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
+    // UpdateFunctionCode S3Bucket (3-63 characters, [0-9A-Za-z\.\-_]*(?<!\.)) and S3Key (1-1024) shapes.
+    private static final Pattern S3_BUCKET_PATTERN = Pattern.compile("[0-9A-Za-z\\.\\-_]*(?<!\\.)");
     // The model's own Role pattern, which AWS quotes verbatim in its validation message; it
     // already accepts every partition.
     private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
@@ -711,6 +713,7 @@ public class LambdaService implements ResourceProvider {
         String imageUri = (String) request.get("ImageUri");
         String s3Bucket = (String) request.get("S3Bucket");
         String s3Key = (String) request.get("S3Key");
+        validateS3CodeLocation(s3Bucket, s3Key);
 
         if (zipFileBase64 != null) {
             fn.setS3Bucket(null);
@@ -2542,6 +2545,22 @@ public class LambdaService implements ResourceProvider {
         validateArnList(topics, "topics", TOPIC_PATTERN, MAX_TOPICS);
         for (Object topic : topics) {
             validateMaxLength(topic, "topics.member", MAX_TOPIC_LENGTH);
+        }
+    }
+
+    private static void validateS3CodeLocation(String bucket, String key) {
+        if (bucket != null) {
+            if (bucket.length() < 3) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + bucket + "' at 's3Bucket' failed to satisfy constraint: "
+                                + "Member must have length greater than or equal to 3", 400);
+            }
+            validateMaxLength(bucket, "s3Bucket", 63);
+            validatePattern(bucket, "s3Bucket", S3_BUCKET_PATTERN);
+        }
+        if (key != null) {
+            validateNonEmpty(key, "s3Key", false);
+            validateMaxLength(key, "s3Key", 1024);
         }
     }
 
