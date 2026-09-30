@@ -531,14 +531,20 @@ class LambdaExecutorServiceTest {
         LambdaExecutorService retryExecutor =
                 retryingExecutor(router, eventInvokeConfig(2, 1), Duration.ofSeconds(10));
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
-        List<Long> enqueuedAt = failEveryAttempt(rtas, failedAttempt("req-deleted-expiry"));
+        ContainerHandle handle = new ContainerHandle("cid-deleted-expiry", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        InvokeResult failure = failedAttempt("req-deleted-expiry");
+        doAnswer(invocation -> {
+            retryExecutor.dropPending(fn);
+            PendingInvocation pendingInvocation = invocation.getArgument(0);
+            pendingInvocation.getResultFuture().complete(failure);
+            return pendingInvocation.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
 
         retryExecutor.invoke(fn, "{}".getBytes(), InvocationType.Event);
-        verify(rtas, timeout(5000)).enqueue(any(PendingInvocation.class));
-        retryExecutor.dropPending(fn);
 
         verify(router, after(2000).never()).route(any(), any(), any(), anyInt(), anyInt(), any());
-        assertEquals(1, enqueuedAt.size());
+        verify(rtas, times(1)).enqueue(any(PendingInvocation.class));
     }
 
     @Test

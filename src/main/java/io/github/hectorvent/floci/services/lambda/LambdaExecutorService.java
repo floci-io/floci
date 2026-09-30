@@ -371,8 +371,9 @@ public class LambdaExecutorService implements Resettable {
 
     @Override
     public void clear() {
-        generation.incrementAndGet();
+        // Counts first: an invoke that reads the new generation must also read the cleared counts.
         deletions.clear();
+        generation.incrementAndGet();
     }
 
     private record AsyncEvent(LambdaFunction fn, byte[] payload, String requestId, int chainDepth,
