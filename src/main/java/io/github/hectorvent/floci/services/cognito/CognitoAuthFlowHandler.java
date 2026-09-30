@@ -66,6 +66,10 @@ final class CognitoAuthFlowHandler {
     private final ConcurrentHashMap<String, SrpSession> srpSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CustomAuthToken> customAuthSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, TotpSession> totpSessions = new ConcurrentHashMap<>();
+    /**
+     * Guards both USER_AUTH session maps and every check of an EMAIL_OTP or SMS_OTP sign-in code, which
+     * the code store reads and only then deletes. Nothing held under it may call a Lambda trigger.
+     */
     private final Object userAuthSessionLock = new Object();
     private final LinkedHashMap<String, UserAuthSession> userAuthSessions = new LinkedHashMap<>();
     private final LinkedHashMap<String, UserAuthSession> simulatedUserAuthSessions = new LinkedHashMap<>();
@@ -1002,8 +1006,12 @@ final class CognitoAuthFlowHandler {
         validateSecretHash(client, responses, username);
         CognitoUser user = service.adminGetUser(pool.getId(), username);
         requireSignInEligible(user);
-        service.consumeSignInOtp(pool.getId(), user.getUsername(),
-                isEmail ? VerificationCode.Purpose.EMAIL_OTP : VerificationCode.Purpose.SMS_OTP, code);
+        // Each of the user's live sessions takes this code, so of two answered with it at once, only the
+        // first to check it under the lock signs in.
+        synchronized (userAuthSessionLock) {
+            service.consumeSignInOtp(pool.getId(), user.getUsername(),
+                    isEmail ? VerificationCode.Purpose.EMAIL_OTP : VerificationCode.Purpose.SMS_OTP, code);
+        }
 
         if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
             return buildNewPasswordRequiredChallenge(pool, client, user);

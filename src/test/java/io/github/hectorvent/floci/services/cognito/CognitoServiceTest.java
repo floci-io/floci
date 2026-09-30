@@ -47,6 +47,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -3479,6 +3480,77 @@ class CognitoServiceTest {
                             return true;
                         } catch (AwsException e) {
                             assertEquals("NotAuthorizedException", e.getErrorCode(), e.getMessage());
+                            return false;
+                        }
+                    }));
+                }
+                assertTrue(ready.await(10, TimeUnit.SECONDS));
+                start.countDown();
+                int signedIn = 0;
+                for (Future<Boolean> outcome : outcomes) {
+                    if (outcome.get(10, TimeUnit.SECONDS)) {
+                        signedIn++;
+                    }
+                }
+                assertEquals(1, signedIn, "round " + round);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * Every live EMAIL_OTP or SMS_OTP session of a user takes the user's one code, so two of them answered
+     * with it at once through RespondToAuthChallenge sign in once. The mocked code store reads the code and
+     * marks it used a moment later, as the real one reads it and then deletes it, so both sessions pass the
+     * check unless it runs under a lock.
+     */
+    @ParameterizedTest
+    @CsvSource({"EMAIL_OTP, EMAIL_OTP_CODE, email, alice@example.com",
+            "SMS_OTP, SMS_OTP_CODE, phone_number, +15555550100"})
+    void respondToAuthChallengeRedeemsASignInCodeOnceAcrossSessions(String challenge, String codeParameter,
+                                                                    String attribute, String destination)
+            throws Exception {
+        VerificationCode.Purpose purpose = VerificationCode.Purpose.valueOf(challenge);
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(purpose), any())).thenReturn("654321");
+        AtomicBoolean redeemed = new AtomicBoolean();
+        doAnswer(invocation -> {
+            boolean used = redeemed.get();
+            Thread.sleep(20);
+            if (used) {
+                throw new VerificationCodeException(VerificationCodeException.Kind.NOT_FOUND, "used");
+            }
+            redeemed.set(true);
+            return null;
+        }).when(verificationCodeService).consume(any(), any(), eq(purpose), eq("654321"));
+        CognitoService serviceWithVerification = serviceWithVerification(verificationCodeService);
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, challenge);
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice",
+                Map.of(attribute, destination, attribute + "_verified", "true"), null);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 10; round++) {
+                redeemed.set(false);
+                List<String> sessions = new ArrayList<>();
+                while (sessions.size() < 2) {
+                    sessions.add((String) serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                            Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", challenge)).get("Session"));
+                }
+                CountDownLatch ready = new CountDownLatch(sessions.size());
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Boolean>> outcomes = new ArrayList<>();
+                for (String session : sessions) {
+                    outcomes.add(executor.submit(() -> {
+                        ready.countDown();
+                        start.await();
+                        try {
+                            serviceWithVerification.respondToAuthChallenge(client.getClientId(), challenge, session,
+                                    Map.of("USERNAME", "alice", codeParameter, "654321"));
+                            return true;
+                        } catch (AwsException e) {
+                            assertEquals("CodeMismatchException", e.getErrorCode(), e.getMessage());
                             return false;
                         }
                     }));
