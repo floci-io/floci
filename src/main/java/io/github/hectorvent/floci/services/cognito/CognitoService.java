@@ -3069,6 +3069,41 @@ public class CognitoService implements ResourceProvider {
         return result;
     }
 
+    /**
+     * GetUserAuthFactors. The MFA members come from the email MFA preference, the one per-user
+     * MFA setting Floci stores; SetUserMFAPreference accepts SMS and software-token settings
+     * without keeping them.
+     */
+    public Map<String, Object> getUserAuthFactors(String accessToken) {
+        VerifiedAccessToken token;
+        try {
+            token = verifyAccessToken(accessToken);
+        } catch (AwsException e) {
+            if ("NotAuthorizedException".equals(e.getErrorCode())
+                    && INVALID_ACCESS_TOKEN_MESSAGE.equals(e.getMessage())) {
+                throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
+            }
+            throw e;
+        }
+        requireScope(accessToken, "aws.cognito.signin.user.admin");
+
+        CognitoUser user = adminGetUser(token.poolId(), token.username());
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("Username", user.getUsername());
+        List<String> factors = authFlowHandler.configuredUserAuthFactors(user);
+        if (!factors.isEmpty()) {
+            result.put("ConfiguredUserAuthFactors", factors);
+        }
+        EmailMfaSettings emailMfa = user.getEmailMfaSettings();
+        if (emailMfa != null && emailMfa.isEnabled()) {
+            if (emailMfa.isPreferredMfa()) {
+                result.put("PreferredMfaSetting", "EMAIL_OTP");
+            }
+            result.put("UserMFASettingList", List.of("EMAIL_OTP"));
+        }
+        return result;
+    }
+
     public Map<String, Object> getUserAttributeVerificationCode(String accessToken, String attributeName) {
         VerifiedAccessToken token;
         try {

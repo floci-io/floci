@@ -257,6 +257,51 @@ class CognitoManagedLoginIntegrationTest {
                 "admin/superuser is not in the client's AllowedOAuthScopes, so the trigger never sees it");
     }
 
+    /**
+     * GetUserAuthFactors needs {@code aws.cognito.signin.user.admin} in the access token's scope.
+     * Floci stamps that scope on every code-grant access token whatever the request asked for, so a
+     * V2 trigger reshapes this token's scope to the {@code openid email} the request named.
+     */
+    @Test
+    void codeGrantAccessTokenWithoutTheAdminScopeCannotReadAuthFactors() throws Exception {
+        Pool pool = newPoolWithPreTokenGenerationTrigger();
+        when(lambdaService.invoke(anyString(), eq(PRE_TOKEN_GENERATION_ARN), any(), any()))
+                .thenReturn(triggerResponse(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "accessTokenGeneration", Map.of(
+                                "scopesToAdd", List.of("openid", "email"),
+                                "scopesToSuppress", List.of("aws.cognito.signin.user.admin"))))));
+        String accessToken = redeem(null, pool.clientId(),
+                code(signIn(null, pool, authorizeRequest(pool.clientId()))), VERIFIER).path("access_token");
+        assertEquals("openid email", jwtPayload(accessToken).path("scope").asText());
+
+        cognitoAction("GetUserAuthFactors", """
+                {"AccessToken":"%s"}
+                """.formatted(accessToken))
+                .then().statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"))
+                .body("message", equalTo("Access Token does not have the required scope"));
+    }
+
+    @Test
+    void codeGrantAccessTokenWithTheAdminScopeReadsAuthFactors() throws Exception {
+        String poolId = cognitoJson("CreateUserPool", "{\"PoolName\":\"ManagedLoginAdminScopePool\"}")
+                .path("UserPool").path("Id").asText();
+        Pool pool = withUser(poolId,
+                codeClient(poolId, "\"openid\",\"email\",\"aws.cognito.signin.user.admin\""),
+                "user-" + System.nanoTime());
+        Map<String, String> query = authorizeRequest(pool.clientId());
+        query.put("scope", "openid email aws.cognito.signin.user.admin");
+        String accessToken = redeem(null, pool.clientId(), code(signIn(null, pool, query)), VERIFIER)
+                .path("access_token");
+
+        cognitoAction("GetUserAuthFactors", """
+                {"AccessToken":"%s"}
+                """.formatted(accessToken))
+                .then().statusCode(200)
+                .body("Username", equalTo(pool.username()))
+                .body("ConfiguredUserAuthFactors", equalTo(List.of("PASSWORD")));
+    }
+
     @Test
     void codeIsRefusedWithAWrongOrMissingVerifierAndAWrongOneSpendsIt() throws Exception {
         Pool pool = newPool();
@@ -533,11 +578,16 @@ class CognitoManagedLoginIntegrationTest {
     }
 
     private static String codeClient(String poolId) throws Exception {
+        return codeClient(poolId, "\"openid\",\"email\"");
+    }
+
+    /** {@code allowedScopes} is the body of the AllowedOAuthScopes JSON array. */
+    private static String codeClient(String poolId, String allowedScopes) throws Exception {
         return cognitoJson("CreateUserPoolClient", """
                 {"UserPoolId":"%s","ClientName":"managed-login","AllowedOAuthFlowsUserPoolClient":true,
-                 "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":["openid","email"],"CallbackURLs":["%s"],
+                 "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":[%s],"CallbackURLs":["%s"],
                  "LogoutURLs":["%s"],"SupportedIdentityProviders":["COGNITO"],"ExplicitAuthFlows":["ALLOW_REFRESH_TOKEN_AUTH"]}
-                """.formatted(poolId, CALLBACK, SIGNED_OUT)).path("UserPoolClient").path("ClientId").asText();
+                """.formatted(poolId, allowedScopes, CALLBACK, SIGNED_OUT)).path("UserPoolClient").path("ClientId").asText();
     }
 
     private static Pool withUser(String poolId, String clientId, String username) throws Exception {

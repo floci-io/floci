@@ -4953,6 +4953,52 @@ class CognitoServiceTest {
         assertThrows(AwsException.class, () -> service.getUserAttributeVerificationCode(invalid, "email"));
         assertThrows(AwsException.class, () -> service.globalSignOut(invalid));
         assertThrows(AwsException.class, () -> service.setUserMFAPreference(invalid, true, false));
+        assertThrows(AwsException.class, () -> service.getUserAuthFactors(invalid));
+    }
+
+    @Test
+    void getUserAuthFactors_userWithoutPassword_omitsPasswordFactor() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "PasswordlessPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+        CognitoUser user = service.adminCreateUser(pool.getId(), "bob",
+                Map.of("email", "bob@example.com", "email_verified", "true"), null);
+        String accessToken = service.generateSignedJwt(user, pool, "access", client, null, null);
+
+        Map<String, Object> result = service.getUserAuthFactors(accessToken);
+
+        assertEquals("bob", result.get("Username"));
+        assertEquals(List.of("EMAIL_OTP"), result.get("ConfiguredUserAuthFactors"),
+                "a verified email is a factor whether or not Floci's code delivery is wired");
+    }
+
+    @Test
+    void getUserAuthFactors_userWithNoFactors_returnsOnlyUsername() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "NoFactorPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+        CognitoUser user = service.adminCreateUser(pool.getId(), "carol",
+                Map.of("email", "carol@example.com"), null);
+        String accessToken = service.generateSignedJwt(user, pool, "access", client, null, null);
+
+        assertEquals(Map.of("Username", "carol"), service.getUserAuthFactors(accessToken));
+    }
+
+    @Test
+    void getUserAuthFactors_accessTokenWithoutAdminScope_isRejected() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        String accessToken = service.generateSignedJwt(user, pool, "access", client,
+                new CognitoService.ClaimsOverride(null, null, null, null,
+                        List.of("openid", "email"), List.of("aws.cognito.signin.user.admin"),
+                        null, null, null));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.getUserAuthFactors(accessToken));
+
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("Access Token does not have the required scope", ex.getMessage());
     }
 
     private void assertInvalidAccessToken(String token, String reason) {
