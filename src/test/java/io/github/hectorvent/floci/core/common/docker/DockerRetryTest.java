@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.net.SocketTimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -74,7 +75,7 @@ class DockerRetryTest {
     // pool exhaustion -- it must stay retryable.
     @Test
     void socketTimeoutExceptionIsStillTransientDespiteExtendingInterruptedIOException() {
-        assertTrue(DockerRetry.isTransientIo(new java.net.SocketTimeoutException("Read timed out")));
+        assertTrue(DockerRetry.isTransientIo(new SocketTimeoutException("Read timed out")));
     }
 
     @Test

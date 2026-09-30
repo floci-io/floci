@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -111,10 +112,10 @@ class RetryingTarCopierTest {
                 () -> RetryingTarCopier.copyFile(docker, "c-1", "/etc", "f", missing, 0644, 1, 0L));
 
         Throwable cause = thrown.getCause();
-        while (cause != null && !(cause instanceof java.nio.file.NoSuchFileException)) {
+        while (cause != null && !(cause instanceof NoSuchFileException)) {
             cause = cause.getCause();
         }
-        assertEquals(java.nio.file.NoSuchFileException.class, cause == null ? null : cause.getClass(),
+        assertEquals(NoSuchFileException.class, cause == null ? null : cause.getClass(),
                 "the streamer's real failure must surface, not a phantom success");
     }
 
