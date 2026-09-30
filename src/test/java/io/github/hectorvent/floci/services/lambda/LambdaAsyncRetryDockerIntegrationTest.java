@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Runs a real failing function to prove the asynchronous retries wait as AWS's do (scaled down by
+ * Runs a real failing function to prove the asynchronous retries wait as they do on AWS (scaled down by
  * the test config to 1 s then 2 s) and that Invoke's Qualifier selects the alias's asynchronous settings.
  */
 @QuarkusTest
@@ -215,7 +215,8 @@ class LambdaAsyncRetryDockerIntegrationTest {
         try {
             dockerClient.pingCmd().exec();
             return true;
-        } catch (Exception e) {
+        } catch (Exception expected) {
+            // Docker is unreachable, so requireDocker() skips the test rather than failing it.
             return false;
         }
     }
