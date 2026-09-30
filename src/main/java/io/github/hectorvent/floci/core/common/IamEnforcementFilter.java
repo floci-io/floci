@@ -704,9 +704,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             boolean accountRootPrincipal = false;
             CallerContext caller = iamService.resolveCallerContext(akid);
             if (caller == null) {
-                // No unknown-key rejection here, unlike filter(): this path runs only for a
-                // presigned POST, whose form signature S3PostPolicySigner has already verified
-                // against the key's secret, so an unknown key never reaches it.
+                // No unknown-key rejection here, unlike filter(), and none is needed. For a second
+                // resource of a request filter() has seen (CopyObject's source, RotateSecret's
+                // rotation function, the secrets behind SSM GetParameter) the credential is the one
+                // filter() evaluated, and filter() refuses an unknown key before the handler runs. A
+                // presigned POST carries its credential only in the form body, which filter() never
+                // sees: an unknown key there is refused by S3's presigned-POST signature check when
+                // S3 auth enforcement is on, and otherwise uploads as an unsigned request would.
                 if (scpLevels == null || !akid.equals(accountId)) {
                     return;
                 }
