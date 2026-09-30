@@ -81,6 +81,29 @@ class ExternalMetadataWriterTest {
     }
 
     @Test
+    void refreshSqlFallsBackToTableSettingsOmittedFromPartitionDescriptor() throws Exception {
+        StorageDescriptor tableDescriptor = new StorageDescriptor();
+        tableDescriptor.setSerdeInfo(serdeInfo("table-serde", Map.of("source", "table")));
+        tableDescriptor.setCompressed(true);
+        Table table = new Table();
+        table.setName("events");
+        table.setStorageDescriptor(tableDescriptor);
+
+        StorageDescriptor partitionDescriptor = new StorageDescriptor();
+        partitionDescriptor.setLocation("s3://bucket/events/date=2024-01-01/");
+        Partition partition = new Partition();
+        partition.setValues(List.of("2024-01-01"));
+        partition.setStorageDescriptor(partitionDescriptor);
+
+        String sql = writer.refreshSql(BINDING, List.of(table), Map.of("events", List.of(partition)));
+        JsonNode partitionRow = refreshPayload(sql).path("partitions").get(0);
+
+        assertEquals("table-serde", partitionRow.path("serialization_lib").asText());
+        assertEquals("{\"source\":\"table\"}", partitionRow.path("serde_parameters").asText());
+        assertEquals(1, partitionRow.path("compressed").asInt());
+    }
+
+    @Test
     void purgeCallsPrivilegedWriterForOneSchema() {
         String sql = writer.purgeSql("analytics");
         assertThat(sql, containsString("SELECT floci_internal.purge_external_schema('analytics')"));

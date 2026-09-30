@@ -82,7 +82,7 @@ public class ExternalMetadataWriter {
             List<Partition> partitions = partitionsByTable.get(table.getName());
             if (partitions != null) {
                 for (Partition partition : partitions) {
-                    appendPartition(partitionRows, table.getName(), partition);
+                    appendPartition(partitionRows, table.getName(), partition, descriptor);
                 }
             }
         }
@@ -121,17 +121,30 @@ public class ExternalMetadataWriter {
                 "is_nullable", "true"));
     }
 
-    private void appendPartition(List<Map<String, Object>> rows, String tableName, Partition partition) {
+    private void appendPartition(List<Map<String, Object>> rows, String tableName, Partition partition,
+                                 StorageDescriptor tableDescriptor) {
         StorageDescriptor descriptor = partition.getStorageDescriptor();
         String values = jsonValues(partition.getValues());
+        String serializationLibrary = serdeLibrary(descriptor);
+        if (serializationLibrary.isBlank()) {
+            serializationLibrary = serdeLibrary(tableDescriptor);
+        }
+        Map<String, String> parameters = serdeParameters(descriptor);
+        if (parameters.isEmpty()) {
+            parameters = serdeParameters(tableDescriptor);
+        }
+        Boolean compressedValue = descriptor == null ? null : descriptor.getCompressed();
+        if (compressedValue == null && tableDescriptor != null) {
+            compressedValue = tableDescriptor.getCompressed();
+        }
         rows.add(row("tablename", tableName,
                 "values", values,
                 "location", descriptor == null ? "" : descriptor.getLocation(),
                 "input_format", descriptor == null ? "" : descriptor.getInputFormat(),
                 "output_format", descriptor == null ? "" : descriptor.getOutputFormat(),
-                "serialization_lib", serdeLibrary(descriptor),
-                "serde_parameters", json(serdeParameters(descriptor)),
-                "compressed", descriptor != null && Boolean.TRUE.equals(descriptor.getCompressed()) ? 1 : 0,
+                "serialization_lib", serializationLibrary,
+                "serde_parameters", json(parameters),
+                "compressed", Boolean.TRUE.equals(compressedValue) ? 1 : 0,
                 "parameters", json(partition.getParameters())));
     }
 
@@ -143,6 +156,7 @@ public class ExternalMetadataWriter {
 
     private static Map<String, String> serdeParameters(StorageDescriptor descriptor) {
         return descriptor == null || descriptor.getSerdeInfo() == null
+                || descriptor.getSerdeInfo().getParameters() == null
                 ? Map.of() : descriptor.getSerdeInfo().getParameters();
     }
 
