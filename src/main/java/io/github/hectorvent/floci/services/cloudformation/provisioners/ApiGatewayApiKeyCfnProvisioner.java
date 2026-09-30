@@ -292,7 +292,7 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> tags = new HashMap<>();
         snapshot.path("tags").fields().forEachRemaining(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
         if (!tags.equals(live.getTags())) {
-            apiGatewayService.replaceApiKeyTags(region, id, tags);
+            apiGatewayService.restoreApiKeyTags(region, id, tags);
         }
         List<Map<String, String>> patches = patchesTo(live, snapshotText(snapshot, "customerId"),
                 snapshotText(snapshot, "description"), snapshot.path("enabled").asBoolean());

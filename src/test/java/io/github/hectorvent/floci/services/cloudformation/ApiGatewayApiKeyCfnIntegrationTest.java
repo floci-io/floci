@@ -201,6 +201,26 @@ class ApiGatewayApiKeyCfnIntegrationTest {
         CfnStackWaits.awaitStackDeleted(stack);
     }
 
+    @Test
+    void aFailedUpdatePutsBackAReservedTagTheUpdateRemoved() {
+        String stack = "apigw-apikey-cfn-reserved-it";
+        String kept = "\"Name\": \"apigw-apikey-cfn-reserved-it-key\", \"Enabled\": \"true\", \"Tags\": [";
+        String withReserved = kept + "{\"Key\": \"_custom_id_\", \"Value\": \"pinned\"}, {\"Key\": \"stack\", \"Value\": \"v1\"}]";
+        cloudFormation(stack, "CreateStack", ROLLBACK_TEMPLATE.formatted(withReserved, ""), Map.of());
+        String keyId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "KeyRef");
+
+        // The update drops the reserved tag before the secret fails it.
+        String withoutReserved = kept + "{\"Key\": \"stack\", \"Value\": \"v1\"}]";
+        cloudFormation(stack, "UpdateStack", ROLLBACK_TEMPLATE.formatted(withoutReserved, FAILING_RESOURCE), Map.of());
+        describeStacks(stack, "UPDATE_ROLLBACK_COMPLETE");
+        getApiKey(keyId)
+            .statusCode(200)
+            .body("tags", equalTo(Map.of("_custom_id_", "pinned", "stack", "v1")));
+
+        cloudFormation(stack, "DeleteStack", null, Map.of());
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
     private static Map<String, String> parameters(String description, String enabled, String tagValue) {
         return Map.of("Description", description, "Enabled", enabled, "TagValue", tagValue);
     }
