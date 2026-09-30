@@ -7,6 +7,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -235,5 +237,117 @@ class CloudFormationLaunchTemplateIntegrationTest {
         .then()
             .statusCode(200)
             .body(not(containsString(templateName)));
+    }
+
+    @Test
+    void explicitUserDataOverridesOversizedLegacyTemplate() {
+        String templateName = "legacy-user-data-" + Long.toString(System.nanoTime(), 36);
+        String oversized = Base64.getEncoder().encodeToString(
+                "A".repeat(16 * 1024 + 1).getBytes(StandardCharsets.UTF_8));
+        LaunchTemplateData legacyData = new LaunchTemplateData();
+        legacyData.setImageId("ami-12345678");
+        legacyData.setInstanceType("t3.micro");
+        legacyData.setEncodedUserData(oversized);
+        ec2Service.createLaunchTemplate("us-east-1", templateName, legacyData, List.of());
+
+        String userData = "#!/bin/sh\necho override\n";
+        String replacement = Base64.getEncoder().encodeToString(userData.getBytes(StandardCharsets.UTF_8));
+        String instanceId = null;
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", EC2_AUTH)
+                .formParam("Action", "RunInstances")
+                .formParam("LaunchTemplate.LaunchTemplateName", templateName)
+                .formParam("MinCount", "1")
+                .formParam("MaxCount", "1")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("UserData exceeds the 16 KiB limit"));
+
+            instanceId = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", EC2_AUTH)
+                .formParam("Action", "RunInstances")
+                .formParam("LaunchTemplate.LaunchTemplateName", templateName)
+                .formParam("UserData", replacement)
+                .formParam("MinCount", "1")
+                .formParam("MaxCount", "1")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+            Instance instance = ec2Service.describeInstances("us-east-1", List.of(instanceId), Map.of())
+                    .getFirst().getInstances().getFirst();
+            assertEquals(userData, instance.getUserData());
+            assertEquals(replacement, instance.getEncodedUserData());
+        } finally {
+            if (instanceId != null) {
+                ec2Service.terminateInstances("us-east-1", List.of(instanceId));
+            }
+            ec2Service.deleteLaunchTemplate("us-east-1", null, templateName);
+        }
+    }
+
+    @Test
+    void cloudFormationInstanceIgnoresUnusedLegacyTemplateUserData() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String templateName = "legacy-cfn-user-data-" + suffix;
+        String stackName = "legacy-cfn-user-data-stack-" + suffix;
+        String oversized = Base64.getEncoder().encodeToString(
+                "A".repeat(16 * 1024 + 1).getBytes(StandardCharsets.UTF_8));
+        LaunchTemplateData legacyData = new LaunchTemplateData();
+        legacyData.setImageId("ami-12345678");
+        legacyData.setInstanceType("t3.micro");
+        legacyData.setEncodedUserData(oversized);
+        ec2Service.createLaunchTemplate("us-east-1", templateName, legacyData, List.of());
+
+        String template = """
+                {
+                  "Resources": {
+                    "Inst": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {
+                        "LaunchTemplate": {"LaunchTemplateName": "%s", "Version": "1"},
+                        "UserData": "IyEvYmluL3NoCmVjaG8gY2ZuCg=="
+                      }
+                    }
+                  }
+                }
+                """.formatted(templateName);
+        try (AutoCloseable cleanup = () -> {
+            try {
+                given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .header("Authorization", CFN_AUTH)
+                    .formParam("Action", "DeleteStack")
+                    .formParam("StackName", stackName)
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200);
+                CfnStackWaits.awaitStackDeleted(stackName);
+            } finally {
+                ec2Service.deleteLaunchTemplate("us-east-1", null, templateName);
+            }
+        }) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", template)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
+            assertEquals("CREATE_COMPLETE", state.status(), state.reason());
+        }
     }
 }

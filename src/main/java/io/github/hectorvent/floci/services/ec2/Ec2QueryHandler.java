@@ -745,7 +745,8 @@ public class Ec2QueryHandler {
         LaunchTemplateData.MetadataOptions metadataOptions = parseMetadataOptions(p, "MetadataOptions.");
         String creditSpecificationCpuCredits = p.getFirst("CreditSpecification.CpuCredits");
 
-        LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(p, region);
+        LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(
+                p, region, userDataEncoded == null || userDataEncoded.isBlank());
         if (launchTemplateData != null) {
             if (launchTemplateData.getMetadataOptions() != null) {
                 metadataOptions = LaunchTemplateData.MetadataOptions.merge(
@@ -822,14 +823,15 @@ public class Ec2QueryHandler {
         throw new AwsException("InvalidParameterValue", name + " must be a positive integer", 400);
     }
 
-    private LaunchTemplateData resolveRunInstancesLaunchTemplateData(MultivaluedMap<String, String> p, String region) {
+    private LaunchTemplateData resolveRunInstancesLaunchTemplateData(MultivaluedMap<String, String> p, String region,
+                                                                     boolean decodeUserData) {
         String id = p.getFirst("LaunchTemplate.LaunchTemplateId");
         String name = p.getFirst("LaunchTemplate.LaunchTemplateName");
         String version = p.getFirst("LaunchTemplate.Version");
         if ((id == null || id.isBlank()) && (name == null || name.isBlank())) {
             return null;
         }
-        return service.resolveLaunchTemplateData(region, id, name, version);
+        return service.resolveLaunchTemplateData(region, id, name, version, decodeUserData);
     }
 
     /**

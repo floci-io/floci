@@ -6570,6 +6570,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     public LaunchTemplateData resolveLaunchTemplateData(String region, String id, String name, String version) {
+        return resolveLaunchTemplateData(region, id, name, version, true);
+    }
+
+    public LaunchTemplateData resolveLaunchTemplateData(String region, String id, String name, String version,
+                                                        boolean decodeUserData) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         String resolvedVersion = resolveLaunchTemplateVersion(
@@ -6577,7 +6582,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 version,
                 launchTemplate.getDefaultVersionNumber());
         LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
-        data.setUserData(Ec2UserDataDecoder.decodeIfMissing(data.getUserData(), data.getEncodedUserData()));
+        if (decodeUserData) {
+            data.setUserData(Ec2UserDataDecoder.decodeIfMissing(data.getUserData(), data.getEncodedUserData()));
+        }
         return data;
     }
 
