@@ -1638,6 +1638,9 @@ public class S3Service implements Resettable, ResourceProvider {
                     }
                 }
             });
+            if (toDelete != null) {
+                fireNotifications(bucketName, key, "ObjectRemoved:Delete", toDelete);
+            }
             return toDelete;
         } else {
             S3Object existing = objectStore.get(objectKey(bucketName, key)).orElse(null);
