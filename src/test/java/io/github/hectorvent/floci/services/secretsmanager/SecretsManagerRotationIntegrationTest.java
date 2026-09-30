@@ -12,6 +12,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -97,5 +98,28 @@ public class SecretsManagerRotationIntegrationTest {
         assertTrue(hasSet, "Should invoke setSecret");
         assertTrue(hasTest, "Should invoke testSecret");
         assertTrue(hasFinish, "Should invoke finishSecret");
+    }
+
+    @Test
+    void rotationFunctionReferenceLambdaCannotReadIsAnInvalidParameter() {
+        String secretName = "rotation-invalid-reference-secret";
+        given()
+            .header("X-Amz-Target", "secretsmanager.CreateSecret")
+            .contentType(SM_CONTENT_TYPE)
+            .body("{\"Name\": \"" + secretName + "\", \"SecretString\": \"initial-value\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "secretsmanager.RotateSecret")
+            .contentType(SM_CONTENT_TYPE)
+            .body("{\"SecretId\": \"" + secretName + "\", \"RotationLambdaARN\": \"rotator!\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
     }
 }

@@ -12,6 +12,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -74,14 +75,25 @@ class SecretsManagerRotationInvokeAuthorizationTest {
         verify(lambda, timeout(5000).atLeastOnce()).invoke(eq(REGION), eq(expected), any(byte[].class), any());
     }
 
-    @Test
-    void referenceLambdaCannotReadIsRejectedBeforeTheCheck() {
+    /**
+     * Each reference is invalid under Lambda's documented {@code FunctionName} pattern, not only
+     * under Floci's parser: an empty name, a character the name pattern excludes, an empty qualifier.
+     * RotateSecret answers with its own {@code InvalidParameterException}, not Lambda's codes.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "arn:aws:lambda:us-east-1:111122223333:function:",
+            "rotator!",
+            "rotator:"
+    })
+    void referenceLambdaCannotReadIsRejectedBeforeTheCheck(String reference) {
         List<String> checked = new ArrayList<>();
 
         AwsException e = assertThrows(AwsException.class, () -> service.rotateSecret("my-secret", TOKEN,
-                "us-east-1:111122223333:function:rotator", null, false, REGION, checked::add));
+                reference, null, false, REGION, checked::add));
 
-        assertEquals("InvalidParameterValueException", e.getErrorCode());
+        assertEquals("InvalidParameterException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
         assertEquals(List.of(), checked);
         assertNull(service.describeSecret("my-secret", REGION).getRotationLambdaArn());
     }
