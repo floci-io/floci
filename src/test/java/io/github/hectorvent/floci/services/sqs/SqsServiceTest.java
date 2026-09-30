@@ -2319,6 +2319,30 @@ class SqsServiceTest {
     }
 
     @Test
+    void receiptHandleFromBeforeAMoveTaskDoesNotReachTheMovedMessage() throws Exception {
+        String region = "us-east-1";
+        sqsService.createQueue("handle-moved-dlq", null, region);
+        String dlqArn = queueArn("handle-moved-dlq");
+        Queue source = sqsService.createQueue("handle-moved-src",
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"),
+                region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "msg", 0, region);
+        String handle = receivedHandle(source.getQueueUrl(), 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, null, region);
+        awaitMoveTaskStatus(dlqArn, taskHandle, "COMPLETED");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.changeMessageVisibility(source.getQueueUrl(), handle, 10, region));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        sqsService.deleteMessage(source.getQueueUrl(), handle, region);
+
+        List<Message> moved = sqsService.peekMessages(source.getQueueUrl(), region);
+        assertEquals(1, moved.size());
+        assertNotEquals(sent.getMessageId(), moved.get(0).getMessageId());
+    }
+
+    @Test
     void receiptHandleStillWorksAfterARestart() {
         String region = "us-east-1";
         InMemoryStorage<String, Queue> queueStore = new InMemoryStorage<>();

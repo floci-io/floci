@@ -69,12 +69,13 @@ public class Message {
         this.md5OfBody = computeMd5(body);
     }
 
-    /** A copy for delivery to another queue by StartMessageMoveTask: identity and content carry
-     *  over; per-receive state (receive count, first-receive timestamp, receipt handle, visibility)
-     *  starts over. The source instance is untouched so a failed delivery can put it back as it was. */
+    /** A copy for delivery to another queue by StartMessageMoveTask. The content carries over. AWS
+     *  gives it a new message id, and per-receive state (receive count, first-receive timestamp,
+     *  receipt handle, visibility) starts over. The source instance is untouched so a failed
+     *  delivery can put it back as it was. */
     public Message copyForRedrive() {
         Message copy = new Message();
-        copy.messageId = messageId;
+        copy.messageId = UUID.randomUUID().toString();
         copy.body = body;
         copy.messageAttributes = messageAttributes == null ? new HashMap<>() : new HashMap<>(messageAttributes);
         copy.sentTimestamp = sentTimestamp;
