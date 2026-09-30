@@ -1085,21 +1085,21 @@ public class LambdaService implements ResourceProvider {
     /**
      * Invokes a function, reconciling a qualifier carried on the name with Invoke's {@code Qualifier} query parameter.
      */
-    public InvokeResult invoke(String region, String functionName, String qualifier, byte[] payload,
+    public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
                                InvocationType type) {
-        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, queryQualifier);
         String name = ref.name();
-        String resolvedQualifier = ref.qualifier();
+        String qualifier = ref.qualifier();
         LambdaFunction fn;
         if (functionName.startsWith("arn:")) {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
-            fn = targetResolver.resolveInvokeTargetForAccount(arn.accountId(), region, name, resolvedQualifier);
+            fn = targetResolver.resolveInvokeTargetForAccount(arn.accountId(), region, name, qualifier);
         } else {
-            fn = targetResolver.resolveInvokeTarget(region, name, resolvedQualifier);
+            fn = targetResolver.resolveInvokeTarget(region, name, qualifier);
         }
         reportCustomResourceLiveness(payload);
         InvokeResult result = executorService.invoke(fn, payload, type,
-                LambdaInvocationChain.currentDepth(), resolvedQualifier);
+                LambdaInvocationChain.currentDepth(), qualifier);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
@@ -1131,6 +1131,12 @@ public class LambdaService implements ResourceProvider {
         InvokeResult result = executorService.invoke(fn, payload, type, chainDepth, ref.qualifier());
         result.setExecutedVersion(fn.getVersion());
         return result;
+    }
+
+    /** Whether {@code fn}, the target an asynchronous event was invoked on, has since been deleted. */
+    boolean functionDeleted(LambdaFunction fn) {
+        return functionStore.getForAccount(ownerAccount(fn), AwsArnUtils.parse(fn.getFunctionArn()).region(),
+                fn.getFunctionName(), fn.getVersion()).isEmpty();
     }
 
     /**

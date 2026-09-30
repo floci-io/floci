@@ -105,7 +105,7 @@ class LambdaInvokeQualifierIntegrationTest {
 
         given().header("X-Amz-Invocation-Type", "DryRun").body("{}")
         .when().post("/2015-03-31/functions/" + fn + ":1/invocations?Qualifier=2")
-        .then().statusCode(400);
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
 
         given().header("X-Amz-Invocation-Type", "DryRun").body("{}")
         .when().post("/2015-03-31/functions/" + fn + ":1/invocations?Qualifier=1")
@@ -118,6 +118,19 @@ class LambdaInvokeQualifierIntegrationTest {
 
         given().header("X-Amz-Invocation-Type", "DryRun").body("{}")
         .when().post("/2015-03-31/functions/" + fn + "/invocations?Qualifier=99")
-        .then().statusCode(404);
+        .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void aQualifierQueryParameterAppliesToAnUnqualifiedFunctionArn() throws Exception {
+        String fn = createFunction("v1");
+        publishVersion(fn, "1");
+        String functionArn = given()
+        .when().get("/2015-03-31/functions/" + fn + "/configuration")
+        .then().statusCode(200).extract().path("FunctionArn");
+
+        given().header("X-Amz-Invocation-Type", "DryRun").body("{}")
+        .when().post("/2015-03-31/functions/{functionArn}/invocations?Qualifier=1", functionArn)
+        .then().statusCode(204).header("X-Amz-Executed-Version", "1");
     }
 }

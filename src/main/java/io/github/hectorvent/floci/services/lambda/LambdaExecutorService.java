@@ -34,10 +34,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * Orchestrates Lambda function invocations.
  * Handles RequestResponse (sync), Event (async fire-and-forget), and DryRun modes.
  *
- * <p>An Event invocation answers 202 straight away and, once the function has finished on the
- * pool, hands its result to {@link AsyncInvokeDestinationRouter}, which delivers it to the
- * function's configured destination when it has one. A failed attempt is retried after the
- * configured delay, as AWS waits one minute and then two.
+ * <p>An Event invocation answers 202 straight away and hands the final outcome to
+ * {@link AsyncInvokeDestinationRouter}, which delivers it to the function's configured destination
+ * when it has one. The first attempt runs on the pool; a failed attempt is retried on a virtual
+ * thread after the configured delay, as AWS waits one minute and then two.
  */
 @ApplicationScoped
 public class LambdaExecutorService implements Resettable {
@@ -221,8 +221,9 @@ public class LambdaExecutorService implements Resettable {
 
     /**
      * Runs one attempt of an asynchronous event and either routes the outcome or schedules the next
-     * attempt. Retry n waits n times the configured delay, never past the event's maximum age. The
-     * concurrency permit covers only the attempt; {@code held} is the one the invoke itself took.
+     * attempt. Retry n waits n times the configured delay, never past the event's maximum age, and a
+     * retry of a function deleted meanwhile is dropped. The concurrency permit covers only the
+     * attempt; {@code held} is the one the invoke itself took.
      */
     private void attempt(AsyncEvent event, int attempt, InvokeResult previous,
                          LambdaConcurrencyLimiter.Permit held) {
@@ -230,57 +231,69 @@ public class LambdaExecutorService implements Resettable {
             if (held != null) {
                 held.close();
             }
-            if (event.generation() == generation.get()) {
-                route(event, previous, attempt - 1);
-            }
+            route(event, previous, attempt - 1);
             return;
         }
-        LambdaConcurrencyLimiter.Permit permit = held;
-        if (permit == null) {
+        LambdaService lambdaService = resolveLambdaService();
+        if (held == null && lambdaService != null && lambdaService.functionDeleted(event.fn())) {
+            LOG.infov("Dropping the pending asynchronous retry of {0}: the function was deleted",
+                    event.fn().getFunctionArn());
+            return;
+        }
+        LambdaConcurrencyLimiter.Permit permit;
+        if (held != null) {
+            permit = held;
+        } else {
             try {
                 permit = concurrencyLimiter.acquire(event.fn());
             } catch (AwsException throttled) {
                 // ponytail: AWS backs a throttled retry off exponentially, up to five minutes; one
                 // fixed poll is enough locally, and the event still expires on time.
-                schedule(event, THROTTLED_RETRY_POLL_MS, () -> attempt(event, attempt, previous, null));
+                schedule(event, THROTTLED_RETRY_POLL_MS, attempt, previous);
                 return;
             }
         }
         InvokeResult result;
-        LambdaConcurrencyLimiter.Permit acquired = permit;
-        try (acquired) {
+        try (permit) {
             result = executeSync(event.fn(), event.payload(), event.requestId());
         } catch (RuntimeException e) {
             LOG.warnv("Error in async Lambda execution for {0}: {1}", event.fn().getFunctionName(), e.getMessage());
-            result = new InvokeResult(500, "Unhandled",
+            // Stops retrying, as upstream did: routes the previous attempt's result, or UnknownError when
+            // there is none, counting this attempt.
+            route(event, previous != null ? previous : new InvokeResult(500, "Unhandled",
                     buildErrorPayload("Error executing Lambda: " + e.getMessage(), "Lambda.UnknownError"),
-                    null, event.requestId());
+                    null, event.requestId()), attempt);
+            return;
         }
         if ((result.getFunctionError() == null && result.getStatusCode() < 300) || attempt > event.maxRetries()) {
             route(event, result, attempt);
             return;
         }
-        InvokeResult failed = result;
-        schedule(event, asyncRetryDelayMs * attempt, () -> attempt(event, attempt + 1, failed, null));
+        schedule(event, asyncRetryDelayMs * attempt, attempt + 1, result);
     }
 
-    private void schedule(AsyncEvent event, long delayMs, Runnable next) {
-        long waitMs = Math.max(0, Math.min(delayMs, event.expiresAtMs() - clock.millis()));
-        CompletableFuture.delayedExecutor(waitMs, TimeUnit.MILLISECONDS, RETRY_THREADS).execute(next);
+    /**
+     * Decides expiry up front, on the injected clock: the delay thread keeps its own time and may
+     * wake a hair early.
+     */
+    private void schedule(AsyncEvent event, long delayMs, int attempt, InvokeResult previous) {
+        long remainingMs = event.expiresAtMs() - clock.millis();
+        Runnable next = delayMs < remainingMs
+                ? () -> attempt(event, attempt, previous, null)
+                : () -> route(event, previous, attempt - 1);
+        CompletableFuture.delayedExecutor(Math.max(0, Math.min(delayMs, remainingMs)), TimeUnit.MILLISECONDS,
+                RETRY_THREADS).execute(next);
     }
 
     private void route(AsyncEvent event, InvokeResult result, int attempts) {
-        if (destinationRouter == null) {
+        if (destinationRouter == null || event.generation() != generation.get()) {
             return;
         }
-        InvokeResult outcome = result;
-        if (outcome == null) {
-            // This Floci-only placeholder covers expiry before any attempt; AWS documents no payload.
-            outcome = new InvokeResult(200, "Unhandled",
-                    buildErrorPayload("Event age exceeded", "EventAgeExceeded"), null, event.requestId());
-        }
-        destinationRouter.route(event.fn(), event.payload(), outcome, attempts,
-                event.chainDepth(), event.invokedQualifier());
+        // This Floci-only placeholder covers expiry before any attempt; AWS documents no payload.
+        InvokeResult outcome = result != null ? result : new InvokeResult(200, "Unhandled",
+                buildErrorPayload("Event age exceeded", "EventAgeExceeded"), null, event.requestId());
+        destinationRouter.route(event.fn(), event.payload(), outcome, attempts, event.chainDepth(),
+                event.invokedQualifier());
     }
 
     private InvokeResult executeSync(LambdaFunction fn, byte[] payload, String requestId) {

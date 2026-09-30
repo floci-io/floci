@@ -16,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -41,7 +42,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -430,8 +433,12 @@ class LambdaExecutorServiceTest {
         retryExecutor.invoke(fn, "{}".getBytes(), InvocationType.Event);
 
         assertTrue(routed.await(10, TimeUnit.SECONDS), "destination routing never ran");
-        verify(concurrencyLimiter, times(3)).acquire(fn);
-        verify(permit, times(3)).close();
+        InOrder inOrder = inOrder(concurrencyLimiter, permit);
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            inOrder.verify(concurrencyLimiter).acquire(fn);
+            inOrder.verify(permit).close();
+        }
+        inOrder.verifyNoMoreInteractions();
     }
 
     @Test
@@ -476,20 +483,61 @@ class LambdaExecutorServiceTest {
     }
 
     @Test
-    void eventInvocation_resetDropsAPendingRetry() throws Exception {
+    void eventInvocation_resetDropsAPendingRetry() {
         AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
         LambdaExecutorService retryExecutor =
                 retryingExecutor(router, eventInvokeConfig(2, 21600), Duration.ofMillis(500));
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
-        List<Long> enqueuedAt = failEveryAttempt(rtas, failedAttempt("req-reset"));
+        ContainerHandle handle = new ContainerHandle("cid-reset", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        InvokeResult failure = failedAttempt("req-reset");
+        doAnswer(invocation -> {
+            retryExecutor.clear();
+            PendingInvocation pendingInvocation = invocation.getArgument(0);
+            pendingInvocation.getResultFuture().complete(failure);
+            return pendingInvocation.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
 
         retryExecutor.invoke(fn, "{}".getBytes(), InvocationType.Event);
-        verify(rtas, timeout(5000).atLeastOnce()).enqueue(any(PendingInvocation.class));
-        retryExecutor.clear();
-        Thread.sleep(1500);
 
+        verify(router, after(1500).never()).route(any(), any(), any(), anyInt(), anyInt(), any());
+        verify(rtas, times(1)).enqueue(any(PendingInvocation.class));
+    }
+
+    @Test
+    void eventInvocation_dropsThePendingRetryOfADeletedFunction() {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaService lambdaService = eventInvokeConfig(2, 21600);
+        LambdaExecutorService retryExecutor = retryingExecutor(router, lambdaService, Duration.ZERO);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        List<Long> enqueuedAt = failEveryAttempt(rtas, failedAttempt("req-deleted"));
+        when(lambdaService.functionDeleted(fn)).thenAnswer(invocation -> !enqueuedAt.isEmpty());
+
+        retryExecutor.invoke(fn, "{}".getBytes(), InvocationType.Event);
+
+        verify(router, after(1000).never()).route(any(), any(), any(), anyInt(), anyInt(), any());
         assertEquals(1, enqueuedAt.size());
-        verify(router, never()).route(any(), any(), any(), anyInt(), anyInt(), any());
+    }
+
+    @Test
+    void exceptionDuringInvocation_destroysHandle_doesNotRelease() {
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-exc", "test-fn", rtas, ContainerState.WARM);
+
+        when(warmPool.acquire(any())).thenReturn(handle);
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            pi.getResultFuture().completeExceptionally(new RuntimeException("runtime crash"));
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+
+        verify(warmPool).destroyHandle(handle);
+        verify(warmPool, never()).release(handle);
+        assertEquals(200, result.getStatusCode());
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("InvocationError"));
     }
 
     private LambdaExecutorService retryingExecutor(AsyncInvokeDestinationRouter router, LambdaService lambdaService,
@@ -534,25 +582,5 @@ class LambdaExecutorServiceTest {
             return null;
         }).when(router).route(any(), any(), any(), anyInt(), anyInt(), any());
         return routed;
-    }
-    @Test
-    void exceptionDuringInvocation_destroysHandle_doesNotRelease() {
-        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
-        ContainerHandle handle = new ContainerHandle("cid-exc", "test-fn", rtas, ContainerState.WARM);
-
-        when(warmPool.acquire(any())).thenReturn(handle);
-        doAnswer(inv -> {
-            PendingInvocation pi = inv.getArgument(0);
-            pi.getResultFuture().completeExceptionally(new RuntimeException("runtime crash"));
-            return pi.getResultFuture();
-        }).when(rtas).enqueue(any(PendingInvocation.class));
-
-        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
-
-        verify(warmPool).destroyHandle(handle);
-        verify(warmPool, never()).release(handle);
-        assertEquals(200, result.getStatusCode());
-        assertEquals("Unhandled", result.getFunctionError());
-        assertTrue(new String(result.getPayload()).contains("InvocationError"));
     }
 }

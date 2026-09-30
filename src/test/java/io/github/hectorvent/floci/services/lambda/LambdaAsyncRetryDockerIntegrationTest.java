@@ -9,7 +9,6 @@ import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,8 +34,6 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 @QuarkusTest
 class LambdaAsyncRetryDockerIntegrationTest {
-
-    private static final Logger LOG = Logger.getLogger(LambdaAsyncRetryDockerIntegrationTest.class);
 
     private static final String BASE_PATH = "/2015-03-31";
     private static final String CONFIG_PATH = "/2019-09-25";
@@ -73,7 +70,6 @@ class LambdaAsyncRetryDockerIntegrationTest {
 
             JsonNode record = awaitRecord(fixture.aliasQueueUrl());
             long elapsedMillis = Duration.ofNanos(System.nanoTime() - started).toMillis();
-            LOG.infov("Alias OnFailure record arrived {0} ms after the invocation", elapsedMillis);
 
             assertTrue(elapsedMillis >= 3000,
                     "the retries should wait 1 s and then 2 s, but the record arrived after " + elapsedMillis + " ms");
