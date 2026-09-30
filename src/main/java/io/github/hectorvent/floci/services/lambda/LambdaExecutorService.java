@@ -371,8 +371,8 @@ public class LambdaExecutorService implements Resettable {
 
     @Override
     public void clear() {
-        // Counts first: an invoke that reads the new generation must also read the cleared counts.
-        deletions.clear();
+        // Only the generation: the deletion counts still fence events from before the reset, so they are
+        // kept, one per deleted function, as LambdaService keeps its per-function concurrency locks.
         generation.incrementAndGet();
     }
 
