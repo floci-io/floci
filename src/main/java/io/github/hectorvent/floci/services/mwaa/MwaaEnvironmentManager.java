@@ -367,9 +367,84 @@ public class MwaaEnvironmentManager {
         }
     }
 
-    /** Runs {@code airflow <cliCommand>} inside the Airflow container via {@code sh -c}. */
+    /**
+     * Runs {@code airflow <cliCommand>} inside the Airflow container. The command is split into
+     * arguments with POSIX quoting rules and executed without a shell, so shell syntax such as
+     * {@code ;}, {@code |} or {@code $(...)} reaches Airflow as plain arguments.
+     */
     public ContainerExec.Result runAirflowCli(String airflowContainerId, String cliCommand) throws Exception {
-        return execInContainer(airflowContainerId, new String[]{"sh", "-c", "airflow " + cliCommand});
+        List<String> argv = new ArrayList<>();
+        argv.add("airflow");
+        argv.addAll(splitCliArguments(cliCommand));
+        return execInContainer(airflowContainerId, argv.toArray(new String[0]));
+    }
+
+    /**
+     * Splits a CLI command line into arguments using POSIX shell quoting without any expansion:
+     * single quotes are literal, double quotes honour backslash escapes of {@code $}, backtick,
+     * {@code "}, backslash and newline, and an unquoted backslash escapes the next character.
+     */
+    private static List<String> splitCliArguments(String command) {
+        List<String> args = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inWord = false;
+        int i = 0;
+        while (i < command.length()) {
+            char c = command.charAt(i);
+            if (Character.isWhitespace(c)) {
+                if (inWord) {
+                    args.add(current.toString());
+                    current.setLength(0);
+                    inWord = false;
+                }
+                i++;
+            } else if (c == '\'') {
+                int end = command.indexOf('\'', i + 1);
+                if (end < 0) {
+                    throw new IllegalArgumentException("Unterminated single quote in CLI command");
+                }
+                current.append(command, i + 1, end);
+                inWord = true;
+                i = end + 1;
+            } else if (c == '"') {
+                i++;
+                boolean closed = false;
+                while (i < command.length()) {
+                    char d = command.charAt(i);
+                    if (d == '"') {
+                        closed = true;
+                        i++;
+                        break;
+                    }
+                    if (d == '\\' && i + 1 < command.length() && "$`\"\\\n".indexOf(command.charAt(i + 1)) >= 0) {
+                        current.append(command.charAt(i + 1));
+                        i += 2;
+                    } else {
+                        current.append(d);
+                        i++;
+                    }
+                }
+                if (!closed) {
+                    throw new IllegalArgumentException("Unterminated double quote in CLI command");
+                }
+                inWord = true;
+            } else if (c == '\\') {
+                if (i + 1 >= command.length()) {
+                    throw new IllegalArgumentException("Trailing backslash in CLI command");
+                }
+                current.append(command.charAt(i + 1));
+                inWord = true;
+                i += 2;
+            } else {
+                current.append(c);
+                inWord = true;
+                i++;
+            }
+        }
+        if (inWord) {
+            args.add(current.toString());
+        }
+        return args;
     }
 
     /** Routed through {@link ContainerStorageHelper} so multiple Floci instances sharing one Docker
