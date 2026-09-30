@@ -303,6 +303,84 @@ class EventBridgeTest {
         assertThat(body).doesNotContain("orderId");
     }
 
+    // ──────────────────────────── Retry and dead-letter ────────────────────────────
+
+    @Test
+    @Order(35)
+    void undeliverableEventIsSentToTheTargetDeadLetterQueue() {
+        String dlqUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName(TestFixtures.uniqueName("eb-dlq")).build()).queueUrl();
+        String dlqArn = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
+                .queueUrl(dlqUrl).attributeNamesWithStrings("QueueArn").build())
+                .attributesAsStrings().get("QueueArn");
+        String missingQueueArn = dlqArn + "-missing";
+        String source = TestFixtures.uniqueName("com.floci.dlq");
+        String dlqRuleName = TestFixtures.uniqueName("eb-dlq-rule");
+        String ruleArn = eb.putRule(PutRuleRequest.builder()
+                .name(dlqRuleName)
+                .eventPattern("{\"source\":[\"" + source + "\"]}")
+                .state(RuleState.ENABLED)
+                .build()).ruleArn();
+        try {
+            eb.putTargets(PutTargetsRequest.builder()
+                    .rule(dlqRuleName)
+                    .targets(Target.builder()
+                            .id("missing-queue")
+                            .arn(missingQueueArn)
+                            .retryPolicy(RetryPolicy.builder()
+                                    .maximumRetryAttempts(2).maximumEventAgeInSeconds(60).build())
+                            .deadLetterConfig(DeadLetterConfig.builder().arn(dlqArn).build())
+                            .build())
+                    .build());
+
+            Target stored = eb.listTargetsByRule(ListTargetsByRuleRequest.builder().rule(dlqRuleName).build())
+                    .targets().get(0);
+            assertThat(stored.retryPolicy().maximumRetryAttempts()).isEqualTo(2);
+            assertThat(stored.retryPolicy().maximumEventAgeInSeconds()).isEqualTo(60);
+            assertThat(stored.deadLetterConfig().arn()).isEqualTo(dlqArn);
+
+            eb.putEvents(PutEventsRequest.builder()
+                    .entries(PutEventsRequestEntry.builder()
+                            .source(source).detailType("Undeliverable").detail("{\"id\":\"1\"}").build())
+                    .build());
+
+            List<Message> messages = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(dlqUrl)
+                    .messageAttributeNames("All")
+                    .waitTimeSeconds(2)
+                    .build()).messages();
+            assertThat(messages).hasSize(1);
+            assertThat(messages.get(0).body()).contains(source).contains("Undeliverable");
+            Map<String, MessageAttributeValue> attributes = messages.get(0).messageAttributes();
+            assertThat(attributes.get("RULE_ARN").stringValue()).isEqualTo(ruleArn);
+            assertThat(attributes.get("TARGET_ARN").stringValue()).isEqualTo(missingQueueArn);
+            assertThat(attributes.get("ERROR_CODE").stringValue()).isEqualTo("NO_RESOURCE");
+            assertThat(attributes.get("RETRY_ATTEMPTS").stringValue()).isEqualTo("0");
+        } finally {
+            eb.removeTargets(RemoveTargetsRequest.builder().rule(dlqRuleName).ids("missing-queue").build());
+            eb.deleteRule(DeleteRuleRequest.builder().name(dlqRuleName).build());
+            sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(dlqUrl).build());
+        }
+    }
+
+    @Test
+    @Order(36)
+    void putTargetsRejectsOutOfRangeRetryPolicy() {
+        assertThatThrownBy(() -> eb.putTargets(PutTargetsRequest.builder()
+                .rule(ruleName)
+                .targets(Target.builder()
+                        .id("bad-retry")
+                        .arn(sinkQueueArn)
+                        .retryPolicy(RetryPolicy.builder().maximumEventAgeInSeconds(0).build())
+                        .build())
+                .build()))
+                .isInstanceOfSatisfying(EventBridgeException.class, e -> {
+                    assertThat(e.statusCode()).isEqualTo(400);
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationException");
+                    assertThat(e.getMessage()).contains("targets.1.member.retryPolicy.maximumEventAgeInSeconds");
+                });
+    }
+
     // ──────────────────────────── Tags ────────────────────────────
 
     @Test

@@ -13,8 +13,8 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
-import io.github.hectorvent.floci.services.eventbridge.EventBridgeInvoker;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.eventbridge.TargetDispatcher;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,19 +40,19 @@ class EcsEventBridgeIntegrationTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private EventBridgeService eventBridgeService;
-    private EventBridgeInvoker invoker;
+    private TargetDispatcher dispatcher;
     private EcsService ecsService;
     private List<String> deliveredEvents;
 
     @BeforeEach
     void setUp() {
         deliveredEvents = new CopyOnWriteArrayList<>();
-        invoker = mock(EventBridgeInvoker.class);
+        dispatcher = mock(TargetDispatcher.class);
         doAnswer(invocation -> {
-            String eventJson = invocation.getArgument(1);
+            String eventJson = invocation.getArgument(2);
             deliveredEvents.add(eventJson);
             return null;
-        }).when(invoker).invokeTarget(any(), anyString(), anyString());
+        }).when(dispatcher).dispatch(anyString(), any(), anyString(), anyString(), any());
 
         RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
         InMemoryStorageFactory storageFactory = new InMemoryStorageFactory();
@@ -66,7 +66,7 @@ class EcsEventBridgeIntegrationTest {
                 regionResolver,
                 objectMapper,
                 null,
-                invoker,
+                dispatcher,
                 null,
                 null
         );

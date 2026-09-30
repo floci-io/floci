@@ -20,6 +20,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.util.List;
 import java.util.Optional;
 
@@ -42,7 +43,8 @@ class EventBridgeSchedulerIntegrationTest {
         StorageBackend<String, List<Target>> targetStore = new InMemoryStorage<>();
 
         EventBridgeInvoker invoker = new EventBridgeInvoker(null, null, null, new ObjectMapper(), createConfig());
-        scheduler = new RuleScheduler(vertx, createConfig(), new ObjectMapper(), invoker);
+        TargetDispatcher dispatcher = new TargetDispatcher(invoker, null, "http://localhost:4566", Clock.systemUTC(), null);
+        scheduler = new RuleScheduler(vertx, createConfig(), new ObjectMapper(), dispatcher);
 
         ReplayDispatcher replayDispatcher = new ReplayDispatcher(vertx);
         eventBridgeService = new EventBridgeService(
@@ -50,7 +52,7 @@ class EventBridgeSchedulerIntegrationTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT),
-                new ObjectMapper(), scheduler, invoker, replayDispatcher,
+                new ObjectMapper(), scheduler, dispatcher, replayDispatcher,
                 new ResourceGroupsTaggingService(null));
     }
 

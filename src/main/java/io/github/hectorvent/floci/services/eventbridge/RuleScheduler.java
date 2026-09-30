@@ -30,7 +30,7 @@ public class RuleScheduler implements Resettable {
     private final ObjectMapper objectMapper;
     private final String defaultAccountId;
     private final String defaultRegion;
-    private final EventBridgeInvoker invoker;
+    private final TargetDispatcher dispatcher;
     private final Clock clock;
     private final ConcurrentHashMap<String, ScheduleContext> scheduleContexts = new ConcurrentHashMap<>();
 
@@ -38,8 +38,8 @@ public class RuleScheduler implements Resettable {
     public RuleScheduler(Vertx vertx,
                           EmulatorConfig config,
                           ObjectMapper objectMapper,
-                          EventBridgeInvoker invoker) {
-        this(vertx, config, objectMapper, invoker, Clock.systemUTC());
+                          TargetDispatcher dispatcher) {
+        this(vertx, config, objectMapper, dispatcher, Clock.systemUTC());
     }
 
     /**
@@ -50,13 +50,13 @@ public class RuleScheduler implements Resettable {
     RuleScheduler(Vertx vertx,
                   EmulatorConfig config,
                   ObjectMapper objectMapper,
-                  EventBridgeInvoker invoker,
+                  TargetDispatcher dispatcher,
                   Clock clock) {
         this.vertx = vertx;
         this.objectMapper = objectMapper;
         this.defaultAccountId = config.defaultAccountId();
         this.defaultRegion = config.defaultRegion();
-        this.invoker = invoker;
+        this.dispatcher = dispatcher;
         this.clock = clock;
     }
 
@@ -174,13 +174,13 @@ public class RuleScheduler implements Resettable {
         LOG.debugv("Rule {0} firing scheduled event", data.rule.getName());
 
         for (Target target : data.targets) {
-            try {
-                invoker.invokeTarget(target, eventJson, region);
-            } catch (Exception e) {
-                LOG.warnv("Failed to invoke target {0} for rule {1}: {2}",
-                        target.getId(), data.rule.getName(), e.getMessage());
-            }
+            dispatcher.dispatch(data.rule.getArn(), target, eventJson, region, () -> currentTargets(dataSupplier));
         }
+    }
+
+    private static List<Target> currentTargets(Supplier<ScheduleData> dataSupplier) {
+        ScheduleData current = dataSupplier.get();
+        return current == null || current.rule() == null ? List.of() : current.targets();
     }
 
     private String buildScheduledEvent(Rule rule, String region) {
