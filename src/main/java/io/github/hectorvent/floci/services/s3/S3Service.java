@@ -3579,8 +3579,11 @@ public class S3Service implements Resettable, ResourceProvider {
             }
         }
 
-        bucket.setNotificationConfiguration(config);
-        bucketStore.put(bucketName, bucket);
+        synchronized (bucket) {
+            requireSameRecord(bucketName, bucket);
+            bucket.setNotificationConfiguration(config);
+            bucketStore.put(bucketName, bucket);
+        }
         LOG.infov("Set notification configuration for bucket: {0}", bucketName);
     }
 

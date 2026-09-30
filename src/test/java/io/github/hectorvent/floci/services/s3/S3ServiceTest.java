@@ -673,6 +673,53 @@ class S3ServiceTest {
                 .getLambdaFunctionConfigurations().getFirst().functionArn());
     }
 
+    @Test
+    void notificationValidationCannotRestoreADeletedBucket() {
+        LambdaService lambdaService = mock(LambdaService.class);
+        RegionResolver regionResolver = new RegionResolver("ap-northeast-1", "000000000000");
+        String arn = "arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test";
+        LambdaFunction function = new LambdaFunction();
+        function.setFunctionArn(arn);
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notification-deleted-bucket"), false, lambdaService, regionResolver);
+        service.createBucket("test-bucket", "ap-northeast-1");
+        when(lambdaService.getFunction("ap-northeast-1", arn, null)).thenAnswer(ignored -> {
+            service.deleteBucket("test-bucket");
+            return function;
+        });
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putBucketNotificationConfiguration("test-bucket",
+                        lambdaNotificationConfig("", "")));
+        assertEquals("NoSuchBucket", error.getErrorCode());
+        assertEquals("NoSuchBucket", assertThrows(AwsException.class,
+                () -> service.getBucketNotificationConfiguration("test-bucket")).getErrorCode());
+    }
+
+    @Test
+    void notificationValidationCannotOverwriteARecreatedBucket() {
+        LambdaService lambdaService = mock(LambdaService.class);
+        RegionResolver regionResolver = new RegionResolver("ap-northeast-1", "000000000000");
+        String arn = "arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test";
+        LambdaFunction function = new LambdaFunction();
+        function.setFunctionArn(arn);
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notification-recreated-bucket"), false, lambdaService, regionResolver);
+        service.createBucket("test-bucket", "ap-northeast-1");
+        when(lambdaService.getFunction("ap-northeast-1", arn, null)).thenAnswer(ignored -> {
+            service.deleteBucket("test-bucket");
+            service.createBucket("test-bucket", "ap-northeast-1");
+            return function;
+        });
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putBucketNotificationConfiguration("test-bucket",
+                        lambdaNotificationConfig("", "")));
+        assertEquals("NoSuchBucket", error.getErrorCode());
+        assertTrue(service.getBucketNotificationConfiguration("test-bucket")
+                .getLambdaFunctionConfigurations().isEmpty());
+    }
+
     private static NotificationConfiguration lambdaNotificationConfig(String prefix, String suffix) {
         NotificationConfiguration config = new NotificationConfiguration();
         config.getLambdaFunctionConfigurations().add(new LambdaNotification(
