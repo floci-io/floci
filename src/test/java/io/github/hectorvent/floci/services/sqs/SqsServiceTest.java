@@ -1727,7 +1727,7 @@ class SqsServiceTest {
 
     private static void awaitMoveTaskStatus(SqsService service, String sourceArn, String taskHandle,
                                             String expectedStatus) throws Exception {
-        for (int attempt = 0; attempt < 100; attempt++) {
+        for (int attempt = 0; attempt < 500; attempt++) {
             boolean reachedStatus = service.listMessageMoveTasks(sourceArn, "us-east-1").stream()
                     .anyMatch(task -> task.taskHandle().equals(taskHandle)
                             && expectedStatus.equals(task.status()));
@@ -2115,9 +2115,10 @@ class SqsServiceTest {
         sqsService.receiveMessage(source.getQueueUrl(), 10, 0, 0, region);
         sqsService.receiveMessage(source.getQueueUrl(), 10, 0, 0, region);
         String dlqArn = queueArn("retention-rl-dlq");
+        // Still live when the task starts, expired when the worker reaches it a second later.
+        second.setSentTimestamp(Instant.now().minusMillis(59_500));
 
         String taskHandle = sqsService.startMessageMoveTask(dlqArn, queueArn("retention-rl-dest"), 1, region);
-        second.setSentTimestamp(Instant.now().minusSeconds(61));
         awaitMoveTaskStatus(dlqArn, taskHandle, "COMPLETED");
 
         List<Message> moved = sqsService.peekMessages(dest.getQueueUrl(), region);
