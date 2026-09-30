@@ -2821,7 +2821,7 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
-    private static void validateMaxLength(Object value, String field, int maxLength) {
+    static void validateMaxLength(Object value, String field, int maxLength) {
         if (!(value instanceof String s) || s.length() <= maxLength) {
             return;
         }
