@@ -58,6 +58,35 @@ class SqsMd5Test {
     }
 
     @Test
+    void receiveMessageWithSelectedAttributePassesSdkMd5Validation() {
+        String queueUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName("md5-receive-" + UUID.randomUUID()).build()).queueUrl();
+        try {
+            sqs.sendMessage(SendMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .messageBody("filter-test")
+                    .messageAttributes(Map.of(
+                            "color.primary", MessageAttributeValue.builder()
+                                    .dataType("String").stringValue("red").build(),
+                            "secret", MessageAttributeValue.builder()
+                                    .dataType("String").stringValue("private").build()))
+                    .build());
+
+            ReceiveMessageResponse response = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .messageAttributeNames("color.primary")
+                    .build());
+
+            assertThat(response.messages()).hasSize(1);
+            assertThat(response.messages().get(0).messageAttributes()).containsOnlyKeys("color.primary");
+            assertThat(response.messages().get(0).md5OfMessageAttributes())
+                    .isEqualTo("d1cf84dfbac1cbe5c78ed09a1768b0d9");
+        } finally {
+            sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
+        }
+    }
+
+    @Test
     void fifoQueueSendMessageWithAttributesPassesSdkMd5Validation() {
         String queueName = "md5-fifo-" + UUID.randomUUID() + ".fifo";
         String queueUrl = sqs.createQueue(CreateQueueRequest.builder()

@@ -137,7 +137,8 @@ class SqsIntegrationTest {
                 .formParam("VisibilityTimeout", "0")
             .when().post("/").then().statusCode(200)
                 .body(containsString("<Body>filter-test</Body>"))
-                .body(not(containsString("<MessageAttribute>")));
+                .body(not(containsString("<MessageAttribute>")))
+                .body(not(containsString("<MD5OfMessageAttributes>")));
 
             given()
                 .contentType("application/x-www-form-urlencoded")
@@ -147,7 +148,8 @@ class SqsIntegrationTest {
                 .formParam("MessageAttributeName.1", "color.primary")
             .when().post("/").then().statusCode(200)
                 .body(containsString("<Name>color.primary</Name>"))
-                .body(not(containsString("<Name>secret</Name>")));
+                .body(not(containsString("<Name>secret</Name>")))
+                .body(containsString("<MD5OfMessageAttributes>d1cf84dfbac1cbe5c78ed09a1768b0d9</MD5OfMessageAttributes>"));
 
             given()
                 .contentType("application/x-www-form-urlencoded")
@@ -157,7 +159,8 @@ class SqsIntegrationTest {
                 .formParam("MessageAttributeName.1", "color.*")
             .when().post("/").then().statusCode(200)
                 .body(containsString("<Name>color.primary</Name>"))
-                .body(not(containsString("<Name>secret</Name>")));
+                .body(not(containsString("<Name>secret</Name>")))
+                .body(containsString("<MD5OfMessageAttributes>d1cf84dfbac1cbe5c78ed09a1768b0d9</MD5OfMessageAttributes>"));
 
             for (String allSelector : new String[]{"All", ".*"}) {
                 given()

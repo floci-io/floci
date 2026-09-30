@@ -280,20 +280,20 @@ public class SqsQueryHandler {
 
         XmlBuilder xml = new XmlBuilder();
         for (Message msg : messages) {
+            Map<String, MessageAttributeValue> selectedMessageAttrs = SqsMessageAttributeSelector.select(
+                    msg.getMessageAttributes(), requestedMessageAttrs);
             xml.start("Message")
                .elem("MessageId", msg.getMessageId())
                .elem("ReceiptHandle", msg.getReceiptHandle())
                .elem("MD5OfBody", msg.getMd5OfBody());
-            if (msg.getMd5OfMessageAttributes() != null) {
-                xml.elem("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+            String messageAttrsMd5 = Message.computeMessageAttributesMd5(selectedMessageAttrs);
+            if (messageAttrsMd5 != null) {
+                xml.elem("MD5OfMessageAttributes", messageAttrsMd5);
             }
             xml.elem("Body", msg.getBody());
             writeSystemAttributesXml(xml, msg, requestedAttrs, senderId);
-            if (msg.getMessageAttributes() != null && !msg.getMessageAttributes().isEmpty()) {
-                for (Map.Entry<String, MessageAttributeValue> entry : msg.getMessageAttributes().entrySet()) {
-                    if (!SqsMessageAttributeSelector.includes(requestedMessageAttrs, entry.getKey())) {
-                        continue;
-                    }
+            if (!selectedMessageAttrs.isEmpty()) {
+                for (Map.Entry<String, MessageAttributeValue> entry : selectedMessageAttrs.entrySet()) {
                     xml.start("MessageAttribute")
                        .elem("Name", entry.getKey())
                        .start("Value")

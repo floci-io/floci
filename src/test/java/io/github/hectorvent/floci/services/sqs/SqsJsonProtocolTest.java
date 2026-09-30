@@ -386,7 +386,8 @@ class SqsJsonProtocolTest {
                 .body(receiveBody + "}")
             .when().post("/").then().statusCode(200)
                 .body("Messages", hasSize(1))
-                .body("Messages[0]", not(hasKey("MessageAttributes")));
+                .body("Messages[0]", not(hasKey("MessageAttributes")))
+                .body("Messages[0]", not(hasKey("MD5OfMessageAttributes")));
 
             given()
                 .contentType(CONTENT_TYPE)
@@ -394,7 +395,8 @@ class SqsJsonProtocolTest {
                 .body(receiveBody + ",\"MessageAttributeNames\":[\"color.primary\"]}")
             .when().post("/").then().statusCode(200)
                 .body("Messages[0].MessageAttributes", hasKey("color.primary"))
-                .body("Messages[0].MessageAttributes", not(hasKey("secret")));
+                .body("Messages[0].MessageAttributes", not(hasKey("secret")))
+                .body("Messages[0].MD5OfMessageAttributes", equalTo("d1cf84dfbac1cbe5c78ed09a1768b0d9"));
 
             given()
                 .contentType(CONTENT_TYPE)
@@ -402,7 +404,8 @@ class SqsJsonProtocolTest {
                 .body(receiveBody + ",\"MessageAttributeNames\":[\"color.*\"]}")
             .when().post("/").then().statusCode(200)
                 .body("Messages[0].MessageAttributes", hasKey("color.primary"))
-                .body("Messages[0].MessageAttributes", not(hasKey("secret")));
+                .body("Messages[0].MessageAttributes", not(hasKey("secret")))
+                .body("Messages[0].MD5OfMessageAttributes", equalTo("d1cf84dfbac1cbe5c78ed09a1768b0d9"));
 
             for (String allSelector : new String[]{"All", ".*"}) {
                 given()
