@@ -35,12 +35,20 @@ import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -1433,10 +1441,10 @@ public class CodePipelineService {
         if (!isValidGitHubPathSegment(repoOwner) || !isValidGitHubPathSegment(repo)
                 || !isValidGitHubRef(branch)) {
             throw new AwsException("InvalidActionDeclarationException",
-                    "GitHub source Owner, Repo, and Branch must not contain path separators "
-                            + "or traversal segments", 400);
+                    "GitHub source Owner and Repo must be non-empty and contain no '/' or '..', "
+                            + "and Branch must be non-empty with no leading '/', '..' or whitespace", 400);
         }
-        byte[] archive = fetchGitHubArchive(java.net.URI.create(
+        byte[] archive = fetchGitHubArchive(URI.create(
                 "https://codeload.github.com/" + repoOwner + "/" + repo
                         + "/zip/refs/heads/" + branch));
         if (archive.length > maxArchiveBytes) {
@@ -1473,17 +1481,17 @@ public class CodePipelineService {
     }
 
     /** Overridable seam for tests; production goes to github.com with the JVM's proxy settings. */
-    byte[] fetchGitHubArchive(java.net.URI uri) {
+    byte[] fetchGitHubArchive(URI uri) {
         try {
-            java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
-                    .connectTimeout(java.time.Duration.ofSeconds(10))
-                    .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(10))
+                    .followRedirects(HttpClient.Redirect.NORMAL)
                     .build();
-            java.net.http.HttpResponse<InputStream> response = client.send(
-                    java.net.http.HttpRequest.newBuilder(uri)
-                            .timeout(java.time.Duration.ofSeconds(30))
+            HttpResponse<InputStream> response = client.send(
+                    HttpRequest.newBuilder(uri)
+                            .timeout(Duration.ofSeconds(30))
                             .GET().build(),
-                    java.net.http.HttpResponse.BodyHandlers.ofInputStream());
+                    HttpResponse.BodyHandlers.ofInputStream());
             try (InputStream body = response.body()) {
                 if (response.statusCode() != 200) {
                     throw new AwsException("ActionExecutionFailed",
@@ -1493,7 +1501,7 @@ public class CodePipelineService {
                 if (response.headers().firstValueAsLong("Content-Length").orElse(0L) > maxArchiveBytes) {
                     throw archiveDownloadTooLarge();
                 }
-                var buffer = new java.io.ByteArrayOutputStream();
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                 byte[] chunk = new byte[8192];
                 long total = 0;
                 int n;
@@ -1526,11 +1534,11 @@ public class CodePipelineService {
      */
     private byte[] stripTopLevelDirectory(byte[] zip) {
         try {
-            var baos = new java.io.ByteArrayOutputStream();
-            try (var zipFile = ZipFile.builder()
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ZipFile zipFile = ZipFile.builder()
                     .setSeekableByteChannel(new SeekableInMemoryByteChannel(zip)).get();
-                 var zos = new ZipArchiveOutputStream(baos)) {
-                var entries = zipFile.getEntriesInPhysicalOrder();
+                 ZipArchiveOutputStream zos = new ZipArchiveOutputStream(baos)) {
+                Enumeration<ZipArchiveEntry> entries = zipFile.getEntriesInPhysicalOrder();
                 int entryCount = 0;
                 long uncompressedTotal = 0;
                 while (entries.hasMoreElements()) {
@@ -1553,17 +1561,18 @@ public class CodePipelineService {
                         continue;
                     }
                     // Symlink entries (unix mode S_IFLNK, content = link target) are not
-                    // directories, so they flow through this copy path: preserving the
-                    // unix mode and the content keeps them symlinks for CodeBuild, which
-                    // recreates them via extractZip. node_modules/.bin/* rely on this.
+                    // directories, so they flow through this copy path: the unix mode and
+                    // the content are kept as-is in the repackaged artifact. This only
+                    // preserves the entries; the current CodeBuild extractZip writes every
+                    // entry as a plain file and does not recreate symlinks.
                     ZipArchiveEntry copy = new ZipArchiveEntry(stripped);
                     if (entry.getUnixMode() != 0) {
                         copy.setUnixMode(entry.getUnixMode());
                     }
                     zos.putArchiveEntry(copy);
                     boolean symlink = (entry.getUnixMode() & 0xF000) == 0xA000;
-                    var linkTarget = new java.io.ByteArrayOutputStream();
-                    try (var in = openEntryStream(zipFile, entry)) {
+                    ByteArrayOutputStream linkTarget = new ByteArrayOutputStream();
+                    try (InputStream in = openEntryStream(zipFile, entry)) {
                         byte[] chunk = new byte[8192];
                         int n;
                         while ((n = in.read(chunk)) >= 0) {
@@ -1612,8 +1621,8 @@ public class CodePipelineService {
         if (target.startsWith("/") || target.startsWith("\\")) {
             return true;
         }
-        java.nio.file.Path root = java.nio.file.Path.of("/root");
-        java.nio.file.Path linkDir = root.resolve(linkName).getParent();
+        Path root = Path.of("/root");
+        Path linkDir = root.resolve(linkName).getParent();
         return !linkDir.resolve(target).normalize().startsWith(root);
     }
 

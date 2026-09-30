@@ -17,7 +17,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -25,6 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
 import java.util.zip.ZipEntry;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -41,7 +46,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
  * The archive fetch is the only seam replaced; the artifact is observed through an S3 deploy
  * action that writes the input artifact to the mocked S3 service.
  */
-class CodePipelineGitHubSourceTest {
+class CodePipelineGitHubSourceServiceTest {
 
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";
@@ -98,12 +103,12 @@ class CodePipelineGitHubSourceTest {
         JsonNode actions = service.handle("ListActionExecutions",
                 mapper.createObjectNode().put("pipelineName", "traversal-repo"), REGION, ACCOUNT)
                 .path("actionExecutionDetails");
-        assertTrue(actions.toString().contains("path separators or traversal"), actions.toString());
+        assertTrue(actions.toString().contains("must be non-empty and contain no"), actions.toString());
     }
 
     @Test
     void repackagingPreservesUnixFileModes() throws Exception {
-        // Catches: executable bits dropped so bootstrap scripts fail to run in CodeBuild
+        // Catches: unix mode bits dropped from the repackaged artifact entries
         byte[] archive = zip(zos -> {
             dir(zos, "repo-main/");
             file(zos, "repo-main/lib/bash/bootstrap.sh", "#!/bin/bash\n", 0755, ZipEntry.DEFLATED);
@@ -122,7 +127,7 @@ class CodePipelineGitHubSourceTest {
 
     @Test
     void repackagingPreservesSymlinks() throws Exception {
-        // Catches: symlink entries flattened, breaking node_modules/.bin executables in CodeBuild
+        // Catches: symlink entries flattened in the artifact (mode and link target lost)
         byte[] archive = zip(zos -> {
             dir(zos, "repo-main/");
             file(zos, "repo-main/node_modules/ts-node/dist/bin.js", "#!/usr/bin/env node\n", 0755, ZipEntry.DEFLATED);
@@ -336,8 +341,8 @@ class CodePipelineGitHubSourceTest {
         if (zip.getEntry(name).getMethod() == ZipEntry.STORED) {
             return new String(raw, StandardCharsets.UTF_8);
         }
-        try (var in = new java.util.zip.InflaterInputStream(
-                new java.io.ByteArrayInputStream(raw), new java.util.zip.Inflater(true))) {
+        try (InflaterInputStream in = new InflaterInputStream(
+                new ByteArrayInputStream(raw), new Inflater(true))) {
             return new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }
     }
