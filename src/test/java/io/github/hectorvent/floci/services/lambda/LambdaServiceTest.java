@@ -2427,4 +2427,29 @@ class LambdaServiceTest {
         }
         return request;
     }
+    @Test
+    void updateFunctionCode_s3BucketEndingInADot_isRejected() {
+        // Catches: UpdateFunctionCode accepting an S3Bucket that breaks the model pattern [0-9A-Za-z\.\-_]*(?<!\.)
+        service.createFunction(REGION, baseRequest("code-bucket-pattern-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION,
+                "code-bucket-pattern-fn", Map.of("S3Bucket", "my-bucket.", "S3Key", "code.zip")));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value 'my-bucket.' at 's3Bucket' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [0-9A-Za-z\\.\\-_]*(?<!\\.)", error.getMessage());
+    }
+
+    @Test
+    void updateFunctionCode_s3KeyLongerThan1024_isRejected() {
+        // Catches: UpdateFunctionCode accepting an S3Key longer than the model's 1024-character maximum
+        service.createFunction(REGION, baseRequest("code-key-length-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION,
+                "code-key-length-fn", Map.of("S3Bucket", "my-bucket", "S3Key", "k".repeat(1025))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value at 's3Key' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 1024", error.getMessage());
+    }
 }
