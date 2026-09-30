@@ -2765,7 +2765,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     String iamArn(String resourceType, String path, String name, String accountId) {
-        return AwsArnUtils.Arn.global(regionResolver.getPartition(), "iam", accountId,
+        return AwsArnUtils.Arn.of("iam", "", accountId,
                 resourceType + normalizePath(path) + name).toString();
     }
 
