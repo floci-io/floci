@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
@@ -57,6 +58,7 @@ public class SesQueryHandler {
     private final SesConfigurationSetService configSetService;
     private final SesPolicyService policyService;
     private final SesSentEmailService sentEmailService;
+    private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
@@ -65,7 +67,8 @@ public class SesQueryHandler {
                            SesCvetService cvetService, SesAccountService accountService,
                            SesConfigurationSetService configSetService,
                            SesPolicyService policyService,
-                           SesSentEmailService sentEmailService, ObjectMapper objectMapper) {
+                           SesSentEmailService sentEmailService, RegionResolver regionResolver,
+                           ObjectMapper objectMapper) {
         this.sesService = sesService;
         this.receiptRuleService = receiptRuleService;
         this.identityService = identityService;
@@ -75,6 +78,7 @@ public class SesQueryHandler {
         this.configSetService = configSetService;
         this.policyService = policyService;
         this.sentEmailService = sentEmailService;
+        this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
 
@@ -948,7 +952,7 @@ public class SesQueryHandler {
         String configSet = requireParam(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        configSetService.createEventDestination(configSet, edName, dest, region);
+        configSetService.createEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "CreateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }
@@ -958,7 +962,7 @@ public class SesQueryHandler {
         String configSet = requireParam(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        configSetService.updateEventDestination(configSet, edName, dest, region);
+        configSetService.updateEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }

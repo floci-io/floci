@@ -18,7 +18,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -26,6 +26,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -118,14 +119,14 @@ class CodeArtifactAssetPersistenceTest {
     }
 
     /**
-     * A package version whose metadata still lists an asset but whose backing file is gone (a
-     * partial restore, or anything else that touched the asset store without also touching the
-     * metadata) must not turn a republish into a hard failure: that would block the one thing that
-     * could actually repair it. Greptile caught this as a real regression risk in the overwrite
-     * check above; this is the case that check must not treat as "the asset exists and must match".
+     * The overwrite check compares against an asset's persisted SHA-256 (in {@code hashes}), not
+     * its bytes, so a backing file that's missing on disk (a partial restore, or anything else that
+     * touched the asset store without also touching the metadata) has no special case at all: a
+     * republish of the exact content that was already recorded still passes the hash comparison and
+     * naturally rewrites the file as a side effect of the normal write path below.
      */
     @Test
-    void republishingAnAssetWhoseBackingFileIsMissingRepairsItInsteadOfFailing(@TempDir Path dir) throws IOException {
+    void republishingWithMatchingContentRewritesAMissingBackingFile(@TempDir Path dir) throws IOException {
         CodeArtifactService service = newService(dir);
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
@@ -140,78 +141,159 @@ class CodeArtifactAssetPersistenceTest {
             }
         }
 
-        byte[] repaired = "repaired content".getBytes(StandardCharsets.UTF_8);
         PublishPackageVersionResult result = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
-                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(repaired), "true", repaired);
+                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "true", content);
 
         assertEquals("Unfinished", result.packageVersion().getStatus());
         PackageVersionAssetResult fetched = service.getPackageVersionAsset(REGION, "dom", null, "repo", "generic",
                 null, "my-pkg", "1.0.0", "a.txt", null);
-        assertEquals("repaired content", new String(fetched.asset().getContent(), StandardCharsets.UTF_8));
+        assertEquals("hello world", new String(fetched.asset().getContent(), StandardCharsets.UTF_8));
     }
 
     /**
-     * The overwrite check streams the existing file in fixed-size chunks rather than loading it
-     * whole, specifically to avoid holding two full copies of a large asset in memory at once for a
-     * same-content retry. These three cases exercise the chunk boundary directly: content spanning
-     * several reads of the comparison buffer, a mismatch that only appears in the final chunk, and a
-     * length mismatch that only becomes apparent once the shorter side is exhausted.
+     * Same repair guarantee as the Unfinished case above, but for a version that's already
+     * Published: the idempotent-retry short-circuit there always rewrites the now-confirmed-correct
+     * bytes rather than trusting that the file, if present, already has the right content.
      */
     @Test
-    void republishingALargeAssetSpanningMultipleBufferReadsWithIdenticalContentSucceeds(@TempDir Path dir) {
+    void republishingAnAlreadyPublishedAssetWithMatchingContentRewritesAMissingBackingFile(@TempDir Path dir)
+            throws IOException {
         CodeArtifactService service = newService(dir);
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
-        byte[] content = deterministicBytes(20_000);
-        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.bin",
-                sha256Hex(content), "true", content);
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+
+        Path assetRoot = dir.resolve("codeartifact-assets");
+        try (Stream<Path> paths = Files.walk(assetRoot)) {
+            for (Path p : paths.filter(Files::isRegularFile).toList()) {
+                Files.delete(p);
+            }
+        }
 
         PublishPackageVersionResult result = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
-                null, "my-pkg", "1.0.0", "a.bin", sha256Hex(content), "true", content);
+                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
+
+        assertEquals("Published", result.packageVersion().getStatus());
+        PackageVersionAssetResult fetched = service.getPackageVersionAsset(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "a.txt", null);
+        assertEquals("hello world", new String(fetched.asset().getContent(), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * A backing file that exists but whose bytes no longer match its recorded hash (disk-level
+     * corruption, or anything else that touched the file directly without going through Floci) must
+     * not survive a matching-content retry: an existence-only check would see the file is "there"
+     * and skip repairing it, letting the corruption persist through every future retry forever.
+     * Greptile caught this as a real regression risk in the presence-check this test replaces.
+     */
+    @Test
+    void republishingWithMatchingContentRepairsACorruptedBackingFile(@TempDir Path dir) throws IOException {
+        CodeArtifactService service = newService(dir);
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "true", content);
+
+        Path assetRoot = dir.resolve("codeartifact-assets");
+        try (Stream<Path> paths = Files.walk(assetRoot)) {
+            for (Path p : paths.filter(Files::isRegularFile).toList()) {
+                Files.write(p, "corrupted on disk".getBytes(StandardCharsets.UTF_8));
+            }
+        }
+
+        PublishPackageVersionResult result = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "true", content);
 
         assertEquals("Unfinished", result.packageVersion().getStatus());
-        assertEquals(1, result.packageVersion().getAssets().size());
+        PackageVersionAssetResult fetched = service.getPackageVersionAsset(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "a.txt", null);
+        assertEquals("hello world", new String(fetched.asset().getContent(), StandardCharsets.UTF_8));
     }
 
+    /**
+     * The overwhelmingly common case, an intact asset republished unchanged, must stay a true
+     * no-op that needs no write capacity at all: Greptile caught that always rewriting (an earlier
+     * version of the fix above) would make a retry fail on a store that has no free space left,
+     * even though nothing on disk actually needed to change. {@code writeAssetContent} always
+     * replaces the file through a temp-file-then-rename, so its identity (device/inode) changing
+     * would prove a write happened; checking permission bits instead would be unreliable under a
+     * root-run CI container, which ignores them.
+     */
     @Test
-    void republishingALargeAssetWithAMismatchInTheFinalChunkConflicts(@TempDir Path dir) {
+    void republishingAnIntactUnfinishedAssetDoesNotRewriteTheBackingFile(@TempDir Path dir) throws IOException {
         CodeArtifactService service = newService(dir);
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
-        byte[] original = deterministicBytes(20_000);
-        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.bin",
-                sha256Hex(original), "true", original);
-
-        byte[] almostSame = original.clone();
-        almostSame[almostSame.length - 1] ^= 0xFF;
-
-        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
-                "repo", "generic", null, "my-pkg", "1.0.0", "a.bin", sha256Hex(almostSame), "true", almostSame));
-        assertEquals("ConflictException", e.getErrorCode());
-    }
-
-    @Test
-    void republishingALargeAssetWithDifferentLengthConflicts(@TempDir Path dir) {
-        CodeArtifactService service = newService(dir);
-        service.createDomain(REGION, "dom", null, Map.of());
-        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
-        byte[] original = deterministicBytes(20_000);
-        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.bin",
-                sha256Hex(original), "true", original);
-
-        byte[] shorter = Arrays.copyOf(original, original.length - 1);
-
-        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
-                "repo", "generic", null, "my-pkg", "1.0.0", "a.bin", sha256Hex(shorter), "true", shorter));
-        assertEquals("ConflictException", e.getErrorCode());
-    }
-
-    private static byte[] deterministicBytes(int size) {
-        byte[] bytes = new byte[size];
-        for (int i = 0; i < size; i++) {
-            bytes[i] = (byte) (i * 31 + 7);
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "true", content);
+        Path assetFile;
+        try (Stream<Path> paths = Files.walk(dir.resolve("codeartifact-assets"))) {
+            assetFile = paths.filter(Files::isRegularFile).findFirst().orElseThrow();
         }
-        return bytes;
+        Object fileKeyBefore = Files.readAttributes(assetFile, BasicFileAttributes.class).fileKey();
+        assertNotNull(fileKeyBefore, "test filesystem must support file keys for this identity check to be meaningful");
+
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "true", content);
+
+        Object fileKeyAfter = Files.readAttributes(assetFile, BasicFileAttributes.class).fileKey();
+        assertEquals(fileKeyBefore, fileKeyAfter, "an intact retry must not replace the backing file");
+    }
+
+    @Test
+    void republishingAnIntactPublishedAssetDoesNotRewriteTheBackingFile(@TempDir Path dir) throws IOException {
+        CodeArtifactService service = newService(dir);
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+        Path assetFile;
+        try (Stream<Path> paths = Files.walk(dir.resolve("codeartifact-assets"))) {
+            assetFile = paths.filter(Files::isRegularFile).findFirst().orElseThrow();
+        }
+        Object fileKeyBefore = Files.readAttributes(assetFile, BasicFileAttributes.class).fileKey();
+        assertNotNull(fileKeyBefore, "test filesystem must support file keys for this identity check to be meaningful");
+
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+
+        Object fileKeyAfter = Files.readAttributes(assetFile, BasicFileAttributes.class).fileKey();
+        assertEquals(fileKeyBefore, fileKeyAfter, "an intact retry must not replace the backing file");
+    }
+
+    /**
+     * A missing backing file must never turn into a loophole that lets a genuinely different
+     * republish through as a silent "repair": the asset's recorded checksum still exists (it's
+     * normal persisted metadata, not the {@code @JsonIgnore}d content field), so this conflicts the
+     * same as it would if the file were still there.
+     */
+    @Test
+    void republishingWithDifferentContentConflictsEvenWhenTheBackingFileIsMissing(@TempDir Path dir)
+            throws IOException {
+        CodeArtifactService service = newService(dir);
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "true", content);
+
+        Path assetRoot = dir.resolve("codeartifact-assets");
+        try (Stream<Path> paths = Files.walk(assetRoot)) {
+            for (Path p : paths.filter(Files::isRegularFile).toList()) {
+                Files.delete(p);
+            }
+        }
+
+        byte[] different = "different content".getBytes(StandardCharsets.UTF_8);
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", null, "my-pkg", "1.0.0", "a.txt", sha256Hex(different), "true", different));
+        assertEquals("ConflictException", e.getErrorCode());
+        assertEquals("a.txt", e.getExtendedData().get("resourceId"));
     }
 
     @Test

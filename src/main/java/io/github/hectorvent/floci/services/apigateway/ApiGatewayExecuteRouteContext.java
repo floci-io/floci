@@ -11,6 +11,7 @@ import jakarta.ws.rs.core.UriInfo;
 public class ApiGatewayExecuteRouteContext {
 
     private String httpApiRegion;
+    private boolean restApiRoute;
     private String signedRequestPath;
 
     void routeToHttpApi(String region) {
@@ -19,6 +20,14 @@ public class ApiGatewayExecuteRouteContext {
 
     String httpApiRegion() {
         return httpApiRegion;
+    }
+
+    void routeToRestApi() {
+        this.restApiRoute = true;
+    }
+
+    boolean isRestApiRoute() {
+        return restApiRoute;
     }
 
     /**

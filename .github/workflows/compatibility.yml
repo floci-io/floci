@@ -21,7 +21,6 @@ on:
       - '.github/ci/compat-opentofu-allowlist-tf-only.txt'
       - '.github/ci/compat-opentofu-allowlist-otf-only.txt'
       - '.github/workflows/compatibility.yml'
-      - '.github/workflows/pr-draft-gate.yml'
 
 permissions:
   contents: read
@@ -31,15 +30,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Drafts skip the suite to spare runners; it runs once the PR is ready for review.
-  draft-gate:
-    uses: ./.github/workflows/pr-draft-gate.yml
-
   docker-runner-regression:
     name: compat / Docker runner failure aggregation
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: draft-gate
+    # Drafts skip the suite to spare runners; it runs once the PR is ready for review.
+    # Written on the job rather than as a gate job so it costs no runner. Pushes to main
+    # always run; `closed` and `edited` are excluded so widening the trigger types cannot
+    # let those events through.
+    if: >-
+      github.event_name != 'pull_request' || (
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.state != 'closed' &&
+        github.event.action != 'edited'
+      )
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -50,7 +54,13 @@ jobs:
     name: compat / aws CLI endpoint resolution
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
-    needs: draft-gate
+    # Same draft condition as docker-runner-regression above.
+    if: >-
+      github.event_name != 'pull_request' || (
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.state != 'closed' &&
+        github.event.action != 'edited'
+      )
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -129,7 +139,13 @@ jobs:
     name: compat / opentofu resource parity
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
-    needs: draft-gate
+    # Same draft condition as docker-runner-regression above.
+    if: >-
+      github.event_name != 'pull_request' || (
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.state != 'closed' &&
+        github.event.action != 'edited'
+      )
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -144,7 +160,13 @@ jobs:
     name: Build native floci image (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
-    needs: draft-gate
+    # Same draft condition as docker-runner-regression above.
+    if: >-
+      github.event_name != 'pull_request' || (
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.state != 'closed' &&
+        github.event.action != 'edited'
+      )
     # Both published architectures. The native image is the only place an
     # arch-specific resource can go missing (snappy-java's JNI library is
     # registered per platform), and one arch cannot prove the other.

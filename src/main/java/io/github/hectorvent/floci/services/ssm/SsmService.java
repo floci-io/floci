@@ -35,6 +35,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.ArrayList;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SsmService implements ResourceProvider {
@@ -49,6 +50,9 @@ public class SsmService implements ResourceProvider {
     private static final Set<String> DESCRIBE_PARAMETERS_FILTER_KEYS =
             Set.of("Name", "Type", "KeyId", "Path", "Tier", "DataType");
     private static final String DEFAULT_SSM_KEY_ID = "alias/aws/ssm";
+    private static final String TAG_KEY_REGEX = "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$";
+    private static final Pattern TAG_KEY_PATTERN = Pattern.compile(TAG_KEY_REGEX);
+    private static final int MAX_TAG_KEY_LENGTH = 128;
 
     /**
      * Account-default values for the service settings floci models. AWS rejects
@@ -179,6 +183,7 @@ public class SsmService implements ResourceProvider {
 
     public long putParameter(String name, String value, String type, String description, boolean overwrite,
                              Map<String, String> tags, String region) {
+        validateTagKeys(tags);
         rejectReservedName(name);
         String storageKey = regionKey(region, name);
         Parameter existing = parameterStore.get(storageKey).orElse(null);
@@ -713,6 +718,7 @@ public class SsmService implements ResourceProvider {
     }
 
     public void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
+        validateTagKeys(tags);
         String normalizedId = normalizeResourceId(resourceId);
         String storageKey = regionKey(region, normalizedId);
         Parameter param = parameterStore.get(storageKey)
@@ -725,6 +731,32 @@ public class SsmService implements ResourceProvider {
         param.getTags().putAll(tags);
         parameterStore.put(storageKey, param);
         LOG.debugv("Added tags to parameter: {0}", resourceId);
+    }
+
+    /**
+     * The key constraint AWS checks before any lookup, naming the offending key by its 1-based
+     * position in the request's {@code Tags} list.
+     */
+    public static void validateTagKeys(Map<String, String> tags) {
+        if (tags == null) {
+            return;
+        }
+        int position = 0;
+        for (String key : tags.keySet()) {
+            position++;
+            String constraint;
+            if (key.isEmpty()) {
+                constraint = "Member must have length greater than or equal to 1";
+            } else if (key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH) {
+                constraint = "Member must have length less than or equal to " + MAX_TAG_KEY_LENGTH;
+            } else if (!TAG_KEY_PATTERN.matcher(key).matches()) {
+                constraint = "Member must satisfy regular expression pattern: " + TAG_KEY_REGEX;
+            } else {
+                continue;
+            }
+            throw new AwsException("ValidationException", "1 validation error detected: Value at 'tags."
+                    + position + ".member.key' failed to satisfy constraint: " + constraint, 400);
+        }
     }
 
     public Map<String, String> listTagsForResource(String resourceId, String region) {

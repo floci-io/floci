@@ -57,6 +57,15 @@ changes to `StateMachineName` or `StateMachineType` use replacement semantics.
   `Parameters` or `Arguments` payload, serialized as a JSON string. `timeoutInSeconds` and
   `heartbeatInSeconds` appear only when the state sets `TimeoutSeconds` or
   `HeartbeatSeconds` as a literal number.
+  `resourceType` is the integrated service (`states`, `ecs`, `aws-sdk:sqs`) and `resource` the
+  API with its suffix (`startExecution.sync:2`, `runTask.sync`), as AWS names them. A `.sync`
+  Task (`states:startExecution.sync` and `.sync:2`, `ecs:runTask.sync`) also records
+  `TaskSubmitted` after `TaskStarted`, once the call that started its job has returned and before
+  it waits on the job. `taskSubmittedEventDetails` carries `resourceType`, `resource`,
+  `outputDetails`, and that call's response as `output`, in PascalCase: `{"ExecutionArn",
+  "StartDate"}` with `StartDate` in epoch milliseconds for a nested execution, `{"Failures",
+  "Tasks"}` for an ECS task. AWS folds the SDK's `SdkHttpMetadata` and `SdkResponseMetadata`
+  into that response as well; Floci records the response fields alone.
 - A direct Lambda function ARN emits `LambdaFunctionScheduled`, `LambdaFunctionStarted`,
   and then `LambdaFunctionSucceeded` or `LambdaFunctionFailed`. `LambdaFunctionScheduled`
   carries `resource` and `input`. `resource` holds the full function ARN. `LambdaFunctionStarted`
@@ -83,7 +92,12 @@ the parent execution's history, as on AWS. A `Parallel` records `ParallelStateSt
 history. A `Task` whose failure ends its branch also records `TaskStateAborted`. When a failure
 ends a `Parallel`, each other branch that is still inside a `Task` or a `Wait` records
 `TaskStateAborted` or `WaitStateAborted`, chained to the failing branch's last event and recorded
-before `ParallelStateFailed`.
+before `ParallelStateFailed`. The `Parallel` fails the moment any branch fails, whichever branch
+is listed first, and cuts the others then; the branch outputs still come back in declaration
+order. When a failure ends an inline `Map`, each other iteration that is still running records
+`MapIterationAborted`, and one still inside a `Task` or a `Wait` records `TaskStateAborted` or
+`WaitStateAborted` right after it, all chained to the failing iteration's last event and recorded
+before `MapIterationFailed` and `MapStateFailed`.
 
 Branches and iterations run concurrently, so the order in which their events interleave differs
 from run to run. Each branch chains its own events through `previousEventId`, and that chain is
@@ -109,13 +123,11 @@ When the request sets `includeExecutionData` to false, the details objects stay 
 `taskScheduledEventDetails.parameters`. This matches AWS.
 
 A few gaps remain. `TaskStarted`, `LambdaFunctionStarted`, and `ActivityStarted` fire at
-scheduling time, not when a worker actually picks up the task. `TaskSubmitted`, which real
-AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet. When a
-branch fails, AWS records `*StateAborted` and `MapIterationAborted` events for the states its
-sibling branches were in; Floci cancels the siblings without recording them. A Distributed
-`Map` that declares no tolerance reports a failed item's own error rather than AWS's
-`States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that error. A `Map` that
-declares one reports `States.ExceedToleratedFailureThreshold`, as AWS does.
+scheduling time, not when a worker actually picks up the task. `TaskSubmitted` is recorded for
+the three `.sync` integrations above and not yet for a `.waitForTaskToken` one, which AWS also
+records it for. A Distributed `Map` that declares no tolerance reports a failed item's own error
+rather than AWS's `States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that
+error. A `Map` that declares one reports `States.ExceedToleratedFailureThreshold`, as AWS does.
 
 ## Map concurrency
 
@@ -126,7 +138,8 @@ omitted value, uses the AWS service ceiling: 40 concurrent iterations for Inline
 
 Results remain in input order even when iterations finish out of order. If an iteration fails,
 the Map state fails promptly, cancels its active sibling iterations, and does not start queued
-iterations.
+iterations. A cancelled iteration whose `Task` was waiting on a `.sync` job stops that job, the
+way a cut `Parallel` branch does.
 
 ## Distributed Map ItemReader
 
@@ -266,8 +279,8 @@ When the `Task`'s own clock fires, the job it was waiting on is stopped the way 
 ECS task reads `stopCode: UserInitiated`, the child execution reads `ABORTED` with no error, and
 both carry the cause `The Task state in AWS Step Functions execution [<arn>] which was managing
 this resource was aborted`. A `StopExecution` that lands while the state waits ends the wait and
-stops the job with the same cause, and so does the execution's budget, and a failure in another
-`Parallel` branch that cuts the branch the `Task` is in.
+stops the job with the same cause, and so does the execution's budget, and so does a failure in
+another branch of the `Parallel`, or in another iteration of the `Map`, that the `Task` is in.
 
 One deviation. AWS starts the `TimeoutSeconds` clock when a worker picks the task up, the instant
 it emits `ActivityStarted`. Floci emits `ActivityStarted` at schedule time, so both clocks start
@@ -419,14 +432,24 @@ more than syntax:
 
 | Resource | Child type | A child that fails | Result |
 | --- | --- | --- | --- |
-| `arn:aws:states:::states:startExecution` | Standard | not awaited | `{executionArn, startDate}` |
-| `arn:aws:states:::states:startExecution.sync` | Standard | fails the calling task | execution envelope, `output` as a JSON string |
-| `arn:aws:states:::states:startExecution.sync:2` | Standard | fails the calling task | the child output, parsed |
-| `arn:aws:states:::aws-sdk:sfn:startExecution` | Standard | not awaited | `{ExecutionArn, StartDate}` |
+| `arn:aws:states:::states:startExecution` | Standard | not awaited | `{ExecutionArn, StartDate}`, `StartDate` in epoch milliseconds |
+| `arn:aws:states:::states:startExecution.sync` | Standard | fails the calling task | execution envelope, `Input` and `Output` as JSON strings |
+| `arn:aws:states:::states:startExecution.sync:2` | Standard | fails the calling task | execution envelope, `Input` and `Output` as JSON values |
+| `arn:aws:states:::aws-sdk:sfn:startExecution` | Standard | not awaited | `{ExecutionArn, StartDate}`, `StartDate` as an ISO-8601 string |
 | `arn:aws:states:::aws-sdk:sfn:startSyncExecution` | Express | reported through `Status` | PascalCase envelope, `Output` as a JSON string |
 
 `states:startExecution` and `aws-sdk:sfn:startExecution` are the same API through two different
-integrations, and only the casing of the result tells them apart.
+integrations, and only the format of `StartDate` tells their results apart. AWS also adds
+`SdkHttpMetadata` and `SdkResponseMetadata` to the `states:startExecution` result, which Floci
+omits.
+
+The execution envelope of the two `.sync` modes is the child's `DescribeExecution` response,
+PascalCase with its keys in alphabetical order and dates in epoch milliseconds: `ExecutionArn`,
+`Input`, `InputDetails`, `Name`, `Output`, `OutputDetails`, `RedriveCount`, `RedriveStatus`,
+`RedriveStatusReason`, `StartDate`, `StateMachineArn`, `Status` and `StopDate`. So the child's
+output is at `$.Output` in both modes: a JSON string through `.sync`, to read with
+`States.StringToJson`, and a JSON value through `.sync:2`, to read directly, for example with a
+`ResultSelector` or `OutputPath` of `$.Output`.
 
 `startSyncExecution` is the only one that does not fail the calling task when the child fails: the
 SDK call itself succeeded, so the task result carries `Status`, `Error` and `Cause` and the parent

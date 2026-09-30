@@ -98,7 +98,7 @@ class IamCaseInsensitiveLegacyNamesTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void awsManagedPolicyMirrorsDoNotReserveCustomerPolicyNames(boolean accountPrefixed) {
-        String managedArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
+        String managedArn = AwsManagedPolicies.arnPrefix("aws") + "/AdministratorAccess";
         String mirrorKey = accountPrefixed ? DEFAULT_ACCOUNT + "/" + managedArn : managedArn;
         IamPolicy mirror = new IamPolicy("ANPALEGACYAWS", "AdministratorAccess", "/", managedArn,
                 null, "{}");

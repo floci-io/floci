@@ -26,6 +26,7 @@ import org.mockito.ArgumentCaptor;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -199,6 +200,84 @@ class AslExecutorEcsRunTaskModeTest {
                         + "] which was managing this resource was aborted"), eq(REGION));
     }
 
+    /**
+     * AWS records TaskSubmitted once RunTask has returned and before it waits on the task (measured:
+     * resourceType ecs, resource runTask.sync, the response as Failures then Tasks in PascalCase,
+     * chained to TaskStarted).
+     */
+    @Test
+    void syncRecordsTaskSubmittedWithTheRunTaskResponse() throws Exception {
+        launchOneTask();
+        when(ecsService.describeTasks(any(), any(), any())).thenReturn(List.of(task("STOPPED")));
+
+        Execution execution = run("arn:aws:states:::ecs:runTask.sync", "{\"TaskDefinition\":\"my-task-def\"}");
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        List<String> types = history.stream().map(HistoryEvent::getType).toList();
+        assertEquals(List.of("TaskStateEntered", "TaskScheduled", "TaskStarted", "TaskSubmitted",
+                "TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"), types);
+        HistoryEvent submitted = history.get(3);
+        assertEquals(history.get(2).getId(), submitted.getPreviousEventId().longValue());
+        assertEquals(submitted.getId(), history.get(4).getPreviousEventId().longValue());
+        assertEquals("ecs", submitted.getDetails().get("resourceType"));
+        assertEquals("runTask.sync", submitted.getDetails().get("resource"));
+        JsonNode output = objectMapper.readTree((String) submitted.getDetails().get("output"));
+        assertEquals(List.of("Failures", "Tasks"), fieldNames(output));
+        assertTrue(output.path("Failures").isArray() && output.path("Failures").isEmpty(), output.toString());
+        assertEquals(1, output.path("Tasks").size(), output.toString());
+        assertEquals(task("PENDING").getTaskArn(), output.path("Tasks").get(0).path("TaskArn").asText());
+        assertEquals("PENDING", output.path("Tasks").get(0).path("LastStatus").asText());
+        assertEquals(Map.of("truncated", false), submitted.getDetails().get("outputDetails"));
+    }
+
+    /**
+     * When TaskSubmitted is the event that hits the 25,000-event limit, the wait that would stop
+     * the launched task is never entered, so it is stopped on the way out instead of running on.
+     */
+    @Test
+    void aTaskWhoseTaskSubmittedHitsTheHistoryLimitIsStopped() throws Exception {
+        launchOneTask();
+        when(ecsService.describeTasks(any(), any(), any())).thenReturn(List.of(task("RUNNING")));
+        List<HistoryEvent> recorded = new ArrayList<>();
+        for (int i = 0; i < 24_996; i++) {
+            recorded.add(new HistoryEvent());
+        }
+
+        Execution execution = runDefinition("""
+                {
+                  "StartAt": "RunTask",
+                  "States": {
+                    "RunTask": { "Type": "Task", "Resource": "arn:aws:states:::ecs:runTask.sync", "End": true }
+                  }
+                }
+                """, "{\"TaskDefinition\":\"my-task-def\"}", recorded);
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.Runtime", execution.getError());
+        assertEquals("TaskStarted", history.get(24_998).getType());
+        assertTrue(history.stream().noneMatch(event -> "TaskSubmitted".equals(event.getType())));
+        verify(ecsService).stopTask(any(), eq(task("RUNNING").getTaskArn()),
+                eq("The Task state in AWS Step Functions execution [" + execution.getExecutionArn()
+                        + "] which was managing this resource was aborted"), eq(REGION));
+    }
+
+    @Test
+    void requestResponseRecordsNoTaskSubmitted() throws Exception {
+        launchOneTask();
+
+        Execution execution = run("arn:aws:states:::ecs:runTask", "{\"TaskDefinition\":\"my-task-def\"}");
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        assertTrue(history.stream().noneMatch(event -> "TaskSubmitted".equals(event.getType())),
+                history.stream().map(HistoryEvent::getType).toList().toString());
+    }
+
+    private static List<String> fieldNames(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
+    }
+
     @Test
     void syncIsNotCappedByAPollCountWhenNoTimeoutSecondsIsDeclared() throws Exception {
         // The former loop gave up after 600 polls. A task that stops on the 700th read must still
@@ -348,6 +427,11 @@ class AslExecutorEcsRunTaskModeTest {
     }
 
     private Execution runDefinition(String definition, String input) {
+        return runDefinition(definition, input, new ArrayList<>());
+    }
+
+    /** {@code recorded} is the history the execution starts with, counted towards the event limit. */
+    private Execution runDefinition(String definition, String input, List<HistoryEvent> recorded) {
         StateMachine stateMachine = new StateMachine();
         stateMachine.setName("ecs-runtask-test");
         stateMachine.setStateMachineArn("arn:aws:states:%s:%s:stateMachine:ecs-runtask-test".formatted(REGION, ACCOUNT));
@@ -360,7 +444,7 @@ class AslExecutorEcsRunTaskModeTest {
         execution.setStateMachineArn(stateMachine.getStateMachineArn());
         execution.setInput(input);
 
-        history = new ArrayList<>();
+        history = recorded;
         executor.executeSync(stateMachine, execution, history, (updated, events) -> { });
         return execution;
     }

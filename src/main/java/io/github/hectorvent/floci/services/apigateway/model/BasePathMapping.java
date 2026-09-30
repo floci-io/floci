@@ -9,6 +9,7 @@ public class BasePathMapping {
     private String basePath;
     private String restApiId;
     private String stage;
+    private String apiType;
 
     public BasePathMapping() {
         this.basePath = "(none)";
@@ -28,4 +29,7 @@ public class BasePathMapping {
 
     public String getStage() { return stage; }
     public void setStage(String stage) { this.stage = stage; }
+
+    public String getApiType() { return apiType; }
+    public void setApiType(String apiType) { this.apiType = apiType; }
 }

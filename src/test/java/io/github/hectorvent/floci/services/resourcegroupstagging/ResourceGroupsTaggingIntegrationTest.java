@@ -14,6 +14,8 @@ import static org.hamcrest.Matchers.*;
 /**
  * Integration tests for the Resource Groups Tagging API.
  * Uses JSON 1.1 protocol (X-Amz-Target: ResourceGroupsTaggingAPI_20170126.*).
+ * Unscoped queries also return tagged resources other test classes left in the shared
+ * application, so they assert on this class's ARNs rather than on result counts.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -123,8 +125,8 @@ class ResourceGroupsTaggingIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ResourceTagMappingList.size()", equalTo(2))
-            .body("ResourceTagMappingList.ResourceARN", hasItems(ARN_INSTANCE, ARN_BUCKET));
+            .body("ResourceTagMappingList.ResourceARN", hasItems(ARN_INSTANCE, ARN_BUCKET))
+            .body("ResourceTagMappingList.ResourceARN", not(hasItem(ARN_FUNCTION)));
     }
 
     @Test
@@ -145,7 +147,7 @@ class ResourceGroupsTaggingIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ResourceTagMappingList.size()", equalTo(3));
+            .body("ResourceTagMappingList.ResourceARN", hasItems(ARN_INSTANCE, ARN_BUCKET, ARN_FUNCTION));
     }
 
     @Test
@@ -161,8 +163,9 @@ class ResourceGroupsTaggingIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ResourceTagMappingList.size()", equalTo(1))
-            .body("ResourceTagMappingList[0].ResourceARN", equalTo(ARN_INSTANCE));
+            .body("ResourceTagMappingList.ResourceARN", hasItem(ARN_INSTANCE))
+            .body("ResourceTagMappingList.ResourceARN",
+                    everyItem(startsWith("arn:aws:ec2:us-east-1:000000000000:instance/")));
     }
 
     @Test
@@ -178,8 +181,8 @@ class ResourceGroupsTaggingIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ResourceTagMappingList.size()", equalTo(1))
-            .body("ResourceTagMappingList[0].ResourceARN", equalTo(ARN_FUNCTION));
+            .body("ResourceTagMappingList.ResourceARN", hasItem(ARN_FUNCTION))
+            .body("ResourceTagMappingList.ResourceARN", everyItem(startsWith("arn:aws:lambda:")));
     }
 
     @Test

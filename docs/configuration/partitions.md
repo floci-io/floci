@@ -113,6 +113,12 @@ did before.
 - **XML namespaces** and the S3 canned-ACL group URIs (`http://acs.amazonaws.com/groups/...`)
   are identifiers, not hosts.
 - **AWS managed policy ARNs** keep the literal `aws` account slot: `arn:aws-cn:iam::aws:policy/AdministratorAccess`.
+  The catalog Floci bundles is the commercial one; every other partition's is derived from it on
+  first use, with the partition in every ARN (what AWS's own SAM translator does) and the
+  partition's DNS suffix in the region-bearing `kms:ViaService` hosts (`s3.*.amazonaws.com.cn`).
+  Service principals and service-linked role paths are the same in every partition and are left
+  alone. Whether AWS's China or GovCloud documents differ in content beyond that is an open
+  question below.
 
 ## Partition-absent services
 

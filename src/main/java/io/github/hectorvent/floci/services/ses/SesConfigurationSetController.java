@@ -455,7 +455,8 @@ public class SesConfigurationSetController {
                 throw new AwsException("BadRequestException", "EventDestination is required.", 400);
             }
             EventDestination dest = objectMapper.treeToValue(edNode, EventDestination.class);
-            configSetService.createEventDestination(configurationSetName, edName, dest, region);
+            configSetService.createEventDestination(configurationSetName, edName, dest,
+                    regionResolver.getAccountId(), region);
             LOG.infov("SES V2 CreateConfigurationSetEventDestination: {0} on {1}", edName, configurationSetName);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
@@ -499,7 +500,7 @@ public class SesConfigurationSetController {
             }
             EventDestination dest = objectMapper.treeToValue(edNode, EventDestination.class);
             configSetService.updateEventDestination(configurationSetName, eventDestinationName,
-                    dest, region);
+                    dest, regionResolver.getAccountId(), region);
             LOG.infov("SES V2 UpdateConfigurationSetEventDestination: {0} on {1}",
                     eventDestinationName, configurationSetName);
             return Response.ok(objectMapper.createObjectNode()).build();

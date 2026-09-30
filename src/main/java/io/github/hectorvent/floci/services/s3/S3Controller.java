@@ -46,6 +46,11 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -62,6 +67,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
@@ -1000,39 +1006,51 @@ public class S3Controller {
                         mergedAttributes, maxParts, partNumberMarker);
             }
             s3Service.authorizeGetObject(bucket, key, versionId, authorization);
-            // Fetch metadata and body as one atomic snapshot: resolving the body lazily at
-            // entity-write time (openObjectStream) races concurrent overwrites and can pair one
-            // version's Content-Length/checksum headers with another version's bytes.
-            S3Object obj = s3Service.getObject(bucket, key, versionId);
-            if (hasPreconditions(ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince)) {
-                // Evaluate preconditions against the same snapshot that is served: a separate
-                // metadata fetch could approve one version (e.g. If-Match for a CAS read) while a
-                // concurrent overwrite swaps in another before the body is resolved.
-                Response preconditionResponse = checkPreconditions(obj, ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince);
-                if (preconditionResponse != null) {
-                    return preconditionResponse;
+            // Open metadata and body as one atomic snapshot: resolving the body lazily at
+            // entity-write time races concurrent overwrites and can pair one version's
+            // Content-Length/checksum headers with another version's bytes. The open stream keeps
+            // serving the snapshot's bytes, and is closed here unless a response took it over.
+            S3Service.ObjectRead read = s3Service.openObject(bucket, key, versionId);
+            S3Object obj = read.object();
+            boolean bodyHandedOff = false;
+            try {
+                if (hasPreconditions(ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince)) {
+                    // Evaluate preconditions against the same snapshot that is served: a separate
+                    // metadata fetch could approve one version (e.g. If-Match for a CAS read) while a
+                    // concurrent overwrite swaps in another before the body is resolved.
+                    Response preconditionResponse = checkPreconditions(obj, ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince);
+                    if (preconditionResponse != null) {
+                        return preconditionResponse;
+                    }
+                }
+                S3Service.validateSseCustomerAccess(
+                        obj,
+                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
+                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
+                        httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
+                ResponseHeaderOverrides overrides = new ResponseHeaderOverrides(
+                        responseContentType, responseContentLanguage, responseExpires,
+                        responseCacheControl, responseContentDisposition, responseContentEncoding);
+                if (overrides.hasAny() && !S3RequestAuthorizationParser.isSigned(httpHeaders, uriInfo)) {
+                    return xmlErrorResponse(new AwsException("InvalidRequest",
+                            "Request specific response headers cannot be used for anonymous GET requests.", 400));
+                }
+
+                boolean includeChecksum = "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
+                if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+                    Response rangeResponse = handleRangeRequest(obj, read.body(), rangeHeader, overrides, includeChecksum);
+                    bodyHandedOff = rangeResponse.getEntity() instanceof StreamingOutput;
+                    return rangeResponse;
+                }
+
+                emitCloudTrailEvent("GetObject", bucket, key, 0L, obj.getSize(), null, null);
+                bodyHandedOff = true;
+                return fullObjectResponse(obj, read.body(), overrides, includeChecksum);
+            } finally {
+                if (!bodyHandedOff) {
+                    closeQuietly(read);
                 }
             }
-            S3Service.validateSseCustomerAccess(
-                    obj,
-                    httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
-                    httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
-                    httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
-            ResponseHeaderOverrides overrides = new ResponseHeaderOverrides(
-                    responseContentType, responseContentLanguage, responseExpires,
-                    responseCacheControl, responseContentDisposition, responseContentEncoding);
-            if (overrides.hasAny() && !S3RequestAuthorizationParser.isSigned(httpHeaders, uriInfo)) {
-                return xmlErrorResponse(new AwsException("InvalidRequest",
-                        "Request specific response headers cannot be used for anonymous GET requests.", 400));
-            }
-
-            boolean includeChecksum = "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
-            if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-                return handleRangeRequest(obj, rangeHeader, overrides, includeChecksum);
-            }
-
-            emitCloudTrailEvent("GetObject", bucket, key, 0L, obj.getSize(), null, null);
-            return fullObjectResponse(obj, overrides, includeChecksum);
         } catch (AwsException e) {
             emitCloudTrailEvent("GetObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
             if (S3Service.isWebsiteErrorDocumentTrigger(e) && isWebsiteRequest(httpHeaders, uriInfo)) {
@@ -1045,11 +1063,29 @@ public class S3Controller {
         }
     }
 
-    private Response fullObjectResponse(S3Object obj, ResponseHeaderOverrides overrides,
+    /** Streams {@code body}, opened together with {@code obj} by {@link S3Service#openObject}, and closes it. */
+    private Response fullObjectResponse(S3Object obj, InputStream body, ResponseHeaderOverrides overrides,
                                         boolean includeChecksum) {
-        byte[] data = objectDataSnapshot(obj);
-        StreamingOutput stream = output -> output.write(data);
-        return objectResponseHeaders(Response.ok(stream), obj, overrides, includeChecksum).build();
+        return streamingResponse(body,
+                stream -> objectResponseHeaders(Response.ok(stream), obj, overrides, includeChecksum).build());
+    }
+
+    /**
+     * Builds a response whose entity streams {@code body} and then closes it. If building the
+     * response fails, the entity is never written, so {@code body} is closed here instead.
+     */
+    static Response streamingResponse(InputStream body, Function<StreamingOutput, Response> build) {
+        StreamingOutput stream = output -> {
+            try (InputStream in = body) {
+                in.transferTo(output);
+            }
+        };
+        try {
+            return build.apply(stream);
+        } catch (RuntimeException e) {
+            closeQuietly(body);
+            throw e;
+        }
     }
 
     /** Applies the standard GetObject response headers derived from {@code obj} to {@code resp}. */
@@ -1068,7 +1104,7 @@ public class S3Controller {
         return resp;
     }
 
-    private Response handleRangeRequest(S3Object obj, String rangeHeader,
+    private Response handleRangeRequest(S3Object obj, InputStream body, String rangeHeader,
                                         ResponseHeaderOverrides overrides,
                                         boolean includeChecksum) {
         long totalSize = obj.getSize();
@@ -1102,15 +1138,18 @@ public class S3Controller {
 
         if (start < 0 || start >= totalSize || start > end) {
             if (totalSize == 0 && rangeSpec.startsWith("-")) {
-                return fullObjectResponse(obj, overrides, includeChecksum);
+                return fullObjectResponse(obj, body, overrides, includeChecksum);
             }
             return invalidRangeResponse(totalSize);
         }
 
         long length = end - start + 1;
-        byte[] data = objectDataSnapshot(obj);
-        // start/length fit in int: they are bounded by the snapshot's length (a byte[]).
-        StreamingOutput stream = output -> output.write(data, (int) start, (int) length);
+        StreamingOutput stream = output -> {
+            try (InputStream in = body) {
+                in.skipNBytes(start);
+                copyExactly(in, output, length);
+            }
+        };
         var resp = Response.status(206)
                 .entity(stream)
                 .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
@@ -1127,24 +1166,29 @@ public class S3Controller {
         return resp.build();
     }
 
-    /**
-     * Returns the body bytes captured together with {@code obj}'s metadata by
-     * {@link S3Service#getObject}. Serving the response from this snapshot (instead of re-reading
-     * the store at entity-write time) guarantees the body always matches the already-committed
-     * Content-Length/ETag/checksum headers, even when a concurrent PutObject overwrites the key.
-     */
-    private static byte[] objectDataSnapshot(S3Object obj) {
-        byte[] data = obj.getData();
-        if (data == null) {
-            throw new IllegalStateException("S3 object data snapshot is missing for "
-                    + obj.getBucketName() + "/" + obj.getKey());
+    private Response websiteObjectResponse(S3Service.ObjectRead read, ResponseHeaderOverrides overrides) {
+        return fullObjectResponse(read.object(), read.body(), overrides, false);
+    }
+
+    private static void copyExactly(InputStream in, OutputStream out, long length) throws IOException {
+        byte[] buffer = new byte[64 * 1024];
+        long remaining = length;
+        while (remaining > 0) {
+            int n = in.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+            if (n < 0) {
+                throw new EOFException("S3 object ended " + remaining + " bytes before the requested range");
+            }
+            out.write(buffer, 0, n);
+            remaining -= n;
         }
-        if (data.length != obj.getSize()) {
-            throw new IllegalStateException("S3 object data snapshot for " + obj.getBucketName()
-                    + "/" + obj.getKey() + " has " + data.length + " bytes but metadata declares "
-                    + obj.getSize() + "; serving it would corrupt the response framing");
+    }
+
+    private static void closeQuietly(Closeable closeable) {
+        try {
+            closeable.close();
+        } catch (IOException e) {
+            LOG.debugv("Failed to close S3 object stream: {0}", e.getMessage());
         }
-        return data;
     }
 
     private Response invalidRangeResponse(long totalSize) {
@@ -3109,7 +3153,7 @@ public class S3Controller {
             // overwrite of the index document cannot tear the response.
             case S3Service.WebsiteResolution.ServeObject(String key, S3Object object) ->
                     includeBody
-                            ? fullObjectResponse(s3Service.getObject(bucket, key), noOverrides, false)
+                            ? websiteObjectResponse(s3Service.openObject(bucket, key, null), noOverrides)
                             : objectResponseHeaders(Response.ok(), object, noOverrides, false).build();
             // The query string is deliberately dropped: real S3 answers
             // GET /photos?code=abc&state=xyz with a bare "Location: /photos/" (verified against a

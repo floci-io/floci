@@ -1,23 +1,28 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
-import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.services.lambda.LambdaService;
-import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.scheduler.SchedulerExpressionParser;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -28,22 +33,19 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Predicate;
-import io.github.hectorvent.floci.core.resource.ExplorerResource;
-import io.github.hectorvent.floci.core.resource.ResourceProvider;
-import io.github.hectorvent.floci.core.resource.SupportedResourceType;
-import java.util.LinkedHashMap;
-import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -1137,7 +1139,10 @@ public class SecretsManagerService implements ResourceProvider {
         // One full ARN for the permission check, the lookup and the invoke, so all three reach the same
         // function: a name or partial ARN would otherwise be invoked in whatever account the rotation
         // thread resolves, which is not necessarily the one that was checked.
-        String functionArn = serviceManaged ? null : rotationFunctionArn(finalLambdaArn, secret, region);
+        AwsArnUtils.Arn secretArn = AwsArnUtils.parse(secret.getArn());
+        String functionArn = serviceManaged
+                ? null
+                : LambdaArnUtils.functionArn(finalLambdaArn, secretArn.partition(), region, secretArn.accountId());
         if (!serviceManaged) {
             authorizeInvoke.accept(functionArn);
         }
@@ -1151,7 +1156,8 @@ public class SecretsManagerService implements ResourceProvider {
                 if (e.getHttpStatus() == 404) {
                     throw new AwsException("AccessDeniedException",
                             "Secrets Manager cannot invoke the specified Lambda function. Ensure that the function "
-                                    + "policy grants access to the principal secretsmanager.amazonaws.com.", 400); // partition-literal: AWS's error text verbatim; names the service principal, which the Secrets Manager guide gives with no partition variant
+                                    + "policy grants access to the principal " + ServicePrincipals.of("secretsmanager")
+                                    + ".", 400);
                 }
                 throw e;
             }
@@ -1208,23 +1214,6 @@ public class SecretsManagerService implements ResourceProvider {
         return secret;
     }
 
-
-    /**
-     * The rotation function as the full ARN an IAM policy's {@code Resource} names. A function name
-     * or partial ARN resolves in the secret's own account and the request's Region, as Lambda
-     * resolves one.
-     */
-    static String rotationFunctionArn(String functionRef, Secret secret, String region) {
-        if (functionRef.startsWith("arn:")) {
-            return functionRef;
-        }
-        AwsArnUtils.Arn secretArn = AwsArnUtils.parse(secret.getArn());
-        if (functionRef.contains(":function:")) {
-            return "arn:" + secretArn.partition() + ":lambda:" + region + ":" + functionRef;
-        }
-        return new AwsArnUtils.Arn(secretArn.partition(), "lambda", region, secretArn.accountId(),
-                "function:" + functionRef).toString();
-    }
 
     /**
      * The outcome of {@link #cancelRotateSecret}: the secret with rotation turned off, plus the id

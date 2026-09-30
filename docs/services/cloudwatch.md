@@ -200,19 +200,23 @@ Fields may be `@timestamp`, `@message`, `@ingestionTime`, `@ptr`, or a dotted pa
 a JSON log message (for example `level` or `params.job_id`). A `@ptr` column is always
 included in each result row, appended unless `fields` already names it.
 
-Unsupported syntax never fails the query, so it is worth knowing how each case degrades:
+A command or filter operator outside this subset fails the query instead of being dropped:
+`StartQuery` still returns a query id, and `GetQueryResults` reports `status: Failed` with no
+rows. The reason is not part of the response (the AWS `GetQueryResults` shape has no such field);
+it is written to the server log as `Logs Insights query <id> will fail: ...`. A few inputs still
+degrade silently, so it is worth knowing how each case behaves:
 
 | Input | Result |
 |---|---|
-| An unsupported command (`stats`, `parse`, ...) | Skipped with a warning in the server log. No aggregation happens |
-| A `filter` whose operator is not `=`, `!=` or `==` — for example `<`, `<=`, `>`, `>=`, `like /ERROR/` or `=~ /ERROR/` | The whole stage is dropped with a warning, so **every** row is returned |
-| A `filter` combining conditions with `and` / `or` — for example `filter level = 'ERROR' and status = 200` | Only the leftmost operator is parsed; the rest of the line becomes the compared value, so nothing matches and you get **no** rows. No warning is logged |
+| An unsupported command (`stats`, `parse`, ...) | The query fails. Logged as `Unsupported command: stats` |
+| A `filter` whose operator is not `=`, `!=` or `==` — for example `<`, `<=`, `>`, `>=`, `like /ERROR/` or `=~ /ERROR/` | The query fails. Logged as `Unsupported filter expression: ...`. Exception: an unquoted `=` anywhere in the expression, as in `like /a=b/`, is taken as the equality operator, so that query completes with **no** rows and no warning |
+| A `filter` combining conditions with `and` / `or` — for example `filter level = 'ERROR' and status = 200` | Only the leftmost operator is parsed; the rest of the line becomes the compared value. With `=` nothing matches and you get **no** rows; with `!=` everything matches and you get **every** row (up to the limit). `status` is `Complete` and no warning is logged |
 | A projected field that does not exist | Rendered as an empty string. No warning |
 | A `sort` direction other than `asc` / `desc` | Treated as ascending. No warning |
 
-In short, a query can come back either wider or narrower than intended without any error. When a
-result set looks wrong, check the server log for `Ignoring unsupported Logs Insights ...` — and note
-that the compound-filter case above produces no log line at all.
+When a `Complete` result set looks narrower or wider than intended, check the query for a
+compound `filter` or a stray `=` first: those cases produce neither a failure nor a warning. The
+only log line is the usual INFO summary, `Logs Insights query <id>: scanned ... -> <n> row(s)`.
 
 For simple substring matching, `FilterLogEvents` is the more predictable option today. Note that
 Floci matches `--filter-pattern` as a plain substring of the message; the real filter-pattern

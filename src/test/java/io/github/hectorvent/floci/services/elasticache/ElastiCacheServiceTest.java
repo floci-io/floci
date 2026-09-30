@@ -194,6 +194,107 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void validatePasswordAdmitsNoAuthUserWithAnyPassword() {
+        service.createReplicationGroup("grp-nopass", "test", AuthMode.IAM, null, "us-east-1");
+        service.createUser("nopass-user-id", "nopass-user", AuthMode.NO_AUTH,
+                List.of(), "on ~* +@all", null);
+        service.modifyReplicationGroup("grp-nopass", List.of("nopass-user-id"), null);
+
+        assertTrue(service.hasMembers("grp-nopass"));
+        assertEquals(AuthMode.NO_AUTH, service.memberAuthMode("grp-nopass", "nopass-user"));
+        assertTrue(service.validatePassword("grp-nopass", "nopass-user", "any-password"));
+        assertTrue(service.validatePassword("grp-nopass", "nopass-user", ""));
+    }
+
+    @Test
+    void memberAuthModeResolvesPasswordIamAndNoAuthUsers() {
+        service.createReplicationGroup("grp-mixed", "test", AuthMode.IAM, null, "us-east-1");
+        service.createUser("u-def", "default", AuthMode.PASSWORD, List.of("def-pass"), "on ~* +@all", null);
+        service.createUser("u-iam", "iam-user", AuthMode.IAM, List.of(), "on ~* +@all", null);
+        service.createUser("u-nopass", "nopass-user", AuthMode.NO_AUTH, List.of(), "on ~* +@all", null);
+        service.modifyReplicationGroup("grp-mixed", List.of("u-def", "u-iam", "u-nopass"), null);
+
+        assertTrue(service.hasMembers("grp-mixed"));
+        assertEquals(AuthMode.PASSWORD, service.memberAuthMode("grp-mixed", "default"));
+        assertEquals(AuthMode.PASSWORD, service.memberAuthMode("grp-mixed", null));
+        assertEquals(AuthMode.IAM, service.memberAuthMode("grp-mixed", "iam-user"));
+        assertEquals(AuthMode.NO_AUTH, service.memberAuthMode("grp-mixed", "nopass-user"));
+        assertNull(service.memberAuthMode("grp-mixed", "unknown-user"));
+    }
+
+    @Test
+    void disabledUserCannotAuthenticateAndHasNoMemberAuthMode() {
+        service.createReplicationGroup("grp-disabled", "test", AuthMode.IAM, null, "us-east-1");
+        service.createUser("u-def-off", "default", AuthMode.NO_AUTH, List.of(), "off -@all", null);
+        service.createUser("u-pass-off", "disabled-pass", AuthMode.PASSWORD, List.of("secret"), "off -@all", null);
+        service.createUser("u-iam-off", "disabled-iam", AuthMode.IAM, List.of(), "off -@all", null);
+        service.createUser("u-pass-on", "enabled-pass", AuthMode.PASSWORD, List.of("secret"), "on ~* +@all", null);
+        service.modifyReplicationGroup("grp-disabled",
+                List.of("u-def-off", "u-pass-off", "u-iam-off", "u-pass-on"), null);
+
+        assertTrue(service.hasMembers("grp-disabled"));
+
+        // Disabled users have no effective memberAuthMode
+        assertNull(service.memberAuthMode("grp-disabled", "default"));
+        assertNull(service.memberAuthMode("grp-disabled", null));
+        assertNull(service.memberAuthMode("grp-disabled", "disabled-pass"));
+        assertNull(service.memberAuthMode("grp-disabled", "disabled-iam"));
+
+        // Enabled user resolves normally
+        assertEquals(AuthMode.PASSWORD, service.memberAuthMode("grp-disabled", "enabled-pass"));
+
+        // Disabled users cannot validate password
+        assertFalse(service.validatePassword("grp-disabled", "default", "any-password"));
+        assertFalse(service.validatePassword("grp-disabled", null, "any-password"));
+        assertFalse(service.validatePassword("grp-disabled", "disabled-pass", "secret"));
+
+        // Enabled user validates password successfully
+        assertTrue(service.validatePassword("grp-disabled", "enabled-pass", "secret"));
+    }
+
+    @Test
+    void deleteUserCleansUpGroupAssociationAndHasMembers() {
+        service.createReplicationGroup("grp-stale", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        service.createUser("uid-stale", "user-stale", AuthMode.PASSWORD, List.of("pass123"), "on ~* +@all", null);
+        service.modifyReplicationGroup("grp-stale", List.of("uid-stale"), null);
+
+        assertTrue(service.hasMembers("grp-stale"));
+        assertTrue(service.getReplicationGroup("grp-stale").getAssociatedUserIds().contains("uid-stale"));
+
+        service.deleteUser("uid-stale");
+
+        assertFalse(service.hasMembers("grp-stale"));
+        assertFalse(service.getReplicationGroup("grp-stale").getAssociatedUserIds().contains("uid-stale"));
+    }
+
+    @Test
+    void modifyReplicationGroupRejectsDuplicateUserNames() {
+        service.createReplicationGroup("grp-dup", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        service.createUser("uid-1", "same-name", AuthMode.PASSWORD, List.of("pass1"), "on ~* +@all", null);
+        service.createUser("uid-2", "same-name", AuthMode.NO_AUTH, List.of(), "on ~* +@all", null);
+
+        // Attempting to associate both users in the same call must fail with DuplicateUserNameFault
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.modifyReplicationGroup("grp-dup", List.of("uid-1", "uid-2"), null));
+        assertEquals("DuplicateUserNameFault", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+
+        // Associate uid-1 first
+        service.modifyReplicationGroup("grp-dup", List.of("uid-1"), null);
+        assertTrue(service.getReplicationGroup("grp-dup").getAssociatedUserIds().contains("uid-1"));
+
+        // Attempting to add uid-2 with the same username must also fail
+        AwsException ex2 = assertThrows(AwsException.class,
+                () -> service.modifyReplicationGroup("grp-dup", List.of("uid-2"), null));
+        assertEquals("DuplicateUserNameFault", ex2.getErrorCode());
+        assertEquals(400, ex2.getHttpStatus());
+
+        // Validate password must not allow bypassing password check
+        assertTrue(service.validatePassword("grp-dup", "same-name", "pass1"));
+        assertFalse(service.validatePassword("grp-dup", "same-name", "wrong-pass"));
+    }
+
+    @Test
     void failedProvisioningRollsBackContainerAndReleasesProxyPort() {
         ElastiCacheContainerHandle handle =
                 new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);

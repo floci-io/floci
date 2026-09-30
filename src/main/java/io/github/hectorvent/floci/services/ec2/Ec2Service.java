@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.CapacityReservation;
@@ -62,6 +63,8 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
+import io.github.hectorvent.floci.services.ec2.model.SpotPrice;
+import io.github.hectorvent.floci.services.ec2.model.SpotPriceHistoryResult;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.TransitGateway;
@@ -100,6 +103,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -199,6 +203,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private static final Set<String> EGRESS_ONLY_INTERNET_GATEWAY_FILTERS = Set.of(
             "attachment.state", "attachment.vpc-id",
             "egress-only-internet-gateway-id", "tag-key", "tag-value");
+    private static final Set<String> SPOT_PRICE_HISTORY_FILTERS = Set.of(
+            "availability-zone", "availability-zone-id",
+            "instance-type", "product-description",
+            "spot-price", "timestamp");
+    private static final List<String> MODELLED_PRODUCT_DESCRIPTIONS = List.of(
+            "Linux/UNIX", "Linux/UNIX (Amazon VPC)",
+            "SUSE Linux", "SUSE Linux (Amazon VPC)",
+            "Red Hat Enterprise Linux", "Red Hat Enterprise Linux (Amazon VPC)",
+            "Windows", "Windows (Amazon VPC)");
+    private static final Set<String> VALID_PRODUCT_DESCRIPTIONS = new HashSet<>(MODELLED_PRODUCT_DESCRIPTIONS);
 
     private final String defaultAccountId;
     private final jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance;
@@ -4711,25 +4725,72 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     public List<NetworkInterface> endpointNetworkInterfaces(String region) {
         List<NetworkInterface> result = new ArrayList<>();
         for (VpcEndpoint endpoint : vpcEndpoints.scan(k -> true)) {
-            if (!region.equals(endpoint.getRegion())
-                    || !"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
+            if (region.equals(endpoint.getRegion())) {
+                result.addAll(endpointNetworkInterfacesOf(endpoint));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * The interfaces ONE endpoint owns. The region-wide method above is this, looped.
+     *
+     * <p>A distinct NAME rather than an overload of {@code endpointNetworkInterfaces},
+     * deliberately: an overload taking VpcEndpoint beside one taking String makes a
+     * Mockito {@code any()} ambiguous, and {@code FlowLogServiceTest} already stubs
+     * {@code endpointNetworkInterfaces(any())}. A new method should not make an existing
+     * test stop compiling.
+     *
+     * <p>Split out so that everything reporting an endpoint's interfaces -- the ids on
+     * the wire, the objects flow-log attribution reads -- comes from one place and
+     * cannot disagree. The alternative, deriving ids independently from the same
+     * {@link #endpointEniId}, looks equivalent and is not: this method skips a subnet
+     * whose record has gone, and a second derivation that forgot to would report an
+     * interface the first one denies exists. Congruence by construction beats congruence
+     * by inspection, and the two had in fact already diverged.
+     *
+     * <p>A Gateway endpoint owns no interfaces and gets an empty list.
+     */
+    private List<NetworkInterface> endpointNetworkInterfacesOf(VpcEndpoint endpoint) {
+        if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
+            return List.of();
+        }
+        String region = endpoint.getRegion();
+        List<NetworkInterface> result = new ArrayList<>();
+        for (String subnetId : endpoint.getSubnetIds()) {
+            Subnet subnet = subnets.get(key(region, subnetId)).orElse(null);
+            if (subnet == null) {
                 continue;
             }
-            for (String subnetId : endpoint.getSubnetIds()) {
-                Subnet subnet = subnets.get(key(region, subnetId)).orElse(null);
-                if (subnet == null) {
-                    continue;
-                }
-                NetworkInterface ni = new NetworkInterface();
-                ni.setNetworkInterfaceId(endpointEniId(endpoint.getVpcEndpointId(), subnetId));
-                ni.setSubnetId(subnetId);
-                ni.setVpcId(endpoint.getVpcId());
-                ni.setAvailabilityZone(subnet.getAvailabilityZone());
-                ni.setDescription("VPC Endpoint Interface " + endpoint.getVpcEndpointId());
-                ni.setInterfaceType("vpc_endpoint");
-                ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint, subnetId));
-                result.add(ni);
+            NetworkInterface ni = new NetworkInterface();
+            ni.setNetworkInterfaceId(endpointEniId(endpoint.getVpcEndpointId(), subnetId));
+            ni.setSubnetId(subnetId);
+            ni.setVpcId(endpoint.getVpcId());
+            ni.setAvailabilityZone(subnet.getAvailabilityZone());
+            ni.setDescription("VPC Endpoint Interface " + endpoint.getVpcEndpointId());
+            ni.setInterfaceType("vpc_endpoint");
+            // AWS creates an interface endpoint's ENIs on the customer's behalf and reports
+            // them as requester-managed. Set here, on the one derivation, so that the objects
+            // flow-log attribution reads and the ones DescribeNetworkInterfaces answers with
+            // cannot describe the same interface two ways. requesterId is deliberately left
+            // unset -- see NetworkInterface#requesterId.
+            ni.setRequesterManaged(true);
+            // An interface endpoint's security groups are enforced ON its interfaces -- that is
+            // the whole mechanism by which a PrivateLink endpoint is firewalled -- and AWS reports
+            // them in each interface's groupSet. Without them DescribeNetworkInterfaces answered
+            // with an empty groupSet and a group-id filter excluded the very interfaces the group
+            // is attached to. The name is best-effort: it is cosmetic, the id is what filters and
+            // rules match on, and the lookup reads the caller's account while FlowLogService runs
+            // on the default one, so a miss omits the name rather than inventing it.
+            for (String securityGroupId : endpoint.getSecurityGroupIds()) {
+                GroupIdentifier group = new GroupIdentifier();
+                group.setGroupId(securityGroupId);
+                securityGroups.get(key(region, securityGroupId))
+                        .ifPresent(sg -> group.setGroupName(sg.getGroupName()));
+                ni.getGroups().add(group);
             }
+            ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint, subnetId));
+            result.add(ni);
         }
         return result;
     }
@@ -4739,6 +4800,37 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 (endpointId + "|" + subnetId).getBytes(StandardCharsets.UTF_8))
                 .toString().replace("-", "");
         return "eni-" + hex.substring(0, 17);
+    }
+
+    /**
+     * The network interfaces an interface endpoint owns, by id, in subnet order.
+     *
+     * <p>DescribeVpcEndpoints reports these in {@code networkInterfaceIdSet}, and the
+     * Terraform AWS provider surfaces them as {@code aws_vpc_endpoint.network_interface_ids}.
+     * Gruntwork modules feed that output downstream, so an empty list does not merely
+     * diff -- it propagates into whatever consumes it.
+     *
+     * <p>Mapped over {@link #endpointNetworkInterfacesOf(VpcEndpoint)} rather than derived
+     * separately, so the ids on the wire come BY CONSTRUCTION from the same derivation
+     * flow-log attribution uses, and no endpoint can be described two ways. An earlier
+     * version of this method called {@link #endpointEniId} itself and looked equivalent;
+     * it was not, because it lacked that method's skip of a subnet whose record has gone,
+     * and the two were measured reporting different sets after a subnet was deleted out
+     * from under a live endpoint.
+     *
+     * <p>Shared derivation, not a shared view: {@link FlowLogService} runs on a scheduler
+     * with no request context and so reads the default account, while this path reads the
+     * caller's. For a non-default account the flow-log side sees no endpoints at all.
+     * Each side stays internally consistent, which is the property being claimed here --
+     * it is not a claim that both see the same endpoints. A Gateway endpoint has no
+     * interfaces and gets an empty list, which is what AWS reports for one.
+     */
+    public List<String> endpointNetworkInterfaceIds(VpcEndpoint endpoint) {
+        List<String> ids = new ArrayList<>();
+        for (NetworkInterface ni : endpointNetworkInterfacesOf(endpoint)) {
+            ids.add(ni.getNetworkInterfaceId());
+        }
+        return ids;
     }
 
     /**
@@ -4834,7 +4926,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String cidr = subnet.getCidrBlock();
         String baseIp = cidr != null ? cidr.split("/")[0] : "172.31.0.0";
         String[] parts = baseIp.split("\\.");
+        // A subnet's CidrBlock is not guaranteed to be dotted IPv4. CreateSubnet stores
+        // whatever it is given without validating the family, and an IPv6-only subnet has
+        // no IPv4 CIDR at all, so this can be "2001:db8::" or anything else -- one element,
+        // and parts[1] then throws. That used to surface only on the flow-log scheduler;
+        // DescribeVpcEndpoints now derives interfaces on the request path, which would turn
+        // an odd subnet into a failed EC2 response rather than a degraded address.
+        // Falls back to the same default the null case already uses, so "no usable IPv4"
+        // has one behaviour rather than two.
         int host = 200 + Math.floorMod(endpoint.getVpcEndpointId().hashCode(), 50);
+        if (parts.length < 4) {
+            // The third octet comes from the SUBNET, not a constant. On the IPv4 path each
+            // subnet supplies its own distinct network, and that is the only thing making
+            // one endpoint's interfaces distinct -- the host octet is derived from the
+            // endpoint and is therefore the same for all of them. A constant fallback threw
+            // that away and gave every non-IPv4 subnet on an endpoint the same address,
+            // trading a crash for a silent collision.
+            return "172.31." + Math.floorMod(subnetId.hashCode(), 256) + "." + host;
+        }
         return parts[0] + "." + parts[1] + "." + parts[2] + "." + host;
     }
 
@@ -8727,6 +8836,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "group-id" -> ni.getGroups().stream()
                         .anyMatch(g -> g != null && matchesValue(values, g.getGroupId()));
                 case "status" -> matchesValue(values, ni.getStatus());
+                // interface-type is how a caller asks for exactly the endpoint interfaces this
+                // store now answers with; without an arm here the default below would match
+                // every interface instead and the filter would read as doing nothing.
+                case "interface-type" -> matchesValue(values, ni.getInterfaceType());
+                case "requester-managed" -> matchesValue(values, String.valueOf(ni.isRequesterManaged()));
                 case "attachment.instance-id" -> ni.getAttachment() != null
                         && matchesValue(values, ni.getAttachment().getInstanceId());
                 case "private-ip-address" ->
@@ -9376,6 +9490,58 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             result.add(ni);
         }
 
+        // The ENIs an interface VPC endpoint owns. DescribeVpcEndpoints publishes these ids in
+        // networkInterfaceIdSet, so without this arm the same emulator that just handed out an id
+        // answers InvalidNetworkInterfaceID.NotFound when asked about it.
+        //
+        // That is not a cosmetic gap. The Terraform AWS provider's aws_vpc_endpoint read calls
+        // findSubnetConfigurationsByNetworkInterfaceIDs over EVERY id in network_interface_ids to
+        // build subnet_configuration, and returns the lookup error rather than tolerating a
+        // NotFound -- note it handles retry.NotFound for the prefix list a few lines above and
+        // pointedly does not here. So an unresolvable id fails every interface endpoint read,
+        // where publishing no ids at all had merely left the list empty.
+        //
+        // The ENIs an interface VPC endpoint owns, so that an id DescribeVpcEndpoints published
+        // resolves instead of answering InvalidNetworkInterfaceID.NotFound. The Terraform AWS
+        // provider's aws_vpc_endpoint read calls findSubnetConfigurationsByNetworkInterfaceIDs
+        // over EVERY id in network_interface_ids to build subnet_configuration, and returns the
+        // lookup error rather than tolerating a NotFound -- note it handles retry.NotFound for
+        // the prefix list a few lines above and pointedly does not here. So an unresolvable id
+        // fails every interface endpoint read, where publishing no ids had merely left the list
+        // empty.
+        //
+        // ACCOUNT SCOPING IS ALREADY DONE, TWICE, BY THE STORAGE LAYER -- which is worth stating
+        // because nothing at this call site shows it, and a reviewer reasonably read it the
+        // other way. endpointNetworkInterfaces does vpcEndpoints.scan(k -> true), and plain scan
+        // on an AccountAwareStorageBackend filters to the caller's partition first: the
+        // k -> true predicate selects every KEY within that account, not every account. The
+        // subnet lookup inside endpointNetworkInterfacesOf is scoped the same way, so even a
+        // foreign endpoint would yield no interfaces. Nothing here crosses an account boundary,
+        // and an id is only ever published to the account that can resolve it.
+        //
+        // ownerId therefore comes from callerAccountId(), the account these were actually read
+        // under, rather than from safeAccount: the explicit-account overload can set safeAccount
+        // to an account this ambient-scoped arm cannot honour, and labelling a resource with an
+        // account it did not come from is worse than either showing or hiding it.
+        String endpointOwnerAccountId = callerAccountId();
+        for (NetworkInterface endpointNi : endpointNetworkInterfaces(region)) {
+            String endpointEniId = endpointNi.getNetworkInterfaceId();
+            if (foundIds.contains(endpointEniId)) {
+                continue;
+            }
+            if (!networkInterfaceIds.isEmpty() && !networkInterfaceIds.contains(endpointEniId)) {
+                continue;
+            }
+            // Added before the filter check, matching the arms above: an id that was asked for
+            // by name and then excluded by a filter is absent from the answer, not NotFound.
+            foundIds.add(endpointEniId);
+            endpointNi.setOwnerId(endpointOwnerAccountId);
+            if (!matchesFilters(endpointNi, filters, region)) {
+                continue;
+            }
+            result.add(endpointNi);
+        }
+
         // Phase 6: validate requested IDs exist
         for (String id : networkInterfaceIds) {
             if (!foundIds.contains(id)) {
@@ -9773,7 +9939,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             String json = new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8);
             int start = json.indexOf("\"offset\":") + 9;
             int end = json.indexOf('}', start);
-            return Integer.parseInt(json.substring(start, end));
+            int offset = Integer.parseInt(json.substring(start, end));
+            if (offset < 0) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid NextToken", 400);
+            }
+            return offset;
+        } catch (AwsException e) {
+            throw e;
         } catch (Exception e) {
             throw new AwsException("InvalidParameterValue",
                     "Invalid NextToken", 400);
@@ -9887,6 +10060,169 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
 
         return result;
+    }
+
+    public void validateSpotPriceHistory(List<String> productDescriptions,
+                                         String availabilityZone,
+                                         String availabilityZoneId,
+                                         Instant startTime,
+                                         Instant endTime,
+                                         Map<String, List<String>> filters) {
+        if (filters != null && !filters.isEmpty()) {
+            requireSupportedFilters(filters, SPOT_PRICE_HISTORY_FILTERS);
+        }
+        if (productDescriptions != null) {
+            for (String desc : productDescriptions) {
+                if (!VALID_PRODUCT_DESCRIPTIONS.contains(desc)) {
+                    throw new AwsException("InvalidParameterValue",
+                            "The parameter ProductDescription is not valid", 400);
+                }
+            }
+        }
+        if (availabilityZone != null && availabilityZoneId != null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "The parameter AvailabilityZone cannot be used with the parameter AvailabilityZoneId", 400);
+        }
+        if (startTime != null && endTime != null && startTime.isAfter(endTime)) {
+            throw new AwsException("InvalidParameterValue",
+                    "StartTime must be before EndTime", 400);
+        }
+    }
+
+    /**
+     * Synthesizes spot price history for known instance types across modeled availability zones.
+     * Prices are synthetic and derived deterministically from instance type vCPU and memory.
+     * They bear no relation to real AWS spot prices.
+     */
+    public SpotPriceHistoryResult describeSpotPriceHistory(String region,
+                                                          List<String> instanceTypes,
+                                                          List<String> productDescriptions,
+                                                          String availabilityZone,
+                                                          String availabilityZoneId,
+                                                          Instant startTime,
+                                                          Instant endTime,
+                                                          Map<String, List<String>> filters,
+                                                          int maxResults,
+                                                          String nextToken) {
+        ensureDefaultResources(region);
+        validateSpotPriceHistory(productDescriptions, availabilityZone, availabilityZoneId, startTime, endTime, filters);
+
+        Instant now = Instant.now();
+        if (startTime != null && startTime.isAfter(now)) {
+            return new SpotPriceHistoryResult(List.of(), null);
+        }
+
+        Instant effectiveTimestamp = startTime != null
+                ? startTime
+                : (endTime != null ? endTime : now.truncatedTo(ChronoUnit.HOURS));
+
+        if (endTime != null && effectiveTimestamp.isAfter(endTime)) {
+            return new SpotPriceHistoryResult(List.of(), null);
+        }
+
+        List<Map<String, String>> zones = describeAvailabilityZones(region);
+        if (availabilityZone != null) {
+            zones = zones.stream()
+                    .filter(z -> availabilityZone.equals(z.get("zoneName")))
+                    .toList();
+        }
+        if (availabilityZoneId != null) {
+            zones = zones.stream()
+                    .filter(z -> availabilityZoneId.equals(z.get("zoneId")))
+                    .toList();
+        }
+        if (filters != null && filters.containsKey("availability-zone")) {
+            List<String> azFilter = filters.get("availability-zone");
+            zones = zones.stream()
+                    .filter(z -> matchesValue(z.get("zoneName"), azFilter))
+                    .toList();
+        }
+        if (filters != null && filters.containsKey("availability-zone-id")) {
+            List<String> azIdFilter = filters.get("availability-zone-id");
+            zones = zones.stream()
+                    .filter(z -> matchesValue(z.get("zoneId"), azIdFilter))
+                    .toList();
+        }
+
+        List<CatalogInstanceType> catalogTypes;
+        if (instanceTypes != null && !instanceTypes.isEmpty()) {
+            Set<String> distinctTypes = new LinkedHashSet<>(instanceTypes);
+            catalogTypes = distinctTypes.stream()
+                    .map(instanceTypeCatalog::find)
+                    .flatMap(Optional::stream)
+                    .filter(t -> t.supportedUsageClasses.contains("spot"))
+                    .toList();
+        } else {
+            catalogTypes = instanceTypeCatalog.instanceTypes().stream()
+                    .filter(t -> t.supportedUsageClasses.contains("spot"))
+                    .toList();
+        }
+        if (filters != null && filters.containsKey("instance-type")) {
+            List<String> itFilter = filters.get("instance-type");
+            catalogTypes = catalogTypes.stream()
+                    .filter(t -> matchesValue(t.instanceType, itFilter))
+                    .toList();
+        }
+
+        List<String> targetProductDescs = MODELLED_PRODUCT_DESCRIPTIONS;
+        if (productDescriptions != null && !productDescriptions.isEmpty()) {
+            Set<String> requested = new HashSet<>(productDescriptions);
+            targetProductDescs = targetProductDescs.stream()
+                    .filter(requested::contains)
+                    .toList();
+        }
+        if (filters != null && filters.containsKey("product-description")) {
+            List<String> pdFilter = filters.get("product-description");
+            targetProductDescs = targetProductDescs.stream()
+                    .filter(pd -> matchesValue(pd, pdFilter))
+                    .toList();
+        }
+
+        List<String> priceFilter = filters != null ? filters.get("spot-price") : null;
+        List<String> timestampFilter = filters != null ? filters.get("timestamp") : null;
+        String formattedTimestamp = ISO_FMT.format(effectiveTimestamp);
+
+        if (timestampFilter != null && !matchesValue(formattedTimestamp, timestampFilter)) {
+            return new SpotPriceHistoryResult(List.of(), null);
+        }
+
+        List<SpotPrice> allEntries = new ArrayList<>();
+        for (CatalogInstanceType type : catalogTypes) {
+            for (Map<String, String> zone : zones) {
+                String zoneName = zone.get("zoneName");
+                String zoneId = zone.get("zoneId");
+                int zoneOffset = Math.max(0, zoneName.charAt(zoneName.length() - 1) - 'a');
+                double multiplier = 1.0 + (zoneOffset * 0.03);
+                double priceVal = ((type.vcpu * 0.0016) + ((type.memoryMib / 1024.0) * 0.0012)) * multiplier;
+                String formattedPrice = String.format(Locale.ROOT, "%.6f", priceVal);
+
+                if (priceFilter != null && !matchesValue(formattedPrice, priceFilter)) {
+                    continue;
+                }
+
+                for (String pd : targetProductDescs) {
+                    allEntries.add(new SpotPrice(zoneName, zoneId, type.instanceType, pd, formattedPrice, effectiveTimestamp));
+                }
+            }
+        }
+
+        allEntries.sort(Comparator
+                .comparing(SpotPrice::instanceType)
+                .thenComparing(SpotPrice::availabilityZone)
+                .thenComparing(SpotPrice::productDescription));
+
+        if (maxResults > 0 || (nextToken != null && !nextToken.isEmpty())) {
+            int offset = decodeToken(nextToken);
+            int total = allEntries.size();
+            int fromIndex = Math.min(offset, total);
+            int pageSize = maxResults > 0 ? maxResults : 1000;
+            int toIndex = (int) Math.min((long) fromIndex + pageSize, total);
+            List<SpotPrice> paged = allEntries.subList(fromIndex, toIndex);
+            String newNextToken = toIndex < total ? encodeToken(toIndex) : null;
+            return new SpotPriceHistoryResult(paged, newNextToken);
+        }
+
+        return new SpotPriceHistoryResult(allEntries, null);
     }
 
     // ─── Resource Explorer 2 ───────────────────────────────────────────────────

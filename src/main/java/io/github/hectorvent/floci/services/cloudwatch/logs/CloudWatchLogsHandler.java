@@ -642,7 +642,7 @@ public class CloudWatchLogsHandler {
         return name;
     }
 
-    private String extractLogGroupNameFromArn(String arn) {
+    static String extractLogGroupNameFromArn(String arn) {
         if (arn != null && arn.contains(":log-group:")) {
             String name = arn.substring(arn.indexOf(":log-group:") + ":log-group:".length());
             if (name.endsWith(":*")) {

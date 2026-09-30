@@ -86,7 +86,7 @@ class IamManagedPolicyAccountScopeTest {
 
         // A managed policy resolves from any account context (served from the global catalog,
         // not the account-partitioned store) — the request runs as account 111...
-        String managedArn = AwsManagedPolicies.ARN_PREFIX + "/service-role/AWSLambdaBasicExecutionRole";
+        String managedArn = AwsManagedPolicies.arnPrefix("aws") + "/service-role/AWSLambdaBasicExecutionRole";
         IamPolicy managed = service.getPolicy(managedArn);
         assertEquals(managedArn, managed.getArn());
         // GetPolicyVersion routes through getPolicy, so the document is reachable too.
@@ -102,11 +102,11 @@ class IamManagedPolicyAccountScopeTest {
         List<String> arns = AwsManagedPolicies.POLICIES.stream()
                 .map(AwsManagedPolicies.ManagedPolicyDef::arn)
                 .toList();
-        assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSXRayDaemonWriteAccess"));
-        assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSCloudFormationReadOnlyAccess"));
-        assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSCloudFormationFullAccess"));
-        assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSServiceCatalogEndUserFullAccess"));
-        assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AmazonElasticFileSystemClientFullAccess"));
+        assertTrue(arns.contains(AwsManagedPolicies.arnPrefix("aws") + "/AWSXRayDaemonWriteAccess"));
+        assertTrue(arns.contains(AwsManagedPolicies.arnPrefix("aws") + "/AWSCloudFormationReadOnlyAccess"));
+        assertTrue(arns.contains(AwsManagedPolicies.arnPrefix("aws") + "/AWSCloudFormationFullAccess"));
+        assertTrue(arns.contains(AwsManagedPolicies.arnPrefix("aws") + "/AWSServiceCatalogEndUserFullAccess"));
+        assertTrue(arns.contains(AwsManagedPolicies.arnPrefix("aws") + "/AmazonElasticFileSystemClientFullAccess"));
     }
 
     @Test
@@ -123,7 +123,7 @@ class IamManagedPolicyAccountScopeTest {
                 new RegionResolver("us-east-1", DEFAULT_ACCT));
 
         int catalogSize = AwsManagedPolicies.POLICIES.size();
-        String lambdaBasicArn = AwsManagedPolicies.ARN_PREFIX + "/service-role/AWSLambdaBasicExecutionRole";
+        String lambdaBasicArn = AwsManagedPolicies.arnPrefix("aws") + "/service-role/AWSLambdaBasicExecutionRole";
 
         // Scope=AWS now serves the full global catalog from a non-default account.
         List<IamPolicy> aws = service.listPolicies("AWS", null);
@@ -152,7 +152,7 @@ class IamManagedPolicyAccountScopeTest {
                         "app", CUSTOMER_DOCUMENT));
 
         // Simulate the seed-time mirror: a managed policy copied into the default account store.
-        String mirroredManagedArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
+        String mirroredManagedArn = AwsManagedPolicies.arnPrefix("aws") + "/AdministratorAccess";
         reqPolicies.putForAccount(DEFAULT_ACCT, mirroredManagedArn,
                 new IamPolicy("ANPAADMIN0000001", "AdministratorAccess", "/", mirroredManagedArn,
                         "admin", CUSTOMER_DOCUMENT));
@@ -195,7 +195,7 @@ class IamManagedPolicyAccountScopeTest {
         AccountAwareStorageBackend<IamPolicy> policies =
                 new AccountAwareStorageBackend<>(rawPolicies, ctx, DEFAULT_ACCT);
 
-        String managedArn = AwsManagedPolicies.ARN_PREFIX + "/service-role/AWSLambdaBasicExecutionRole";
+        String managedArn = AwsManagedPolicies.arnPrefix("aws") + "/service-role/AWSLambdaBasicExecutionRole";
         // A customer policy attached to the same user — must stay account-scoped (control).
         String customerArn = "arn:aws:iam::" + REQUEST_ACCT + ":policy/app-policy";
         policies.putForAccount(REQUEST_ACCT, customerArn,
@@ -254,7 +254,7 @@ class IamManagedPolicyAccountScopeTest {
         AccountAwareStorageBackend<IamPolicy> policies =
                 new AccountAwareStorageBackend<>(rawPolicies, ctx, DEFAULT_ACCT);
 
-        String managedArn = AwsManagedPolicies.ARN_PREFIX + "/service-role/AWSLambdaBasicExecutionRole";
+        String managedArn = AwsManagedPolicies.arnPrefix("aws") + "/service-role/AWSLambdaBasicExecutionRole";
         String customerArn = "arn:aws:iam::" + REQUEST_ACCT + ":policy/group-policy";
         policies.putForAccount(REQUEST_ACCT, customerArn,
                 new IamPolicy("ANPAGRP000000001", "group-policy", "/", customerArn,
@@ -287,8 +287,8 @@ class IamManagedPolicyAccountScopeTest {
         AccountAwareStorageBackend<IamPolicy> policies =
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), ctx, DEFAULT_ACCT);
 
-        String managedArn = AwsManagedPolicies.ARN_PREFIX + "/service-role/AWSLambdaBasicExecutionRole";
-        String boundaryArn = AwsManagedPolicies.ARN_PREFIX + "/PowerUserAccess";
+        String managedArn = AwsManagedPolicies.arnPrefix("aws") + "/service-role/AWSLambdaBasicExecutionRole";
+        String boundaryArn = AwsManagedPolicies.arnPrefix("aws") + "/PowerUserAccess";
 
         IamRole role = new IamRole("AROLE00000000001", "task-role", "/",
                 "arn:aws:iam::" + REQUEST_ACCT + ":role/task-role", "{}");
@@ -333,8 +333,8 @@ class IamManagedPolicyAccountScopeTest {
                 users, groups, roles, new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT));
-        String managedArn = AwsManagedPolicies.ARN_PREFIX + "/service-role/AWSLambdaBasicExecutionRole";
-        String boundaryArn = AwsManagedPolicies.ARN_PREFIX + "/PowerUserAccess";
+        String managedArn = AwsManagedPolicies.arnPrefix("aws") + "/service-role/AWSLambdaBasicExecutionRole";
+        String boundaryArn = AwsManagedPolicies.arnPrefix("aws") + "/PowerUserAccess";
 
         service.createUser("auth-user", "/");
         service.createGroup("auth-group", "/");
@@ -380,7 +380,7 @@ class IamManagedPolicyAccountScopeTest {
                 users, groups, roles, policies,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT));
-        String managedArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
+        String managedArn = AwsManagedPolicies.arnPrefix("aws") + "/AdministratorAccess";
 
         service.createUser("account-a-user", "/");
         service.createGroup("account-a-group", "/");

@@ -4,6 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import org.jboss.logging.Logger;
 
@@ -15,6 +18,8 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -42,12 +47,35 @@ import java.util.regex.Pattern;
  * managed policy's history down to five versions. A policy missing from the versions file
  * keeps the {@code v1} default so a partial refresh degrades to the old behaviour instead of
  * dropping the policy.
+ *
+ * <p>The bundled data is the commercial partition's. Every other partition's catalog is
+ * derived from it on first use ({@link #forPartition}): the ARN prefix and every
+ * {@code arn:aws:} inside a document take the partition ({@code arn:aws-cn:iam::aws:policy/...},
+ * which is what AWS's own SAM translator does, {@code samtranslator/translator/arn_generator.py}),
+ * and the region-bearing hostnames a {@code kms:ViaService} condition names
+ * ({@code s3.*.amazonaws.com}) take the partition's DNS suffix. Bare service principals
+ * ({@code ec2.amazonaws.com}) and service-linked role paths are the same in every partition and
+ * are left alone, as is the {@code ::aws:policy/} owner slot. Whether AWS's China or GovCloud
+ * documents differ in content beyond that is not known; see the open questions in
+ * {@code docs/configuration/partitions.md}.
  */
 final class AwsManagedPolicies {
 
     private static final Logger LOG = Logger.getLogger(AwsManagedPolicies.class);
 
-    static final String ARN_PREFIX = "arn:aws:iam::aws:policy";
+    private static final String COMMERCIAL_PARTITION = "aws";
+    /** {@code arn:<partition>:iam::aws:policy/}, the owner slot literally {@code aws} in every partition. */
+    private static final Pattern MANAGED_POLICY_ARN = Pattern.compile(
+            "^arn:(" + AwsArnUtils.PARTITION_REGEX + "):iam::aws:policy/");
+    /** Every commercial ARN inside a document; the whole prefix up to and including the second colon. */
+    private static final Pattern COMMERCIAL_ARN = Pattern.compile("arn:aws:"); // partition-literal: the commercial prefix this rewrites away
+    /**
+     * A hostname whose label before the commercial suffix is a region or the {@code *} that
+     * stands for one ({@code s3.*.amazonaws.com}, {@code s3.us-east-1.amazonaws.com}); a bare
+     * principal has no such label and never matches.
+     */
+    private static final Pattern REGION_BEARING_HOST = Pattern.compile(
+            "\\.(\\*|[a-z]{2,4}-[a-z-]+-\\d)\\.amazonaws\\.com(?![.\\w-])"); // partition-literal: the commercial suffix this rewrites away
 
     private static final String CATALOG_RESOURCE_NAME = "iam/managed-policies.yaml";
     private static final String DOCUMENTS_RESOURCE_NAME = "iam/managed-policy-documents.json";
@@ -59,22 +87,71 @@ final class AwsManagedPolicies {
     /**
      * One resolvable AWS managed policy.
      *
+     * @param partition        the partition whose catalog holds it, which its ARN names
      * @param document         the document of the policy's current default version
      * @param defaultVersionId the version id AWS reports for that document, e.g. {@code v3}
      * @param createDate       when AWS first published the policy, or {@code null} if unknown
      * @param updateDate       when AWS published the current default version, or {@code null}
      *                         if unknown
      */
-    record ManagedPolicyDef(String name, String path, String description, String document,
+    record ManagedPolicyDef(String partition, String name, String path, String description, String document,
                             String defaultVersionId, Instant createDate, Instant updateDate) {
         String arn() {
-            return ARN_PREFIX + path + name;
+            return arnPrefix(partition) + path + name;
         }
     }
 
+    /** The commercial catalog, byte-identical to the bundled data. */
     static final List<ManagedPolicyDef> POLICIES = load();
 
+    private static final Map<String, List<ManagedPolicyDef>> BY_PARTITION = new ConcurrentHashMap<>();
+
     private AwsManagedPolicies() {
+    }
+
+    /** {@code arn:<partition>:iam::aws:policy}, without the trailing slash of the path. */
+    static String arnPrefix(String partition) {
+        return "arn:" + partition + ":iam::aws:policy";
+    }
+
+    /** True for an AWS managed policy ARN in any partition ({@code arn:aws-cn:iam::aws:policy/...}). */
+    static boolean isManagedPolicyArn(String arn) {
+        return arn != null && MANAGED_POLICY_ARN.matcher(arn).find();
+    }
+
+    /**
+     * The catalog of {@code partition}: the bundled commercial data for {@code aws}, a derived
+     * view otherwise, built once per partition. Bounded by the published partitions.
+     *
+     * @throws IllegalArgumentException when {@code partition} is not a published partition id
+     */
+    static List<ManagedPolicyDef> forPartition(String partition) {
+        if (COMMERCIAL_PARTITION.equals(partition)) {
+            return POLICIES;
+        }
+        AwsPartition target = AwsPartitions.find(partition).orElseThrow(() ->
+                new IllegalArgumentException("Not a published AWS partition: " + partition));
+        return BY_PARTITION.computeIfAbsent(target.id(), id -> derive(target));
+    }
+
+    private static List<ManagedPolicyDef> derive(AwsPartition partition) {
+        long started = System.nanoTime();
+        String arnPrefix = "arn:" + partition.id() + ":";
+        List<ManagedPolicyDef> derived = new ArrayList<>(POLICIES.size());
+        for (ManagedPolicyDef def : POLICIES) {
+            derived.add(new ManagedPolicyDef(partition.id(), def.name(), def.path(), def.description(),
+                    rewriteDocument(def.document(), arnPrefix, partition.dnsSuffix()),
+                    def.defaultVersionId(), def.createDate(), def.updateDate()));
+        }
+        LOG.debugv("Derived the {0} managed policy catalog ({1} policies) in {2} ms",
+                partition.id(), derived.size(), (System.nanoTime() - started) / 1_000_000);
+        return List.copyOf(derived);
+    }
+
+    static String rewriteDocument(String document, String arnPrefix, String dnsSuffix) {
+        String rewritten = COMMERCIAL_ARN.matcher(document).replaceAll(Matcher.quoteReplacement(arnPrefix));
+        Matcher hosts = REGION_BEARING_HOST.matcher(rewritten);
+        return hosts.replaceAll(match -> Matcher.quoteReplacement("." + match.group(1) + "." + dnsSuffix));
     }
 
     private static List<ManagedPolicyDef> load() {
@@ -100,7 +177,8 @@ final class AwsManagedPolicies {
                     continue;
                 }
                 VersionEntry version = versions.get(entry.name);
-                defs.add(new ManagedPolicyDef(entry.name, entry.path, entry.description, document.toString(),
+                defs.add(new ManagedPolicyDef(COMMERCIAL_PARTITION, entry.name, entry.path, entry.description,
+                        document.toString(),
                         defaultVersionId(entry.name, version),
                         parseDate(entry.name, "createDate", version == null ? null : version.createDate),
                         parseDate(entry.name, "updateDate", version == null ? null : version.updateDate)));
