@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Totp;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -20,6 +21,7 @@ import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
+import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -2209,7 +2211,41 @@ class IamServiceTest {
 
         assertEquals("TRUE", fields[3], "password_enabled");
         assertEquals("TRUE", fields[8], "access_key_1_active");
-        assertEquals("FALSE", fields[7], "mfa_active is never modeled");
+        assertEquals("FALSE", fields[7], "mfa_active, with no device enabled for this user");
+    }
+
+    /**
+     * The {@code mfa_active} column is backed by real device state rather than a constant, so a
+     * user holding an enabled device reports TRUE while the untouched user beside them stays FALSE.
+     */
+    @Test
+    void credentialReportMarksUsersHoldingAnMfaDeviceAsMfaActive() {
+        iamService.createUser("mfa-report-with", "/");
+        iamService.createUser("mfa-report-without", "/");
+        VirtualMfaDevice device = iamService.createVirtualMfaDevice("mfa-report-device", "/", Map.of());
+        String[] codes = consecutiveCodes(device.getBase32Seed());
+        iamService.enableMfaDevice("mfa-report-with", device.getSerialNumber(), codes[0], codes[1]);
+        iamService.generateCredentialReport();
+
+        String csv = new String(Base64.getDecoder().decode(iamService.getCredentialReport().base64Content()));
+        assertEquals("TRUE", mfaActiveColumn(csv, "mfa-report-with"));
+        assertEquals("FALSE", mfaActiveColumn(csv, "mfa-report-without"));
+    }
+
+    private static String mfaActiveColumn(String csv, String userName) {
+        return csv.lines().filter(line -> line.startsWith(userName + ","))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no row for " + userName + " in: " + csv))
+                .split(",", -1)[7];
+    }
+
+    /** The pair an authenticator would show now, which is what EnableMFADevice asks for. */
+    private static String[] consecutiveCodes(String base32Seed) {
+        long step = Totp.stepAt(Instant.now());
+        return new String[] {
+                Totp.codeAt(base32Seed, step - 1),
+                Totp.codeAt(base32Seed, step)
+        };
     }
 
     /**
@@ -2253,7 +2289,7 @@ class IamServiceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), credentialReports,
+                new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, null);
 
         AwsException ex = assertThrows(AwsException.class, withExpiredReport::getCredentialReport);
@@ -2270,7 +2306,7 @@ class IamServiceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), credentialReports,
+                new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, null);
 
         IamService.CredentialReportGeneration generation = withExpiredReport.generateCredentialReport();
