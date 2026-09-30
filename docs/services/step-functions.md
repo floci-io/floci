@@ -94,7 +94,10 @@ ends a `Parallel`, each other branch that is still inside a `Task` or a `Wait` r
 `TaskStateAborted` or `WaitStateAborted`, chained to the failing branch's last event and recorded
 before `ParallelStateFailed`. The `Parallel` fails the moment any branch fails, whichever branch
 is listed first, and cuts the others then; the branch outputs still come back in declaration
-order.
+order. When a failure ends an inline `Map`, each other iteration that is still running records
+`MapIterationAborted`, and one still inside a `Task` or a `Wait` records `TaskStateAborted` or
+`WaitStateAborted` right after it, all chained to the failing iteration's last event and recorded
+before `MapIterationFailed` and `MapStateFailed`.
 
 Branches and iterations run concurrently, so the order in which their events interleave differs
 from run to run. Each branch chains its own events through `previousEventId`, and that chain is
@@ -122,11 +125,7 @@ When the request sets `includeExecutionData` to false, the details objects stay 
 A few gaps remain. `TaskStarted`, `LambdaFunctionStarted`, and `ActivityStarted` fire at
 scheduling time, not when a worker actually picks up the task. `TaskSubmitted` is recorded for
 the three `.sync` integrations above and not yet for a `.waitForTaskToken` one, which AWS also
-records it for. When an inline `Map` iteration fails, AWS records a `MapIterationAborted` for each
-iteration it cuts and the `*StateAborted` of the state that iteration was in, all chained to the
-failing iteration's last event and recorded before `MapIterationFailed` and `MapStateFailed`; Floci
-cancels the iterations without recording them, where a `Parallel` records the state of each branch
-it cuts, as above. A Distributed `Map` that declares no tolerance reports a failed item's own error
+records it for. A Distributed `Map` that declares no tolerance reports a failed item's own error
 rather than AWS's `States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that
 error. A `Map` that declares one reports `States.ExceedToleratedFailureThreshold`, as AWS does.
 

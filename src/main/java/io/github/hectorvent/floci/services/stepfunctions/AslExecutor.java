@@ -2890,17 +2890,20 @@ public class AslExecutor {
             } catch (FailStateException e) {
                 int failedSoFar = failedItems.addAndGet(itemsInChild);
                 failedExecutions.incrementAndGet();
-                if (iterationStarted && !distributed && !e.isRuntimeError()) {
-                    iterationChain.publishAside("MapIterationFailed", Map.of("name", name, "index", i));
-                }
+                boolean recordFailed = iterationStarted && !distributed && !e.isRuntimeError();
+                // A failure that ends the Map records its MapIterationFailed only once the other
+                // iterations have been cut, since AWS records what it cut first.
                 if (!tolerated.declared()) {
-                    throw new IterationFailure(i, e);
+                    throw new IterationFailure(i, e, recordFailed);
                 }
                 if (failedSoFar > tolerated.threshold()) {
                     throw new IterationFailure(i, new FailStateException(
                             "States.ExceedToleratedFailureThreshold",
                             "The map run failed because a tolerated failure threshold was exceeded. "
-                                    + failedSoFar + " of " + itemCount + " items failed."));
+                                    + failedSoFar + " of " + itemCount + " items failed."), recordFailed);
+                }
+                if (recordFailed) {
+                    iterationChain.publishAside("MapIterationFailed", Map.of("name", name, "index", i));
                 }
                 if (hasResultWriter) {
                     failedByIndex[i] = new FailedChild(childInputsByIndex[i],
@@ -2921,11 +2924,15 @@ public class AslExecutor {
 
         if (childCount > 0) {
             List<JsonNode> itemOutputs;
+            // The iterations a failure cuts, each read and cut in one step before it is cancelled,
+            // as a Parallel does with its branches (cutAfterFailure). Filled on this thread.
+            List<CutIteration> cutIterations = new ArrayList<>();
             try {
                 itemOutputs = MapIterationScheduler.execute(
                         childCount, Math.max(1, effectiveConcurrency),
                         i -> () -> callUnderExecutionAccount(sm, makeTask.apply(i)),
-                        executionDeadlineNanos);
+                        executionDeadlineNanos,
+                        i -> cutIterations.add(new CutIteration(i, iterationChains.get(i).abandonInState())));
             } catch (java.util.concurrent.TimeoutException e) {
                 // The only deadline the scheduler is given is the state machine's budget, so its
                 // expiry ends the execution rather than failing the Map state.
@@ -2934,6 +2941,12 @@ public class AslExecutor {
                 // A Distributed Map's chain stays at MapRunStarted, as on AWS.
                 if (!distributed) {
                     chain.continueFrom(iterationChains.get(e.index).lastEventId());
+                    if (!e.failure.isRuntimeError()) {
+                        publishCutIterations(chain, name, cutIterations);
+                    }
+                    if (e.recordFailed) {
+                        chain.publishBeside("MapIterationFailed", Map.of("name", name, "index", e.index));
+                    }
                 } else {
                     publishMapRunFailedEvent(chain, e.failure);
                     recordMapRun(mapRunRecord, "FAILED", succeededItems.get(), failedItems.get(),
@@ -5845,11 +5858,33 @@ public class AslExecutor {
     private static final class IterationFailure extends RuntimeException {
         final int index;
         final FailStateException failure;
+        /** Whether the Map records the iteration's MapIterationFailed once the others are cut. */
+        final boolean recordFailed;
 
-        IterationFailure(int index, FailStateException failure) {
+        IterationFailure(int index, FailStateException failure, boolean recordFailed) {
             super(failure.getMessage(), failure, false, false);
             this.index = index;
             this.failure = failure;
+            this.recordFailed = recordFailed;
+        }
+    }
+
+    /** An iteration a failure cut, and the state it was in, or null when it was between states. */
+    private record CutIteration(int index, String stateType) {}
+
+    /**
+     * Records the iterations a failure cut, the way AWS was measured recording them: for each, a
+     * {@code MapIterationAborted} and then the {@code *StateAborted} of the Task or Wait it was in,
+     * all chained to the failing iteration's last event, ahead of {@code MapIterationFailed} and
+     * {@code MapStateFailed}. An iteration between states, or inside any other state type, records
+     * only the {@code MapIterationAborted}.
+     */
+    private static void publishCutIterations(HistoryChain chain, String name, List<CutIteration> cutIterations) {
+        for (CutIteration cut : cutIterations) {
+            chain.publishBeside("MapIterationAborted", Map.of("name", name, "index", cut.index()));
+            if ("Task".equals(cut.stateType()) || "Wait".equals(cut.stateType())) {
+                chain.publishBeside(cut.stateType() + "StateAborted", null);
+            }
         }
     }
 

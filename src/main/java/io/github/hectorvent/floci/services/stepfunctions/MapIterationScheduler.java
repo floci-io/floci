@@ -1,10 +1,11 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutionException;
@@ -14,6 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.IntConsumer;
 import java.util.function.IntFunction;
 
 /** Runs Map iterations with a bounded in-flight window while preserving input order. */
@@ -30,6 +32,19 @@ final class MapIterationScheduler {
      */
     static <T> List<T> execute(int itemCount, int maxConcurrency,
                                IntFunction<Callable<T>> taskFactory, long deadlineNanos)
+            throws Exception {
+        return execute(itemCount, maxConcurrency, taskFactory, deadlineNanos, index -> { });
+    }
+
+    /**
+     * @param cutting called with the index of every iteration still in flight when another one
+     *                fails, in start order and before any of them is cancelled, so the caller can
+     *                read the state each is in while it is still running. Not called when the
+     *                deadline ends the run.
+     */
+    static <T> List<T> execute(int itemCount, int maxConcurrency,
+                               IntFunction<Callable<T>> taskFactory, long deadlineNanos,
+                               IntConsumer cutting)
             throws Exception {
         if (itemCount < 0) {
             throw new IllegalArgumentException("itemCount must not be negative");
@@ -49,19 +64,20 @@ final class MapIterationScheduler {
         ExecutorService executor = Executors.newThreadPerTaskExecutor(
                 Thread.ofVirtual().name("sfn-map-", 0).factory());
         CompletionService<IndexedResult<T>> completions = new ExecutorCompletionService<>(executor);
-        Set<Future<IndexedResult<T>>> inFlight = new HashSet<>();
+        Map<Future<IndexedResult<T>>, Integer> inFlight = new LinkedHashMap<>();
         int nextIndex = 0;
         int completed = 0;
 
         try {
             while (nextIndex < inFlightLimit) {
-                inFlight.add(submit(completions, taskFactory, nextIndex++));
+                inFlight.put(submit(completions, taskFactory, nextIndex), nextIndex);
+                nextIndex++;
             }
             while (completed < itemCount) {
                 Future<IndexedResult<T>> future =
                         completions.poll(deadlineNanos - System.nanoTime(), TimeUnit.NANOSECONDS);
                 if (future == null) {
-                    cancel(inFlight);
+                    cancel(inFlight.keySet());
                     throw new TimeoutException();
                 }
                 inFlight.remove(future);
@@ -69,12 +85,14 @@ final class MapIterationScheduler {
                 results.set(result.index(), result.value());
                 completed++;
                 if (nextIndex < itemCount) {
-                    inFlight.add(submit(completions, taskFactory, nextIndex++));
+                    inFlight.put(submit(completions, taskFactory, nextIndex), nextIndex);
+                    nextIndex++;
                 }
             }
             return results;
         } catch (ExecutionException e) {
-            cancel(inFlight);
+            inFlight.values().forEach(cutting::accept);
+            cancel(inFlight.keySet());
             Throwable cause = e.getCause();
             if (cause instanceof Exception exception) {
                 throw exception;
@@ -84,11 +102,11 @@ final class MapIterationScheduler {
             }
             throw new RuntimeException(cause);
         } catch (InterruptedException e) {
-            cancel(inFlight);
+            cancel(inFlight.keySet());
             Thread.currentThread().interrupt();
             throw e;
         } finally {
-            cancel(inFlight);
+            cancel(inFlight.keySet());
             executor.shutdownNow();
         }
     }
@@ -99,7 +117,7 @@ final class MapIterationScheduler {
         return completions.submit(() -> new IndexedResult<>(index, taskFactory.apply(index).call()));
     }
 
-    private static void cancel(Set<? extends Future<?>> futures) {
+    private static void cancel(Collection<? extends Future<?>> futures) {
         futures.forEach(future -> future.cancel(true));
     }
 
