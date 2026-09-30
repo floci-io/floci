@@ -2116,10 +2116,11 @@ class SqsServiceTest {
         sqsService.receiveMessage(source.getQueueUrl(), 10, 0, 0, region);
         String dlqArn = queueArn("retention-rl-dlq");
         // Still live when the task starts, expired when the worker reaches it a second later.
-        second.setSentTimestamp(Instant.now().minusMillis(59_500));
+        second.setSentTimestamp(Instant.now().minusSeconds(59));
 
         String taskHandle = sqsService.startMessageMoveTask(dlqArn, queueArn("retention-rl-dest"), 1, region);
         awaitMoveTaskStatus(dlqArn, taskHandle, "COMPLETED");
+        assertEquals(2, sqsService.listMessageMoveTasks(dlqArn, region).get(0).approximateNumberOfMessagesToMove());
 
         List<Message> moved = sqsService.peekMessages(dest.getQueueUrl(), region);
         assertEquals(List.of("first"), moved.stream().map(Message::getBody).toList());
