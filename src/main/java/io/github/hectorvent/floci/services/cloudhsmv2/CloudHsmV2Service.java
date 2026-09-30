@@ -5,23 +5,26 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.cloudhsmv2.model.Backup;
+import io.github.hectorvent.floci.services.cloudhsmv2.model.BackupRetentionPolicy;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Certificates;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Cluster;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.ClusterState;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Hsm;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
-
+import org.bouncycastle.openssl.PEMParser;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.PKCS10CertificationRequestBuilder;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
-import org.bouncycastle.cert.X509CertificateHolder;
-import org.bouncycastle.openssl.PEMParser;
 import org.jboss.logging.Logger;
 
 import java.io.StringReader;
@@ -30,15 +33,15 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
-import io.github.hectorvent.floci.services.cloudhsmv2.model.Backup;
-import io.github.hectorvent.floci.services.cloudhsmv2.model.BackupRetentionPolicy;
-import java.time.temporal.ChronoUnit;
-import java.util.stream.Collectors;
 import java.time.Instant;
-import java.util.*;
-
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
-import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * CloudHSM v2 service implementation for the local emulator.
