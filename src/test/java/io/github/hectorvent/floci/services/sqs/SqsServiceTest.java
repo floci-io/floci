@@ -2103,6 +2103,28 @@ class SqsServiceTest {
     }
 
     @Test
+    void rateLimitedMessageMoveTaskDropsMessagesThatExpireDuringTheMove() throws Exception {
+        String region = "us-east-1";
+        sqsService.createQueue("retention-rl-dlq", Map.of("MessageRetentionPeriod", "60"), region);
+        Queue source = sqsService.createQueue("retention-rl-src",
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + queueArn("retention-rl-dlq")
+                        + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Queue dest = sqsService.createQueue("retention-rl-dest", null, region);
+        sqsService.sendMessage(source.getQueueUrl(), "first", 0, region);
+        Message second = sqsService.sendMessage(source.getQueueUrl(), "second", 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 10, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 10, 0, 0, region);
+        String dlqArn = queueArn("retention-rl-dlq");
+
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, queueArn("retention-rl-dest"), 1, region);
+        second.setSentTimestamp(Instant.now().minusSeconds(61));
+        awaitMoveTaskStatus(dlqArn, taskHandle, "COMPLETED");
+
+        List<Message> moved = sqsService.peekMessages(dest.getQueueUrl(), region);
+        assertEquals(List.of("first"), moved.stream().map(Message::getBody).toList());
+    }
+
+    @Test
     void deleteExpiredMessagesRemovesThemFromStorage() {
         String region = "us-east-1";
         InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>();

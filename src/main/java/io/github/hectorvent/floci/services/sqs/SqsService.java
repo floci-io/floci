@@ -1469,6 +1469,7 @@ public class SqsService implements Resettable, ResourceProvider {
                         return;
                     }
                 }
+                removeExpiredMessages(srcKey);
                 if (!moveOneMessage(srcQueue, destUrl, region)) {
                     break;
                 }
@@ -1811,12 +1812,18 @@ public class SqsService implements Resettable, ResourceProvider {
 
     /** Frees the memory and storage held by expired messages. Reads already skip them. */
     void deleteExpiredMessages() {
-        for (Map.Entry<String, GuardedMessageQueue> entry : messagesByQueue.entrySet()) {
-            String storageKey = entry.getKey();
-            String queueUrl = baseUrl + storageKey.substring(storageKey.indexOf("::") + 2);
-            getQueueByUrl(storageKey, queueUrl)
-                    .ifPresent(queue -> entry.getValue().removeExpired(retentionCutoff(queue)));
+        for (String storageKey : messagesByQueue.keySet()) {
+            removeExpiredMessages(storageKey);
         }
+    }
+
+    private void removeExpiredMessages(String storageKey) {
+        GuardedMessageQueue messages = messagesByQueue.get(storageKey);
+        if (messages == null) {
+            return;
+        }
+        String queueUrl = baseUrl + storageKey.substring(storageKey.indexOf("::") + 2);
+        getQueueByUrl(storageKey, queueUrl).ifPresent(queue -> messages.removeExpired(retentionCutoff(queue)));
     }
 
     private void ensureQueueExists(String storageKey) {
