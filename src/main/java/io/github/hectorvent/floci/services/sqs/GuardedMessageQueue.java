@@ -198,6 +198,14 @@ class GuardedMessageQueue {
         }
     }
 
+    void removeExpired(Instant cutoff) {
+        try (Guard _ = hold()) {
+            if (messages.removeIf(msg -> msg.isExpired(cutoff))) {
+                persist();
+            }
+        }
+    }
+
     void purge() {
         try (Guard _ = hold()) {
             messages.clear();

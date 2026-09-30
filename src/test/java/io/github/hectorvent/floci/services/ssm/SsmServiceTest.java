@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -134,6 +135,89 @@ class SsmServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 ssmService.getParameter("/nonexistent", "eu-west-1"));
         assertEquals("ParameterNotFound", ex.getErrorCode());
+    }
+
+    @Test
+    void addTagsToResource_keyOutsideTheAwsPattern_isRejectedBeforeTheLookup() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.addTagsToResource("/no/such/param", Map.of("a,b", "x"), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: ^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$",
+                ex.getMessage());
+    }
+
+    @Test
+    void addTagsToResource_namesTheOffendingKeyByItsPosition() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/tags/position", "v", "String", null, false, region);
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put("ok", "1");
+        tags.put("a,b", "x");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.addTagsToResource("/tags/position", tags, region));
+        assertTrue(ex.getMessage().contains("'tags.2.member.key'"), ex.getMessage());
+        assertTrue(ssmService.listTagsForResource("/tags/position", region).isEmpty());
+    }
+
+    @Test
+    void addTagsToResource_validKeyIsApplied() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/tags/valid", "v", "String", null, false, region);
+
+        ssmService.addTagsToResource("/tags/valid", Map.of("team:name/x=y+z-@_. 1", "v"), region);
+
+        assertEquals(Map.of("team:name/x=y+z-@_. 1", "v"), ssmService.listTagsForResource("/tags/valid", region));
+    }
+
+    @Test
+    void addTagsToResource_emptyKeyIsRejected() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.addTagsToResource("/no/such/param", Map.of("", "x"), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
+    void addTagsToResource_keyLongerThan128IsRejected() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.addTagsToResource("/no/such/param", Map.of("k".repeat(129), "x"), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 128", ex.getMessage());
+    }
+
+    @Test
+    void addTagsToResource_keyLengthCountsCodePoints() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/tags/code-points", "v", "String", null, false, region);
+        String letter = new String(Character.toChars(0x20000));
+
+        ssmService.addTagsToResource("/tags/code-points", Map.of(letter.repeat(128), "x"), region);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.addTagsToResource("/tags/code-points", Map.of(letter.repeat(129), "x"), region));
+
+        assertEquals(Map.of(letter.repeat(128), "x"), ssmService.listTagsForResource("/tags/code-points", region));
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 128", ex.getMessage());
+    }
+
+    @Test
+    void putParameter_invalidTagKeyIsRejectedAndTheParameterIsNotCreated() {
+        String region = "eu-west-1";
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.putParameter("/tags/rejected", "v", "String", null, false,
+                        Map.of("a,b", "x"), region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: ^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$",
+                ex.getMessage());
+        AwsException missing = assertThrows(AwsException.class, () ->
+                ssmService.getParameter("/tags/rejected", region));
+        assertEquals("ParameterNotFound", missing.getErrorCode());
     }
 
     @Test

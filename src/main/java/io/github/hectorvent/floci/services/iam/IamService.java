@@ -43,6 +43,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -176,11 +177,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final Object resourceNameLock = new Object();
 
     /**
-     * AWS-managed policies (arn:aws:iam::aws:policy/...), keyed by ARN. These are global —
-     * not owned by any account — so they live here rather than in the account-partitioned
-     * {@link #policies} store, and {@link #getPolicy} resolves them for any caller.
+     * AWS-managed policies ({@code arn:<partition>:iam::aws:policy/...}), keyed by ARN, one map
+     * per partition and built on first use. These are global: not owned by any account, so they
+     * live here rather than in the account-partitioned {@link #policies} store, and
+     * {@link #getPolicy} resolves them for any caller. The partition comes from the ARN a
+     * caller names, so a China ARN resolves under any signing scope and lists in China scope.
      */
-    private final Map<String, IamPolicy> awsManagedPolicies = buildAwsManagedPolicies();
+    private final Map<String, Map<String, IamPolicy>> awsManagedPoliciesByPartition = new ConcurrentHashMap<>();
 
     @Inject
     public IamService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
@@ -317,9 +320,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         seedConfiguredAccountAlias();
     }
 
-    private static Map<String, IamPolicy> buildAwsManagedPolicies() {
+    private Map<String, IamPolicy> awsManagedPolicies(String partition) {
+        return awsManagedPoliciesByPartition.computeIfAbsent(partition, IamService::buildAwsManagedPolicies);
+    }
+
+    /** The managed policy catalog of the partition an ARN names, or empty for an unpublished one. */
+    private Map<String, IamPolicy> awsManagedPoliciesFor(String managedPolicyArn) {
+        try {
+            return awsManagedPolicies(AwsArnUtils.parse(managedPolicyArn).partition());
+        } catch (IllegalArgumentException ignored) {
+            // Only reached for an ARN that already matched the managed-policy pattern but names a
+            // partition AWS does not publish: no catalog exists there, so no policy resolves.
+            return Map.of();
+        }
+    }
+
+    private static Map<String, IamPolicy> buildAwsManagedPolicies(String partition) {
         Map<String, IamPolicy> catalog = new LinkedHashMap<>();
-        for (AwsManagedPolicies.ManagedPolicyDef def : AwsManagedPolicies.POLICIES) {
+        for (AwsManagedPolicies.ManagedPolicyDef def : AwsManagedPolicies.forPartition(partition)) {
             String arn = def.arn();
             // The bundled document is the policy's current default version, served under the
             // version id AWS actually reports for it (v3 for AmazonS3ReadOnlyAccess, v1 for
@@ -348,7 +366,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * megabyte of persisted state and several seconds of startup for nothing.
      */
     void seedAwsManagedPolicies() {
-        LOG.debugv("AWS managed policy catalog available: {0} policies", awsManagedPolicies.size());
+        LOG.debugv("AWS managed policy catalog available: {0} policies",
+                awsManagedPolicies(regionResolver.getDefaultPartition()).size());
     }
 
     private void seedConfiguredAccountAlias() {
@@ -369,7 +388,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void seedDefaultDeployerPrincipal() {
-        String adminPolicyArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
+        String adminPolicyArn = AwsManagedPolicies.arnPrefix(regionResolver.getDefaultPartition())
+                + "/AdministratorAccess";
         IamUser user = users.get(DEFAULT_DEPLOYER_USER)
                 .orElseGet(() -> {
                     String userId = "AIDA" + randomId(16);
@@ -921,7 +941,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             String arn = iamArn("policy", normalizedPath, policyName);
             boolean nameTaken = resourcesInCurrentAccount(policies)
                     .filter(existing -> existing.getArn() == null
-                            || !existing.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX))
+                            || !AwsManagedPolicies.isManagedPolicyArn(existing.getArn()))
                     .map(IamPolicy::getPolicyName)
                     .anyMatch(existingName -> existingName != null && existingName.equalsIgnoreCase(policyName));
             if (nameTaken) {
@@ -939,7 +959,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public IamPolicy getPolicy(String policyArn) {
         IamPolicy policy = requirePolicy(policyArn);
-        if (policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(policyArn)) {
             return managedPolicySnapshot(policy, managedPolicyAttachmentCount(policyArn));
         }
         return policy;
@@ -959,9 +979,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * that account's {@link #policies} partition and would otherwise be silently dropped.
      */
     private Optional<IamPolicy> resolvePolicy(String arn) {
-        if (arn != null && arn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(arn)) {
             // Authorization and ListAttached* need policy documents or names, not attachment counts.
-            return Optional.ofNullable(awsManagedPolicies.get(arn));
+            return Optional.ofNullable(awsManagedPoliciesFor(arn).get(arn));
         }
         return policies.get(arn);
     }
@@ -980,7 +1000,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     private void tallyManagedPolicyAttachments(List<String> policyArns, Map<String, Integer> counts) {
         for (String policyArn : policyArns) {
-            if (policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            if (AwsManagedPolicies.isManagedPolicyArn(policyArn)) {
                 counts.merge(policyArn, 1, Integer::sum);
             }
         }
@@ -1012,7 +1032,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void incrementCustomerManagedPolicyAttachmentCount(IamPolicy policy) {
-        if (policy.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(policy.getArn())) {
             return;
         }
         policy.setAttachmentCount(policy.getAttachmentCount() + 1);
@@ -1020,7 +1040,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void decrementCustomerManagedPolicyAttachmentCount(String policyArn) {
-        if (policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(policyArn)) {
             return;
         }
         policies.get(policyArn).ifPresent(policy -> {
@@ -1030,7 +1050,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void rejectIfAwsManaged(String policyArn) {
-        if (policyArn != null && policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(policyArn)) {
             throw new AwsException("AccessDenied",
                     "Cannot modify or delete AWS managed policy: " + policyArn, 403);
         }
@@ -1089,7 +1109,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // AWS-managed ARNs mirrored into the default account at seed time — those are
             // served from the global catalog below so the default account does not see them twice.
             policies.scan(k -> true).stream()
-                    .filter(p -> !p.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX))
+                    .filter(p -> !AwsManagedPolicies.isManagedPolicyArn(p.getArn()))
                     .filter(p -> p.getPath().startsWith(prefix))
                     .forEach(result::add);
         }
@@ -1098,7 +1118,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // every caller sees the full set regardless of the request account — mirroring the
             // getPolicy fix, and keeping the ListPolicies and GetPolicy read paths consistent.
             Map<String, Integer> attachmentCounts = managedPolicyAttachmentCounts();
-            awsManagedPolicies.values().stream()
+            awsManagedPolicies(regionResolver.getPartition()).values().stream()
                     .filter(p -> p.getPath().startsWith(prefix))
                     .map(p -> managedPolicySnapshot(p, attachmentCounts.getOrDefault(p.getArn(), 0)))
                     .forEach(result::add);
@@ -1119,7 +1139,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         long localPolicyCount = 0;
         long policyVersionsInUse = 0;
         for (IamPolicy policy : policies.scan(k -> true)) {
-            if (policy.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            if (AwsManagedPolicies.isManagedPolicyArn(policy.getArn())) {
                 continue;
             }
             localPolicyCount++;
@@ -2996,7 +3016,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                                    Set<String> referencedAwsManagedArns) {
         for (String arn : attachedPolicyArns) {
             attachmentCounts.merge(arn, 1, Integer::sum);
-            if (arn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            if (AwsManagedPolicies.isManagedPolicyArn(arn)) {
                 referencedAwsManagedArns.add(arn);
             }
         }
@@ -3008,7 +3028,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return;
         }
         boundaryUsageCounts.merge(permissionsBoundaryArn, 1, Integer::sum);
-        if (permissionsBoundaryArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(permissionsBoundaryArn)) {
             referencedAwsManagedArns.add(permissionsBoundaryArn);
         }
     }

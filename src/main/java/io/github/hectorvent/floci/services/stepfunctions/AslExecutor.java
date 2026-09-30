@@ -108,8 +108,10 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionService;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -118,6 +120,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -825,7 +828,8 @@ public class AslExecutor {
                         : invokeResource(effectiveResource, effectiveInput, sm, taskToken,
                                 context.path("Execution").path("Id").asText(null),
                                 executionDeadlineNanos, taskDeadlineNanos,
-                                jsonata ? null : stateDef.path("Parameters"));
+                                jsonata ? null : stateDef.path("Parameters"),
+                                jobResponse -> addTaskSubmittedEvent(chain, profile, jobResponse));
                 if (tokenFuture != null) {
                     taskResult = awaitToken(tokenFuture, stateDef, taskToken, executionDeadlineNanos,
                             taskDeadlineNanos);
@@ -1075,9 +1079,13 @@ public class AslExecutor {
         return new FailStateException("Exception", cause);
     }
 
+    /**
+     * @param jobSubmitted called with the response of the call that started a {@code .sync} job,
+     *                     once it has returned and before the job is waited on
+     */
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
                                     String executionArn, long executionDeadlineNanos, long taskDeadlineNanos,
-                                    JsonNode rawParameters) throws Exception {
+                                    JsonNode rawParameters, Consumer<JsonNode> jobSubmitted) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
         String functionRef = null;
@@ -1226,7 +1234,8 @@ public class AslExecutor {
                     ? ".waitForTaskToken"
                     : integration.suffix();
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeEcsRunTask(mode, input, region, executionArn, executionDeadlineNanos, taskDeadlineNanos);
+            return invokeEcsRunTask(mode, input, region, executionArn, executionDeadlineNanos, taskDeadlineNanos,
+                    jobSubmitted);
         }
 
         // AWS SDK service integrations: Step Functions
@@ -1252,7 +1261,7 @@ public class AslExecutor {
             String mode = integration.suffix();
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeNestedStateMachine(mode, input, region, executionArn, executionDeadlineNanos,
-                    taskDeadlineNanos, rawParameters);
+                    taskDeadlineNanos, rawParameters, jobSubmitted);
         }
 
         throw new FailStateException("States.TaskFailed", "Unsupported resource: " + resource);
@@ -1439,10 +1448,10 @@ public class AslExecutor {
     }
 
     /**
-     * AWS SDK integration for {@code sfn:startExecution}. Unlike the optimized
-     * {@code states:startExecution}, which returns {@code executionArn} and {@code startDate} in
-     * the casing of the wire response, this one returns the SDK's own {@code ExecutionArn} and an
-     * ISO-8601 {@code StartDate}. Neither waits for the child.
+     * AWS SDK integration for {@code sfn:startExecution}. Both this and the optimized
+     * {@code states:startExecution} return {@code ExecutionArn} and {@code StartDate}; the
+     * optimized one carries {@code StartDate} in epoch milliseconds, this one as an ISO-8601
+     * string. Neither waits for the child.
      */
     private JsonNode invokeAwsSdkSfnStartExecution(JsonNode input, String region) throws Exception {
         String smArn = input.path("StateMachineArn").asText(null);
@@ -1627,9 +1636,9 @@ public class AslExecutor {
     /**
      * AWS SDK integration for {@code sfn:startSyncExecution}, the way an EXPRESS child workflow is
      * called. It differs from the optimized {@code states:startExecution.sync} integration in three
-     * ways: the child must be EXPRESS, the response envelope uses PascalCase field names with
-     * {@code Output} as a JSON string, and a child execution that fails is reported through
-     * {@code Status} rather than failing the calling task.
+     * ways: the child must be EXPRESS, the response envelope is the SDK's StartSyncExecution
+     * response rather than the DescribeExecution one, and a child execution that fails is reported
+     * through {@code Status} rather than failing the calling task.
      */
     private JsonNode invokeAwsSdkSfnStartSyncExecution(JsonNode input, String region) throws Exception {
         String smArn = input.path("StateMachineArn").asText(null);
@@ -1671,7 +1680,8 @@ public class AslExecutor {
 
     private JsonNode invokeNestedStateMachine(String mode, JsonNode input, String region, String executionArn,
                                               long executionDeadlineNanos, long taskDeadlineNanos,
-                                              JsonNode rawParameters) throws Exception {
+                                              JsonNode rawParameters, Consumer<JsonNode> jobSubmitted)
+            throws Exception {
         String smArn = input.path("StateMachineArn").asText(null);
         if (smArn == null || smArn.isBlank()) {
             throw new FailStateException("States.TaskFailed",
@@ -1709,12 +1719,23 @@ public class AslExecutor {
         }
         String execArn = exec.getExecutionArn();
 
+        // The StartExecution response as this integration reports it (measured: PascalCase,
+        // StartDate in epoch milliseconds). Request-response returns it as the Task result.
+        ObjectNode startResponse = objectMapper.createObjectNode();
+        startResponse.put("ExecutionArn", execArn);
+        startResponse.put("StartDate", Math.round(exec.getStartDate() * 1000));
         if ("".equals(mode)) {
-            // Fire-and-forget: return { executionArn, startDate }
-            ObjectNode result = objectMapper.createObjectNode();
-            result.put("executionArn", execArn);
-            result.put("startDate", exec.getStartDate());
-            return result;
+            return startResponse;
+        }
+
+        // The job is submitted: AWS records the same response here, before the wait.
+        try {
+            jobSubmitted.accept(startResponse);
+        } catch (RuntimeException e) {
+            // The event could not be recorded (the history-event limit): the child has started and
+            // the wait that would abort it is never entered, so it is aborted here.
+            abortChildExecution(execArn, executionArn);
+            throw e;
         }
 
         // .sync or .sync:2 polls until terminal. Whatever else ends the wait aborts the child, the way
@@ -1747,70 +1768,74 @@ public class AslExecutor {
                 continue;
             }
             if ("SUCCEEDED".equals(status)) {
-                if (".sync:2".equals(mode)) {
-                    String out = current.getOutput();
-                    return objectMapper.readTree(out != null ? out : "null");
-                }
-                // .sync — full execution envelope; output field is a JSON string
-                ObjectNode envelope = objectMapper.createObjectNode();
-                envelope.put("executionArn", current.getExecutionArn());
-                envelope.put("stateMachineArn", current.getStateMachineArn());
-                envelope.put("name", current.getName());
-                envelope.put("status", current.getStatus());
-                envelope.put("startDate", current.getStartDate());
-                if (current.getStopDate() != null) {
-                    envelope.put("stopDate", current.getStopDate());
-                }
-                if (current.getInput() != null) {
-                    envelope.put("input", current.getInput());
-                }
-                if (current.getOutput() != null) {
-                    envelope.put("output", current.getOutput());
-                }
-                return envelope;
+                // Both modes return the envelope (measured); .sync:2 differs only in carrying
+                // Input and Output as JSON values where .sync carries them as JSON strings.
+                return nestedExecutionEnvelope(current, true, ".sync:2".equals(mode));
             }
             // However the child ended, FAILED, TIMED_OUT or ABORTED, and whatever its own error, the
             // parent sees States.TaskFailed (measured), so a Catch on the child's error never fires.
-            throw new FailStateException("States.TaskFailed", nestedExecutionFailureCause(current));
+            throw new FailStateException("States.TaskFailed",
+                    nestedExecutionEnvelope(current, false, false).toString());
         }
     }
 
     /**
-     * The cause of a {@code .sync} Task whose child ended other than SUCCEEDED, as measured on AWS
-     * for {@code .sync} and {@code .sync:2} alike: the child's DescribeExecution response in
-     * PascalCase with its keys in alphabetical order, {@code Cause} and {@code Error} only when the
-     * child has them, {@code StateMachineAliasArn} and {@code StateMachineVersionArn} only when it
-     * was started through an alias or a version (an alias carries both), dates in epoch
-     * milliseconds, and no {@code Output}. Floci does not implement
-     * redrive, so the two redrive fields carry what AWS reports for a child never redriven.
+     * The child's DescribeExecution response as a {@code .sync} or {@code .sync:2} Task reports it
+     * (measured on AWS): PascalCase with its keys in alphabetical order, dates in epoch
+     * milliseconds, {@code StateMachineAliasArn} and {@code StateMachineVersionArn} only when the
+     * child was started through an alias or a version (an alias carries both).
+     *
+     * <p>A child that SUCCEEDED is the Task result: it carries {@code Output}, {@code OutputDetails}
+     * and {@code RedriveStatusReason}, and {@code .sync:2} carries {@code Input} and {@code Output}
+     * as JSON values ({@code payloadsAsJson}) where {@code .sync} carries JSON strings. A child that
+     * ended any other way is the cause of the failed Task, the same for both modes: {@code Cause}
+     * and {@code Error} only when the child has them, and no {@code Output}. Floci does not
+     * implement redrive, so the redrive fields carry what AWS reports for a child never redriven.
      */
-    private String nestedExecutionFailureCause(Execution child) {
-        ObjectNode cause = objectMapper.createObjectNode();
-        if (child.getCause() != null) {
-            cause.put("Cause", child.getCause());
+    private ObjectNode nestedExecutionEnvelope(Execution child, boolean succeeded, boolean payloadsAsJson)
+            throws JsonProcessingException {
+        ObjectNode envelope = objectMapper.createObjectNode();
+        if (!succeeded && child.getCause() != null) {
+            envelope.put("Cause", child.getCause());
         }
-        if (child.getError() != null) {
-            cause.put("Error", child.getError());
+        if (!succeeded && child.getError() != null) {
+            envelope.put("Error", child.getError());
         }
-        cause.put("ExecutionArn", child.getExecutionArn());
-        cause.put("Input", child.getInput() != null ? child.getInput() : "{}");
-        cause.putObject("InputDetails").put("Included", true);
-        cause.put("Name", child.getName());
-        cause.put("RedriveCount", 0);
-        cause.put("RedriveStatus", "REDRIVABLE");
-        cause.put("StartDate", Math.round(child.getStartDate() * 1000));
+        envelope.put("ExecutionArn", child.getExecutionArn());
+        String input = child.getInput() != null ? child.getInput() : "{}";
+        if (payloadsAsJson) {
+            envelope.set("Input", objectMapper.readTree(input));
+        } else {
+            envelope.put("Input", input);
+        }
+        envelope.putObject("InputDetails").put("Included", true);
+        envelope.put("Name", child.getName());
+        if (succeeded && child.getOutput() != null) {
+            if (payloadsAsJson) {
+                envelope.set("Output", objectMapper.readTree(child.getOutput()));
+            } else {
+                envelope.put("Output", child.getOutput());
+            }
+            envelope.putObject("OutputDetails").put("Included", true);
+        }
+        envelope.put("RedriveCount", 0);
+        envelope.put("RedriveStatus", succeeded ? "NOT_REDRIVABLE" : "REDRIVABLE");
+        if (succeeded) {
+            envelope.put("RedriveStatusReason", "Execution is SUCCEEDED and cannot be redriven");
+        }
+        envelope.put("StartDate", Math.round(child.getStartDate() * 1000));
         if (child.getStateMachineAliasArn() != null) {
-            cause.put("StateMachineAliasArn", child.getStateMachineAliasArn());
+            envelope.put("StateMachineAliasArn", child.getStateMachineAliasArn());
         }
-        cause.put("StateMachineArn", child.getStateMachineArn());
+        envelope.put("StateMachineArn", child.getStateMachineArn());
         if (child.getStateMachineVersionArn() != null) {
-            cause.put("StateMachineVersionArn", child.getStateMachineVersionArn());
+            envelope.put("StateMachineVersionArn", child.getStateMachineVersionArn());
         }
-        cause.put("Status", child.getStatus());
+        envelope.put("Status", child.getStatus());
         if (child.getStopDate() != null) {
-            cause.put("StopDate", Math.round(child.getStopDate() * 1000));
+            envelope.put("StopDate", Math.round(child.getStopDate() * 1000));
         }
-        return cause.toString();
+        return envelope;
     }
 
     /**
@@ -1825,7 +1850,8 @@ public class AslExecutor {
      *             (both ".sync" and ".waitForTaskToken" fail the state on a placement failure).
      */
     private JsonNode invokeEcsRunTask(String mode, JsonNode input, String region, String executionArn,
-                                      long executionDeadlineNanos, long taskDeadlineNanos) throws Exception {
+                                      long executionDeadlineNanos, long taskDeadlineNanos,
+                                      Consumer<JsonNode> jobSubmitted) throws Exception {
         String taskDefinition = input.path("TaskDefinition").asText(null);
         if (taskDefinition == null || taskDefinition.isBlank()) {
             throw new FailStateException("States.TaskFailed",
@@ -1901,6 +1927,22 @@ public class AslExecutor {
         // clock, a failure in a sibling Parallel branch, which interrupts this one, and a
         // StopExecution on the execution, which otherwise would leave this worker polling.
         List<String> taskArns = launched.stream().map(EcsTask::getTaskArn).toList();
+        // The job is submitted: AWS records the RunTask response here, before the wait (measured:
+        // Failures then Tasks, PascalCase).
+        ObjectNode runTaskResponse = objectMapper.createObjectNode();
+        runTaskResponse.putArray("Failures");
+        ArrayNode submittedTasks = runTaskResponse.putArray("Tasks");
+        for (EcsTask t : launched) {
+            submittedTasks.add(recaseKeys(objectMapper, ecsJsonHandler.taskNode(t), true));
+        }
+        try {
+            jobSubmitted.accept(runTaskResponse);
+        } catch (RuntimeException e) {
+            // Same as the nested case: the tasks are running and the wait that would stop them is
+            // never entered, so they are stopped here.
+            stopEcsTasks(cluster, taskArns, executionArn, region);
+            throw e;
+        }
         while (true) {
             try {
                 sleepOrTimeOutTask(TimeUnit.MILLISECONDS.toNanos(SYNC_POLL_INTERVAL_MS),
@@ -2584,6 +2626,11 @@ public class AslExecutor {
         JsonNode branches = stateDef.path("Branches");
         chain.publish("ParallelStateStarted", null);
         var branchChains = new ArrayList<HistoryChain>();
+        // The branches are joined in the order they complete, not the order they are declared, so
+        // a failure in any branch ends the Parallel while the others are still running, as on AWS
+        // (measured: the Parallel fails within about 0.1 s of the failing branch, whichever branch
+        // is listed first). The outputs still land in declaration order.
+        CompletionService<JsonNode> completions = new ExecutorCompletionService<>(executor);
         List<Future<JsonNode>> futures = new ArrayList<>();
 
         for (JsonNode branch : branches) {
@@ -2605,7 +2652,7 @@ public class AslExecutor {
             // A branch state that declares no QueryLanguage defaults to the state machine's, not to
             // this Parallel's: the ASL specification calls the two independent, so what travels
             // into the branch is topLevelQueryLanguage. https://states-language.net/spec.html
-            futures.add(executor.submit(() -> callUnderExecutionAccount(sm,
+            futures.add(completions.submit(() -> callUnderExecutionAccount(sm,
                     () -> executeBranch(startAt, branchStates, capturedInput, branchChain, sm,
                             topLevelQueryLanguage, branchContext, branchVariables))));
         }
@@ -2618,20 +2665,22 @@ public class AslExecutor {
         // own TimeoutSeconds, and the state machine's budget for the whole execution.
         long joinDeadlineNanos = Math.min(stateDeadlineNanos, executionDeadlineNanos);
 
-        ArrayNode results = objectMapper.createArrayNode();
-        var joined = 0;
+        JsonNode[] outputs = new JsonNode[futures.size()];
+        // The branch whose future was last taken from the completion queue: the failed one when
+        // the join ends in ExecutionException.
+        int current = -1;
         try {
-            for (Future<JsonNode> future : futures) {
+            for (int joined = 0; joined < futures.size(); joined++) {
                 long remainingNanos = joinDeadlineNanos - System.nanoTime();
                 if (remainingNanos <= 0) {
                     throw parallelJoinExpired(stateDeadlineNanos, timeoutSeconds);
                 }
-                try {
-                    results.add(future.get(remainingNanos, TimeUnit.NANOSECONDS));
-                } catch (java.util.concurrent.TimeoutException e) {
+                Future<JsonNode> done = completions.poll(remainingNanos, TimeUnit.NANOSECONDS);
+                if (done == null) {
                     throw parallelJoinExpired(stateDeadlineNanos, timeoutSeconds);
                 }
-                joined++;
+                current = futures.indexOf(done);
+                outputs[current] = done.get();
             }
         } catch (InterruptedException e) {
             abandon(branchChains, futures);
@@ -2639,7 +2688,7 @@ public class AslExecutor {
             throw e;
         } catch (ExecutionException e) {
             List<String> abortedEventTypes = cutAfterFailure(branchChains, futures);
-            chain.continueFrom(branchChains.get(joined).lastEventId());
+            chain.continueFrom(branchChains.get(current).lastEventId());
             if (e.getCause() instanceof FailStateException failure && !failure.isRuntimeError()) {
                 for (String abortedEventType : abortedEventTypes) {
                     chain.publishBeside(abortedEventType, null);
@@ -2666,6 +2715,10 @@ public class AslExecutor {
         chain.continueAfter(branchChains);
         chain.publishAside("ParallelStateSucceeded", null);
 
+        ArrayNode results = objectMapper.createArrayNode();
+        for (JsonNode output : outputs) {
+            results.add(output);
+        }
         if (jsonata) {
             JsonNode output = applyJsonataOutput(stateDef, input, results, context, variables);
             return new StateResult(output, stateDef.path("Next").asText(null));
@@ -2822,7 +2875,7 @@ public class AslExecutor {
                             : resolveParameters(itemTransform, mapInput, iterContext);
                 }
                 if (!distributed) {
-                    iterationChain.publish("MapIterationStarted", Map.of("name", name, "index", i));
+                    iterationChain.publishIterationStart("MapIterationStarted", Map.of("name", name, "index", i));
                 }
                 iterationStarted = true;
                 if (hasResultWriter) {
@@ -2838,17 +2891,20 @@ public class AslExecutor {
             } catch (FailStateException e) {
                 int failedSoFar = failedItems.addAndGet(itemsInChild);
                 failedExecutions.incrementAndGet();
-                if (iterationStarted && !distributed && !e.isRuntimeError()) {
-                    iterationChain.publishAside("MapIterationFailed", Map.of("name", name, "index", i));
-                }
+                boolean recordFailed = iterationStarted && !distributed && !e.isRuntimeError();
+                // A failure that ends the Map records its MapIterationFailed only once the other
+                // iterations have been cut, since AWS records what it cut first.
                 if (!tolerated.declared()) {
-                    throw new IterationFailure(i, e);
+                    throw new IterationFailure(i, e, recordFailed);
                 }
                 if (failedSoFar > tolerated.threshold()) {
                     throw new IterationFailure(i, new FailStateException(
                             "States.ExceedToleratedFailureThreshold",
                             "The map run failed because a tolerated failure threshold was exceeded. "
-                                    + failedSoFar + " of " + itemCount + " items failed."));
+                                    + failedSoFar + " of " + itemCount + " items failed."), recordFailed);
+                }
+                if (recordFailed) {
+                    iterationChain.publishIterationEndAside("MapIterationFailed", Map.of("name", name, "index", i));
                 }
                 if (hasResultWriter) {
                     failedByIndex[i] = new FailedChild(childInputsByIndex[i],
@@ -2859,7 +2915,7 @@ public class AslExecutor {
             succeededItems.addAndGet(itemsInChild);
             succeededExecutions.incrementAndGet();
             if (!distributed) {
-                iterationChain.publish("MapIterationSucceeded", Map.of("name", name, "index", i));
+                iterationChain.publishIterationEnd("MapIterationSucceeded", Map.of("name", name, "index", i));
             }
             if (hasResultWriter) {
                 childTimingsByIndex[i] = new long[]{startMs, System.currentTimeMillis()};
@@ -2869,11 +2925,17 @@ public class AslExecutor {
 
         if (childCount > 0) {
             List<JsonNode> itemOutputs;
+            // The iterations a failure cuts, each read and cut in one step before it is cancelled,
+            // as a Parallel does with its branches (cutAfterFailure). Filled on this thread. Only an
+            // iteration whose start is recorded and whose end is not gets recorded: the scheduler
+            // names every iteration it has not yet taken off its queue, started or ended or not.
+            List<CutIteration> cutIterations = new ArrayList<>();
             try {
                 itemOutputs = MapIterationScheduler.execute(
                         childCount, Math.max(1, effectiveConcurrency),
                         i -> () -> callUnderExecutionAccount(sm, makeTask.apply(i)),
-                        executionDeadlineNanos);
+                        executionDeadlineNanos,
+                        i -> cutIteration(iterationChains.get(i), i, cutIterations));
             } catch (java.util.concurrent.TimeoutException e) {
                 // The only deadline the scheduler is given is the state machine's budget, so its
                 // expiry ends the execution rather than failing the Map state.
@@ -2882,6 +2944,19 @@ public class AslExecutor {
                 // A Distributed Map's chain stays at MapRunStarted, as on AWS.
                 if (!distributed) {
                     chain.continueFrom(iterationChains.get(e.index).lastEventId());
+                    // Each event follows the rule of the one it accompanies. The cut iterations are
+                    // recorded right before MapStateFailed and follow its rule: the failure that ends
+                    // the Map is not States.Runtime. MapIterationFailed follows the iteration's own:
+                    // it started, and its own error is not States.Runtime. The two differ for an
+                    // ItemSelector that fails before the iteration starts, which cuts the others but
+                    // has no iteration to report, and for a States.Runtime failure that exceeds a
+                    // declared tolerance, where the Map ends with the tolerance error instead.
+                    if (!e.failure.isRuntimeError()) {
+                        publishCutIterations(chain, name, cutIterations);
+                    }
+                    if (e.recordFailed) {
+                        chain.publishBeside("MapIterationFailed", Map.of("name", name, "index", e.index));
+                    }
                 } else {
                     publishMapRunFailedEvent(chain, e.failure);
                     recordMapRun(mapRunRecord, "FAILED", succeededItems.get(), failedItems.get(),
@@ -5391,6 +5466,14 @@ public class AslExecutor {
         if (resource.contains(":lambda:") && resource.contains(":function:")) {
             return new TaskEventProfile("LambdaFunction", null, resource);
         }
+        // A well-formed integration id splits at its service: AWS reports states / startExecution.sync:2,
+        // and a split at the last colon would report startExecution.sync / 2 for it.
+        StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
+        if (integration != null) {
+            return new TaskEventProfile("Task",
+                    (integration.sdk() ? "aws-sdk:" : "") + integration.service(),
+                    integration.api() + integration.suffix());
+        }
         String tail = StatesIntegration.tail(resource).orElse(null);
         if (tail != null) {
             int idx = tail.lastIndexOf(':');
@@ -5432,6 +5515,20 @@ public class AslExecutor {
         } else {
             chain.publish(profile.prefix() + "Started", null);
         }
+    }
+
+    /**
+     * Recorded for a {@code .sync} Task once the call that started its job has returned, carrying
+     * that response as {@code output}. AWS also folds the SDK's {@code SdkHttpMetadata} and
+     * {@code SdkResponseMetadata} into it; Floci records the response fields alone.
+     */
+    private void addTaskSubmittedEvent(HistoryChain chain, TaskEventProfile profile, JsonNode jobResponse) {
+        LinkedHashMap<String, Object> details = new LinkedHashMap<>();
+        details.put("resourceType", profile.resourceType());
+        details.put("resource", profile.resource());
+        details.put("output", jobResponse.toString());
+        details.put("outputDetails", Map.of("truncated", false));
+        chain.publish("TaskSubmitted", details);
     }
 
     private void addTaskSucceededEvent(HistoryChain chain, TaskEventProfile profile, JsonNode taskResult) {
@@ -5771,11 +5868,40 @@ public class AslExecutor {
     private static final class IterationFailure extends RuntimeException {
         final int index;
         final FailStateException failure;
+        /** Whether the Map records the iteration's MapIterationFailed once the others are cut. */
+        final boolean recordFailed;
 
-        IterationFailure(int index, FailStateException failure) {
+        IterationFailure(int index, FailStateException failure, boolean recordFailed) {
             super(failure.getMessage(), failure, false, false);
             this.index = index;
             this.failure = failure;
+            this.recordFailed = recordFailed;
+        }
+    }
+
+    /** An iteration a failure cut, and the state it was in, or null when it was between states. */
+    private record CutIteration(int index, String stateType) {}
+
+    private static void cutIteration(HistoryChain iteration, int index, List<CutIteration> cutIterations) {
+        HistoryChain.IterationCut cut = iteration.abandonIteration();
+        if (cut.recorded()) {
+            cutIterations.add(new CutIteration(index, cut.stateType()));
+        }
+    }
+
+    /**
+     * Records the iterations a failure cut, the way AWS was measured recording them: for each, a
+     * {@code MapIterationAborted} and then the {@code *StateAborted} of the Task or Wait it was in,
+     * all chained to the failing iteration's last event, ahead of {@code MapIterationFailed} and
+     * {@code MapStateFailed}. An iteration between states, or inside any other state type, records
+     * only the {@code MapIterationAborted}.
+     */
+    private static void publishCutIterations(HistoryChain chain, String name, List<CutIteration> cutIterations) {
+        for (CutIteration cut : cutIterations) {
+            chain.publishBeside("MapIterationAborted", Map.of("name", name, "index", cut.index()));
+            if ("Task".equals(cut.stateType()) || "Wait".equals(cut.stateType())) {
+                chain.publishBeside(cut.stateType() + "StateAborted", null);
+            }
         }
     }
 

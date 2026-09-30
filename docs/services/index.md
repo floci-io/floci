@@ -78,7 +78,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Redshift Data API](redshift-data.md) | `POST /` + `X-Amz-Target: RedshiftData.*` | JSON 1.1 | 11 |
 | [Redshift Serverless](redshift-serverless.md) | `POST /` + `X-Amz-Target: RedshiftServerless.*` | JSON 1.1 | 8 |
 | [EMR](emr.md) | `POST /` + `X-Amz-Target: ElasticMapReduce.*` | JSON 1.1 | 24 |
-| [EMR Serverless](emr-serverless.md) | `/applications/*` | REST JSON | 7 |
+| [EMR Serverless](emr-serverless.md) | `/applications/*`, `/tags/*` | REST JSON | 10 |
 | [Data Firehose](firehose.md) | `POST /` + `X-Amz-Target: Firehose_20150804.*` | JSON 1.1 | 6 |
 | [ECS](ecs.md) | `POST /` + `X-Amz-Target: AmazonEC2ContainerServiceV20141113.*` | JSON 1.1 | 58 |
 | [EFS](efs.md) | `/2015-02-01/...` | REST JSON | 17 |

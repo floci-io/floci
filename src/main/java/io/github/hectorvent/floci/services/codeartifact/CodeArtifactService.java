@@ -35,7 +35,6 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -568,8 +567,30 @@ public class CodeArtifactService implements Resettable {
 
         CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key).orElse(null);
         if (pv != null && "Published".equals(pv.getStatus())) {
-            throw conflict("Package version '" + version + "' of package '" + packageName + "' is already "
-                    + "Published; no additional assets can be uploaded to it.", version, "package-version");
+            // AWS's idempotency rule ("Overwriting package assets" in CodeArtifact's packages
+            // overview) is not scoped to Unfinished versions, and the terminal publish call (the
+            // one that finishes a version, or a single-shot generic publish that's Published
+            // immediately) is the likeliest one a client retries after a dropped response. A brand
+            // new asset name is still rejected outright: once Published, only a byte-identical
+            // replay of an asset that's already there is idempotent, nothing new can be added.
+            PackageAsset existingAsset = pv.getAssets().get(assetName);
+            if (existingAsset == null) {
+                throw conflict("Package version '" + version + "' of package '" + packageName + "' is already "
+                        + "Published; no additional assets can be uploaded to it.", version, "package-version");
+            }
+            // Throws on a genuine mismatch; a Published version can never transition to anything
+            // else via republish, so the match/no-stored-hash distinction contentMatchesExisting
+            // returns doesn't matter here the way it does for the Unfinished path below.
+            contentMatchesExisting(existingAsset, assetName, version, packageName, actualSha256);
+            // Only rewrites when the actual disk bytes don't check out: an intact retry (the
+            // overwhelmingly common case) must stay a true no-op that needs no write capacity at
+            // all, not fail just because the asset store happens to be low on free space. Repairs
+            // (missing file, or bytes corrupted independently of Floci) still self-heal here, since
+            // existingFileMatches actually reads the file back rather than trusting it's fine.
+            if (!existingFileMatches(owner, key, assetName, actualSha256)) {
+                writeAssetContent(owner, key, assetName, assetContent);
+            }
+            return new PublishPackageVersionResult(pv, existingAsset);
         }
         if (pv == null) {
             pv = new CodeArtifactPackageVersion();
@@ -584,20 +605,23 @@ public class CodeArtifactService implements Resettable {
         }
 
         Map<String, PackageAsset> assets = new LinkedHashMap<>(pv.getAssets());
-        // AWS's own docs ("Overwriting package assets" in CodeArtifact's packages overview): a
-        // republish of an asset name that already exists is only rejected when the new content
-        // actually differs from what's already there; byte-identical content succeeds because the
-        // operation is idempotent, e.g. a client retrying after a dropped response. The in-memory
-        // PackageAsset.content field is @JsonIgnore and not reliable after a reload from persisted
-        // storage, so the real existing bytes have to come from the asset store, the same place
-        // getPackageVersionAsset reads them from. A genuinely missing backing file (metadata says
-        // the asset exists but its bytes don't, e.g. a partial restore) reads the same as "nothing
-        // to conflict with" rather than a hard failure, so a republish can still repair it.
-        if (assets.containsKey(assetName) && !existingAssetMatchesOrIsMissing(owner, key, assetName, assetContent)) {
-            throw conflict("Asset '" + assetName + "' already exists for package version '" + version
-                    + "' of package '" + packageName + "' with different content.", assetName, "asset");
+        PackageAsset existingAsset = assets.get(assetName);
+        if (existingAsset != null) {
+            // Throws on a genuine mismatch. A confirmed exact match is a true no-op only when this
+            // call also isn't trying to finalize the version (unfinished=false): that's a real
+            // status transition to Published even when the one asset it happens to touch is
+            // unchanged, and must not be skipped just because that asset's bytes already matched.
+            boolean matches = contentMatchesExisting(existingAsset, assetName, version, packageName, actualSha256);
+            if (matches && unfinished) {
+                // Only rewrites when the actual disk bytes don't check out: see the identical
+                // reasoning on the Published branch above.
+                if (!existingFileMatches(owner, key, assetName, actualSha256)) {
+                    writeAssetContent(owner, key, assetName, assetContent);
+                }
+                return new PublishPackageVersionResult(pv, existingAsset);
+            }
         }
-        if (!assets.containsKey(assetName) && assets.size() >= MAX_ASSETS_PER_PACKAGE_VERSION) {
+        if (existingAsset == null && assets.size() >= MAX_ASSETS_PER_PACKAGE_VERSION) {
             throw new AwsException("ServiceQuotaExceededException",
                     "A package version can have a maximum of " + MAX_ASSETS_PER_PACKAGE_VERSION + " assets.", 402,
                     resourceFields(version, "package-version"));
@@ -952,6 +976,45 @@ public class CodeArtifactService implements Resettable {
 
     // ----------------------------------------------------------- asset bytes
 
+    /**
+     * {@code true} when the existing backing bytes actually hash to {@code expectedSha256}, so an
+     * idempotent retry can safely skip rewriting them; {@code false} when the file is missing,
+     * unreadable, or its real content doesn't match, meaning a repair write is still needed. For
+     * disk-backed storage this streams the file in fixed-size chunks rather than loading it whole:
+     * the caller's own upload is already fully resident in memory, so verifying a large existing
+     * asset this way costs no second full copy the way loading it to compare would. Deliberately
+     * separate from {@link #contentMatchesExisting}, which only compares persisted metadata and
+     * never touches disk: that is enough to reject a genuinely different republish outright, but
+     * not enough to know the disk file backing a *matching* one hasn't been corrupted or gone
+     * missing independently of Floci, which only actually reading it back can confirm.
+     */
+    private boolean existingFileMatches(String owner, String packageVersionKey, String assetName,
+                                         String expectedSha256) {
+        if (inMemory) {
+            byte[] existing = memoryAssetStore.get(assetStoreKey(owner, packageVersionKey, assetName));
+            return existing != null && expectedSha256.equalsIgnoreCase(sha256Hex(existing));
+        }
+        Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
+        try (InputStream in = Files.newInputStream(filePath)) {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                digest.update(buffer, 0, read);
+            }
+            return expectedSha256.equalsIgnoreCase(SigV4RequestValidator.hexEncode(digest.digest()));
+        } catch (NoSuchFileException e) {
+            return false;
+        } catch (IOException e) {
+            // Any I/O error reading the existing file (not just a clean "not found") reads the
+            // same as "can't confirm it's intact": a repair write is the safe response, not a
+            // thrown exception that would turn an otherwise-successful idempotent retry into one.
+            return false;
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("JVM does not support SHA-256", e);
+        }
+    }
+
     private void writeAssetContent(String owner, String packageVersionKey, String assetName, byte[] content) {
         if (inMemory) {
             memoryAssetStore.put(assetStoreKey(owner, packageVersionKey, assetName), content);
@@ -984,43 +1047,6 @@ public class CodeArtifactService implements Resettable {
         Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
         try {
             return Files.readAllBytes(filePath);
-        } catch (IOException e) {
-            throw new UncheckedIOException("Failed to read CodeArtifact asset file: " + filePath, e);
-        }
-    }
-
-    /**
-     * {@code true} when the asset's backing bytes are genuinely missing (e.g. a partial restore
-     * left the metadata but not the file, so there is nothing to conflict with) or match
-     * {@code newContent}; {@code false} only on a real mismatch. Deliberately never materializes
-     * the existing file as a second full byte array: {@code newContent} is already fully resident
-     * (RESTEasy Reactive buffers the whole request body before this method ever runs), so loading a
-     * second full copy of a large existing asset just to compare it would double peak memory for a
-     * same-content retry. Also deliberately separate from {@link #readAssetContent}: a real
-     * download through {@code getPackageVersionAsset} needs a missing file to stay a hard failure,
-     * not silently read as "nothing published yet".
-     */
-    private boolean existingAssetMatchesOrIsMissing(String owner, String packageVersionKey, String assetName,
-                                                      byte[] newContent) {
-        if (inMemory) {
-            byte[] existing = memoryAssetStore.get(assetStoreKey(owner, packageVersionKey, assetName));
-            return existing == null || Arrays.equals(existing, newContent);
-        }
-        Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
-        try (InputStream in = Files.newInputStream(filePath)) {
-            byte[] buffer = new byte[8192];
-            int offset = 0;
-            int read;
-            while ((read = in.read(buffer)) != -1) {
-                if (offset + read > newContent.length || !Arrays.equals(buffer, 0, read,
-                        newContent, offset, offset + read)) {
-                    return false;
-                }
-                offset += read;
-            }
-            return offset == newContent.length;
-        } catch (NoSuchFileException e) {
-            return true;
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to read CodeArtifact asset file: " + filePath, e);
         }
@@ -1067,6 +1093,31 @@ public class CodeArtifactService implements Resettable {
             return Boolean.parseBoolean(value);
         }
         throw validation("unfinished must be 'true' or 'false'.");
+    }
+
+    /**
+     * Rejects with {@code ConflictException} when {@code existingAsset}'s stored SHA-256 differs
+     * from the new upload's. Compares against the asset's own persisted {@code hashes} map rather
+     * than its bytes: unlike {@code PackageAsset.content} (which is {@code @JsonIgnore} and empty
+     * after a reload from persisted storage), the hash survives normally, so this needs no disk
+     * read, no in-memory-store lookup, and no missing-backing-file special case at all, since a
+     * hash never "goes missing" the way a file can.
+     *
+     * <p>Returns {@code true} only on a confirmed exact match, letting a caller treat that case as
+     * a genuine no-op; {@code false} when there's no stored hash to compare against (defensive:
+     * every asset gets one computed at publish time, so not a path any real request reaches).
+     */
+    private static boolean contentMatchesExisting(PackageAsset existingAsset, String assetName, String version,
+                                                   String packageName, String actualSha256) {
+        String existingSha256 = existingAsset.getHashes().get("SHA-256");
+        if (existingSha256 == null) {
+            return false;
+        }
+        if (!existingSha256.equalsIgnoreCase(actualSha256)) {
+            throw conflict("Asset '" + assetName + "' already exists for package version '" + version
+                    + "' of package '" + packageName + "' with different content.", assetName, "asset");
+        }
+        return true;
     }
 
     private static Map<String, String> computeHashes(byte[] content) {

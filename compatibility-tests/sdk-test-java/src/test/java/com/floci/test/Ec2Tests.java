@@ -969,6 +969,75 @@ class Ec2Tests {
 
     @Test
     @Order(50)
+    @DisplayName("DescribeVpcEndpoints - an interface endpoint reports its network interfaces")
+    void describeVpcEndpointsReportsNetworkInterfaceIds() {
+        // The wire element is networkInterfaceIdSet, and the point of asserting it HERE
+        // rather than only over raw XML is that this proves the real Java SDK deserializes
+        // it into networkInterfaceIds(). A response can be well-formed XML and still not
+        // populate the SDK model -- a wrong element name or nesting fails silently, leaving
+        // an empty list rather than an error, which is exactly the symptom being fixed.
+        // OWNS ITS FIXTURES. The shared subnetId and security group this test originally
+        // used are destroyed before it runs -- @Order(44) deletes the subnet and sets
+        // subnetId to null, @Order(45) deletes the group -- so it was passing null as a
+        // subnet id and asserting on groups that no longer existed. Caught in review.
+        // An ordered suite sharing mutable fixtures makes "what exists here" a function of
+        // position, so a test placed late has to create what it needs.
+        String ownSubnetId = null;
+        String ownGroupId = null;
+        String endpointId = null;
+        try {
+            ownSubnetId = ec2.createSubnet(CreateSubnetRequest.builder()
+                    .vpcId(vpcId).cidrBlock("10.0.90.0/24").availabilityZone("us-east-1a")
+                    .build()).subnet().subnetId();
+            ownGroupId = ec2.createSecurityGroup(CreateSecurityGroupRequest.builder()
+                    .groupName("vpce-eni-sdk-test").description("endpoint interface ids")
+                    .vpcId(vpcId).build()).groupId();
+
+            CreateVpcEndpointResponse created = ec2.createVpcEndpoint(
+                    CreateVpcEndpointRequest.builder()
+                            .vpcId(vpcId)
+                            .serviceName("com.amazonaws.us-east-1.ec2")
+                            .vpcEndpointType(VpcEndpointType.INTERFACE)
+                            .subnetIds(ownSubnetId)
+                            .securityGroupIds(ownGroupId)
+                            .build());
+            endpointId = created.vpcEndpoint().vpcEndpointId();
+
+            // Asserted on the CREATE response and again on DESCRIBE, because Terraform
+            // reads the ids from one and then re-reads them from the other between plan
+            // and apply; both renderings have to agree.
+            assertThat(created.vpcEndpoint().networkInterfaceIds())
+                    .as("CreateVpcEndpoint response")
+                    .hasSize(1)
+                    .allMatch(id -> id.matches("eni-[0-9a-f]{17}"));
+
+            DescribeVpcEndpointsResponse described = ec2.describeVpcEndpoints(
+                    DescribeVpcEndpointsRequest.builder().vpcEndpointIds(endpointId).build());
+            VpcEndpoint ep = described.vpcEndpoints().get(0);
+
+            assertThat(ep.networkInterfaceIds())
+                    .as("DescribeVpcEndpoints response")
+                    .isEqualTo(created.vpcEndpoint().networkInterfaceIds());
+            assertThat(ep.groups()).isNotEmpty();
+            assertThat(ep.dnsEntries()).isNotEmpty();
+        } finally {
+            if (endpointId != null) {
+                ec2.deleteVpcEndpoints(DeleteVpcEndpointsRequest.builder()
+                        .vpcEndpointIds(endpointId).build());
+            }
+            if (ownGroupId != null) {
+                ec2.deleteSecurityGroup(DeleteSecurityGroupRequest.builder()
+                        .groupId(ownGroupId).build());
+            }
+            if (ownSubnetId != null) {
+                ec2.deleteSubnet(DeleteSubnetRequest.builder()
+                        .subnetId(ownSubnetId).build());
+            }
+        }
+    }
+
+    @Test
+    @Order(51)
     @DisplayName("DeleteVpc - delete VPC")
     void deleteVpc() {
         ec2.deleteVpc(DeleteVpcRequest.builder().vpcId(vpcId).build());

@@ -182,6 +182,39 @@ class SqsServiceTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"59", "1209601", "abc", "60.5", "", "-1", " 60", "60 ", "99999999999"})
+    void messageRetentionPeriodOutsideAwsRangeIsRejected(String invalid) {
+        String region = "eu-west-1";
+        AwsException onCreate = assertThrows(AwsException.class,
+                () -> sqsService.createQueue("retention-range", Map.of("MessageRetentionPeriod", invalid), region));
+        assertEquals("InvalidAttributeValue", onCreate.getErrorCode());
+        assertEquals("Invalid value for the parameter MessageRetentionPeriod.", onCreate.getMessage());
+
+        Queue queue = sqsService.createQueue("retention-range", null, region);
+        AwsException onSet = assertThrows(AwsException.class,
+                () -> sqsService.setQueueAttributes(queue.getQueueUrl(),
+                        Map.of("MessageRetentionPeriod", invalid), region));
+        assertEquals("InvalidAttributeValue", onSet.getErrorCode());
+        assertEquals("Invalid value for the parameter MessageRetentionPeriod.", onSet.getMessage());
+        assertEquals("345600", sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("MessageRetentionPeriod"), region).get("MessageRetentionPeriod"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"60, 60", "1209600, 1209600", "060, 60", "+60, 60"})
+    void messageRetentionPeriodIsStoredInCanonicalForm(String value, String stored) {
+        String region = "eu-west-1";
+        Queue created = sqsService.createQueue("retention-created", Map.of("MessageRetentionPeriod", value), region);
+        assertEquals(stored, sqsService.getQueueAttributes(created.getQueueUrl(),
+                List.of("MessageRetentionPeriod"), region).get("MessageRetentionPeriod"));
+
+        Queue updated = sqsService.createQueue("retention-updated", null, region);
+        sqsService.setQueueAttributes(updated.getQueueUrl(), Map.of("MessageRetentionPeriod", value), region);
+        assertEquals(stored, sqsService.getQueueAttributes(updated.getQueueUrl(),
+                List.of("MessageRetentionPeriod"), region).get("MessageRetentionPeriod"));
+    }
+
     @Test
     void createQueue_acceptsTheAwsCeilingWhenTheConfiguredMaximumIsLower() {
         String region = "eu-west-1";
@@ -1727,7 +1760,7 @@ class SqsServiceTest {
 
     private static void awaitMoveTaskStatus(SqsService service, String sourceArn, String taskHandle,
                                             String expectedStatus) throws Exception {
-        for (int attempt = 0; attempt < 100; attempt++) {
+        for (int attempt = 0; attempt < 500; attempt++) {
             boolean reachedStatus = service.listMessageMoveTasks(sourceArn, "us-east-1").stream()
                     .anyMatch(task -> task.taskHandle().equals(taskHandle)
                             && expectedStatus.equals(task.status()));
@@ -2014,5 +2047,132 @@ class SqsServiceTest {
                 "A long poll driven by the queue attribute must return as soon as a message arrives");
         assertEquals(1, result.get().size());
         assertEquals("wake-up", result.get().get(0).getBody());
+    }
+
+    @Test
+    void messagePastRetentionPeriodIsNotReturned() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("retention-queue",
+                Map.of("MessageRetentionPeriod", "60"), region);
+        Message sent = sqsService.sendMessage(queue.getQueueUrl(), "old", 0, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "fresh", 0, region);
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("ApproximateNumberOfMessages"), region);
+        assertEquals("1", attrs.get("ApproximateNumberOfMessages"));
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0, region);
+        assertEquals(List.of("fresh"), received.stream().map(Message::getBody).toList());
+    }
+
+    @Test
+    void shorterRetentionPeriodExpiresExistingMessages() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("retention-shrink", null, region);
+        Message sent = sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        sent.setSentTimestamp(Instant.now().minusSeconds(120));
+        assertEquals(1, sqsService.peekMessages(queue.getQueueUrl(), region).size());
+
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("MessageRetentionPeriod", "60"), region);
+
+        assertTrue(sqsService.peekMessages(queue.getQueueUrl(), region).isEmpty());
+    }
+
+    @Test
+    void standardDeadLetterQueueKeepsOriginalEnqueueTimeForRetention() {
+        String region = "us-east-1";
+        Queue dlq = sqsService.createQueue("retention-dlq",
+                Map.of("MessageRetentionPeriod", "60"), region);
+        Queue source = sqsService.createQueue("retention-src",
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + queueArn("retention-dlq")
+                        + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "msg", 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        assertEquals(1, sqsService.peekMessages(dlq.getQueueUrl(), region).size());
+
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+
+        assertTrue(sqsService.peekMessages(dlq.getQueueUrl(), region).isEmpty());
+    }
+
+    @Test
+    void fifoDeadLetterQueueRestartsRetentionPeriod() {
+        String region = "us-east-1";
+        Queue dlq = sqsService.createQueue("retention-dlq.fifo",
+                Map.of("FifoQueue", "true", "MessageRetentionPeriod", "60"), region);
+        Queue source = sqsService.createQueue("retention-src.fifo",
+                Map.of("FifoQueue", "true", "RedrivePolicy", "{\"deadLetterTargetArn\":\""
+                        + queueArn("retention-dlq.fifo") + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "msg", 0, "g1", "d1", region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+
+        assertEquals(1, sqsService.peekMessages(dlq.getQueueUrl(), region).size());
+    }
+
+    @Test
+    void messageMoveTaskRestartsRetentionPeriod() {
+        String region = "us-east-1";
+        sqsService.createQueue("retention-mv-dlq", null, region);
+        Queue source = sqsService.createQueue("retention-mv-src",
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + queueArn("retention-mv-dlq")
+                        + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Queue dest = sqsService.createQueue("retention-mv-dest",
+                Map.of("MessageRetentionPeriod", "60"), region);
+        Message sent = sqsService.sendMessage(source.getQueueUrl(), "msg", 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+        Instant sentAt = Instant.now().minusSeconds(61);
+        sent.setSentTimestamp(sentAt);
+
+        sqsService.startMessageMoveTask(queueArn("retention-mv-dlq"), queueArn("retention-mv-dest"), region);
+
+        List<Message> moved = sqsService.peekMessages(dest.getQueueUrl(), region);
+        assertEquals(1, moved.size());
+        assertEquals(sentAt, moved.get(0).getSentTimestamp());
+    }
+
+    @Test
+    void rateLimitedMessageMoveTaskDropsMessagesThatExpireDuringTheMove() throws Exception {
+        String region = "us-east-1";
+        sqsService.createQueue("retention-rl-dlq", Map.of("MessageRetentionPeriod", "60"), region);
+        Queue source = sqsService.createQueue("retention-rl-src",
+                Map.of("RedrivePolicy", "{\"deadLetterTargetArn\":\"" + queueArn("retention-rl-dlq")
+                        + "\",\"maxReceiveCount\":\"1\"}"), region);
+        Queue dest = sqsService.createQueue("retention-rl-dest", null, region);
+        sqsService.sendMessage(source.getQueueUrl(), "first", 0, region);
+        Message second = sqsService.sendMessage(source.getQueueUrl(), "second", 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 10, 0, 0, region);
+        sqsService.receiveMessage(source.getQueueUrl(), 10, 0, 0, region);
+        String dlqArn = queueArn("retention-rl-dlq");
+        // Still live when the task starts, expired when the worker reaches it a second later.
+        second.setSentTimestamp(Instant.now().minusSeconds(59));
+
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, queueArn("retention-rl-dest"), 1, region);
+        awaitMoveTaskStatus(dlqArn, taskHandle, "COMPLETED");
+        assertEquals(2, sqsService.listMessageMoveTasks(dlqArn, region).get(0).approximateNumberOfMessagesToMove());
+
+        List<Message> moved = sqsService.peekMessages(dest.getQueueUrl(), region);
+        assertEquals(List.of("first"), moved.stream().map(Message::getBody).toList());
+    }
+
+    @Test
+    void deleteExpiredMessagesRemovesThemFromStorage() {
+        String region = "us-east-1";
+        InMemoryStorage<String, List<Message>> messageStore = new InMemoryStorage<>();
+        SqsService service = new SqsService(new InMemoryStorage<>(), messageStore, new InMemoryStorage<>(),
+                30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"));
+        Queue queue = service.createQueue("retention-sweep", Map.of("MessageRetentionPeriod", "60"), region);
+        Message sent = service.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        sent.setSentTimestamp(Instant.now().minusSeconds(61));
+        String storageKey = region + "::/000000000000/retention-sweep";
+        assertEquals(1, messageStore.get(storageKey).orElseThrow().size());
+
+        service.deleteExpiredMessages();
+
+        assertTrue(messageStore.get(storageKey).orElseThrow().isEmpty());
     }
 }

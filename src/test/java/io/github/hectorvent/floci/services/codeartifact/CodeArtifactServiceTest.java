@@ -854,14 +854,42 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         byte[] content = "same-bytes".getBytes(StandardCharsets.UTF_8);
-        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
-                sha256Hex(content), "true", content);
+        PublishPackageVersionResult first = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "true", content);
+        // pv is the same mutable object across calls in this storage backend, so the revision has
+        // to be captured now, before the retry below has a chance to change it in place.
+        String firstRevision = first.packageVersion().getRevision();
 
-        PublishPackageVersionResult result = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+        PublishPackageVersionResult retry = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
                 null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "true", content);
 
-        assertEquals("Unfinished", result.packageVersion().getStatus());
-        assertEquals(1, result.packageVersion().getAssets().size());
+        assertEquals("Unfinished", retry.packageVersion().getStatus());
+        assertEquals(1, retry.packageVersion().getAssets().size());
+        assertEquals(firstRevision, retry.packageVersion().getRevision());
+    }
+
+    /**
+     * A no-op-looking retry (same asset name, same content) must not be treated as a true no-op
+     * when it also flips {@code unfinished} to {@code false}: that is a real status transition to
+     * Published, and skipping it just because the one asset it touches happens to be unchanged
+     * would leave the version stuck Unfinished forever.
+     */
+    @Test
+    void finalizingWithTheSameAssetContentStillTransitionsToPublished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "same-bytes".getBytes(StandardCharsets.UTF_8);
+        PublishPackageVersionResult unfinished = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "true", content);
+        // pv is the same mutable object across calls in this storage backend, so this must be
+        // checked before the second call mutates it, not read back afterward.
+        assertEquals("Unfinished", unfinished.packageVersion().getStatus());
+
+        PublishPackageVersionResult finalized = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
+
+        assertEquals("Published", finalized.packageVersion().getStatus());
+        assertTrue(finalized.packageVersion().getPublishedTime() != null);
     }
 
     @Test
@@ -893,6 +921,40 @@ class CodeArtifactServiceTest {
         assertEquals("ConflictException", e.getErrorCode());
         assertEquals("1.0.0", e.getExtendedData().get("resourceId"));
         assertEquals("package-version", e.getExtendedData().get("resourceType"));
+    }
+
+    @Test
+    void republishingTheExactSameAssetToAnAlreadyPublishedVersionSucceedsIdempotently() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        PublishPackageVersionResult first = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
+        // pv is the same mutable object across calls in this storage backend, so the revision has
+        // to be captured now, before the retry below has a chance to change it in place.
+        String firstRevision = first.packageVersion().getRevision();
+
+        PublishPackageVersionResult retry = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
+                null, "my-pkg", "1.0.0", "a.txt", sha256Hex(content), "false", content);
+
+        assertEquals("Published", retry.packageVersion().getStatus());
+        assertEquals(firstRevision, retry.packageVersion().getRevision());
+    }
+
+    @Test
+    void republishingAnAlreadyPublishedAssetWithDifferentContentConflicts() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "x".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "false", content);
+
+        byte[] different = "y".getBytes(StandardCharsets.UTF_8);
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", null, "my-pkg", "1.0.0", "a.txt", sha256Hex(different), "false", different));
+        assertEquals("ConflictException", e.getErrorCode());
+        assertEquals("a.txt", e.getExtendedData().get("resourceId"));
+        assertEquals("asset", e.getExtendedData().get("resourceType"));
     }
 
     @Test
