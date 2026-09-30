@@ -25,8 +25,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -53,6 +56,7 @@ class AslExecutorNestedStartExecutionTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private AslExecutor executor;
     private StepFunctionsService childSfn;
+    private List<HistoryEvent> history;
 
     @BeforeEach
     @SuppressWarnings("unchecked")
@@ -101,7 +105,8 @@ class AslExecutorNestedStartExecutionTest {
         exec.setExecutionArn("arn:aws:states:us-east-1:000000000000:execution:parent:pe");
         exec.setStateMachineArn(sm.getStateMachineArn());
         exec.setInput(input);
-        executor.executeSync(sm, exec, new ArrayList<HistoryEvent>(), (u, e) -> {
+        history = new ArrayList<>();
+        executor.executeSync(sm, exec, history, (u, e) -> {
         });
         return exec;
     }
@@ -284,5 +289,58 @@ class AslExecutorNestedStartExecutionTest {
             assertEquals("SUCCEEDED", output.path("status").asText(), "sync returns the execution envelope");
             assertEquals("{\"ok\":true}", output.path("output").asText(), "envelope output is the child output JSON string");
         }
+    }
+    /**
+     * AWS records TaskSubmitted once StartExecution has returned and before it waits on the child
+     * (measured: resourceType states, resource startExecution.sync:2, the response in PascalCase with
+     * StartDate in epoch milliseconds, chained to TaskStarted). It also names the integration as
+     * states / startExecution.sync:2 on every event, not startExecution.sync / 2.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {".sync", ".sync:2"})
+    void syncRecordsTaskSubmittedWithTheStartExecutionResponse(String mode) throws Exception {
+        childSucceeds();
+
+        Execution exec = runParent(parentMode(mode), "{}");
+
+        assertEquals("SUCCEEDED", exec.getStatus(), exec.getCause());
+        assertEquals(List.of("TaskStateEntered", "TaskScheduled", "TaskStarted", "TaskSubmitted",
+                "TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"), types());
+        HistoryEvent submitted = history.get(3);
+        assertEquals(history.get(2).getId(), submitted.getPreviousEventId().longValue());
+        assertEquals(submitted.getId(), history.get(4).getPreviousEventId().longValue());
+        assertEquals("states", submitted.getDetails().get("resourceType"));
+        assertEquals("startExecution" + mode, submitted.getDetails().get("resource"));
+        assertEquals("{\"ExecutionArn\":\"arn:aws:states:us-east-1:000000000000:execution:child:e1\","
+                + "\"StartDate\":1000}", submitted.getDetails().get("output"));
+        assertEquals(Map.of("truncated", false), submitted.getDetails().get("outputDetails"));
+        for (int i = 1; i <= 4; i++) {
+            assertEquals("states", history.get(i).getDetails().get("resourceType"), history.get(i).getType());
+            assertEquals("startExecution" + mode, history.get(i).getDetails().get("resource"), history.get(i).getType());
+        }
+    }
+
+    @Test
+    void requestResponseRecordsNoTaskSubmitted() {
+        Execution exec = runParent(parentMode(""), "{}");
+
+        assertEquals("SUCCEEDED", exec.getStatus(), exec.getCause());
+        assertFalse(types().contains("TaskSubmitted"), types().toString());
+    }
+
+    private void childSucceeds() {
+        Execution done = new Execution();
+        done.setExecutionArn("arn:aws:states:us-east-1:000000000000:execution:child:e1");
+        done.setStateMachineArn(CHILD_ARN);
+        done.setName("e1");
+        done.setStatus("SUCCEEDED");
+        done.setStartDate(1.0);
+        done.setStopDate(2.0);
+        done.setOutput("{\"ok\":true}");
+        when(childSfn.describeExecution(any())).thenReturn(done);
+    }
+
+    private List<String> types() {
+        return history.stream().map(HistoryEvent::getType).toList();
     }
 }

@@ -118,6 +118,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -825,7 +826,8 @@ public class AslExecutor {
                         : invokeResource(effectiveResource, effectiveInput, sm, taskToken,
                                 context.path("Execution").path("Id").asText(null),
                                 executionDeadlineNanos, taskDeadlineNanos,
-                                jsonata ? null : stateDef.path("Parameters"));
+                                jsonata ? null : stateDef.path("Parameters"),
+                                jobResponse -> addTaskSubmittedEvent(chain, profile, jobResponse));
                 if (tokenFuture != null) {
                     taskResult = awaitToken(tokenFuture, stateDef, taskToken, executionDeadlineNanos,
                             taskDeadlineNanos);
@@ -1075,9 +1077,13 @@ public class AslExecutor {
         return new FailStateException("Exception", cause);
     }
 
+    /**
+     * @param jobSubmitted called with the response of the call that started a {@code .sync} job,
+     *                     once it has returned and before the job is waited on
+     */
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
                                     String executionArn, long executionDeadlineNanos, long taskDeadlineNanos,
-                                    JsonNode rawParameters) throws Exception {
+                                    JsonNode rawParameters, Consumer<JsonNode> jobSubmitted) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
         String functionRef = null;
@@ -1226,7 +1232,8 @@ public class AslExecutor {
                     ? ".waitForTaskToken"
                     : integration.suffix();
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeEcsRunTask(mode, input, region, executionArn, executionDeadlineNanos, taskDeadlineNanos);
+            return invokeEcsRunTask(mode, input, region, executionArn, executionDeadlineNanos, taskDeadlineNanos,
+                    jobSubmitted);
         }
 
         // AWS SDK service integrations: Step Functions
@@ -1252,7 +1259,7 @@ public class AslExecutor {
             String mode = integration.suffix();
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeNestedStateMachine(mode, input, region, executionArn, executionDeadlineNanos,
-                    taskDeadlineNanos, rawParameters);
+                    taskDeadlineNanos, rawParameters, jobSubmitted);
         }
 
         throw new FailStateException("States.TaskFailed", "Unsupported resource: " + resource);
@@ -1671,7 +1678,8 @@ public class AslExecutor {
 
     private JsonNode invokeNestedStateMachine(String mode, JsonNode input, String region, String executionArn,
                                               long executionDeadlineNanos, long taskDeadlineNanos,
-                                              JsonNode rawParameters) throws Exception {
+                                              JsonNode rawParameters, Consumer<JsonNode> jobSubmitted)
+            throws Exception {
         String smArn = input.path("StateMachineArn").asText(null);
         if (smArn == null || smArn.isBlank()) {
             throw new FailStateException("States.TaskFailed",
@@ -1716,6 +1724,13 @@ public class AslExecutor {
             result.put("startDate", exec.getStartDate());
             return result;
         }
+
+        // The job is submitted: AWS records the StartExecution response here, before the wait
+        // (measured: PascalCase, StartDate in epoch milliseconds).
+        ObjectNode startResponse = objectMapper.createObjectNode();
+        startResponse.put("ExecutionArn", execArn);
+        startResponse.put("StartDate", Math.round(exec.getStartDate() * 1000));
+        jobSubmitted.accept(startResponse);
 
         // .sync or .sync:2 polls until terminal. Whatever else ends the wait aborts the child, the way
         // AWS does (measured: child ABORTED, no error, the cause below): the Task's own TimeoutSeconds,
@@ -1825,7 +1840,8 @@ public class AslExecutor {
      *             (both ".sync" and ".waitForTaskToken" fail the state on a placement failure).
      */
     private JsonNode invokeEcsRunTask(String mode, JsonNode input, String region, String executionArn,
-                                      long executionDeadlineNanos, long taskDeadlineNanos) throws Exception {
+                                      long executionDeadlineNanos, long taskDeadlineNanos,
+                                      Consumer<JsonNode> jobSubmitted) throws Exception {
         String taskDefinition = input.path("TaskDefinition").asText(null);
         if (taskDefinition == null || taskDefinition.isBlank()) {
             throw new FailStateException("States.TaskFailed",
@@ -1901,6 +1917,15 @@ public class AslExecutor {
         // clock, a failure in a sibling Parallel branch, which interrupts this one, and a
         // StopExecution on the execution, which otherwise would leave this worker polling.
         List<String> taskArns = launched.stream().map(EcsTask::getTaskArn).toList();
+        // The job is submitted: AWS records the RunTask response here, before the wait (measured:
+        // Failures then Tasks, PascalCase).
+        ObjectNode runTaskResponse = objectMapper.createObjectNode();
+        runTaskResponse.putArray("Failures");
+        ArrayNode submittedTasks = runTaskResponse.putArray("Tasks");
+        for (EcsTask t : launched) {
+            submittedTasks.add(recaseKeys(objectMapper, ecsJsonHandler.taskNode(t), true));
+        }
+        jobSubmitted.accept(runTaskResponse);
         while (true) {
             try {
                 sleepOrTimeOutTask(TimeUnit.MILLISECONDS.toNanos(SYNC_POLL_INTERVAL_MS),
@@ -5391,6 +5416,14 @@ public class AslExecutor {
         if (resource.contains(":lambda:") && resource.contains(":function:")) {
             return new TaskEventProfile("LambdaFunction", null, resource);
         }
+        // A well-formed integration id splits at its service: AWS reports states / startExecution.sync:2,
+        // and a split at the last colon would report startExecution.sync / 2 for it.
+        StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
+        if (integration != null) {
+            return new TaskEventProfile("Task",
+                    (integration.sdk() ? "aws-sdk:" : "") + integration.service(),
+                    integration.api() + integration.suffix());
+        }
         String tail = StatesIntegration.tail(resource).orElse(null);
         if (tail != null) {
             int idx = tail.lastIndexOf(':');
@@ -5432,6 +5465,20 @@ public class AslExecutor {
         } else {
             chain.publish(profile.prefix() + "Started", null);
         }
+    }
+
+    /**
+     * Recorded for a {@code .sync} Task once the call that started its job has returned, carrying
+     * that response as {@code output}. AWS also folds the SDK's {@code SdkHttpMetadata} and
+     * {@code SdkResponseMetadata} into it; Floci records the response fields alone.
+     */
+    private void addTaskSubmittedEvent(HistoryChain chain, TaskEventProfile profile, JsonNode jobResponse) {
+        LinkedHashMap<String, Object> details = new LinkedHashMap<>();
+        details.put("resourceType", profile.resourceType());
+        details.put("resource", profile.resource());
+        details.put("output", jobResponse.toString());
+        details.put("outputDetails", Map.of("truncated", false));
+        chain.publish("TaskSubmitted", details);
     }
 
     private void addTaskSucceededEvent(HistoryChain chain, TaskEventProfile profile, JsonNode taskResult) {

@@ -57,6 +57,15 @@ changes to `StateMachineName` or `StateMachineType` use replacement semantics.
   `Parameters` or `Arguments` payload, serialized as a JSON string. `timeoutInSeconds` and
   `heartbeatInSeconds` appear only when the state sets `TimeoutSeconds` or
   `HeartbeatSeconds` as a literal number.
+  `resourceType` is the integrated service (`states`, `ecs`, `aws-sdk:sqs`) and `resource` the
+  API with its suffix (`startExecution.sync:2`, `runTask.sync`), as AWS names them. A `.sync`
+  Task (`states:startExecution.sync` and `.sync:2`, `ecs:runTask.sync`) also records
+  `TaskSubmitted` after `TaskStarted`, once the call that started its job has returned and before
+  it waits on the job. `taskSubmittedEventDetails` carries `resourceType`, `resource`,
+  `outputDetails`, and that call's response as `output`, in PascalCase: `{"ExecutionArn",
+  "StartDate"}` with `StartDate` in epoch milliseconds for a nested execution, `{"Failures",
+  "Tasks"}` for an ECS task. AWS folds the SDK's `SdkHttpMetadata` and `SdkResponseMetadata`
+  into that response as well; Floci records the response fields alone.
 - A direct Lambda function ARN emits `LambdaFunctionScheduled`, `LambdaFunctionStarted`,
   and then `LambdaFunctionSucceeded` or `LambdaFunctionFailed`. `LambdaFunctionScheduled`
   carries `resource` and `input`. `resource` holds the full function ARN. `LambdaFunctionStarted`
@@ -109,15 +118,15 @@ When the request sets `includeExecutionData` to false, the details objects stay 
 `taskScheduledEventDetails.parameters`. This matches AWS.
 
 A few gaps remain. `TaskStarted`, `LambdaFunctionStarted`, and `ActivityStarted` fire at
-scheduling time, not when a worker actually picks up the task. `TaskSubmitted`, which real
-AWS emits for `.sync` and `.waitForTaskToken` integrations, is not emitted yet. When an inline
-`Map` iteration fails, AWS records a `MapIterationAborted` for each iteration it cuts and the
-`*StateAborted` of the state that iteration was in, all chained to the failing iteration's last
-event and recorded before `MapIterationFailed` and `MapStateFailed`; Floci cancels the iterations
-without recording them, where a `Parallel` records the state of each branch it cuts, as above. A
-Distributed `Map` that declares no tolerance reports a failed item's own error rather than AWS's
-`States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that error. A `Map` that
-declares one reports `States.ExceedToleratedFailureThreshold`, as AWS does.
+scheduling time, not when a worker actually picks up the task. `TaskSubmitted` is recorded for
+the three `.sync` integrations above and not yet for a `.waitForTaskToken` one, which AWS also
+records it for. When an inline `Map` iteration fails, AWS records a `MapIterationAborted` for each
+iteration it cuts and the `*StateAborted` of the state that iteration was in, all chained to the
+failing iteration's last event and recorded before `MapIterationFailed` and `MapStateFailed`; Floci
+cancels the iterations without recording them, where a `Parallel` records the state of each branch
+it cuts, as above. A Distributed `Map` that declares no tolerance reports a failed item's own error
+rather than AWS's `States.ExceedToleratedFailureThreshold`, and emits `MapRunFailed` with that
+error. A `Map` that declares one reports `States.ExceedToleratedFailureThreshold`, as AWS does.
 
 ## Map concurrency
 

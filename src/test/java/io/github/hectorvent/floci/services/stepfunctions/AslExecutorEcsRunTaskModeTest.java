@@ -26,6 +26,7 @@ import org.mockito.ArgumentCaptor;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -197,6 +198,53 @@ class AslExecutorEcsRunTaskModeTest {
         verify(ecsService).stopTask(any(), eq(task("RUNNING").getTaskArn()),
                 eq("The Task state in AWS Step Functions execution [" + execution.getExecutionArn()
                         + "] which was managing this resource was aborted"), eq(REGION));
+    }
+
+    /**
+     * AWS records TaskSubmitted once RunTask has returned and before it waits on the task (measured:
+     * resourceType ecs, resource runTask.sync, the response as Failures then Tasks in PascalCase,
+     * chained to TaskStarted).
+     */
+    @Test
+    void syncRecordsTaskSubmittedWithTheRunTaskResponse() throws Exception {
+        launchOneTask();
+        when(ecsService.describeTasks(any(), any(), any())).thenReturn(List.of(task("STOPPED")));
+
+        Execution execution = run("arn:aws:states:::ecs:runTask.sync", "{\"TaskDefinition\":\"my-task-def\"}");
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        List<String> types = history.stream().map(HistoryEvent::getType).toList();
+        assertEquals(List.of("TaskStateEntered", "TaskScheduled", "TaskStarted", "TaskSubmitted",
+                "TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"), types);
+        HistoryEvent submitted = history.get(3);
+        assertEquals(history.get(2).getId(), submitted.getPreviousEventId().longValue());
+        assertEquals(submitted.getId(), history.get(4).getPreviousEventId().longValue());
+        assertEquals("ecs", submitted.getDetails().get("resourceType"));
+        assertEquals("runTask.sync", submitted.getDetails().get("resource"));
+        JsonNode output = objectMapper.readTree((String) submitted.getDetails().get("output"));
+        assertEquals(List.of("Failures", "Tasks"), fieldNames(output));
+        assertTrue(output.path("Failures").isArray() && output.path("Failures").isEmpty(), output.toString());
+        assertEquals(1, output.path("Tasks").size(), output.toString());
+        assertEquals(task("PENDING").getTaskArn(), output.path("Tasks").get(0).path("TaskArn").asText());
+        assertEquals("PENDING", output.path("Tasks").get(0).path("LastStatus").asText());
+        assertEquals(Map.of("truncated", false), submitted.getDetails().get("outputDetails"));
+    }
+
+    @Test
+    void requestResponseRecordsNoTaskSubmitted() throws Exception {
+        launchOneTask();
+
+        Execution execution = run("arn:aws:states:::ecs:runTask", "{\"TaskDefinition\":\"my-task-def\"}");
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        assertTrue(history.stream().noneMatch(event -> "TaskSubmitted".equals(event.getType())),
+                history.stream().map(HistoryEvent::getType).toList().toString());
+    }
+
+    private static List<String> fieldNames(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
     }
 
     @Test
