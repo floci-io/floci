@@ -212,6 +212,31 @@ class S3PresignedChecksumIntegrationTest {
             .header("x-amz-checksum-sha256", equalTo(expectedSha256));
     }
 
+    @Test
+    void presignedPutWithUserMetadataInQueryStoresTheMetadata() throws Exception {
+        createBucket();
+        String path = "/" + BUCKET + "/query-metadata.txt";
+        String url = presign("PUT", path,
+                Map.of("x-amz-meta-source", "presigned-put", "x-amz-meta-Uploaded-By", "tester"), Map.of());
+
+        given()
+            .urlEncodingEnabled(false)
+            .body("x".getBytes(StandardCharsets.UTF_8))
+        .when()
+            .put(url)
+        .then()
+            .statusCode(200);
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .head(path)
+        .then()
+            .statusCode(200)
+            .header("x-amz-meta-source", equalTo("presigned-put"))
+            .header("x-amz-meta-uploaded-by", equalTo("tester"));
+    }
+
     private static void createBucket() {
         given()
             .filter(LOCAL_SIGNER)
