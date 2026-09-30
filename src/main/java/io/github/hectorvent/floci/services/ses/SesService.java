@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
@@ -924,24 +925,28 @@ public class SesService {
         tenantService.disassociate(tenant, ref, region);
     }
 
-    public List<TenantResourceAssociation> listTenantResources(String tenantName,
-                                                               String resourceTypeFilter,
-                                                               Integer pageSize, String nextToken,
-                                                               String region) {
-        SesTenantService.validateListPaging(pageSize, nextToken);
+    // Probe-confirmed precedence on both lists: an out-of-range PageSize or an empty NextToken is
+    // refused before the tenant or resource is looked up, so a bad page on a missing tenant is the
+    // validation error, not the 404.
+    public PaginatedResult<TenantResourceAssociation> listTenantResources(String tenantName,
+                                                                          String resourceTypeFilter,
+                                                                          SesListPaging paging,
+                                                                          Integer pageSize, String nextToken,
+                                                                          String region) {
+        paging.validate(pageSize, nextToken);
         SesTenantService.validateResourceTypeFilter(resourceTypeFilter);
         Tenant tenant = tenantService.tenantForAssociation(tenantName, region);
-        return tenantService.listTenantResources(tenant, resourceTypeFilter, region);
+        return tenantService.listTenantResources(tenant, resourceTypeFilter, region, paging, pageSize, nextToken);
     }
 
-    public List<TenantResourceAssociation> listResourceTenants(String resourceArn, Integer pageSize,
-                                                               String nextToken, String accountId,
-                                                               String region) {
-        SesTenantService.validateListPaging(pageSize, nextToken);
+    public PaginatedResult<TenantResourceAssociation> listResourceTenants(String resourceArn, SesListPaging paging,
+                                                                          Integer pageSize, String nextToken,
+                                                                          String accountId, String region) {
+        paging.validate(pageSize, nextToken);
         SesTenantService.AssociationResource ref =
                 SesTenantService.parseResourceArn(resourceArn, accountId, region);
         requireTenantResourceExists(ref, region);
-        return tenantService.listResourceTenants(ref, region);
+        return tenantService.listResourceTenants(ref, region, paging, pageSize, nextToken);
     }
 
     /**
