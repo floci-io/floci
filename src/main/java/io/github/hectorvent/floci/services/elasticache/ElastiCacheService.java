@@ -28,6 +28,7 @@ import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
+import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheAuthProxy;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
@@ -41,6 +42,7 @@ import java.net.UnknownHostException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -298,7 +300,7 @@ public class ElastiCacheService implements ResourceProvider {
                 if (handle != null) {
                     proxyManager.startProxy(groupId, authMode, proxyPort,
                             handle.getHost(), handle.getPort(),
-                            (username, password) -> validatePassword(groupId, username, password));
+                            groupAuthenticator(groupId));
                 } else {
                     LOG.warnv("Replication group {0} created without a backing cache container: no "
                             + "Docker daemon is reachable. Metadata operations work; connections to "
@@ -376,7 +378,7 @@ public class ElastiCacheService implements ResourceProvider {
                 ElastiCacheContainerHandle handle = handles.get(i);
                 proxyManager.startProxy(node.getMemberClusterId(), authMode, node.getProxyPort(),
                         handle.getHost(), handle.getPort(),
-                        (username, password) -> validatePassword(groupId, username, password));
+                        groupAuthenticator(groupId));
                 startedProxyKeys.add(node.getMemberClusterId());
             }
 
@@ -837,7 +839,7 @@ public class ElastiCacheService implements ResourceProvider {
                     group.setContainerPort(handle.getPort());
                     proxyManager.startProxy(groupId, group.getAuthMode(), group.getProxyPort(),
                             handle.getHost(), handle.getPort(),
-                            (username, password) -> validatePassword(groupId, username, password));
+                            groupAuthenticator(groupId));
                 } else {
                     // Cleared rather than left alone: whatever the record carried describes a
                     // container from the previous process, and nothing must read it as live.
@@ -989,7 +991,7 @@ public class ElastiCacheService implements ResourceProvider {
                     ElastiCacheContainerHandle handle = handles.get(i);
                     proxyManager.startProxy(node.getMemberClusterId(), group.getAuthMode(), node.getProxyPort(),
                             handle.getHost(), handle.getPort(),
-                            (username, password) -> validatePassword(groupId, username, password));
+                            groupAuthenticator(groupId));
                     startedProxyKeys.add(node.getMemberClusterId());
                 }
 
@@ -1459,11 +1461,26 @@ public class ElastiCacheService implements ResourceProvider {
             ReplicationGroup group = getReplicationGroup(groupId);
             // every check before any change: the store hands out its own object, so a mutation
             // made before a later refusal would stay visible
+            Set<String> nextUserIds = new HashSet<>(group.getAssociatedUserIds());
+            if (userIdsToRemove != null) {
+                nextUserIds.removeAll(userIdsToRemove);
+            }
             if (userIdsToAdd != null) {
                 for (String userId : userIdsToAdd) {
                     getUser(userId);
                 }
+                nextUserIds.addAll(userIdsToAdd);
             }
+
+            Set<String> seenUserNames = new HashSet<>();
+            for (String userId : nextUserIds) {
+                ElastiCacheUser u = users.get(userId).orElse(null);
+                if (u != null && !seenUserNames.add(u.getUserName())) {
+                    throw new AwsException("DuplicateUserNameFault",
+                            "Duplicate user name " + u.getUserName() + " in user group.", 400);
+                }
+            }
+
             settings.applyTo(group);
             if (userIdsToAdd != null) {
                 group.getAssociatedUserIds().addAll(userIdsToAdd);
@@ -1583,6 +1600,13 @@ public class ElastiCacheService implements ResourceProvider {
             throw new AwsException("UserNotFoundFault", "User " + userId + " not found.", 404);
         }
         users.delete(userId);
+        for (ReplicationGroup group : groups.scan(k -> true)) {
+            synchronized (lockFor("rg:" + group.getReplicationGroupId())) {
+                if (group.getAssociatedUserIds().remove(userId)) {
+                    groups.put(group.getReplicationGroupId(), group);
+                }
+            }
+        }
         LOG.infov("ElastiCache user {0} deleted", userId);
     }
 
@@ -1604,21 +1628,82 @@ public class ElastiCacheService implements ResourceProvider {
             if (group.getAuthToken() != null && password.equals(group.getAuthToken())) {
                 return true;
             }
-            // Fall back to the "default" PASSWORD user associated with this group
+            // Fall back to the "default" user associated with this group
             Set<String> groupUserIds = group.getAssociatedUserIds();
-            return groupUserIds.stream()
+            ElastiCacheUser defaultUser = groupUserIds.stream()
                     .map(id -> users.get(id).orElse(null))
-                    .filter(u -> u != null
-                            && "default".equals(u.getUserName())
-                            && u.getAuthMode() == AuthMode.PASSWORD)
-                    .anyMatch(u -> u.getPasswords() != null && u.getPasswords().contains(password));
+                    .filter(u -> u != null && "default".equals(u.getUserName()))
+                    .findFirst()
+                    .orElse(null);
+            if (defaultUser == null || !defaultUser.isEnabled()) {
+                return false;
+            }
+            if (defaultUser.getAuthMode() == AuthMode.NO_AUTH) {
+                return true;
+            }
+            if (defaultUser.getAuthMode() == AuthMode.PASSWORD) {
+                return defaultUser.getPasswords() != null && defaultUser.getPasswords().contains(password);
+            }
+            return false;
         }
         // AUTH username password form: find user by userName, scoped to group
         Set<String> groupUserIds = group.getAssociatedUserIds();
-        return groupUserIds.stream()
+        ElastiCacheUser targetUser = groupUserIds.stream()
                 .map(id -> users.get(id).orElse(null))
-                .filter(u -> u != null && username.equals(u.getUserName()) && u.getAuthMode() == AuthMode.PASSWORD)
-                .anyMatch(u -> u.getPasswords() != null && u.getPasswords().contains(password));
+                .filter(u -> u != null && username.equals(u.getUserName()))
+                .findFirst()
+                .orElse(null);
+        if (targetUser == null || !targetUser.isEnabled()) {
+            return false;
+        }
+        if (targetUser.getAuthMode() == AuthMode.NO_AUTH) {
+            return true;
+        }
+        if (targetUser.getAuthMode() == AuthMode.PASSWORD) {
+            return targetUser.getPasswords() != null && targetUser.getPasswords().contains(password);
+        }
+        return false;
+    }
+
+    public boolean hasMembers(String groupId) {
+        ReplicationGroup group = groups.get(groupId).orElse(null);
+        if (group == null) {
+            return false;
+        }
+        return group.getAssociatedUserIds().stream().anyMatch(id -> users.get(id).isPresent());
+    }
+
+    public AuthMode memberAuthMode(String groupId, String username) {
+        ReplicationGroup group = groups.get(groupId).orElse(null);
+        if (group == null) {
+            return null;
+        }
+        String target = (username == null || username.isEmpty()) ? "default" : username;
+        return group.getAssociatedUserIds().stream()
+                .map(id -> users.get(id).orElse(null))
+                .filter(u -> u != null && target.equals(u.getUserName()) && u.isEnabled())
+                .map(ElastiCacheUser::getAuthMode)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private ElastiCacheAuthProxy.PasswordValidator groupAuthenticator(String groupId) {
+        return new ElastiCacheAuthProxy.PasswordValidator() {
+            @Override
+            public boolean validatePassword(String username, String password) {
+                return ElastiCacheService.this.validatePassword(groupId, username, password);
+            }
+
+            @Override
+            public boolean hasMembers() {
+                return ElastiCacheService.this.hasMembers(groupId);
+            }
+
+            @Override
+            public AuthMode memberAuthMode(String username) {
+                return ElastiCacheService.this.memberAuthMode(groupId, username);
+            }
+        };
     }
 
     // AWS allows only redis and valkey.

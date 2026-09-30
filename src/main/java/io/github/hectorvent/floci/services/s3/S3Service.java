@@ -35,16 +35,20 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.net.URLEncoder;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -67,6 +71,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -1337,6 +1343,20 @@ public class S3Service implements Resettable, ResourceProvider {
      * token is only ever observed when untouched, and untouched means nothing to race against.
      */
     private S3Object getLatestObject(String bucketName, String key) {
+        Snapshot<byte[]> snapshot = readLatestSnapshot(bucketName, key,
+                account -> readFile(account, bucketName, key), data -> { });
+        snapshot.object().setData(snapshot.body());
+        return snapshot.object();
+    }
+
+    private record Snapshot<B>(S3Object object, B body) { }
+
+    /**
+     * The optimistic read described on {@link #getLatestObject}, for any body type: {@code readBody}
+     * gets the bucket owner's account and {@code discard} releases a body read during a race.
+     */
+    private <B> Snapshot<B> readLatestSnapshot(String bucketName, String key,
+                                               Function<String, B> readBody, Consumer<B> discard) {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
@@ -1348,21 +1368,91 @@ public class S3Service implements Resettable, ResourceProvider {
         // with a clear error instead of spinning forever re-reading the file and exhausting the heap.
         for (int attempt = 0; attempt < 10_000; attempt++) {
             S3Object obj = getObjectMetadata(bucketName, key, null);
-            byte[] data = readFile(bucketOwnerAccount, bucketName, key);
+            B body = readBody.apply(bucketOwnerAccount);
             synchronized (bucket) {
                 S3Object current = resolveObjectForAccount(bucketOwnerAccount, storeKey).orElse(null);
                 if (current != null && !current.isDeleteMarker()
                         && Objects.equals(current.getDataGeneration(), obj.getDataGeneration())) {
-                    obj.setData(data);
-                    return obj;
+                    return new Snapshot<>(obj, body);
                 }
             }
+            discard.accept(body);
             // A concurrent overwrite (or delete) landed mid-read; retry against the new state.
         }
         throw new IllegalStateException(
                 "getObject retry limit exceeded for " + bucketName + "/" + key
                         + " - the object is either under sustained concurrent overwrite or the "
                         + "metadata/data resolution paths disagree about where this key lives");
+    }
+
+    /** An object's metadata and an open stream over the body that matches it. */
+    public record ObjectRead(S3Object object, InputStream body) implements Closeable {
+        @Override
+        public void close() throws IOException {
+            body.close();
+        }
+    }
+
+    /**
+     * Like {@link #getObject}, but the body is an open stream instead of a byte array, so serving
+     * a large object does not load it into the heap. Every write replaces the object file with an
+     * atomic move, so a file opened for the matching generation keeps returning that generation's
+     * bytes even if the key is overwritten while the stream is read. The caller closes the result.
+     */
+    public ObjectRead openObject(String bucketName, String key, String versionId) {
+        if (inMemory) {
+            S3Object obj = getObject(bucketName, key, versionId);
+            return new ObjectRead(obj, new ByteArrayInputStream(obj.getData()));
+        }
+        if (versionId == null) {
+            Snapshot<FileChannel> snapshot = readLatestSnapshot(bucketName, key,
+                    account -> openForRead(resolveObjectPathForRead(account, bucketName, key)),
+                    S3Service::closeQuietly);
+            return objectRead(snapshot.object(), snapshot.body());
+        }
+        String bucketOwnerAccount = resolveBucketEntry(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404))
+                .account();
+        S3Object obj = getObjectMetadata(bucketName, key, versionId);
+        Path path = "null".equals(versionId)
+                ? resolveObjectPathForRead(bucketOwnerAccount, bucketName, key)
+                : resolveVersionedPathForRead(bucketOwnerAccount, bucketName, key, versionId);
+        return objectRead(obj, openForRead(path));
+    }
+
+    private static ObjectRead objectRead(S3Object obj, FileChannel channel) {
+        try {
+            long fileSize = channel.size();
+            if (fileSize != obj.getSize()) {
+                throw new IllegalStateException("S3 object file for " + obj.getBucketName() + "/"
+                        + obj.getKey() + " has " + fileSize + " bytes but metadata declares "
+                        + obj.getSize() + "; serving it would corrupt the response framing");
+            }
+        } catch (IOException e) {
+            closeQuietly(channel);
+            throw new UncheckedIOException("Failed to read S3 object file size", e);
+        } catch (RuntimeException e) {
+            closeQuietly(channel);
+            throw e;
+        }
+        return new ObjectRead(obj, Channels.newInputStream(channel));
+    }
+
+    private static FileChannel openForRead(Path path) {
+        try {
+            return FileChannel.open(path, StandardOpenOption.READ);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to open S3 object file", e);
+        }
+    }
+
+    private static void closeQuietly(Closeable closeable) {
+        try {
+            closeable.close();
+        } catch (IOException ignored) {
+            // Nothing was read from it; closing is best effort.
+        }
     }
 
     public S3Object headObject(String bucketName, String key) {
@@ -1643,6 +1733,9 @@ public class S3Service implements Resettable, ResourceProvider {
                     }
                 }
             });
+            if (toDelete != null) {
+                fireNotifications(bucketName, key, "ObjectRemoved:Delete", toDelete);
+            }
             return toDelete;
         } else {
             S3Object existing = objectStore.get(objectKey(bucketName, key)).orElse(null);
@@ -4658,14 +4751,29 @@ public class S3Service implements Resettable, ResourceProvider {
             objectNode.put("key", key);
             objectNode.put("size", size);
             objectNode.put("etag", eTag);
+            if (obj != null && obj.getVersionId() != null) {
+                objectNode.put("version-id", obj.getVersionId());
+            }
             detail.put("request-id", UUID.randomUUID().toString());
             detail.put("requester", "aws:emulator");
             detail.put("source-ip-address", "127.0.0.1");
             detail.put("reason", eventName);
+            String deletionType = eventBridgeDeletionType(eventName);
+            if (deletionType != null) {
+                detail.put("deletion-type", deletionType);
+            }
             return objectMapper.writeValueAsString(detail);
         } catch (Exception e) {
             return "{}";
         }
+    }
+
+    private static String eventBridgeDeletionType(String eventName) {
+        return switch (eventName) {
+            case "ObjectRemoved:Delete" -> "Permanently Deleted";
+            case "ObjectRemoved:DeleteMarkerCreated" -> "Delete Marker Created";
+            default -> null;
+        };
     }
 
     private boolean matchesEvent(String pattern, String eventName) {

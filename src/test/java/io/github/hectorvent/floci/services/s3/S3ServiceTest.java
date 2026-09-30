@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -22,6 +24,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
@@ -718,6 +721,69 @@ class S3ServiceTest {
         assertEquals("NoSuchBucket", error.getErrorCode());
         assertTrue(service.getBucketNotificationConfiguration("test-bucket")
                 .getLambdaFunctionConfigurations().isEmpty());
+    }
+
+    @Test
+    void deleteObjectVersionFiresObjectRemovedDeleteWithTheDeletedVersionId() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = versionedBucketNotifyingOnRemoval(lambdaInvoker, "notif-s3-delete-version");
+        S3Object older = service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+        service.putObject("test-bucket", "k.txt", "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        service.deleteObject("test-bucket", "k.txt", older.getVersionId());
+
+        JsonNode record = onlyRecordedS3Event(lambdaInvoker);
+        assertEquals("ObjectRemoved:Delete", record.path("eventName").asText());
+        assertEquals("k.txt", record.path("s3").path("object").path("key").asText());
+        assertEquals(older.getVersionId(), record.path("s3").path("object").path("versionId").asText());
+    }
+
+    @Test
+    void deleteObjectVersionOfADeleteMarkerFiresObjectRemovedDelete() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = versionedBucketNotifyingOnRemoval(lambdaInvoker, "notif-s3-delete-marker-version");
+        service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        S3Object marker = service.deleteObject("test-bucket", "k.txt");
+
+        service.deleteObject("test-bucket", "k.txt", marker.getVersionId());
+
+        JsonNode record = onlyRecordedS3Event(lambdaInvoker);
+        assertEquals("ObjectRemoved:Delete", record.path("eventName").asText());
+        assertEquals(marker.getVersionId(), record.path("s3").path("object").path("versionId").asText());
+    }
+
+    @Test
+    void deleteObjectVersionThatDoesNotExistFiresNoNotification() {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = versionedBucketNotifyingOnRemoval(lambdaInvoker, "notif-s3-delete-missing-version");
+        service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        service.deleteObject("test-bucket", "k.txt", "no-such-version");
+
+        assertNull(lambdaInvoker.payload);
+    }
+
+    private S3Service versionedBucketNotifyingOnRemoval(RecordingLambdaInvoker lambdaInvoker, String dataDir) {
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve(dataDir),
+                false, lambdaInvoker, new RegionResolver("us-east-1", "000000000000"));
+        service.createBucket("test-bucket", "us-east-1");
+        service.putBucketVersioning("test-bucket", "Enabled");
+        NotificationConfiguration config = new NotificationConfiguration();
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                "lambda-notif",
+                "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
+                List.of("s3:ObjectRemoved:*"),
+                List.of()));
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
+        return service;
+    }
+
+    private static JsonNode onlyRecordedS3Event(RecordingLambdaInvoker lambdaInvoker) throws IOException {
+        assertNotNull(lambdaInvoker.payload, "no S3 event reached the notification target");
+        JsonNode records = new ObjectMapper().readTree(lambdaInvoker.payload).path("Records");
+        assertEquals(1, records.size());
+        return records.get(0);
     }
 
     private static NotificationConfiguration lambdaNotificationConfig(String prefix, String suffix) {

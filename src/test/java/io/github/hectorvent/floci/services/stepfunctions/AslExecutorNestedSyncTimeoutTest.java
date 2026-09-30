@@ -118,7 +118,7 @@ class AslExecutorNestedSyncTimeoutTest {
 
         assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
         assertEquals(700, polls.get());
-        assertTrue(objectMapper.readTree(execution.getOutput()).path("output").asText().contains("42"));
+        assertTrue(objectMapper.readTree(execution.getOutput()).path("Output").asText().contains("42"));
         verify(sfnService, never()).stopExecution(any(), any(), any());
     }
 
