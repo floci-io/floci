@@ -26,12 +26,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -323,19 +325,21 @@ class ApiGatewayApiKeyCfnProvisionerTest {
         ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of());
         when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
         when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenReturn(existing);
-        when(apiGateway.replaceApiKeyTags(eq(REGION), eq("abc123"), anyMap()))
+        when(apiGateway.replaceApiKeyTags(REGION, "abc123", Map.of("_custom_id_", "other")))
                 .thenThrow(new AwsException("BadRequestException",
                         "Reserved tag key _custom_id_ can only be supplied during resource creation.", 400));
         ObjectNode props = tags("_custom_id_", "other").put("Name", "my-key").put("Description", "new");
 
         assertThrows(AwsException.class, () -> provisioner.provision(resource("abc123"), props, ctx("abc123")));
 
-        verify(apiGateway, never()).updateApiKey(any(), any(), anyList());
+        verify(apiGateway, never()).updateApiKey(any(), any(), argThat((List<Map<String, String>> ops) ->
+                ops.stream().anyMatch(op -> "/description".equals(op.get("path")) && "new".equals(op.get("value")))));
     }
 
     @Test
-    void aFailedPatchPutsTheReplacedTagsBack() {
+    void aFailedPatchPutsTheWholeKeyBack() {
         ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of("team", "core"));
+        existing.setCustomerId("customer-1");
         when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
         // The service swaps the tag map on the stored key object, which is the one findApiKey returned.
         when(apiGateway.replaceApiKeyTags(eq(REGION), eq("abc123"), anyMap())).thenAnswer(inv -> {
@@ -343,20 +347,54 @@ class ApiGatewayApiKeyCfnProvisionerTest {
             existing.setTags(new HashMap<>(replaced));
             return existing;
         });
-        AwsException failure = new AwsException("NotFoundException", "Invalid API Key identifier specified", 404);
-        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenThrow(failure);
+        RuntimeException failure = new IllegalStateException("store write failed");
+        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenThrow(failure).thenReturn(existing);
         ObjectNode props = tags("team", "platform")
                 .put("Name", "my-key")
-                .put("Description", "new")
-                .put("Enabled", "true");
+                .put("CustomerId", "customer-2")
+                .put("Description", "new");
+        StackResource r = resource("abc123");
 
-        AwsException thrown = assertThrows(AwsException.class,
-                () -> provisioner.provision(resource("abc123"), props, ctx("abc123")));
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> provisioner.provision(r, props, ctx("abc123")));
 
         assertSame(failure, thrown);
         InOrder order = inOrder(apiGateway);
         order.verify(apiGateway).replaceApiKeyTags(REGION, "abc123", Map.of("team", "platform"));
         order.verify(apiGateway).replaceApiKeyTags(REGION, "abc123", Map.of("team", "core"));
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, String>>> patches = ArgumentCaptor.forClass(List.class);
+        verify(apiGateway, times(2)).updateApiKey(eq(REGION), eq("abc123"), patches.capture());
+        List<Map<String, String>> restore = patches.getAllValues().get(1);
+        assertTrue(restore.stream().anyMatch(op ->
+                "/customerId".equals(op.get("path")) && "customer-1".equals(op.get("value"))), restore.toString());
+        assertTrue(restore.stream().anyMatch(op ->
+                "/description".equals(op.get("path")) && "old".equals(op.get("value"))), restore.toString());
+        assertTrue(restore.stream().anyMatch(op ->
+                "/enabled".equals(op.get("path")) && "true".equals(op.get("value"))), restore.toString());
+        assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void aFailedUndoOfAFailedUpdateMarksTheRollbackFailed() {
+        ApiKey existing = key("abc123", "my-key", "abc123", true, "old", Map.of("team", "core"));
+        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
+        RuntimeException restoreFailure = new IllegalStateException("store write failed again");
+        when(apiGateway.replaceApiKeyTags(REGION, "abc123", Map.of("team", "platform"))).thenReturn(existing);
+        when(apiGateway.replaceApiKeyTags(REGION, "abc123", Map.of("team", "core"))).thenThrow(restoreFailure);
+        RuntimeException failure = new IllegalStateException("store write failed");
+        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenThrow(failure);
+        ObjectNode props = tags("team", "platform").put("Name", "my-key").put("Description", "new");
+        StackResource r = resource("abc123");
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> provisioner.provision(r, props, ctx("abc123")));
+
+        assertSame(failure, thrown);
+        assertTrue(List.of(thrown.getSuppressed()).contains(restoreFailure));
+        String reason = r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
+        assertTrue(reason != null && reason.contains("abc123") && reason.contains("store write failed again"),
+                String.valueOf(reason));
     }
 
     @Test
