@@ -642,7 +642,7 @@ public class GlueSchemaRegistryService {
         return new CheckValidityResult(false, error);
     }
 
-    public SchemaVersion getSchemaByDefinition(SchemaId schemaId, String definition, String region) {
+    public synchronized SchemaVersion getSchemaByDefinition(SchemaId schemaId, String definition, String region) {
         validateDefinitionRequired(definition);
         Schema schema = resolveSchema(schemaId, region);
         String schemaKey = schemaKey(schema.getRegistryName(), schema.getSchemaName());
