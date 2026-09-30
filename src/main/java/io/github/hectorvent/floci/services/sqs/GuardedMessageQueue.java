@@ -10,7 +10,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -117,7 +116,7 @@ class GuardedMessageQueue {
             return false;
         }
 
-        msg.setReceiptHandle(UUID.randomUUID().toString());
+        msg.setReceiptHandle(ReceiptHandle.issue(storageKey, msg.getMessageId()));
         msg.setVisibleAt(Instant.now().plusSeconds(effectiveTimeout));
         claimed.add(msg);
         return true;

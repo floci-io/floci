@@ -1244,11 +1244,20 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     public void deleteMessage(String queueUrl, String receiptHandle, String region) {
+        deleteMessage(queueUrl, receiptHandle, region, false);
+    }
+
+    public void deleteMessageInBatch(String queueUrl, String receiptHandle, String region) {
+        deleteMessage(queueUrl, receiptHandle, region, true);
+    }
+
+    private void deleteMessage(String queueUrl, String receiptHandle, String region, boolean inBatch) {
         String storageKey = regionKey(region, queueUrl);
         if (getQueueByUrl(storageKey, queueUrl).isEmpty()) {
             throw new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                     "The specified queue does not exist.", 400);
         }
+        checkReceiptHandle(storageKey, receiptHandle, inBatch);
 
         Optional<Message> removed = getOrCreateQueue(storageKey).removeByReceiptHandle(receiptHandle);
 
@@ -1265,14 +1274,37 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     public void changeMessageVisibility(String queueUrl, String receiptHandle, int visibilityTimeout, String region) {
+        changeMessageVisibility(queueUrl, receiptHandle, visibilityTimeout, region, false);
+    }
+
+    private void changeMessageVisibility(String queueUrl, String receiptHandle, int visibilityTimeout,
+                                         String region, boolean inBatch) {
         String storageKey = regionKey(region, queueUrl);
         ensureQueueExists(storageKey);
+        checkReceiptHandle(storageKey, receiptHandle, inBatch);
 
         boolean found = getOrCreateQueue(storageKey).changeVisibility(receiptHandle, visibilityTimeout);
         if (!found) {
             throw new AwsException("ReceiptHandleIsInvalid",
                     "The input receipt handle is not a valid receipt handle.", 400);
         }
+    }
+
+    /** A batch entry reports every receipt handle error under the ReceiptHandleIsInvalid code. */
+    private static ReceiptHandle checkReceiptHandle(String storageKey, String receiptHandle, boolean inBatch) {
+        if (receiptHandle == null || receiptHandle.isEmpty()) {
+            throw new AwsException(inBatch ? "ReceiptHandleIsInvalid" : "MissingParameter",
+                    "The request must contain the parameter ReceiptHandle.", 400);
+        }
+        ReceiptHandle parsed = ReceiptHandle.parse(receiptHandle);
+        if (parsed == null) {
+            throw new AwsException("ReceiptHandleIsInvalid", "The input receipt handle is invalid.", 400);
+        }
+        if (!parsed.isIntact() || !parsed.belongsTo(storageKey)) {
+            throw new AwsException("ReceiptHandleIsInvalid",
+                    "The receipt handle \"" + receiptHandle + "\" is not valid for this queue.", 400);
+        }
+        return parsed;
     }
 
     public void purgeQueue(String queueUrl, String region) {
@@ -1597,7 +1629,7 @@ public class SqsService implements Resettable, ResourceProvider {
         List<BatchResultEntry> results = new ArrayList<>();
         for (ChangeVisibilityBatchEntry entry : entries) {
             try {
-                changeMessageVisibility(queueUrl, entry.receiptHandle(), entry.visibilityTimeout(), region);
+                changeMessageVisibility(queueUrl, entry.receiptHandle(), entry.visibilityTimeout(), region, true);
                 results.add(new BatchResultEntry(entry.id(), true, null, null));
             } catch (AwsException e) {
                 results.add(new BatchResultEntry(entry.id(), false, e.getErrorCode(), e.getMessage()));

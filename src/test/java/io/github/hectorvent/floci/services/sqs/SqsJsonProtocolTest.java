@@ -475,6 +475,33 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    @Order(7)
+    void malformedReceiptHandleIsRejected() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.DeleteMessage")
+            .body("{\"QueueUrl\":\"" + queueUrl + "\",\"ReceiptHandle\":\"abc\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ReceiptHandleIsInvalid"))
+            .body("message", equalTo("The input receipt handle is invalid."));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.DeleteMessageBatch")
+            .body("{\"QueueUrl\":\"" + queueUrl + "\",\"Entries\":[{\"Id\":\"e\",\"ReceiptHandle\":\"\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Failed[0].Id", equalTo("e"))
+            .body("Failed[0].Code", equalTo("ReceiptHandleIsInvalid"))
+            .body("Failed[0].Message", equalTo("The request must contain the parameter ReceiptHandle."));
+    }
+
+    @Test
     @Order(8)
     void deleteQueueViaQueueUrlPath() {
         String body = "{\"QueueUrl\":\"" + queueUrl + "\"}";

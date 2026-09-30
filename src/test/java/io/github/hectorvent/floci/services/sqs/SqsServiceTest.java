@@ -2175,4 +2175,100 @@ class SqsServiceTest {
 
         assertTrue(messageStore.get(storageKey).orElseThrow().isEmpty());
     }
+
+    @Test
+    void receiptHandleNamesTheQueueAndTheMessage() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-format", null, region);
+        Message sent = sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+
+        String handle = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).get(0).getReceiptHandle();
+
+        assertTrue(handle.startsWith("region=us-east-1:account=000000000000:queue=handle-format:messageId="
+                + sent.getMessageId() + ":receipt="), handle);
+        assertTrue(handle.matches(".*:checksum=[0-9a-f]{8}"), handle);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"delete", "changeVisibility"})
+    void emptyReceiptHandleIsAMissingParameter(String operation) {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-empty", null, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> useReceiptHandle(operation, queue.getQueueUrl(), "", region));
+
+        assertEquals("MissingParameter", ex.getErrorCode());
+        assertEquals("The request must contain the parameter ReceiptHandle.", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"delete", "changeVisibility"})
+    void malformedReceiptHandleIsInvalid(String operation) {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-malformed", null, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> useReceiptHandle(operation, queue.getQueueUrl(), "abc", region));
+
+        assertEquals("ReceiptHandleIsInvalid", ex.getErrorCode());
+        assertEquals("The input receipt handle is invalid.", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"delete", "changeVisibility"})
+    void editedReceiptHandleIsNotValidForTheQueue(String operation) {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-edited", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        String handle = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).get(0).getReceiptHandle();
+        String edited = handle.replace(":receipt=", ":receipt=0");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> useReceiptHandle(operation, queue.getQueueUrl(), edited, region));
+
+        assertEquals("ReceiptHandleIsInvalid", ex.getErrorCode());
+        assertEquals("The receipt handle \"" + edited + "\" is not valid for this queue.", ex.getMessage());
+        assertEquals(1, sqsService.peekMessages(queue.getQueueUrl(), region).size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"delete", "changeVisibility"})
+    void receiptHandleOfAnotherQueueIsNotValidForTheQueue(String operation) {
+        String region = "us-east-1";
+        Queue origin = sqsService.createQueue("handle-origin", null, region);
+        Queue other = sqsService.createQueue("handle-other", null, region);
+        sqsService.sendMessage(origin.getQueueUrl(), "msg", 0, region);
+        String handle = sqsService.receiveMessage(origin.getQueueUrl(), 1, 30, 0, region).get(0).getReceiptHandle();
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> useReceiptHandle(operation, other.getQueueUrl(), handle, region));
+
+        assertEquals("ReceiptHandleIsInvalid", ex.getErrorCode());
+        assertEquals("The receipt handle \"" + handle + "\" is not valid for this queue.", ex.getMessage());
+    }
+
+    @Test
+    void batchEntryReportsAnEmptyReceiptHandleAsInvalid() {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("handle-batch-empty", null, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.deleteMessageInBatch(queue.getQueueUrl(), "", region));
+        assertEquals("ReceiptHandleIsInvalid", ex.getErrorCode());
+        assertEquals("The request must contain the parameter ReceiptHandle.", ex.getMessage());
+
+        List<SqsService.BatchResultEntry> results = sqsService.changeMessageVisibilityBatch(queue.getQueueUrl(),
+                List.of(new SqsService.ChangeVisibilityBatchEntry("e", "", 10)), region);
+        assertEquals("ReceiptHandleIsInvalid", results.get(0).errorCode());
+        assertEquals("The request must contain the parameter ReceiptHandle.", results.get(0).errorMessage());
+    }
+
+    private void useReceiptHandle(String operation, String queueUrl, String receiptHandle, String region) {
+        if ("delete".equals(operation)) {
+            sqsService.deleteMessage(queueUrl, receiptHandle, region);
+        } else {
+            sqsService.changeMessageVisibility(queueUrl, receiptHandle, 10, region);
+        }
+    }
 }
