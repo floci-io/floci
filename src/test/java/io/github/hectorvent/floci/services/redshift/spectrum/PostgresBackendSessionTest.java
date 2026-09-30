@@ -99,6 +99,55 @@ class PostgresBackendSessionTest {
         }
     }
 
+    @Test
+    void copyInContinuesAfterAZeroByteRead() throws Exception {
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket backend = new Socket("localhost", listener.getLocalPort())) {
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            Future<String> received = executor.submit(() -> {
+                try (Socket socket = listener.accept()) {
+                    InputStream input = socket.getInputStream();
+                    OutputStream output = socket.getOutputStream();
+                    readFrame(input);
+                    send(output, 'G', new byte[]{0, 0, 0});
+                    StringBuilder data = new StringBuilder();
+                    Frame frame = readFrame(input);
+                    while (frame.type() == 'd') {
+                        data.append(new String(frame.body(), StandardCharsets.UTF_8));
+                        frame = readFrame(input);
+                    }
+                    send(output, 'C', "COPY 1\0".getBytes(StandardCharsets.UTF_8));
+                    send(output, 'Z', new byte[]{'I'});
+                    return data + "|" + frame.type();
+                }
+            });
+            ByteArrayInputStream source = new ByteArrayInputStream("row\n".getBytes(StandardCharsets.UTF_8));
+            InputStream zeroByteReadInput = new InputStream() {
+                private boolean returnZero = true;
+
+                @Override
+                public int read() {
+                    return source.read();
+                }
+
+                @Override
+                public int read(byte[] bytes, int offset, int length) {
+                    if (returnZero) {
+                        returnZero = false;
+                        return 0;
+                    }
+                    return source.read(bytes, offset, length);
+                }
+            };
+
+            long rows = new PostgresBackendSession(backend).copyIn("COPY \"t\" FROM STDIN", zeroByteReadInput);
+
+            assertEquals(1, rows);
+            assertEquals("row\n|c", received.get());
+            executor.shutdownNow();
+        }
+    }
+
 
     private static Character serveCopyFailure(ServerSocket listener) throws IOException {
         try (Socket socket = listener.accept()) {

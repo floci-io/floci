@@ -73,6 +73,17 @@ class ExternalStatementParserTest {
     }
 
     @Test
+    void parsesQuotedColumnNamesContainingSpaces() {
+        ExternalStatement.CreateTable table = (ExternalStatement.CreateTable) parser.parse(
+                "CREATE EXTERNAL TABLE analytics.events (\"event name\" VARCHAR(20), amount DECIMAL(10,2)) "
+                        + "STORED AS PARQUET LOCATION 's3://bucket/events/'").orElseThrow();
+
+        assertThat(table.columns().stream().map(ExternalStatement.ColumnDefinition::name).toList(),
+                equalTo(List.of("event name", "amount")));
+        assertThat(table.columns().get(0).type(), equalTo("varchar(20)"));
+    }
+
+    @Test
     void createDatabaseOptionSurvivesLineBreaksAndExtraWhitespace() {
         ExternalStatement.CreateSchema schema = (ExternalStatement.CreateSchema) parser.parse(
                 "CREATE EXTERNAL SCHEMA a FROM DATA CATALOG DATABASE 'lake' IAM_ROLE 'arn:aws:iam::000000000000:role/R'\n"

@@ -167,14 +167,36 @@ public class ExternalStatementParser {
     private static List<ExternalStatement.ColumnDefinition> columns(String text) {
         List<ExternalStatement.ColumnDefinition> result = new ArrayList<>();
         for (String item : split(text)) {
-            String[] parts = item.trim().split("\\s+", 2);
-            if (parts.length < 2) {
+            String definition = item.trim();
+            int nameEnd = columnNameEnd(definition);
+            if (nameEnd < 0 || nameEnd == definition.length() || definition.substring(nameEnd).isBlank()) {
                 throw new SpectrumSqlException("0A000", "malformed column definition");
             }
-            result.add(new ExternalStatement.ColumnDefinition(identifier(parts[0]),
-                    GlueTypeMapper.canonicalGlueType(parts[1])));
+            result.add(new ExternalStatement.ColumnDefinition(identifier(definition.substring(0, nameEnd)),
+                    GlueTypeMapper.canonicalGlueType(definition.substring(nameEnd).trim())));
         }
         return result;
+    }
+
+    private static int columnNameEnd(String definition) {
+        if (!definition.startsWith("\"")) {
+            for (int index = 0; index < definition.length(); index++) {
+                if (Character.isWhitespace(definition.charAt(index))) {
+                    return index;
+                }
+            }
+            return -1;
+        }
+        for (int index = 1; index < definition.length(); index++) {
+            if (definition.charAt(index) == '"') {
+                if (index + 1 < definition.length() && definition.charAt(index + 1) == '"') {
+                    index++;
+                } else {
+                    return index + 1;
+                }
+            }
+        }
+        return -1;
     }
 
     private static List<String> split(String text) {

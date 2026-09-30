@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Column;
@@ -16,6 +17,8 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 
 class ExternalMetadataWriterTest {
@@ -54,6 +57,30 @@ class ExternalMetadataWriterTest {
     }
 
     @Test
+    void refreshSqlUsesPartitionStorageSettings() throws Exception {
+        StorageDescriptor tableDescriptor = new StorageDescriptor();
+        tableDescriptor.setSerdeInfo(serdeInfo("table-serde", Map.of("source", "table")));
+        tableDescriptor.setCompressed(false);
+        Table table = new Table();
+        table.setName("events");
+        table.setStorageDescriptor(tableDescriptor);
+
+        StorageDescriptor partitionDescriptor = new StorageDescriptor();
+        partitionDescriptor.setSerdeInfo(serdeInfo("partition-serde", Map.of("source", "partition")));
+        partitionDescriptor.setCompressed(true);
+        Partition partition = new Partition();
+        partition.setValues(List.of("2024-01-01"));
+        partition.setStorageDescriptor(partitionDescriptor);
+
+        String sql = writer.refreshSql(BINDING, List.of(table), Map.of("events", List.of(partition)));
+        JsonNode partitionRow = refreshPayload(sql).path("partitions").get(0);
+
+        assertEquals("partition-serde", partitionRow.path("serialization_lib").asText());
+        assertEquals("{\"source\":\"partition\"}", partitionRow.path("serde_parameters").asText());
+        assertEquals(1, partitionRow.path("compressed").asInt());
+    }
+
+    @Test
     void purgeCallsPrivilegedWriterForOneSchema() {
         String sql = writer.purgeSql("analytics");
         assertThat(sql, containsString("SELECT floci_internal.purge_external_schema('analytics')"));
@@ -74,5 +101,39 @@ class ExternalMetadataWriterTest {
             }
         };
         assertDoesNotThrow(() -> writer.purge(missingTable, "analytics"));
+    }
+
+    @Test
+    void refreshPropagatesMissingBootstrapTables() {
+        BackendSql missingTable = new BackendSql() {
+            @Override
+            public void execute(String sql) {
+                throw new SpectrumReadException("42P01", "metadata table missing");
+            }
+
+            @Override
+            public long copyIn(String copySql, InputStream data) {
+                return 0;
+            }
+        };
+
+        SpectrumReadException exception = assertThrows(SpectrumReadException.class,
+                () -> writer.refresh(missingTable, BINDING.accountId(), BINDING));
+
+        assertEquals("42P01", exception.sqlState());
+    }
+
+    private static StorageDescriptor.SerDeInfo serdeInfo(String library, Map<String, String> parameters) {
+        StorageDescriptor.SerDeInfo serdeInfo = new StorageDescriptor.SerDeInfo();
+        serdeInfo.setSerializationLibrary(library);
+        serdeInfo.setParameters(parameters);
+        return serdeInfo;
+    }
+
+    private JsonNode refreshPayload(String sql) throws Exception {
+        String prefix = "SELECT floci_internal.refresh_external_catalog('analytics', '";
+        String payloadEnd = "'::jsonb)";
+        String escapedJson = sql.substring(prefix.length(), sql.lastIndexOf(payloadEnd));
+        return new ObjectMapper().readTree(escapedJson.replace("''", "'"));
     }
 }

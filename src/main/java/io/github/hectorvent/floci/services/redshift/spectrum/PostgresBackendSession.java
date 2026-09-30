@@ -57,7 +57,16 @@ public final class PostgresBackendSession implements BackendSql {
     private static int readChunk(OutputStream output, PostgresWireDecoder decoder, InputStream data, byte[] chunk)
             throws IOException {
         try {
-            return data.read(chunk);
+            int read = data.read(chunk);
+            if (read != 0) {
+                return read;
+            }
+            int nextByte = data.read();
+            if (nextByte < 0) {
+                return -1;
+            }
+            chunk[0] = (byte) nextByte;
+            return 1;
         } catch (IOException exception) {
             writeCopyFail(output, exception.getMessage());
             try {

@@ -35,18 +35,18 @@ public class ExternalMetadataWriter {
             partitions.put(table.getName(), RequestScopes.callAs(accountId,
                     () -> glueService.getPartitions(binding.glueDatabase(), table.getName())));
         }
-        run(backend, refreshSql(binding, tables, partitions));
+        run(backend, refreshSql(binding, tables, partitions), false);
     }
 
     public void purge(BackendSql backend, String schemaName) {
-        run(backend, purgeSql(schemaName));
+        run(backend, purgeSql(schemaName), true);
     }
 
-    private void run(BackendSql backend, String sql) {
+    private void run(BackendSql backend, String sql, boolean tolerateMissingBootstrapTables) {
         try {
             backend.execute(sql);
         } catch (SpectrumReadException exception) {
-            if (!"42P01".equals(exception.sqlState())) {
+            if (!tolerateMissingBootstrapTables || !"42P01".equals(exception.sqlState())) {
                 throw exception;
             }
             LOG.warnv("Spectrum metadata tables are missing; restart the cluster to re-run the catalog bootstrap: {0}",
@@ -82,7 +82,7 @@ public class ExternalMetadataWriter {
             List<Partition> partitions = partitionsByTable.get(table.getName());
             if (partitions != null) {
                 for (Partition partition : partitions) {
-                    appendPartition(partitionRows, table.getName(), partition, serdeLibrary, serdeParameters, compressed);
+                    appendPartition(partitionRows, table.getName(), partition);
                 }
             }
         }
@@ -121,8 +121,7 @@ public class ExternalMetadataWriter {
                 "is_nullable", "true"));
     }
 
-    private void appendPartition(List<Map<String, Object>> rows, String tableName, Partition partition,
-                                 String serdeLibrary, String serdeParameters, int compressed) {
+    private void appendPartition(List<Map<String, Object>> rows, String tableName, Partition partition) {
         StorageDescriptor descriptor = partition.getStorageDescriptor();
         String values = jsonValues(partition.getValues());
         rows.add(row("tablename", tableName,
@@ -130,9 +129,9 @@ public class ExternalMetadataWriter {
                 "location", descriptor == null ? "" : descriptor.getLocation(),
                 "input_format", descriptor == null ? "" : descriptor.getInputFormat(),
                 "output_format", descriptor == null ? "" : descriptor.getOutputFormat(),
-                "serialization_lib", serdeLibrary,
-                "serde_parameters", serdeParameters,
-                "compressed", compressed,
+                "serialization_lib", serdeLibrary(descriptor),
+                "serde_parameters", json(serdeParameters(descriptor)),
+                "compressed", descriptor != null && Boolean.TRUE.equals(descriptor.getCompressed()) ? 1 : 0,
                 "parameters", json(partition.getParameters())));
     }
 
