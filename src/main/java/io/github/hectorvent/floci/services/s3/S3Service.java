@@ -4513,10 +4513,22 @@ public class S3Service implements Resettable, ResourceProvider {
             detail.put("requester", "aws:emulator");
             detail.put("source-ip-address", "127.0.0.1");
             detail.put("reason", eventName);
+            String deletionType = eventBridgeDeletionType(eventName);
+            if (deletionType != null) {
+                detail.put("deletion-type", deletionType);
+            }
             return objectMapper.writeValueAsString(detail);
         } catch (Exception e) {
             return "{}";
         }
+    }
+
+    private static String eventBridgeDeletionType(String eventName) {
+        return switch (eventName) {
+            case "ObjectRemoved:Delete" -> "Permanently Deleted";
+            case "ObjectRemoved:DeleteMarkerCreated" -> "Delete Marker Created";
+            default -> null;
+        };
     }
 
     private boolean matchesEvent(String pattern, String eventName) {
