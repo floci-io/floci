@@ -67,6 +67,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
@@ -1057,12 +1058,26 @@ public class S3Controller {
     /** Streams {@code body}, opened together with {@code obj} by {@link S3Service#openObject}, and closes it. */
     private Response fullObjectResponse(S3Object obj, InputStream body, ResponseHeaderOverrides overrides,
                                         boolean includeChecksum) {
+        return streamingResponse(body,
+                stream -> objectResponseHeaders(Response.ok(stream), obj, overrides, includeChecksum).build());
+    }
+
+    /**
+     * Builds a response whose entity streams {@code body} and then closes it. If building the
+     * response fails, the entity is never written, so {@code body} is closed here instead.
+     */
+    static Response streamingResponse(InputStream body, Function<StreamingOutput, Response> build) {
         StreamingOutput stream = output -> {
             try (InputStream in = body) {
                 in.transferTo(output);
             }
         };
-        return objectResponseHeaders(Response.ok(stream), obj, overrides, includeChecksum).build();
+        try {
+            return build.apply(stream);
+        } catch (RuntimeException e) {
+            closeQuietly(body);
+            throw e;
+        }
     }
 
     /** Applies the standard GetObject response headers derived from {@code obj} to {@code resp}. */

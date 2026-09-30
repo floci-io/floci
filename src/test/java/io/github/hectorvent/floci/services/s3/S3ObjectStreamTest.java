@@ -5,15 +5,19 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class S3ObjectStreamTest {
 
@@ -31,6 +35,8 @@ class S3ObjectStreamTest {
         long threadId = Thread.currentThread().threadId();
         byte[] buffer = new byte[64 * 1024];
         long total = 0;
+        assumeTrue(threads.isThreadAllocatedMemorySupported() && threads.isThreadAllocatedMemoryEnabled(),
+                "thread allocation tracking is unavailable");
         long allocatedBefore = threads.getThreadAllocatedBytes(threadId);
         try (S3Service.ObjectRead read = s3.openObject("large-objects", "blob.bin", null)) {
             int n;
@@ -60,5 +66,22 @@ class S3ObjectStreamTest {
             assertEquals(first.length, read.object().getSize());
             assertArrayEquals(first, body.readAllBytes());
         }
+    }
+
+    @Test
+    void responseThatFailsToBuildClosesTheObjectStream() {
+        AtomicBoolean closed = new AtomicBoolean();
+        InputStream body = new ByteArrayInputStream(new byte[16]) {
+            @Override
+            public void close() {
+                closed.set(true);
+            }
+        };
+
+        assertThrows(NullPointerException.class, () -> S3Controller.streamingResponse(body, stream -> {
+            throw new NullPointerException("Last-Modified is missing");
+        }));
+
+        assertTrue(closed.get(), "the object stream was left open");
     }
 }
