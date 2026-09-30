@@ -2,8 +2,6 @@ package io.github.hectorvent.floci.services.s3;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -222,67 +220,7 @@ class S3NotificationDestinationValidationIntegrationTest {
     }
 
     @Test
-    void sameAccountQueueRequiresMatchingPolicyAndHonorsExplicitDeny() throws Exception {
-        String queueArn = createQueue("policy-required", Map.of(), false);
-        String queueUrl = queueUrls.getFirst();
-        putNotification(notificationConfiguration(queueConfiguration(queueArn)), false)
-                .statusCode(400)
-                .body(containsString("Amazon S3 is not authorized"));
-        assertTrue(receiveQueueMessage(queueUrl).isEmpty());
-
-        String wrongBucketArn = S3PublicAccessEvaluator.bucketArn(regionResolver.getPartition(), "other-bucket");
-        sqsService.setQueueAttributes(queueUrl,
-                Map.of("Policy", queuePolicy(queueArn, wrongBucketArn, regionResolver.getAccountId())), REGION);
-        putNotification(notificationConfiguration(queueConfiguration(queueArn)), false).statusCode(400);
-        assertTrue(receiveQueueMessage(queueUrl).isEmpty());
-
-        sqsService.setQueueAttributes(queueUrl,
-                Map.of("Policy", queuePolicy(queueArn, bucketArn(), regionResolver.getAccountId())
-                        .replace("\"Service\":\"s3.amazonaws.com\"", "\"Federated\":\"s3.amazonaws.com\"")), REGION);
-        putNotification(notificationConfiguration(queueConfiguration(queueArn)), false).statusCode(400);
-        assertTrue(receiveQueueMessage(queueUrl).isEmpty());
-
-        String allowedPolicy = queuePolicy(queueArn, bucketArn(), regionResolver.getAccountId());
-        sqsService.setQueueAttributes(queueUrl, Map.of("Policy", allowedPolicy), REGION);
-        putNotification(notificationConfiguration(queueConfiguration(queueArn)), false).statusCode(200);
-        Message testEvent = receiveQueueMessage(queueUrl).getFirst();
-        assertTestEvent(testEvent.getBody());
-        sqsService.deleteMessage(queueUrl, testEvent.getReceiptHandle(), REGION);
-
-        ObjectNode deniedPolicy = (ObjectNode) objectMapper.readTree(allowedPolicy);
-        ArrayNode statements = (ArrayNode) deniedPolicy.get("Statement");
-        ObjectNode deny = statements.addObject();
-        deny.put("Effect", "Deny");
-        deny.putObject("Principal").put("Service", "s3.amazonaws.com");
-        deny.put("Action", "sqs:SendMessage");
-        deny.put("Resource", queueArn);
-        sqsService.setQueueAttributes(queueUrl, Map.of("Policy", deniedPolicy.toString()), REGION);
-        putNotification(notificationConfiguration(queueConfiguration(queueArn)), false).statusCode(400);
-        assertTrue(receiveQueueMessage(queueUrl).isEmpty());
-    }
-
-    @Test
-    void skipValidationDoesNotBypassQueuePolicyDuringObjectDelivery() {
-        String queueArn = createQueue("skip-policy", Map.of(), false);
-        String queueUrl = queueUrls.getFirst();
-        putNotification(notificationConfiguration(queueConfiguration(queueArn)), true).statusCode(200);
-        assertTrue(receiveQueueMessage(queueUrl).isEmpty());
-
-        given().contentType("text/plain").body("payload")
-                .when().put("/" + bucket + "/denied-object").then().statusCode(200);
-        assertTrue(receiveQueueMessage(queueUrl).isEmpty());
-
-        sqsService.setQueueAttributes(queueUrl,
-                Map.of("Policy", queuePolicy(queueArn, bucketArn(), regionResolver.getAccountId())), REGION);
-        given().contentType("text/plain").body("payload")
-                .when().put("/" + bucket + "/allowed-object").then().statusCode(200);
-        assertTrue(receiveQueueMessage(queueUrl).getFirst().getBody().contains("allowed-object"));
-        given().when().delete("/" + bucket + "/denied-object").then().statusCode(204);
-        given().when().delete("/" + bucket + "/allowed-object").then().statusCode(204);
-    }
-
-    @Test
-    void crossAccountQueueRequiresSourceScopedPolicyForTestAndObjectEvents() throws Exception {
+    void crossAccountQueueReceivesTestEventWithoutIamEnforcement() throws Exception {
         String queueName = "notification-cross-account-" + UUID.randomUUID().toString().substring(0, 8);
         String auth = "AWS4-HMAC-SHA256 Credential=" + OTHER_ACCOUNT
                 + "/20261001/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=abc";
@@ -293,22 +231,6 @@ class S3NotificationDestinationValidationIntegrationTest {
                 .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
         String queueArn = "arn:aws:sqs:" + REGION + ":" + OTHER_ACCOUNT + ":" + queueName;
         try {
-            putNotification(notificationConfiguration(queueConfiguration(queueArn)), false).statusCode(400);
-            assertTrue(sqsService.receiveMessage(queueUrl, 1, 0, 0, REGION).isEmpty());
-
-            given().header("Authorization", auth).contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", "SetQueueAttributes").formParam("QueueUrl", queueUrl)
-                    .formParam("Attribute.1.Name", "Policy")
-                    .formParam("Attribute.1.Value", queuePolicy(queueArn, bucketArn(), OTHER_ACCOUNT))
-                    .when().post("/").then().statusCode(200);
-            putNotification(notificationConfiguration(queueConfiguration(queueArn)), false).statusCode(400);
-            assertTrue(sqsService.receiveMessage(queueUrl, 1, 0, 0, REGION).isEmpty());
-
-            given().header("Authorization", auth).contentType("application/x-www-form-urlencoded")
-                    .formParam("Action", "SetQueueAttributes").formParam("QueueUrl", queueUrl)
-                    .formParam("Attribute.1.Name", "Policy")
-                    .formParam("Attribute.1.Value", queuePolicy(queueArn, bucketArn(), regionResolver.getAccountId()))
-                    .when().post("/").then().statusCode(200);
             putNotification(notificationConfiguration(queueConfiguration(queueArn)), false).statusCode(200);
             Message testEvent = sqsService.receiveMessage(queueUrl, 1, 0, 0, REGION).getFirst();
             assertTestEvent(testEvent.getBody());
@@ -327,35 +249,13 @@ class S3NotificationDestinationValidationIntegrationTest {
     }
 
     private String createQueue(String suffix, Map<String, String> attributes) {
-        return createQueue(suffix, attributes, true);
-    }
-
-    private String createQueue(String suffix, Map<String, String> attributes, boolean grantS3) {
         String queueName = "notification-" + suffix + "-" + UUID.randomUUID().toString().substring(0, 8);
         if (queueName.contains(".fifo-")) {
             queueName = queueName.replace(".fifo-", "-") + ".fifo";
         }
         String queueUrl = sqsService.createQueue(queueName, attributes, REGION).getQueueUrl();
         queueUrls.add(queueUrl);
-        String queueArn = sqsService.getQueueAttributes(queueUrl, List.of("QueueArn"), REGION).get("QueueArn");
-        if (grantS3) {
-            sqsService.setQueueAttributes(queueUrl,
-                    Map.of("Policy", queuePolicy(queueArn, bucketArn(), regionResolver.getAccountId())), REGION);
-        }
-        return queueArn;
-    }
-
-    private String bucketArn() {
-        return S3PublicAccessEvaluator.bucketArn(regionResolver.getPartition(), bucket);
-    }
-
-    private static String queuePolicy(String queueArn, String sourceArn, String sourceAccount) {
-        return """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-                "Principal":{"Service":"s3.amazonaws.com"},"Action":"sqs:SendMessage",
-                "Resource":"%s","Condition":{"ArnEquals":{"aws:SourceArn":"%s"},
-                "StringEquals":{"aws:SourceAccount":"%s"}}}]}
-                """.formatted(queueArn, sourceArn, sourceAccount);
+        return sqsService.getQueueAttributes(queueUrl, List.of("QueueArn"), REGION).get("QueueArn");
     }
 
     private String createTopic(String suffix) {

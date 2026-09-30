@@ -40,10 +40,8 @@ import software.amazon.awssdk.services.sqs.model.CreateQueueRequest;
 import software.amazon.awssdk.services.sqs.model.DeleteQueueRequest;
 import software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
-import software.amazon.awssdk.services.sqs.model.SetQueueAttributesRequest;
 
 import java.time.Duration;
-import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -89,14 +87,6 @@ class S3NotificationsTest {
                         .build())
                 .attributes()
                 .get(QueueAttributeName.QUEUE_ARN);
-        String policy = """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-                "Principal":{"Service":"s3.amazonaws.com"},"Action":"sqs:SendMessage",
-                "Resource":"%s","Condition":{"ArnEquals":{"aws:SourceArn":"arn:aws:s3:::%s"},
-                "StringEquals":{"aws:SourceAccount":"000000000000"}}}]}
-                """.formatted(queueArn, bucketName);
-        sqs.setQueueAttributes(SetQueueAttributesRequest.builder().queueUrl(queueUrl)
-                .attributes(Map.of(QueueAttributeName.POLICY, policy)).build());
 
         topicArn = sns.createTopic(CreateTopicRequest.builder()
                         .name(topicName)

@@ -148,7 +148,7 @@ class S3PresignedPostIntegrationTest {
     }
 
     private String createQueue(String queueName) {
-        String queueUrl = given()
+        return given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateQueue")
             .formParam("QueueName", queueName)
@@ -157,20 +157,6 @@ class S3PresignedPostIntegrationTest {
         .then()
             .statusCode(200)
             .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
-        String policy = """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-                "Principal":{"Service":"s3.amazonaws.com"},"Action":"sqs:SendMessage",
-                "Resource":"arn:aws:sqs:us-east-1:000000000000:%s",
-                "Condition":{"ArnEquals":{"aws:SourceArn":"arn:aws:s3:::%s"},
-                "StringEquals":{"aws:SourceAccount":"000000000000"}}}]}
-                """.formatted(queueName, BUCKET);
-        given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "SetQueueAttributes")
-                .formParam("QueueUrl", queueUrl)
-                .formParam("Attribute.1.Name", "Policy")
-                .formParam("Attribute.1.Value", policy)
-                .when().post("/").then().statusCode(200);
-        return queueUrl;
     }
 
     private void assertQueueContainsPostNotification(String queueUrl) {

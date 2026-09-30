@@ -164,6 +164,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private final String baseUrl;
     private final ObjectMapper objectMapper;
     private final boolean enforceAuth;
+    private final boolean enforceIam;
     private final IamService iamService;
     private final boolean globalBucketNamespace;
     private final IamPolicyEvaluator policyEvaluator;
@@ -196,7 +197,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 eventBridgeService, s3UpdatedEvent,
                 regionResolver,
                 config.effectiveBaseUrl(), objectMapper,
-                config.services().s3().enforceAuth(), iamService,
+                config.services().s3().enforceAuth(), config.services().iam().enforcementEnabled(), iamService,
                 config.services().s3().globalBucketNamespace()
         );
     }
@@ -209,7 +210,7 @@ public class S3Service implements Resettable, ResourceProvider {
               Path dataRoot, boolean inMemory) {
         this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, null, null, null,
-                null, "http://localhost:4566", new ObjectMapper(), false, null, false);
+                null, "http://localhost:4566", new ObjectMapper(), false, false, null, false);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -218,7 +219,7 @@ public class S3Service implements Resettable, ResourceProvider {
               boolean enforceAuth, IamService iamService) {
         this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, null, null, null,
-                null, "http://localhost:4566", new ObjectMapper(), enforceAuth, iamService, false);
+                null, "http://localhost:4566", new ObjectMapper(), enforceAuth, false, iamService, false);
     }
 
     /** Package-private constructor for testing account-level Block Public Access persistence. */
@@ -228,7 +229,7 @@ public class S3Service implements Resettable, ResourceProvider {
               Path dataRoot, boolean inMemory) {
         this(bucketStore, objectStore, defaultAnnotationStore(), accountPublicAccessBlockStore,
                 dataRoot, inMemory, null, null, null, null, null, null, null,
-                null, "http://localhost:4566", new ObjectMapper(), false, null, false);
+                null, "http://localhost:4566", new ObjectMapper(), false, false, null, false);
     }
 
     /** Package-private constructor for testing the global-bucket-namespace resolution flag. */
@@ -237,7 +238,7 @@ public class S3Service implements Resettable, ResourceProvider {
               Path dataRoot, boolean inMemory, boolean globalBucketNamespace) {
         this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, null, null, null,
-                null, "http://localhost:4566", new ObjectMapper(), false, null, globalBucketNamespace);
+                null, "http://localhost:4566", new ObjectMapper(), false, false, null, globalBucketNamespace);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -247,7 +248,7 @@ public class S3Service implements Resettable, ResourceProvider {
               RegionResolver regionResolver) {
         this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, lambdaService, null, null, null, null,
-                regionResolver, "http://localhost:4566", new ObjectMapper(), false, null, false);
+                regionResolver, "http://localhost:4566", new ObjectMapper(), false, false, null, false);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -257,7 +258,7 @@ public class S3Service implements Resettable, ResourceProvider {
               RegionResolver regionResolver) {
         this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, lambdaInvoker, null, null,
-                regionResolver, "http://localhost:4566", new ObjectMapper(), false, null, false);
+                regionResolver, "http://localhost:4566", new ObjectMapper(), false, false, null, false);
     }
 
     /** In-memory account-level Block Public Access store for the package-private test constructors. */
@@ -281,7 +282,8 @@ public class S3Service implements Resettable, ResourceProvider {
                       EventBridgeService eventBridgeService,
                       Event<S3ObjectUpdatedEvent> s3UpdatedEvent,
                       RegionResolver regionResolver, String baseUrl, ObjectMapper objectMapper,
-                      boolean enforceAuth, IamService iamService, boolean globalBucketNamespace) {
+                      boolean enforceAuth, boolean enforceIam, IamService iamService,
+                      boolean globalBucketNamespace) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
         this.annotationStore = annotationStore;
@@ -299,6 +301,7 @@ public class S3Service implements Resettable, ResourceProvider {
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
         this.enforceAuth = enforceAuth;
+        this.enforceIam = enforceIam;
         this.iamService = iamService;
         this.globalBucketNamespace = globalBucketNamespace;
         this.policyEvaluator = new IamPolicyEvaluator(objectMapper);
@@ -3657,8 +3660,11 @@ public class S3Service implements Resettable, ResourceProvider {
             for (NotificationDestination destination : destinations) {
                 try {
                     if ("sqs".equals(destination.service())) {
-                        sqsService.sendS3Notification(destination.arn(), testEvent,
-                                S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName), ownerId());
+                        if (enforceIam && !destination.accountId().equals(ownerId())) {
+                            continue;
+                        }
+                        sqsService.sendMessage(sqsUrlFromArn(destination.arn()), testEvent, 0,
+                                destination.region());
                     } else if ("sns".equals(destination.service())) {
                         snsService.publish(destination.arn(), null, testEvent, "Amazon S3 Notification",
                                 destination.region());
@@ -4682,8 +4688,8 @@ public class S3Service implements Resettable, ResourceProvider {
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(key)) {
                 try {
-                    sqsService.sendS3Notification(qn.queueArn(), eventJson,
-                            S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName), ownerId());
+                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0,
+                            extractRegionFromArn(qn.queueArn()));
                     LOG.debugv("Fired S3 event {0} to SQS {1}", eventName, qn.queueArn());
                 } catch (Exception e) {
                     LOG.warnv("Failed to deliver S3 event to SQS {0}: {1}", qn.queueArn(), e.getMessage());

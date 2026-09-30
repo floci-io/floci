@@ -10,15 +10,12 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
-import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
-import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
@@ -273,10 +270,6 @@ public class SqsService implements Resettable, ResourceProvider {
     private final boolean clearFifoDeduplicationCacheOnPurge;
     private final SnsService snsService;
     private final Clock clock;
-    private final IamPolicyEvaluator notificationPolicyEvaluator;
-
-    private record S3NotificationSource(String queueArn, String bucketArn, String accountId) {
-    }
 
     public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                       SnsService snsService) {
@@ -368,7 +361,6 @@ public class SqsService implements Resettable, ResourceProvider {
         this.clearFifoDeduplicationCacheOnPurge = clearFifoDeduplicationCacheOnPurge;
         this.snsService = snsService;
         this.clock = clock;
-        this.notificationPolicyEvaluator = new IamPolicyEvaluator(POLICY_MAPPER);
         this.moveTasksByHandle = new MoveTaskStore(clock);
         loadPersistedMessages();
         loadPersistedDedup();
@@ -769,39 +761,10 @@ public class SqsService implements Resettable, ResourceProvider {
                                Map<String, MessageAttributeValue> messageAttributes,
                                String awsTraceHeader,
                                String region) {
-        return sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId,
-                messageAttributes, awsTraceHeader, region, null);
-    }
-
-    public Message sendS3Notification(String queueArn, String body, String bucketArn, String bucketAccountId) {
-        String queueUrl = AwsArnUtils.arnToQueueUrl(queueArn, baseUrl);
-        String region = AwsArnUtils.regionOrDefault(queueArn, null);
-        return sendMessage(queueUrl, body, 0, null, null, null, null, region,
-                new S3NotificationSource(queueArn, bucketArn, bucketAccountId));
-    }
-
-    private Message sendMessage(String queueUrl, String body, Integer delaySeconds,
-                                String messageGroupId, String messageDeduplicationId,
-                                Map<String, MessageAttributeValue> messageAttributes,
-                                String awsTraceHeader, String region, S3NotificationSource source) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
-
-        if (source != null) {
-            String policy = queue.getAttributes().get("Policy");
-            ResourcePolicyDecision decision = notificationPolicyEvaluator.evaluateServiceResourcePolicy(
-                    policy == null || policy.isBlank() ? List.of() : List.of(policy),
-                    ServicePrincipals.of("s3"), "sqs:SendMessage", source.queueArn(),
-                    Map.of("aws:SourceArn", List.of(source.bucketArn()),
-                            "aws:SourceAccount", List.of(source.accountId()),
-                            "aws:PrincipalIsAWSService", List.of("true")));
-            if (decision != ResourcePolicyDecision.ALLOW) {
-                throw new AwsException("AccessDenied",
-                        "Amazon S3 is not authorized to send messages to the destination queue.", 403);
-            }
-        }
 
         int queueMaxMessageSize = parseMaxMessageSize(queue.getAttributes().get("MaximumMessageSize"));
         int totalSize = computeMessageSize(body, messageAttributes);
