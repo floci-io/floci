@@ -83,7 +83,9 @@ the parent execution's history, as on AWS. A `Parallel` records `ParallelStateSt
 history. A `Task` whose failure ends its branch also records `TaskStateAborted`. When a failure
 ends a `Parallel`, each other branch that is still inside a `Task` or a `Wait` records
 `TaskStateAborted` or `WaitStateAborted`, chained to the failing branch's last event and recorded
-before `ParallelStateFailed`.
+before `ParallelStateFailed`. The `Parallel` fails the moment any branch fails, whichever branch
+is listed first, and cuts the others then; the branch outputs still come back in declaration
+order.
 
 Branches and iterations run concurrently, so the order in which their events interleave differs
 from run to run. Each branch chains its own events through `previousEventId`, and that chain is

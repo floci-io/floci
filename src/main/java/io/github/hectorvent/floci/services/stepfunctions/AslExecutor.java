@@ -108,8 +108,10 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionService;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -2584,6 +2586,11 @@ public class AslExecutor {
         JsonNode branches = stateDef.path("Branches");
         chain.publish("ParallelStateStarted", null);
         var branchChains = new ArrayList<HistoryChain>();
+        // The branches are joined in the order they complete, not the order they are declared, so
+        // a failure in any branch ends the Parallel while the others are still running, as on AWS
+        // (measured: the Parallel fails within about 0.1 s of the failing branch, whichever branch
+        // is listed first). The outputs still land in declaration order.
+        CompletionService<JsonNode> completions = new ExecutorCompletionService<>(executor);
         List<Future<JsonNode>> futures = new ArrayList<>();
 
         for (JsonNode branch : branches) {
@@ -2605,7 +2612,7 @@ public class AslExecutor {
             // A branch state that declares no QueryLanguage defaults to the state machine's, not to
             // this Parallel's: the ASL specification calls the two independent, so what travels
             // into the branch is topLevelQueryLanguage. https://states-language.net/spec.html
-            futures.add(executor.submit(() -> callUnderExecutionAccount(sm,
+            futures.add(completions.submit(() -> callUnderExecutionAccount(sm,
                     () -> executeBranch(startAt, branchStates, capturedInput, branchChain, sm,
                             topLevelQueryLanguage, branchContext, branchVariables))));
         }
@@ -2618,20 +2625,22 @@ public class AslExecutor {
         // own TimeoutSeconds, and the state machine's budget for the whole execution.
         long joinDeadlineNanos = Math.min(stateDeadlineNanos, executionDeadlineNanos);
 
-        ArrayNode results = objectMapper.createArrayNode();
-        var joined = 0;
+        JsonNode[] outputs = new JsonNode[futures.size()];
+        // The branch whose future was last taken from the completion queue: the failed one when
+        // the join ends in ExecutionException.
+        int current = -1;
         try {
-            for (Future<JsonNode> future : futures) {
+            for (int joined = 0; joined < futures.size(); joined++) {
                 long remainingNanos = joinDeadlineNanos - System.nanoTime();
                 if (remainingNanos <= 0) {
                     throw parallelJoinExpired(stateDeadlineNanos, timeoutSeconds);
                 }
-                try {
-                    results.add(future.get(remainingNanos, TimeUnit.NANOSECONDS));
-                } catch (java.util.concurrent.TimeoutException e) {
+                Future<JsonNode> done = completions.poll(remainingNanos, TimeUnit.NANOSECONDS);
+                if (done == null) {
                     throw parallelJoinExpired(stateDeadlineNanos, timeoutSeconds);
                 }
-                joined++;
+                current = futures.indexOf(done);
+                outputs[current] = done.get();
             }
         } catch (InterruptedException e) {
             abandon(branchChains, futures);
@@ -2639,7 +2648,7 @@ public class AslExecutor {
             throw e;
         } catch (ExecutionException e) {
             List<String> abortedEventTypes = cutAfterFailure(branchChains, futures);
-            chain.continueFrom(branchChains.get(joined).lastEventId());
+            chain.continueFrom(branchChains.get(current).lastEventId());
             if (e.getCause() instanceof FailStateException failure && !failure.isRuntimeError()) {
                 for (String abortedEventType : abortedEventTypes) {
                     chain.publishBeside(abortedEventType, null);
@@ -2666,6 +2675,10 @@ public class AslExecutor {
         chain.continueAfter(branchChains);
         chain.publishAside("ParallelStateSucceeded", null);
 
+        ArrayNode results = objectMapper.createArrayNode();
+        for (JsonNode output : outputs) {
+            results.add(output);
+        }
         if (jsonata) {
             JsonNode output = applyJsonataOutput(stateDef, input, results, context, variables);
             return new StateResult(output, stateDef.path("Next").asText(null));

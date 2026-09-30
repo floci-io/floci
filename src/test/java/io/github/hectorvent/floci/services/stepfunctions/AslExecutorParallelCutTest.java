@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.time.Clock;
 import java.util.ArrayList;
@@ -50,7 +51,9 @@ import static org.mockito.Mockito.when;
  * cause below, and records one {@code TaskStateAborted} (or {@code WaitStateAborted}) per cut
  * branch, each chained to the failing branch's last event and recorded before
  * {@code ParallelStateFailed}, which is chained to that same event. When the execution's budget
- * cuts the Parallel instead, the child is aborted as well and no such event is recorded. An
+ * cuts the Parallel instead, the child is aborted as well and no such event is recorded. The
+ * failure is seen the moment it happens, whichever branch is listed first: the branches are
+ * joined as they complete, and the outputs still come back in declaration order. An
  * iteration of an inline Map that fails cuts the other iterations the same way, and the job one of
  * them waits on is aborted too (measured: within about 0.15 s, with the same cause, whether or not
  * a Catch on the Map keeps the execution going).
@@ -94,6 +97,11 @@ class AslExecutorParallelCutTest {
               "Boom":{"Type":"Fail","Error":"Boom","Cause":"sibling failed"},
               "Nest":{"Type":"Task","Resource":"arn:aws:states:::states:startExecution.sync:2",
                 "Parameters":{"StateMachineArn":"%s"},"End":true}}}}""".formatted(CHILD_SM_ARN);
+    private static final String SLOW_RESULT_BRANCH = """
+            {"StartAt":"Slow","States":{"Slow":{"Type":"Wait","Seconds":1,"Next":"Out"},
+              "Out":{"Type":"Pass","Result":"slow","End":true}}}""";
+    private static final String FAST_RESULT_BRANCH = """
+            {"StartAt":"Out","States":{"Out":{"Type":"Pass","Result":"fast","End":true}}}""";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private StepFunctionsService sfnService;
@@ -126,6 +134,47 @@ class AslExecutorParallelCutTest {
         assertEquals(failure, parallelFailed.getPreviousEventId().longValue());
         assertTrue(aborted.get(0).getId() < parallelFailed.getId());
         verify(sfnService, timeout(5_000)).stopExecution(eq(CHILD_ARN), eq(ABORT_CAUSE), isNull());
+    }
+
+    /** Fails against a declaration-order join after the default 300 s Task timeout; the limit ends it sooner. */
+    @Test
+    @Timeout(20)
+    void aFailureInALaterBranchCutsAnEarlierBranchStillWaitingOnItsJob() {
+        Execution execution = run(parallel(NESTED_SYNC_BRANCH, FAILING_BRANCH), 1, 0);
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Boom", execution.getError());
+        long failure = eventOfType("FailStateEntered").getId();
+        HistoryEvent aborted = eventOfType("TaskStateAborted");
+        assertEquals(failure, aborted.getPreviousEventId().longValue());
+        assertEquals(failure, eventOfType("ParallelStateFailed").getPreviousEventId().longValue());
+        assertTrue(aborted.getId() < eventOfType("ParallelStateFailed").getId());
+        verify(sfnService, timeout(5_000)).stopExecution(eq(CHILD_ARN), eq(ABORT_CAUSE), isNull());
+    }
+
+    /** The earlier branch's Wait really sleeps 20 s; a declaration-order join sees the failure only then. */
+    @Test
+    @Timeout(10)
+    void aFailureInALaterBranchIsSeenWhileAnEarlierWaitStillRuns() {
+        Execution execution = run(parallel(LONG_WAIT_BRANCH, FAILING_BRANCH), 1, 0);
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Boom", execution.getError());
+        long failure = eventOfType("FailStateEntered").getId();
+        assertEquals(failure, eventOfType("WaitStateAborted").getPreviousEventId().longValue());
+        // The failing branch's own Pause exits; the cut Long never does.
+        List<String> exitedWaits = eventsOfType("WaitStateExited").stream()
+                .map(event -> String.valueOf(event.getDetails().get("name"))).toList();
+        assertEquals(List.of("Pause"), exitedWaits, types().toString());
+    }
+
+    @Test
+    void outputsStayInDeclarationOrderWhenAnEarlierBranchFinishesLast() throws Exception {
+        AslExecutor.Sleeper sleeper = nanos -> TimeUnit.MILLISECONDS.sleep(200);
+        Execution execution = run(parallel(SLOW_RESULT_BRANCH, FAST_RESULT_BRANCH), sleeper, 0);
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        assertEquals(objectMapper.readTree("[\"slow\",\"fast\"]"), objectMapper.readTree(execution.getOutput()));
     }
 
     @Test
