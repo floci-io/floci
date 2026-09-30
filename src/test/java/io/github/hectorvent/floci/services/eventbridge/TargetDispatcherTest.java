@@ -331,6 +331,21 @@ class TargetDispatcherTest {
         verifyNoDeadLetter();
     }
 
+    @Test
+    void attemptFailingAfterAResetIsNeitherRetriedNorDeadLettered() {
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION)).thenAnswer(invocation -> {
+            dispatcher.clear();
+            throw unavailable();
+        });
+        Target target = sqsTarget(null, DLQ_ARN);
+
+        dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
+        dispatcher.tick(T0.plusSeconds(3600));
+
+        verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        verifyNoDeadLetter();
+    }
+
     private static Target sqsTarget(Target.RetryPolicy retryPolicy, String deadLetterArn) {
         Target target = new Target("orders-target", TARGET_ARN, null, null);
         target.setRetryPolicy(retryPolicy);

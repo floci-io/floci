@@ -25,6 +25,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 /**
@@ -54,6 +55,7 @@ public class TargetDispatcher implements Resettable {
     private final ScheduledExecutorService executor;
     private final PriorityBlockingQueue<Delivery> pending =
             new PriorityBlockingQueue<>(11, Comparator.comparing(Delivery::nextAttemptAt));
+    private final AtomicLong generation = new AtomicLong();
 
     @Inject
     public TargetDispatcher(EventBridgeInvoker invoker, SqsService sqsService, EmulatorConfig config, Clock clock) {
@@ -82,6 +84,7 @@ public class TargetDispatcher implements Resettable {
 
     @Override
     public void clear() {
+        generation.incrementAndGet();
         pending.clear();
     }
 
@@ -89,8 +92,8 @@ public class TargetDispatcher implements Resettable {
                          Supplier<List<Target>> currentTargets) {
         Instant now = clock.instant();
         try {
-            attempt(new Delivery(ruleArn, target.getId(), eventJson, region, currentTargets, now, 0, null, null, now),
-                    target, now);
+            attempt(new Delivery(ruleArn, target.getId(), eventJson, region, currentTargets, generation.get(), now, 0,
+                    null, null, now), target, now);
         } catch (RuntimeException e) {
             LOG.warnv("EventBridge rule {0} could not dispatch to target {1}: {2}",
                     ruleArn, target.getId(), e.getMessage());
@@ -116,6 +119,9 @@ public class TargetDispatcher implements Resettable {
     }
 
     private void retry(Delivery delivery, Instant now) {
+        if (delivery.generation() != generation.get()) {
+            return;
+        }
         Target target = delivery.currentTargets().get().stream()
                 .filter(candidate -> delivery.targetId().equals(candidate.getId()))
                 .findFirst()
@@ -140,6 +146,9 @@ public class TargetDispatcher implements Resettable {
         try {
             invoker.invokeTarget(target, delivery.eventJson(), delivery.region());
         } catch (Exception e) {
+            if (delivery.generation() != generation.get()) {
+                return;
+            }
             String errorCode = classify(e);
             String message = e.getMessage() != null && !e.getMessage().isBlank()
                     ? e.getMessage()
@@ -157,8 +166,9 @@ public class TargetDispatcher implements Resettable {
             } else {
                 pending.add(failed);
                 if (executor != null) {
-                    long delayMillis = Duration.between(now, failed.nextAttemptAt()).toMillis();
-                    executor.schedule(() -> tick(failed.nextAttemptAt()), delayMillis, TimeUnit.MILLISECONDS);
+                    Instant retryAt = failed.nextAttemptAt();
+                    executor.schedule(() -> tick(retryAt), Duration.between(now, retryAt).toMillis(),
+                            TimeUnit.MILLISECONDS);
                 }
             }
         }
@@ -246,17 +256,17 @@ public class TargetDispatcher implements Resettable {
     }
 
     private record Delivery(String ruleArn, String targetId, String eventJson, String region,
-                            Supplier<List<Target>> currentTargets, Instant firstAttemptAt, int retryAttempts,
-                            String errorCode, String errorMessage, Instant nextAttemptAt) {
+                            Supplier<List<Target>> currentTargets, long generation, Instant firstAttemptAt,
+                            int retryAttempts, String errorCode, String errorMessage, Instant nextAttemptAt) {
 
         Delivery failed(String code, String message, Instant retryAt) {
-            return new Delivery(ruleArn, targetId, eventJson, region, currentTargets, firstAttemptAt, retryAttempts,
-                    code, message, retryAt);
+            return new Delivery(ruleArn, targetId, eventJson, region, currentTargets, generation, firstAttemptAt,
+                    retryAttempts, code, message, retryAt);
         }
 
         Delivery nextRetry() {
-            return new Delivery(ruleArn, targetId, eventJson, region, currentTargets, firstAttemptAt, retryAttempts + 1,
-                    errorCode, errorMessage, nextAttemptAt);
+            return new Delivery(ruleArn, targetId, eventJson, region, currentTargets, generation, firstAttemptAt,
+                    retryAttempts + 1, errorCode, errorMessage, nextAttemptAt);
         }
     }
 }
