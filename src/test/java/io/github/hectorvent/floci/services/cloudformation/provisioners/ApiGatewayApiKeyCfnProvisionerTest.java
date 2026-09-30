@@ -347,6 +347,22 @@ class ApiGatewayApiKeyCfnProvisionerTest {
     }
 
     @Test
+    void aFailedStackUpdateDeletesTheKeyItCreatedInPlaceOfOneDeletedOutOfBand() {
+        when(apiGateway.findApiKey(REGION, "gone")).thenReturn(Optional.empty());
+        when(apiGateway.createApiKey(eq(REGION), anyMap()))
+                .thenReturn(key("new1", "my-key", "new1", true, null, Map.of()));
+        StackResource r = resource("gone");
+        r.getAttributes().put("APIKeyId", "gone");
+        provisioner.provision(r, mapper.createObjectNode().put("Name", "my-key"), ctx("gone"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(apiGateway).deleteApiKey(REGION, "new1");
+        assertEquals("gone", r.getPhysicalId());
+        assertEquals("gone", r.getAttributes().get("APIKeyId"));
+    }
+
+    @Test
     void deleteDelegatesToTheService() {
         provisioner.delete(TYPE, "abc123", REGION);
         verify(apiGateway).deleteApiKey(REGION, "abc123");

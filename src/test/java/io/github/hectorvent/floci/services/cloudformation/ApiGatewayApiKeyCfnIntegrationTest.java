@@ -13,6 +13,7 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -180,6 +181,26 @@ class ApiGatewayApiKeyCfnIntegrationTest {
         getApiKey(keyId).statusCode(404);
     }
 
+    @Test
+    void aFailedUpdateDeletesTheKeyItCreatedInPlaceOfOneDeletedOutOfBand() {
+        String stack = "apigw-apikey-cfn-recreate-it";
+        String name = "apigw-apikey-cfn-recreate-it-key";
+        String properties = "\"Name\": \"" + name + "\"";
+        cloudFormation(stack, "CreateStack", ROLLBACK_TEMPLATE.formatted(properties, ""), Map.of());
+        String keyId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "KeyRef");
+        given().when().delete("/apikeys/" + keyId).then().statusCode(202);
+
+        // The update creates a key in place of the deleted one before the secret fails it.
+        cloudFormation(stack, "UpdateStack", ROLLBACK_TEMPLATE.formatted(properties, FAILING_RESOURCE), Map.of());
+        describeStacks(stack, "UPDATE_ROLLBACK_COMPLETE");
+        given().when().get("/apikeys").then()
+            .statusCode(200)
+            .body("item.name", not(hasItem(name)));
+
+        cloudFormation(stack, "DeleteStack", null, Map.of());
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
     private static Map<String, String> parameters(String description, String enabled, String tagValue) {
         return Map.of("Description", description, "Enabled", enabled, "TagValue", tagValue);
     }
@@ -212,6 +233,8 @@ class ApiGatewayApiKeyCfnIntegrationTest {
     }
 
     private static String describeStacks(String stack, String expectedStatus) {
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack);
+        assertEquals(expectedStatus, state.status(), state.reason());
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

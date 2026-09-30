@@ -66,6 +66,21 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         create(r, props, ctx);
+        if (ctx.isUpdate()) {
+            recordCreatedByUpdate(r, ctx);
+        }
+    }
+
+    /**
+     * Records that this update created the key because the one at the prior physical id was gone,
+     * so {@link #rollbackUpdate} can delete it and name the prior id again.
+     */
+    private static void recordCreatedByUpdate(StackResource r, ProvisionContext ctx) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("region", ctx.region());
+        snapshot.put("createdId", r.getPhysicalId());
+        snapshot.put("priorId", ctx.priorPhysicalId());
+        r.getAttributes().put(CfnRollback.API_KEY_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
     }
 
     private void create(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -211,10 +226,13 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Puts the customer id, description, enabled flag and tags back from the snapshot the update
-     * took. With no snapshot on the resource the update changed nothing, since the snapshot is
-     * taken before every mutating call, so there is nothing to undo. A key deleted since the update
-     * fails the restore with NotFoundException, and the stack reports the rollback as failed.
+     * Undoes the update from the snapshot on the resource. When the update created the key because
+     * the one at the prior physical id was gone, the created key is deleted and the resource names
+     * the prior id again. Otherwise the customer id, description, enabled flag and tags are put
+     * back. With no snapshot on the resource the update changed nothing, since every mutating call
+     * is preceded by the snapshot or followed by the creation record, so there is nothing to undo.
+     * Putting values back on a key deleted since the update fails with NotFoundException, and the
+     * stack reports the rollback as failed.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
@@ -232,6 +250,17 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
                     + resource.getLogicalId(), e);
         }
         String region = snapshot.path("region").asText();
+        String createdId = snapshotText(snapshot, "createdId");
+        if (createdId != null) {
+            // Deleted before the resource names the prior id again, so a failed delete leaves the
+            // resource naming the created key and deleting the stack still removes it.
+            delete(TYPE, createdId, region);
+            String priorId = snapshot.path("priorId").asText();
+            resource.setPhysicalId(priorId);
+            resource.getAttributes().put("APIKeyId", priorId);
+            resource.getAttributes().remove(CfnRollback.API_KEY_UPDATE_SNAPSHOT_ATTR);
+            return true;
+        }
         String id = snapshot.path("id").asText();
         Map<String, String> tags = new HashMap<>();
         snapshot.path("tags").fields().forEachRemaining(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
