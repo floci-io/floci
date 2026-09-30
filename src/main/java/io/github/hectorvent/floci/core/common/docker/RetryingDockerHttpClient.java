@@ -31,6 +31,10 @@ import java.util.Map;
  *       one retrying fixes. The {@code contains} spelling (not {@code startsWith}) also covers
  *       exec-create ({@code POST /containers/{id}/exec}), where a replay would merely leak an
  *       unused exec ID; that conservative breadth costs nothing.</li>
+ *   <li>It must not be an unnamed container create, a network create, a container restart or a
+ *       network connect/disconnect: replaying those after a lost response duplicates a
+ *       container, loses a network to a swallowed 409, restarts twice, or hits a spurious
+ *       conflict.</li>
  * </ul>
  *
  * <p>Idempotency of what a replay <em>means</em> stays the call site's job: docker answers a
@@ -122,10 +126,26 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
         if (request.path().contains("/exec")) {
             return false;
         }
-        if (isNonIdempotentCreate(request)) {
+        if (isNonIdempotentCreate(request) || isNonIdempotentAction(request)) {
             return false;
         }
         return request.bodyBytes() != null || request.body() == null;
+    }
+
+    /**
+     * Bodyless POST actions whose replay after a lost response changes the outcome. A replayed
+     * {@code containers/{id}/restart} restarts the container a second time (extra downtime), and
+     * a replayed {@code networks/{id}/connect} or {@code disconnect} gets a conflict or not-found
+     * the caller does not expect for an operation that in fact succeeded.
+     */
+    private static boolean isNonIdempotentAction(Request request) {
+        if (!"POST".equals(request.method())) {
+            return false;
+        }
+        String path = request.path();
+        int queryStart = path.indexOf('?');
+        String route = queryStart < 0 ? path : path.substring(0, queryStart);
+        return route.endsWith("/restart") || route.endsWith("/connect") || route.endsWith("/disconnect");
     }
 
     /**

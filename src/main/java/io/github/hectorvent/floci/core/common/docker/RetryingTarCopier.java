@@ -8,6 +8,7 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
@@ -84,7 +85,7 @@ public final class RetryingTarCopier {
                 entry.setSize(Files.size(sourceFile));
                 entry.setMode(mode);
                 tar.putArchiveEntry(entry);
-                try (var fis = Files.newInputStream(sourceFile)) {
+                try (InputStream fis =Files.newInputStream(sourceFile)) {
                     fis.transferTo(tar);
                 }
                 tar.closeArchiveEntry();
@@ -135,10 +136,11 @@ public final class RetryingTarCopier {
                 streamer.join();
             }
             Throwable failure = writerFailure.get();
-            if (failure instanceof Exception ex) {
-                throw ex;
-            } else if (failure != null) {
-                throw new IOException("Tar streamer for " + label + " failed", failure);
+            if (failure != null) {
+                // exec() already returned, so the daemon transport was fine: this is a local
+                // writer failure that rebuilding the copy would only repeat.
+                throw new DockerRetry.LocalFailure("Tar streamer for " + label + " failed: "
+                        + failure.getMessage(), failure);
             }
         });
     }

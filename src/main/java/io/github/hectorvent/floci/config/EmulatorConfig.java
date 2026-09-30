@@ -3365,8 +3365,8 @@ public interface EmulatorConfig {
 
         /**
          * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
-         * long-lived streams that occupy a slot for a container's or CodeBuild run's entire
-         * lifetime (container log-follow, {@code execStartCmd} output streams). Total live
+         * long-lived container log-follow streams that occupy a slot for a container's entire
+         * lifetime. Exec-output and container-wait streams stay on the main pool. Total live
          * containers is unbounded across distinct functions (each {@code WarmPool} caps only
          * per-function), so this pool is sized generously rather than tied to any single
          * function's warm-pool cap.

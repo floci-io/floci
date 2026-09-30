@@ -297,6 +297,10 @@ floci:
     # runtime API port range allows. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.maxConnections: a value set here WINS over the annotation.
     max-connections: 1024
+    # FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS: separate pool for container log-follow streams, so
+    # they never starve create/start/stop/remove. Keep in step with the @WithDefault on
+    # EmulatorConfig.DockerConfig.streamingMaxConnections: a value set here WINS over the annotation.
+    streaming-max-connections: 512
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume

@@ -266,6 +266,28 @@ class RetryingDockerHttpClientTest {
     }
 
     @Test
+    void doesNotRetryRestartOrNetworkConnectAndDisconnect() {
+        // Catches: replaying a bodyless restart whose first attempt landed, which restarts the
+        // container a second time, and replaying a network connect/disconnect, which the daemon
+        // answers with a conflict or not-found the caller never expected.
+        for (String path : List.of("/containers/abc/restart?t=10", "/networks/net1/connect",
+                "/networks/net1/disconnect")) {
+            FakeTransport delegate = new FakeTransport(attempt -> {
+                throw brokenPipe();
+            });
+            RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, 0L);
+            Request request = Request.builder()
+                    .method(Request.Method.POST)
+                    .path(path)
+                    .build();
+
+            RuntimeException thrown = assertThrows(RuntimeException.class, () -> client.execute(request));
+            assertEquals("Broken pipe", thrown.getCause().getMessage());
+            assertEquals(1, delegate.calls.get(), path);
+        }
+    }
+
+    @Test
     void retriesNamedContainerCreate() {
         // Catches: over-broad exclusion that stops replaying named creates, which are safe
         // because the caller adopts the container on a 409.

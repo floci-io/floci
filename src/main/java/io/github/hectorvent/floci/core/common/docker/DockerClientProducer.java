@@ -422,9 +422,10 @@ public class DockerClientProducer {
     /**
      * Control-plane DockerClient: create/start/stop/remove/copyArchive and every other
      * short-lived call in Floci. Kept on its own connection pool, separate from the
-     * {@link StreamingDocker} bean, so long-lived log-follow and exec-output streams can
-     * never occupy every lease in this pool and starve these short calls until
-     * httpclient5's connection-request timeout fires.
+     * {@link StreamingDocker} bean, so long-lived log-follow streams can never occupy every
+     * lease in this pool and starve these short calls until httpclient5's connection-request
+     * timeout fires. Exec-output and container-wait streams (CodeBuild phases, Lambda
+     * extensions and exit watchers, EKS audit followers) still use this pool.
      */
     @Produces
     @ApplicationScoped
@@ -434,8 +435,7 @@ public class DockerClientProducer {
     }
 
     /**
-     * Streaming DockerClient: container log-follow ({@link ContainerLogStreamer}) and
-     * {@code execStartCmd} output streams held open for a whole CodeBuild phase. Each such
+     * Streaming DockerClient: container log-follow ({@link ContainerLogStreamer}). Each
      * stream occupies a connection pool slot for its entire lifetime, so sharing the
      * control-plane pool meant a fan-out of many concurrent streams exhausted it and blocked
      * control-plane calls. Sized separately because {@code WarmPool}'s cap is per-function,
@@ -501,7 +501,7 @@ public class DockerClientProducer {
 
     /**
      * Wraps the control-plane transport in {@link RetryingDockerHttpClient} so every short-lived
-     * docker call survives a transient socket drop; the streaming transport stays unwrapped —
+     * docker call survives a transient socket drop; the streaming transport stays unwrapped,
      * its requests (log-follow, exec output) hold hijacked or long-lived streams that must never
      * be replayed, and its exec-start calls are the one request retrying could turn into a
      * re-run command.

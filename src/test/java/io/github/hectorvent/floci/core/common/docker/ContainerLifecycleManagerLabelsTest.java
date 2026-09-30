@@ -276,7 +276,7 @@ class ContainerLifecycleManagerLabelsTest {
     }
 
     /**
-     * Strips the per-call {@code ContainerLifecycleManager.CREATE_ATTEMPT_LABEL} — a random id
+     * Strips the per-call {@code ContainerLifecycleManager.CREATE_ATTEMPT_LABEL}, a random id
      * generated fresh on every {@code create()} call for conflict-recovery adoption safety,
      * orthogonal to the default-label behavior this test file covers.
      */

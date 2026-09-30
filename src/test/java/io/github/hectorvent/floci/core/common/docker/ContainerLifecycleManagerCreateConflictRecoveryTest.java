@@ -8,13 +8,16 @@ import com.github.dockerjava.api.model.Container;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -31,7 +34,6 @@ import static org.mockito.Mockito.when;
  * failure while a live, untracked container sits on the daemon.
  */
 @ExtendWith(MockitoExtension.class)
-@DisplayName("ContainerLifecycleManager, create retry name-conflict recovery")
 class ContainerLifecycleManagerCreateConflictRecoveryTest {
 
     @Mock
@@ -61,7 +63,7 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         lenient().when(config.tls()).thenReturn(tlsConfig);
         // create() now resolves the image through the cache before building the create command.
         lenient().when(imageCacheService.ensureImageExists("busybox:stable")).thenReturn("busybox:stable");
-        lenient().when(dockerConfig.resourceNamespace()).thenReturn(java.util.Optional.empty());
+        lenient().when(dockerConfig.resourceNamespace()).thenReturn(Optional.empty());
     }
 
     @Test
@@ -73,8 +75,8 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         // hardcoded, since createWithConflictRecovery only adopts a container proven to be THIS
         // call's own lost-response attempt, not merely one with matching image/spec labels.
         @SuppressWarnings("unchecked")
-        org.mockito.ArgumentCaptor<java.util.Map<String, String>> labelsCaptor =
-                org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+        ArgumentCaptor<Map<String, String>> labelsCaptor =
+                ArgumentCaptor.forClass(Map.class);
         when(createCmd.withLabels(labelsCaptor.capture())).thenReturn(createCmd);
         when(createCmd.exec()).thenThrow(new ConflictException("named container already exists"));
 
@@ -88,8 +90,8 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         when(listCmd.exec()).thenReturn(List.of(existing));
 
         ContainerSpec spec = new ContainerSpec(
-                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, java.util.Map.of(),
-                List.of(), null, List.of(), List.of(), List.of(), java.util.Map.of(), null, false, null,
+                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, Map.of(),
+                List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null,
                 List.of(), null, null, List.of());
 
         String containerId = manager().create(spec);
@@ -118,8 +120,8 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         // Same image and default/spec labels as this call would apply, but a different
         // create() invocation's attempt id, simulating a genuinely concurrent racing caller,
         // not this call's own lost-response retry.
-        java.util.Map<String, String> foreignLabels = new java.util.HashMap<>(
-                java.util.Map.of("floci", "true", "floci_emulator", "floci-aws"));
+        Map<String, String> foreignLabels = new HashMap<>(
+                Map.of("floci", "true", "floci_emulator", "floci-aws"));
         foreignLabels.put(ContainerLifecycleManager.CREATE_ATTEMPT_LABEL, "some-other-callers-attempt-id");
         when(existing.getLabels()).thenReturn(foreignLabels);
 
@@ -128,8 +130,8 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         when(listCmd.exec()).thenReturn(List.of(existing));
 
         ContainerSpec spec = new ContainerSpec(
-                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, java.util.Map.of(),
-                List.of(), null, List.of(), List.of(), List.of(), java.util.Map.of(), null, false, null,
+                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, Map.of(),
+                List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null,
                 List.of(), null, null, List.of());
 
         assertThrows(ConflictException.class, () -> manager().create(spec));
@@ -150,8 +152,8 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
         when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
         @SuppressWarnings("unchecked")
-        org.mockito.ArgumentCaptor<java.util.Map<String, String>> labelsCaptor =
-                org.mockito.ArgumentCaptor.forClass(java.util.Map.class);
+        ArgumentCaptor<Map<String, String>> labelsCaptor =
+                ArgumentCaptor.forClass(Map.class);
         when(createCmd.withLabels(labelsCaptor.capture())).thenReturn(createCmd);
         when(createCmd.exec()).thenThrow(new ConflictException("named container already exists"));
 
@@ -160,7 +162,7 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
         // lenient: matchesSpec must NOT read the image at all. Stubbing it anyway is the regression
         // guard, reintroduce a tag comparison and this digest makes the adoption fail.
-        org.mockito.Mockito.lenient().when(existing.getImage()).thenReturn(
+        lenient().when(existing.getImage()).thenReturn(
                 "sha256:1f2e3d4c5b6a798877665544332211009988776655443322110099887766554433");
         when(existing.getLabels()).thenAnswer(inv -> labelsCaptor.getValue());
 
@@ -169,8 +171,8 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         when(listCmd.exec()).thenReturn(List.of(existing));
 
         ContainerSpec spec = new ContainerSpec(
-                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, java.util.Map.of(),
-                List.of(), null, List.of(), List.of(), List.of(), java.util.Map.of(), null, false, null,
+                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, Map.of(),
+                List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null,
                 List.of(), null, null, List.of());
 
         assertEquals("winning-container-id", manager().create(spec));
@@ -185,15 +187,15 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         Container existing = mock(Container.class);
         when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
         when(existing.getLabels()).thenReturn(
-                java.util.Map.of("floci", "true", "floci_emulator", "floci-lambda"));
+                Map.of("floci", "true", "floci_emulator", "floci-lambda"));
 
         ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
         when(dockerClient.listContainersCmd()).thenReturn(listCmd);
         when(listCmd.exec()).thenReturn(List.of(existing));
 
         ContainerSpec spec = new ContainerSpec(
-                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, java.util.Map.of(),
-                List.of(), null, List.of(), List.of(), List.of(), java.util.Map.of(), null, false, null,
+                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, Map.of(),
+                List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null,
                 List.of(), null, null, List.of());
 
         assertThrows(ConflictException.class, () -> manager().create(spec));
@@ -210,8 +212,8 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         when(listCmd.exec()).thenReturn(List.of());
 
         ContainerSpec spec = new ContainerSpec(
-                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, java.util.Map.of(),
-                List.of(), null, List.of(), List.of(), List.of(), java.util.Map.of(), null, false, null,
+                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, Map.of(),
+                List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null,
                 List.of(), null, null, List.of());
 
         assertThrows(ConflictException.class, () -> manager().create(spec));

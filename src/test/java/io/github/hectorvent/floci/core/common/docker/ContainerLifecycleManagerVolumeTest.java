@@ -475,8 +475,8 @@ class ContainerLifecycleManagerVolumeTest {
     void ensureVolume_doesNotCreateWhenVolumeAlreadyExists() {
         // This existence guard is what keeps ensureVolume idempotent now that transient-I/O
         // retries live at the transport: when the daemon created the volume but the response was
-        // lost to a broken pipe, the transport's replayed create finds the volume already there —
-        // POST /volumes/create with the same name is itself idempotent — and later ensureVolume
+        // lost to a broken pipe, the transport's replayed create finds the volume already there,
+        // POST /volumes/create with the same name is itself idempotent, and later ensureVolume
         // calls see it exists and do nothing.
         AtomicInteger inspects = inspectVolumeBehaving(attempt ->
                 mock(InspectVolumeResponse.class));

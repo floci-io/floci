@@ -59,7 +59,7 @@ public class ContainerLifecycleManager {
 
     /**
      * Label carrying a fresh id per {@code create()} invocation, used to tell this call's own
-     * replayed create apart from a genuinely concurrent caller's — see
+     * replayed create apart from a genuinely concurrent caller's, see
      * {@link #createWithConflictRecovery}.
      */
     static final String CREATE_ATTEMPT_LABEL = "floci_create_attempt_id";
@@ -219,7 +219,7 @@ public class ContainerLifecycleManager {
         // A fresh id per create() call, not per spec: two calls can carry identical image, name,
         // and labels (a second, genuinely concurrent caller racing on the same fixed name), and
         // matchesSpec must be able to tell that apart from a replay of THIS call's own create
-        // hitting a lost-response conflict — see createWithConflictRecovery.
+        // hitting a lost-response conflict, see createWithConflictRecovery.
         String createAttemptId = UUID.randomUUID().toString();
         Map<String, String> labels = mergedLabels(spec.labels());
         labels.put(CREATE_ATTEMPT_LABEL, createAttemptId);
@@ -234,14 +234,14 @@ public class ContainerLifecycleManager {
      * Executes the create, recovering the container when a replay of it lost the race with its own
      * earlier attempt.
      *
-     * <p>{@link RetryingDockerHttpClient} replays {@code POST /containers/create} — it has a
+     * <p>{@link RetryingDockerHttpClient} replays {@code POST /containers/create}, it has a
      * {@code bodyBytes} body, no hijacked input, and no {@code /exec} in its path, so it is
      * replayable by that decorator's rules. That replay is what makes this recovery necessary: a
      * create is not idempotent, so if the daemon accepts a named create but the response is lost to
      * a transient socket drop, the replay hits a 409 name conflict instead of the transient error
      * the retry exists to absorb. {@code DockerRetry} correctly classifies that 409 as
      * non-transient and rethrows it immediately, so without this it surfaces as a spurious build
-     * failure — and leaks the container the first attempt actually created, untracked.
+     * failure, and leaks the container the first attempt actually created, untracked.
      *
      * <p>Recovery only fires for a named spec, and only adopts a candidate whose image, labels, and
      * this exact call's {@link #CREATE_ATTEMPT_LABEL} all match. Image and labels alone cannot tell
@@ -338,7 +338,7 @@ public class ContainerLifecycleManager {
     }
 
     /**
-     * Confirms a name-conflicting container is the one THIS create() call produced — not a stale or
+     * Confirms a name-conflicting container is the one THIS create() call produced, not a stale or
      * differently-owned container, and not one from a genuinely concurrent create() sharing the same
      * fixed name, image, and spec labels. It must carry every label this call would have applied,
      * including a {@link #CREATE_ATTEMPT_LABEL} equal to this call's {@code createAttemptId}: the
@@ -347,7 +347,7 @@ public class ContainerLifecycleManager {
      *
      * <p>Deliberately does NOT compare the image. The list API reports {@code getImage()} as an
      * image ID/digest rather than the tag once that tag has been re-pulled, retagged, or removed, so
-     * a tag comparison would reject this call's own container and leak it untracked — the failure
+     * a tag comparison would reject this call's own container and leak it untracked, the failure
      * this recovery exists to prevent, arising precisely under the daemon churn that makes a lost
      * create response likely. The attempt-id match already excludes every foreign container.
      */
@@ -412,10 +412,10 @@ public class ContainerLifecycleManager {
      * on the transport's already-exhausted budget.
      *
      * <p>The 304 handling is what makes the transport's replay safe: when the daemon honoured a
-     * start whose response was lost to a broken pipe, the replayed start meets HTTP 304 — a
+     * start whose response was lost to a broken pipe, the replayed start meets HTTP 304, a
      * successful response at transport level, which docker-java converts to
      * {@link NotModifiedException} above it. That reports the outcome we wanted and is swallowed.
-     * Letting it escape would turn a recovered blip into a hard launch failure — the exact bug
+     * Letting it escape would turn a recovered blip into a hard launch failure, the exact bug
      * the retry exists to remove.
      *
      * <p>Package-private so tests can verify a given call site routes through this translation
@@ -425,7 +425,7 @@ public class ContainerLifecycleManager {
         try {
             dockerClient.startContainerCmd(containerId).exec();
         } catch (NotModifiedException alreadyRunning) {
-            LOG.debugv("Container {0} was already running (304) — treating start as done",
+            LOG.debugv("Container {0} was already running (304), treating start as done",
                     containerId);
         } catch (DockerException e) {
             String message = e.getMessage();
@@ -556,12 +556,12 @@ public class ContainerLifecycleManager {
      * {@code docker volume prune --filter label=floci=true} (all emulators) and
      * {@code --filter label=floci_emulator=floci-aws} (this emulator only) work.
      *
-     * <p>Transient socket blips on both daemon calls here — the existence check and the create —
+     * <p>Transient socket blips on both daemon calls here, the existence check and the create,
      * are retried at the transport seam ({@link RetryingDockerHttpClient}). The existence guard
      * is what keeps the transport's replay safe: {@code POST /volumes/create} with the same name
      * is itself idempotent, and when the daemon created the volume but the response was lost to
      * a broken pipe, the replayed create finds it already there while later calls see it exists
-     * and do nothing — the volume analogue of start treating an HTTP 304 as success.
+     * and do nothing, the volume analogue of start treating an HTTP 304 as success.
      */
     public void ensureVolume(String volumeName) {
         createVolumeIfAbsent(volumeName);

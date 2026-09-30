@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
@@ -115,6 +116,28 @@ class RetryingTarCopierTest {
         }
         assertEquals(java.nio.file.NoSuchFileException.class, cause == null ? null : cause.getClass(),
                 "the streamer's real failure must surface, not a phantom success");
+    }
+
+    @Test
+    void copyStreamedDoesNotRetryALocalWriterFailure() {
+        // Catches: a local tar-writer IOException (unreadable source file) being retried as a
+        // transient daemon blip, rebuilding the copy several times with backoff.
+        DockerClient docker = mock(DockerClient.class);
+        CopyArchiveToContainerCmd cmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(cmd.exec()).thenAnswer(inv -> null);
+        when(docker.copyArchiveToContainerCmd(any())).thenReturn(cmd);
+        AtomicInteger writes = new AtomicInteger();
+
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> RetryingTarCopier.copyStreamed(docker, "c-1", "/var/task", "fn-code",
+                        out -> {
+                            writes.incrementAndGet();
+                            throw new IOException("Permission denied");
+                        },
+                        MAX_ATTEMPTS, 0L));
+
+        assertEquals(1, writes.get());
+        assertTrue(thrown.getMessage().contains("Permission denied"), thrown.getMessage());
     }
 
     @Test

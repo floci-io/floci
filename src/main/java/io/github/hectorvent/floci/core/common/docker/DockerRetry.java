@@ -4,6 +4,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.net.SocketTimeoutException;
 import java.util.Locale;
 
 /**
@@ -45,6 +46,18 @@ public final class DockerRetry {
         return delay;
     }
 
+    /**
+     * A failure raised on this host while preparing a docker call's payload (for example a tar
+     * writer that cannot read its source file), as opposed to one raised by the daemon
+     * transport. It is never retried, even when its cause is an {@link IOException}, because
+     * rebuilding the payload would fail the same way.
+     */
+    public static final class LocalFailure extends RuntimeException {
+        public LocalFailure(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     /** A docker call that returns a value and may throw. */
     @FunctionalInterface
     public interface DockerCall<T> {
@@ -75,7 +88,10 @@ public final class DockerRetry {
         // too long to answer, not that the pool is exhausted or the thread was interrupted) and
         // must stay retryable, so it's excluded from this exclusion.
         for (Throwable c = t; c != null; c = c.getCause()) {
-            if (c instanceof InterruptedIOException && !(c instanceof java.net.SocketTimeoutException)) {
+            if (c instanceof InterruptedIOException && !(c instanceof SocketTimeoutException)) {
+                return false;
+            }
+            if (c instanceof LocalFailure) {
                 return false;
             }
             if (c.getCause() == c) {

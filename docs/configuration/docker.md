@@ -62,7 +62,7 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_MAX_CONNECTIONS`
 
-Long-lived log-follow and exec-output streams use a second, separate pool so they can never starve create, start, stop and remove calls. Its size defaults to 512 and follows the same rule (at least 1):
+Container log-follow streams use a second, separate pool so they can never starve create, start, stop and remove calls. Its size defaults to 512 and follows the same rule (at least 1). Exec-output and container-wait streams (CodeBuild phases, Lambda extensions and exit watchers, EKS audit followers) still use the main pool and count against `max-connections`:
 
 ```yaml
 floci:
@@ -277,9 +277,9 @@ What each setting does and why it is needed:
 
 ## Transient I/O retry
 
-All of Floci's short-lived docker calls (create/start/inspect/remove container, volume management, image operations) travel one shared daemon socket, and under fan-out load the daemon occasionally drops a connection mid-call with `java.io.IOException: Broken pipe`. Floci retries these transient failures centrally, at the docker transport layer — up to 6 attempts with a capped exponential backoff (500ms base, 8s cap) — so every call site is covered without per-call configuration, and a genuine daemon rejection (a 4xx, a name conflict) still surfaces immediately.
+All of Floci's short-lived docker calls (create/start/inspect/remove container, volume management, image operations) travel one shared daemon socket, and under fan-out load the daemon occasionally drops a connection mid-call with `java.io.IOException: Broken pipe`. Floci retries these transient failures centrally, at the docker transport layer, up to 6 attempts with a capped exponential backoff (500ms base, 8s cap); so every call site is covered without per-call configuration, and a genuine daemon rejection (a 4xx, a name conflict) still surfaces immediately.
 
-A request is only replayed when doing so cannot change semantics: requests carrying a one-shot upload stream (e.g. copying an archive into a container), bidirectional attach streams, and `exec` requests (which would re-run the command) are never retried. Long-lived streaming connections (log follow, exec output) use a separate transport that does not retry at all.
+A request is only replayed when doing so cannot change semantics: requests carrying a one-shot upload stream (e.g. copying an archive into a container), bidirectional attach streams, and `exec` requests (which would re-run the command) are never retried. Log-follow connections use a separate transport that does not retry at all. Bodyless actions whose replay changes the outcome (unnamed container create, network create, container restart, network connect and disconnect) are not retried either. A tar-writer failure on the Floci host (for example an unreadable source file) is reported at once instead of retried.
 
 ## Full Reference
 
