@@ -74,7 +74,7 @@ class CognitoOAuthControllerTest {
                 .thenReturn("https://provider.example.test/authorize?state=provider-state");
 
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid", "nonce",
-                "ExampleOidc", " relying-party-state ", RFC_7636_CHALLENGE, "S256", null);
+                "ExampleOidc", " relying-party-state ", RFC_7636_CHALLENGE, "S256", null, null);
 
         assertEquals(302, response.getStatus());
         assertEquals("https://provider.example.test/authorize?state=provider-state", response.getHeaderString("Location"));
@@ -86,7 +86,7 @@ class CognitoOAuthControllerTest {
                 .thenThrow(new AwsException("ResourceNotFoundException", "Client not found", 400));
 
         Response response = controller.authorize(requestContext(null), "missing-client", CALLBACK_URI, "code", "openid", null,
-                "ExampleOidc", null, null, null, null);
+                "ExampleOidc", null, null, null, null, null);
 
         assertOAuthError(response, "invalid_client");
     }
@@ -94,7 +94,7 @@ class CognitoOAuthControllerTest {
     @Test
     void authorizeReturnsInvalidRequestForUnregisteredRedirectUri() {
         Response response = controller.authorize(requestContext(null), CLIENT_ID, "https://other.example.test/callback", "code", "openid",
-                null, "ExampleOidc", null, null, null, null);
+                null, "ExampleOidc", null, null, null, null, null);
 
         assertOAuthError(response, "invalid_request");
     }
@@ -102,7 +102,7 @@ class CognitoOAuthControllerTest {
     @Test
     void authorizeReturnsUnsupportedResponseTypeForTokenResponse() {
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "token", "openid", null, "ExampleOidc",
-                null, null, null, null);
+                null, null, null, null, null);
 
         assertOAuthError(response, "unsupported_response_type");
     }
@@ -110,7 +110,7 @@ class CognitoOAuthControllerTest {
     @Test
     void authorizeWithoutIdentityProviderRedirectsToTheLoginEndpointWithTheRequest() {
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid email",
-                "nonce", null, "state & more", RFC_7636_CHALLENGE, "S256", null);
+                "nonce", null, "state & more", RFC_7636_CHALLENGE, "S256", null, null);
 
         assertEquals(302, response.getStatus());
         assertEquals("/cognito-idp/login?response_type=code&client_id=" + CLIENT_ID
@@ -120,10 +120,23 @@ class CognitoOAuthControllerTest {
                 response.getHeaderString("Location"));
     }
 
+    /** AWS: "managed login fills the username field with your hint value", so the redirect carries it. */
+    @Test
+    void authorizeCarriesTheLoginHintToTheLoginEndpoint() {
+        Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid",
+                null, null, "s1", null, null, "user@example.com", null);
+
+        assertEquals(302, response.getStatus());
+        assertEquals("/cognito-idp/login?response_type=code&client_id=" + CLIENT_ID
+                        + "&redirect_uri=https%3A%2F%2Fapplication.example.test%2Fcallback&scope=openid&state=s1"
+                        + "&login_hint=user%40example.com",
+                response.getHeaderString("Location"));
+    }
+
     @Test
     void authorizeWithCognitoProviderOnACustomDomainRedirectsToItsLoginPath() {
         Response response = controller.authorize(requestContext(POOL_ID), CLIENT_ID, CALLBACK_URI, "code", null, null,
-                "COGNITO", null, null, null, null);
+                "COGNITO", null, null, null, null, null);
 
         assertEquals(302, response.getStatus());
         assertEquals("/login?response_type=code&client_id=" + CLIENT_ID
@@ -135,7 +148,7 @@ class CognitoOAuthControllerTest {
         client.setSupportedIdentityProviders(List.of("ExampleOidc"));
 
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid", null,
-                null, null, null, null, null);
+                null, null, null, null, null, null);
 
         assertOAuthError(response, "invalid_request");
     }
@@ -152,7 +165,7 @@ class CognitoOAuthControllerTest {
     void authorizeRejectsUnusablePkceParametersForEitherProvider(String challenge, String method) {
         for (String provider : new String[] {null, "ExampleOidc"}) {
             Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid", null,
-                    provider, null, challenge, method, null);
+                    provider, null, challenge, method, null, null);
 
             assertOAuthError(response, "invalid_request");
             String description = ((JsonNode) response.getEntity()).path("error_description").asText();
@@ -238,7 +251,7 @@ class CognitoOAuthControllerTest {
                 CLOCK.instant().plusSeconds(60)));
 
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid", "nonce",
-                null, "relying-party-state", RFC_7636_CHALLENGE, "S256", sessionId);
+                null, "relying-party-state", RFC_7636_CHALLENGE, "S256", null, sessionId);
 
         assertEquals(302, response.getStatus());
         String location = response.getHeaderString("Location");
@@ -257,7 +270,7 @@ class CognitoOAuthControllerTest {
                 CLOCK.instant().plusSeconds(60)));
 
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
-                null, null, null, null, sessionId);
+                null, null, null, null, null, sessionId);
 
         assertEquals(302, response.getStatus());
         assertTrue(response.getHeaderString("Location").startsWith("/cognito-idp/login?"));
@@ -273,7 +286,7 @@ class CognitoOAuthControllerTest {
                 CLOCK.instant().plusSeconds(60)));
 
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
-                null, null, null, null, sessionId);
+                null, null, null, null, null, sessionId);
 
         assertTrue(response.getHeaderString("Location").startsWith("/cognito-idp/login?"));
         assertTrue(stateStore.findSession(sessionId).isEmpty());

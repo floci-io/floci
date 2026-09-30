@@ -55,6 +55,9 @@ final class CognitoAuthFlowHandler {
     /** The message of a wrong password, which managed login also shows for an unknown user. */
     static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
     static final int MAX_USER_AUTH_SESSIONS_PER_PARTITION = 4_096;
+    private static final String CODE_MISMATCH = "Invalid verification code provided, please try again.";
+    private static final String MANAGED_LOGIN_NEW_PASSWORD = "This user must set a new password, which this "
+            + "sign-in page does not support. Set a permanent password with AdminSetUserPassword.";
 
     private final CognitoService service;
     private final LambdaService lambdaService;
@@ -500,8 +503,84 @@ final class CognitoAuthFlowHandler {
     CognitoUser authenticateManagedLogin(UserPool pool, UserPoolClient client, String username, String password) {
         CognitoUser user = verifyPassword(pool, client, username, password, Map.of());
         if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
-            throw new AwsException("NotAuthorizedException", "This user must set a new password, which this "
-                    + "sign-in page does not support. Set a permanent password with AdminSetUserPassword.", 400);
+            throw new AwsException("NotAuthorizedException", MANAGED_LOGIN_NEW_PASSWORD, 400);
+        }
+        firePostAuthentication(pool, client, user, Map.of(), false);
+        return user;
+    }
+
+    /**
+     * The first factors in the pool's sign-in policy when the client can use USER_AUTH, which is what
+     * managed login's choice-based sign-in may offer. Empty for a Lite pool, a client without
+     * {@code ALLOW_USER_AUTH}, or a pool whose policy names no first factors.
+     */
+    List<String> managedLoginFirstFactors(UserPool pool, UserPoolClient client) {
+        if ("LITE".equals(pool.getUserPoolTier()) || !enabledAuthFlows(client).contains("ALLOW_USER_AUTH")) {
+            return List.of();
+        }
+        List<String> factors = allowedFirstAuthFactors(pool);
+        return factors == null ? List.of() : factors;
+    }
+
+    /**
+     * The USER_AUTH challenges managed login's choice-based sign-in can offer {@code username}. An
+     * unknown user is offered every factor the pool allows, as USER_AUTH's simulated challenge is, so
+     * the page does not tell who has an account.
+     */
+    List<String> managedLoginChallenges(UserPool pool, String username) {
+        CognitoUser user;
+        try {
+            user = service.adminGetUser(pool.getId(), username);
+        } catch (AwsException exception) {
+            if (!"UserNotFoundException".equals(exception.getErrorCode())) {
+                throw exception;
+            }
+            return configuredUserAuthChallenges(pool);
+        }
+        requireSignInEligible(user);
+        return allowedUserAuthChallenges(pool, user);
+    }
+
+    /**
+     * Emails {@code username} a code, as answering SELECT_CHALLENGE with EMAIL_OTP does, and returns
+     * the USER_AUTH session that {@link #completeManagedLoginEmailOtp} answers. An unknown user gets
+     * a session that no code completes, and no message.
+     */
+    String startManagedLoginEmailOtp(UserPool pool, UserPoolClient client, String username) {
+        CognitoUser user;
+        try {
+            user = service.adminGetUser(pool.getId(), username);
+        } catch (AwsException exception) {
+            if (!"UserNotFoundException".equals(exception.getErrorCode())) {
+                throw exception;
+            }
+            return (String) userAuthChallengeResponse(pool, client, username, "EMAIL_OTP", null,
+                    Map.of("USERNAME", username), false).get("Session");
+        }
+        requireSignInEligible(user);
+        return (String) startUserAuthChallenge(pool, client, user, "EMAIL_OTP", allowedUserAuthChallenges(pool, user),
+                false, Map.of(), Map.of()).get("Session");
+    }
+
+    /**
+     * Managed login's answer to its EMAIL_OTP challenge: checks the code and returns the signed-in
+     * user, issuing no tokens, as {@link #authenticateManagedLogin} does for a password. Unlike
+     * RespondToAuthChallenge, a wrong code leaves the session for another try, since the page asks
+     * again; the code itself stops working after too many wrong ones.
+     */
+    CognitoUser completeManagedLoginEmailOtp(UserPool pool, UserPoolClient client, String session, String code) {
+        UserAuthSession state = findUserAuthSession(pool, client, session, "EMAIL_OTP");
+        if (!state.userExists()) {
+            throw new AwsException("CodeMismatchException", CODE_MISMATCH, 400);
+        }
+        CognitoUser user = service.adminGetUser(pool.getId(), state.username());
+        requireSignInEligible(user);
+        service.consumeSignInOtp(pool.getId(), user.getUsername(), VerificationCode.Purpose.EMAIL_OTP, code);
+        synchronized (userAuthSessionLock) {
+            userAuthSessions.remove(session, state);
+        }
+        if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
+            throw new AwsException("NotAuthorizedException", MANAGED_LOGIN_NEW_PASSWORD, 400);
         }
         firePostAuthentication(pool, client, user, Map.of(), false);
         return user;
@@ -803,7 +882,7 @@ final class CognitoAuthFlowHandler {
         }
         requireSignInEligible(user);
 
-        List<String> available = availableUserAuthChallenges(user);
+        List<String> available = allowedUserAuthChallenges(pool, user);
         if (available.isEmpty()) {
             throw new AwsException("NotAuthorizedException",
                     "No USER_AUTH challenge is available for this user", 400);
@@ -834,7 +913,7 @@ final class CognitoAuthFlowHandler {
         validateSecretHash(client, responses, username);
         CognitoUser user = service.adminGetUser(pool.getId(), username);
         requireSignInEligible(user);
-        List<String> available = availableUserAuthChallenges(user);
+        List<String> available = allowedUserAuthChallenges(pool, user);
         return startUserAuthChallenge(pool, client, user, answer, available, false, responses, clientMetadata);
     }
 
@@ -962,6 +1041,24 @@ final class CognitoAuthFlowHandler {
                 state = simulatedUserAuthSessions.remove(session);
             }
         }
+        return checkUserAuthSession(pool, client, state, expectedChallenge);
+    }
+
+    /** As {@link #consumeUserAuthSession}, but leaves the session in place for its caller to remove. */
+    private UserAuthSession findUserAuthSession(UserPool pool, UserPoolClient client, String session,
+                                                String expectedChallenge) {
+        UserAuthSession state;
+        synchronized (userAuthSessionLock) {
+            state = session == null ? null : userAuthSessions.get(session);
+            if (state == null && session != null) {
+                state = simulatedUserAuthSessions.get(session);
+            }
+        }
+        return checkUserAuthSession(pool, client, state, expectedChallenge);
+    }
+
+    private UserAuthSession checkUserAuthSession(UserPool pool, UserPoolClient client, UserAuthSession state,
+                                                 String expectedChallenge) {
         if (state == null || !expectedChallenge.equals(state.challengeName())) {
             throw new AwsException("NotAuthorizedException", "Session not found", 400);
         }
@@ -991,24 +1088,52 @@ final class CognitoAuthFlowHandler {
     }
 
     private List<String> configuredUserAuthChallenges(UserPool pool) {
-        Map<String, Object> policies = pool.getPolicies();
-        if (policies == null || !(policies.get("SignInPolicy") instanceof Map<?, ?> signInPolicy)) {
-            return List.of("PASSWORD");
-        }
-        Object configuredFactors = signInPolicy.get("AllowedFirstAuthFactors");
-        if (!(configuredFactors instanceof List<?> factors) || factors.isEmpty()) {
+        List<String> factors = allowedFirstAuthFactors(pool);
+        if (factors == null) {
             return List.of("PASSWORD");
         }
 
         List<String> supported = new ArrayList<>();
-        for (Object factor : factors) {
-            if (factor instanceof String name
-                    && ("PASSWORD".equals(name) || "EMAIL_OTP".equals(name) || "SMS_OTP".equals(name))
-                    && !supported.contains(name)) {
+        for (String name : factors) {
+            if ("PASSWORD".equals(name) || "EMAIL_OTP".equals(name) || "SMS_OTP".equals(name)) {
                 supported.add(name);
             }
         }
         return supported;
+    }
+
+    /**
+     * The pool's {@code SignInPolicy.AllowedFirstAuthFactors} without duplicates, or null when the
+     * pool configures none.
+     */
+    private static List<String> allowedFirstAuthFactors(UserPool pool) {
+        Map<String, Object> policies = pool.getPolicies();
+        if (policies == null || !(policies.get("SignInPolicy") instanceof Map<?, ?> signInPolicy)
+                || !(signInPolicy.get("AllowedFirstAuthFactors") instanceof List<?> factors) || factors.isEmpty()) {
+            return null;
+        }
+        List<String> names = new ArrayList<>();
+        for (Object factor : factors) {
+            if (factor instanceof String name && !names.contains(name)) {
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    /**
+     * The USER_AUTH challenges this user qualifies for that the pool's sign-in policy allows, where
+     * it names first factors. The policy's {@code PASSWORD} covers both PASSWORD and PASSWORD_SRP.
+     * A pool with no policy is not narrowed, where AWS would default it to PASSWORD alone.
+     */
+    private List<String> allowedUserAuthChallenges(UserPool pool, CognitoUser user) {
+        List<String> available = availableUserAuthChallenges(user);
+        List<String> allowed = allowedFirstAuthFactors(pool);
+        if (allowed != null) {
+            available.removeIf(challenge ->
+                    !allowed.contains("PASSWORD_SRP".equals(challenge) ? "PASSWORD" : challenge));
+        }
+        return available;
     }
 
     /** The set of USER_AUTH challenges this user currently qualifies for. */

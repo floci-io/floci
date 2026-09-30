@@ -247,8 +247,14 @@ preferences, SMS/email MFA challenges, and managed-login MFA are not emulated.
 `USER_AUTH` is the choice-based flow: with no `PREFERRED_CHALLENGE` it returns
 `ChallengeName=SELECT_CHALLENGE` and an `AvailableChallenges` list drawn from what the user has
 configured (`PASSWORD`, `PASSWORD_SRP`, `EMAIL_OTP`, `SMS_OTP`); with one, it goes straight to that
-challenge. It requires the user pool's tier to be Essentials or higher. `WEB_AUTHN` and the
-`ConfirmSignUp` session as a first-factor shortcut are not implemented yet.
+challenge. When the pool's `Policies.SignInPolicy.AllowedFirstAuthFactors` names first factors, the
+list keeps only those it allows: its `PASSWORD` covers both `PASSWORD` and `PASSWORD_SRP`, so a pool
+that allows only `EMAIL_OTP` offers `["EMAIL_OTP"]`, and a user with no password is never offered a
+password challenge. A `PREFERRED_CHALLENGE` or `SELECT_CHALLENGE` answer outside the list fails with
+`InvalidParameterException`, where AWS documents falling back to `AvailableChallenges`. A pool with no
+`SignInPolicy` is not narrowed, where AWS defaults it to `PASSWORD` alone. It requires the user pool's
+tier to be Essentials or higher. `WEB_AUTHN` and the `ConfirmSignUp` session as a first-factor
+shortcut are not implemented yet.
 
 Any other `AuthFlow` value is rejected with `InvalidParameterException` and no tokens are issued.
 
@@ -377,12 +383,15 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
 `/oauth2/authorize`, `/login` and `/logout`.
 
 1. `GET /cognito-idp/oauth2/authorize` redirects to `/cognito-idp/login` with the request's
-   parameters. If the browser already has a managed login session in the pool, it skips the
-   form and redirects straight to the callback with a code, as AWS does. A `scope` the client's
-   `AllowedOAuthScopes` does not include is refused first, as on AWS, with a redirect to the
-   callback carrying `error=invalid_request`, `error_description=invalid_scope` and the `state`.
-2. `GET /cognito-idp/login` renders a plain username and password form. The form carries the
-   request in hidden fields and a CSRF token that must match the `XSRF-TOKEN` cookie set with it.
+   parameters, `login_hint` included. If the browser already has a managed login session in the
+   pool, it skips the form and redirects straight to the callback with a code, as AWS does. A
+   `scope` the client's `AllowedOAuthScopes` does not include is refused first, as on AWS, with a
+   redirect to the callback carrying `error=invalid_request`, `error_description=invalid_scope`
+   and the `state`.
+2. `GET /cognito-idp/login` renders a plain username and password form, with the username filled
+   in from `login_hint` when the request has one. The form carries the request in hidden fields and
+   a CSRF token that must match the `XSRF-TOKEN` cookie set with it. With choice-based sign-in
+   (below), it asks for the username alone.
 3. `POST /cognito-idp/login` checks the password as `USER_PASSWORD_AUTH` does, including
    sign-in aliases and the pre and post authentication and user migration triggers, but
    without the client's `ExplicitAuthFlows`. On success it sets a `cognito` session cookie
@@ -402,6 +411,27 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
    `response_type=code` instead of `logout_uri`, it ends the session and redirects to the
    sign-in form for that request.
 
+Choice-based sign-in applies when the pool's `SignInPolicy.AllowedFirstAuthFactors` includes
+`EMAIL_OTP` and the client's `ExplicitAuthFlows` includes `ALLOW_USER_AUTH` (on a pool above the
+Lite tier). The page then takes one step per `POST /cognito-idp/login`:
+
+1. The username. The page looks up the `USER_AUTH` challenges the user has, as `InitiateAuth`
+   would offer them, and keeps `PASSWORD` (for either password challenge) and `EMAIL_OTP`.
+2. The factor, as buttons that post `challenge=PASSWORD` or `challenge=EMAIL_OTP`, when the user
+   has both. A user with one factor goes straight to it.
+3. For `PASSWORD`, the username and password form. For `EMAIL_OTP`, the page sends a code
+   through the `USER_AUTH` `EMAIL_OTP` challenge, so it arrives in Floci's SES (readable at
+   `/_aws/ses`), and shows a code field. The username and the challenge's `Session` travel in
+   hidden fields. A correct code signs the user in as the password does: the session cookie,
+   and a redirect to the callback with `code` and `state`. A wrong code shows the code field
+   again with `Invalid verification code provided, please try again.` and the same session, so
+   the user can try again until the session (the client's `AuthSessionValidity`) or the code runs out.
+
+An unknown user is offered the policy's factors and asked for a code like anyone else, but no
+message is sent and no code signs them in. A password posted to a pool whose policy leaves out
+`PASSWORD` is refused. Without choice-based sign-in, the page is the username and password form
+above, whatever the policy says.
+
 PKCE follows AWS: `code_challenge_method` must be `S256`, and discovery advertises
 `code_challenge_methods_supported: ["S256"]`. A code issued with a `code_challenge` is
 redeemed only with the matching `code_verifier`, so a public client (no secret) can use it
@@ -413,7 +443,8 @@ Differences from AWS:
 
 - **No challenge pages.** A user who must change or reset their password, or who is not
   confirmed, sees an error on the form instead. Sign-up, forgot-password, MFA and passkey
-  pages are not served, and `prompt`, `login_hint`, `lang` and `idp_identifier` are ignored.
+  pages are not served, choice-based sign-in offers no `SMS_OTP` or `WEB_AUTHN` factor, and
+  `prompt`, `lang` and `idp_identifier` are ignored.
 - **Errors are JSON.** An authorization request error returns `400` with an OAuth error body,
   even after `redirect_uri` is validated, where AWS redirects the error to the callback. The
   exception is an unallowed `scope`, which is redirected as on AWS.

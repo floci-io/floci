@@ -11,12 +11,13 @@ import org.jboss.logging.Logger;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
 /**
- * Managed login for a pool's own users: signs a user in with their password, keeps the browser's
- * session, and issues the authorization codes that {@code /oauth2/token} redeems.
+ * Managed login for a pool's own users: signs a user in with their password or an emailed code, keeps
+ * the browser's session, and issues the authorization codes that {@code /oauth2/token} redeems.
  * {@link CognitoFederationService} does the same for users of an external identity provider.
  */
 @ApplicationScoped
@@ -26,6 +27,8 @@ public class CognitoManagedLoginService {
     private static final Duration AUTHORIZATION_CODE_LIFETIME = Duration.ofMinutes(5);
     /** How long AWS keeps a managed login session. */
     static final Duration SESSION_LIFETIME = Duration.ofHours(1);
+    /** The first factors of choice-based sign-in that the sign-in page offers, in the order it lists them. */
+    private static final List<String> CHOICE_BASED_FACTORS = List.of("PASSWORD", "EMAIL_OTP");
 
     private static final Logger LOG = Logger.getLogger(CognitoManagedLoginService.class);
 
@@ -48,7 +51,65 @@ public class CognitoManagedLoginService {
      * @throws AwsException when the user cannot sign in, with the reason in its message
      */
     public String signIn(UserPoolClient client, String username, String password) {
-        CognitoUser user = cognitoService.authenticateManagedLogin(client, username, password);
+        return openSession(client, cognitoService.authenticateManagedLogin(client, username, password));
+    }
+
+    /**
+     * The factors the sign-in page lets a user choose from after their username, or an empty list when
+     * the page is the plain username and password form. Choice-based sign-in applies when the pool's
+     * sign-in policy allows EMAIL_OTP and the client allows USER_AUTH; the page offers the policy's
+     * PASSWORD and EMAIL_OTP.
+     */
+    public List<String> choiceBasedFactors(UserPoolClient client) {
+        List<String> allowed = cognitoService.managedLoginFirstFactors(client);
+        if (!allowed.contains("EMAIL_OTP")) {
+            return List.of();
+        }
+        return CHOICE_BASED_FACTORS.stream().filter(allowed::contains).toList();
+    }
+
+    /**
+     * The factors {@code username} can choose from in choice-based sign-in: PASSWORD when USER_AUTH
+     * would offer them a password challenge, and EMAIL_OTP.
+     *
+     * @throws AwsException when the user cannot sign in, or has no factor the page offers
+     */
+    public List<String> factorsFor(UserPoolClient client, String username) {
+        List<String> challenges = cognitoService.managedLoginChallenges(client, username);
+        List<String> factors = new ArrayList<>();
+        if (challenges.contains("PASSWORD") || challenges.contains("PASSWORD_SRP")) {
+            factors.add("PASSWORD");
+        }
+        if (challenges.contains("EMAIL_OTP")) {
+            factors.add("EMAIL_OTP");
+        }
+        if (factors.isEmpty()) {
+            throw new AwsException("NotAuthorizedException", "No sign-in method is available for this user.", 400);
+        }
+        return factors;
+    }
+
+    /**
+     * Emails the user a sign-in code through the USER_AUTH EMAIL_OTP challenge.
+     *
+     * @return the USER_AUTH session that {@link #signInWithEmailCode} answers
+     */
+    public String sendEmailCode(UserPoolClient client, String username) {
+        return cognitoService.startManagedLoginEmailOtp(client, username);
+    }
+
+    /**
+     * Signs the user of a USER_AUTH EMAIL_OTP session in with the code they were sent, and opens a
+     * session for them. A wrong code leaves the USER_AUTH session for another try.
+     *
+     * @return the session's id, the value of the browser's session cookie
+     * @throws AwsException when the code is wrong or the user cannot sign in, with the reason in its message
+     */
+    public String signInWithEmailCode(UserPoolClient client, String userAuthSession, String code) {
+        return openSession(client, cognitoService.completeManagedLoginEmailOtp(client, userAuthSession, code));
+    }
+
+    private String openSession(UserPoolClient client, CognitoUser user) {
         return stateStore.putSession(new CognitoManagedLoginSession(
                 client.getUserPoolId(), user.getUsername(), clock.instant().plus(SESSION_LIFETIME)));
     }

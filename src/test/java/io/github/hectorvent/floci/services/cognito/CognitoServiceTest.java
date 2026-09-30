@@ -41,6 +41,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -3343,6 +3344,141 @@ class CognitoServiceTest {
                 client.getClientId(), "EMAIL_OTP", session,
                 Map.of("USERNAME", "alice", "EMAIL_OTP_CODE", "000000")));
         assertEquals("CodeMismatchException", ex.getErrorCode());
+    }
+
+    /** AWS, pool policy [PASSWORD]: a user with a password and a verified email gets SELECT_CHALLENGE with PASSWORD_SRP and PASSWORD. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void initiateAuthWithUserAuthOffersOnlyTheFirstFactorsTheSignInPolicyAllows() {
+        CognitoService serviceWithVerification = serviceWithEmailOtpCode("654321");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, "Perm1234!");
+
+        Map<String, Object> result = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+
+        assertEquals("SELECT_CHALLENGE", result.get("ChallengeName"));
+        assertEquals(Set.of("PASSWORD", "PASSWORD_SRP"), Set.copyOf((List<String>) result.get("AvailableChallenges")));
+    }
+
+    @Test
+    void initiateAuthWithUserAuthOffersOnlyEmailOtpWhenThePolicyAllowsOnlyEmailOtp() {
+        CognitoService serviceWithVerification = serviceWithEmailOtpCode("654321");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, "Perm1234!");
+
+        Map<String, Object> result = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+
+        assertEquals("SELECT_CHALLENGE", result.get("ChallengeName"));
+        assertEquals(List.of("EMAIL_OTP"), result.get("AvailableChallenges"));
+    }
+
+    @Test
+    void initiateAuthWithUserAuthOffersNoPasswordChallengeToAUserWithoutAPassword() {
+        CognitoService serviceWithVerification = serviceWithEmailOtpCode("654321");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, null);
+
+        Map<String, Object> result = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+
+        assertEquals(List.of("EMAIL_OTP"), result.get("AvailableChallenges"));
+    }
+
+    /** A factor outside the policy is refused as one the user does not have is: the same InvalidParameterException. */
+    @Test
+    void initiateAuthWithUserAuthRefusesAPreferredChallengeOrAnswerThePolicyDisallows() {
+        CognitoService serviceWithVerification = serviceWithEmailOtpCode("654321");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, "Perm1234!");
+
+        AwsException preferred = assertThrows(AwsException.class, () -> serviceWithVerification.initiateAuth(
+                client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD", "PASSWORD", "Perm1234!")));
+        assertEquals("InvalidParameterException", preferred.getErrorCode());
+        assertEquals("PASSWORD is not an available challenge for this user", preferred.getMessage());
+
+        String session = (String) serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice")).get("Session");
+        AwsException answer = assertThrows(AwsException.class, () -> serviceWithVerification.respondToAuthChallenge(
+                client.getClientId(), "SELECT_CHALLENGE", session,
+                Map.of("USERNAME", "alice", "ANSWER", "PASSWORD_SRP", "SRP_A", "ABCDEF1234567890")));
+        assertEquals("InvalidParameterException", answer.getErrorCode());
+    }
+
+    /** Managed login asks again after a wrong code, so the USER_AUTH session must outlive one. */
+    @Test
+    void managedLoginEmailOtpKeepsTheSessionForAnotherTryAfterAWrongCode() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenReturn("654321");
+        doThrow(new VerificationCodeException(VerificationCodeException.Kind.MISMATCH, "nope"))
+                .when(verificationCodeService).consume(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP),
+                        eq("000000"));
+        CognitoService serviceWithVerification = serviceWithVerification(verificationCodeService);
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, null);
+
+        String session = serviceWithVerification.startManagedLoginEmailOtp(client, "alice");
+        AwsException wrong = assertThrows(AwsException.class,
+                () -> serviceWithVerification.completeManagedLoginEmailOtp(client, session, "000000"));
+        assertEquals("CodeMismatchException", wrong.getErrorCode());
+
+        assertEquals("alice", serviceWithVerification.completeManagedLoginEmailOtp(client, session, "654321")
+                .getUsername());
+        AwsException replayed = assertThrows(AwsException.class,
+                () -> serviceWithVerification.completeManagedLoginEmailOtp(client, session, "654321"));
+        assertEquals("NotAuthorizedException", replayed.getErrorCode(), "a session that signed in is spent");
+    }
+
+    /** A service whose EMAIL_OTP code is always {@code code}, with delivery mocked out. */
+    private CognitoService serviceWithEmailOtpCode(String code) {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenReturn(code);
+        return serviceWithVerification(verificationCodeService);
+    }
+
+    private CognitoService serviceWithVerification(VerificationCodeService verificationCodeService) {
+        return new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                "cloudfront.net",
+                regionResolver,
+                null,
+                acmService,
+                verificationCodeService,
+                mock(CognitoMessageDispatcher.class),
+                mock(TlsCertificateManager.class)
+        );
+    }
+
+    private static UserPool poolWithFirstFactors(CognitoService service, String... factors) {
+        return service.createUserPool(Map.of(
+                "PoolName", "TestPool",
+                "Policies", Map.of("SignInPolicy", Map.of("AllowedFirstAuthFactors", List.of(factors)))), "us-east-1");
+    }
+
+    /** Creates alice with a verified email, and with {@code password} as her permanent password unless it is null. */
+    private static void createUserWithVerifiedEmail(CognitoService service, UserPool pool, String password) {
+        service.adminCreateUser(pool.getId(), "alice",
+                Map.of("email", "alice@example.com", "email_verified", "true"), null);
+        if (password != null) {
+            service.adminSetUserPassword(pool.getId(), "alice", password, true);
+        }
     }
 
     @Test

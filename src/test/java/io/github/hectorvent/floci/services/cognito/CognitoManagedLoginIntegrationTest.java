@@ -63,6 +63,7 @@ class CognitoManagedLoginIntegrationTest {
     private static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
     private static final Pattern HIDDEN_FIELD = Pattern.compile("<input type=\"hidden\" name=\"([^\"]*)\" value=\"([^\"]*)\">");
     private static final Pattern FORM_ACTION = Pattern.compile("<form method=\"post\" action=\"([^\"]*)\">");
+    private static final Pattern SIX_DIGIT_CODE = Pattern.compile("\\b(\\d{6})\\b");
     private static final String PRE_TOKEN_GENERATION_ARN = "arn:aws:lambda:::pre-token-generation";
     private static final String ADMIN_SCOPE = "aws.cognito.signin.user.admin";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -724,6 +725,177 @@ class CognitoManagedLoginIntegrationTest {
                 queryOf(refused));
     }
 
+    /**
+     * AWS: with {@code login_hint}, "managed login fills the username field with your hint value", on
+     * {@code /oauth2/authorize} and on {@code /login}. The hint is escaped like the rest of the page.
+     */
+    @Test
+    void loginHintReachesTheLoginPageAndFillsTheUsernameOnEitherHost() throws Exception {
+        Pool pool = newPool();
+        String domain = "login-hint-" + System.nanoTime() + ".teos.localhost.floci.io";
+        cognitoJson("CreateUserPoolDomain", customDomain(domain, pool.poolId(), requestCertificate(domain)));
+        String hint = "o'hara+\"<b>\"@example.com";
+
+        for (String host : new String[] {null, domain}) {
+            Map<String, String> query = authorizeRequest(pool.clientId());
+            query.put("login_hint", hint);
+            String location = browserGet(host, host == null ? "/cognito-idp/oauth2/authorize" : "/oauth2/authorize",
+                    query, null).then().statusCode(302).extract().header("Location");
+            assertEquals(hint, queryOf(location).get("login_hint"), location);
+
+            String html = follow(host, location).then().statusCode(200).extract().asString();
+            assertEquals("<input id=\"username\" name=\"username\" type=\"text\" autocomplete=\"username\" "
+                    + "autocapitalize=\"none\" value=\"o&#39;hara+&quot;&lt;b&gt;&quot;@example.com\" required>",
+                    input(html, "username"));
+            assertFalse(html.contains("<b>"), html);
+            assertTrue(html.contains("name=\"password\""), "a pool without a sign-in policy keeps the password form");
+        }
+    }
+
+    /**
+     * The issue's pool: email usernames, a sign-in policy of EMAIL_OTP alone, and a client that allows
+     * USER_AUTH. The page asks for the username, emails a code through Floci's SES, and signs in with it
+     * exactly as the password form does: a code and the state on the callback, redeemed with PKCE.
+     */
+    @Test
+    void choiceBasedSignInAsksForTheUsernameThenSignsInWithAnEmailedCode() throws Exception {
+        PasswordlessPool pool = newPasswordlessPool(List.of("EMAIL_OTP"), true);
+        JsonNode userAuth = cognitoJson("InitiateAuth", """
+                {"ClientId":"%s","AuthFlow":"USER_AUTH","AuthParameters":{"USERNAME":"%s"}}
+                """.formatted(pool.clientId(), pool.email()));
+        assertEquals(List.of("EMAIL_OTP"), MAPPER.convertValue(userAuth.path("AvailableChallenges"), List.class));
+        Map<String, String> query = authorizeRequest(pool.clientId());
+        query.put("login_hint", pool.email());
+
+        Response usernameStep = loginPage(null, "/cognito-idp/oauth2/authorize", query);
+        String usernameHtml = usernameStep.asString();
+        assertTrue(input(usernameHtml, "username").contains("value=\"" + pool.email() + "\""), usernameHtml);
+        assertNull(input(usernameHtml, "password"), "no password field for a pool that allows only email codes");
+
+        Response codeStep = post(null, usernameStep, Map.of("username", pool.email()));
+        codeStep.then().statusCode(200).contentType(startsWith("text/html"));
+        String codeHtml = codeStep.asString();
+        assertNotNull(input(codeHtml, "code"), codeHtml);
+        assertNull(input(codeHtml, "password"), codeHtml);
+        assertNull(setCookie(codeStep, "cognito"));
+        assertNotNull(hiddenFields(codeHtml).get("session"), "the USER_AUTH session travels in the form");
+
+        Response signedIn = post(null, codeStep, Map.of("code", latestEmailCode(pool.email())));
+
+        signedIn.then().statusCode(302);
+        String location = signedIn.getHeader("Location");
+        assertTrue(location.startsWith(CALLBACK + "?code="), location);
+        assertEquals("client-state", queryOf(location).get("state"));
+        assertNotNull(setCookie(signedIn, "cognito"));
+        JsonNode idToken = jwtPayload(redeem(null, pool.clientId(), code(signedIn), VERIFIER)
+                .then().statusCode(200).extract().path("id_token"));
+        assertEquals(pool.sub(), idToken.path("sub").asText());
+        assertEquals(pool.email(), idToken.path("email").asText());
+        assertEquals("client-nonce", idToken.path("nonce").asText());
+    }
+
+    @Test
+    void wrongEmailCodeShowsTheCodeFormAgainAndTheRightCodeStillSignsIn() throws Exception {
+        PasswordlessPool pool = newPasswordlessPool(List.of("EMAIL_OTP"), false);
+        Response codeStep = post(null, loginPage(null, "/cognito-idp/oauth2/authorize", authorizeRequest(pool.clientId())),
+                Map.of("username", pool.email()));
+        String code = latestEmailCode(pool.email());
+
+        Response wrong = post(null, codeStep, Map.of("code", differentCode(code)));
+
+        wrong.then().statusCode(400).contentType(startsWith("text/html"));
+        assertNull(wrong.getHeader("Location"));
+        assertNull(setCookie(wrong, "cognito"));
+        assertTrue(wrong.asString().contains("<p role=\"alert\">Invalid verification code provided, please try again.</p>"),
+                wrong.asString());
+        assertNotNull(input(wrong.asString(), "code"), "the code form is shown again");
+
+        Response signedIn = post(null, wrong, Map.of("code", code));
+        redeem(null, pool.clientId(), code(signedIn), VERIFIER).then().statusCode(200);
+    }
+
+    /**
+     * With PASSWORD and EMAIL_OTP allowed, a user with a password chooses between them, and one without a
+     * password is sent a code straight away: they have a single factor, so there is nothing to choose.
+     */
+    @Test
+    void userWithAPasswordChoosesAFactorAndUserWithoutOneGetsACode() throws Exception {
+        PasswordlessPool withPassword = newPasswordlessPool(List.of("PASSWORD", "EMAIL_OTP"), true);
+
+        Response choice = post(null, loginPage(null, "/cognito-idp/oauth2/authorize",
+                authorizeRequest(withPassword.clientId())), Map.of("username", withPassword.email()));
+        choice.then().statusCode(200);
+        String choiceHtml = choice.asString();
+        assertTrue(choiceHtml.contains("<button type=\"submit\" name=\"challenge\" value=\"PASSWORD\">"), choiceHtml);
+        assertTrue(choiceHtml.contains("<button type=\"submit\" name=\"challenge\" value=\"EMAIL_OTP\">"), choiceHtml);
+        Response passwordStep = post(null, choice, Map.of("challenge", "PASSWORD"));
+        String passwordHtml = passwordStep.then().statusCode(200).extract().asString();
+        assertTrue(input(passwordHtml, "username").contains("value=\"" + withPassword.email() + "\""), passwordHtml);
+        Response signedIn = post(null, passwordStep, Map.of("username", withPassword.email(), "password", PASSWORD));
+        redeem(null, withPassword.clientId(), code(signedIn), VERIFIER).then().statusCode(200);
+
+        PasswordlessPool withoutPassword = newPasswordlessPool(List.of("PASSWORD", "EMAIL_OTP"), false);
+        Response codeStep = post(null, loginPage(null, "/cognito-idp/oauth2/authorize",
+                authorizeRequest(withoutPassword.clientId())), Map.of("username", withoutPassword.email()));
+        assertNotNull(input(codeStep.then().statusCode(200).extract().asString(), "code"), codeStep.asString());
+        Response codeSignedIn = post(null, codeStep, Map.of("code", latestEmailCode(withoutPassword.email())));
+        redeem(null, withoutPassword.clientId(), code(codeSignedIn), VERIFIER).then().statusCode(200);
+    }
+
+    /** An unknown user is asked for a code like anyone else, so the page does not tell who has an account. */
+    @Test
+    void unknownUserIsAskedForACodeThatNeverSignsIn() throws Exception {
+        PasswordlessPool pool = newPasswordlessPool(List.of("EMAIL_OTP"), false);
+        String nobody = "nobody-" + System.nanoTime() + "@example.com";
+
+        Response codeStep = post(null, loginPage(null, "/cognito-idp/oauth2/authorize", authorizeRequest(pool.clientId())),
+                Map.of("username", nobody));
+        assertNotNull(input(codeStep.then().statusCode(200).extract().asString(), "code"), codeStep.asString());
+        assertEquals(0, emailsTo(nobody).size(), "nothing is sent to an address with no account");
+
+        Response refused = post(null, codeStep, Map.of("code", "123456"));
+
+        refused.then().statusCode(400);
+        assertNull(refused.getHeader("Location"));
+        assertTrue(refused.asString().contains("<p role=\"alert\">Invalid verification code provided, please try again.</p>"),
+                refused.asString());
+    }
+
+    @Test
+    void passwordIsRefusedWhenThePolicyAllowsOnlyEmailCodes() throws Exception {
+        PasswordlessPool pool = newPasswordlessPool(List.of("EMAIL_OTP"), true);
+
+        Response refused = post(null, loginPage(null, "/cognito-idp/oauth2/authorize", authorizeRequest(pool.clientId())),
+                Map.of("username", pool.email(), "password", PASSWORD));
+
+        refused.then().statusCode(400).contentType(startsWith("text/html"));
+        assertNull(refused.getHeader("Location"));
+        assertNull(setCookie(refused, "cognito"));
+    }
+
+    /**
+     * Choice-based sign-in needs EMAIL_OTP in the sign-in policy and USER_AUTH on the client; without
+     * either, the page is the username and password form of before, and it signs in the same way.
+     */
+    @Test
+    void passwordFormStaysWithoutAnEmailCodePolicyOrWithoutUserAuthOnTheClient() throws Exception {
+        PasswordlessPool passwordPolicy = newPasswordlessPool(List.of("PASSWORD"), true);
+        PasswordlessPool withoutUserAuth = newPasswordlessPool(List.of("PASSWORD", "EMAIL_OTP"), true);
+        cognitoAction("UpdateUserPoolClient", """
+                {"UserPoolId":"%s","ClientId":"%s","AllowedOAuthFlowsUserPoolClient":true,"AllowedOAuthFlows":["code"],
+                 "AllowedOAuthScopes":["openid","email"],"CallbackURLs":["%s"],"SupportedIdentityProviders":["COGNITO"],
+                 "ExplicitAuthFlows":["ALLOW_REFRESH_TOKEN_AUTH"]}
+                """.formatted(withoutUserAuth.poolId(), withoutUserAuth.clientId(), CALLBACK)).then().statusCode(200);
+
+        for (PasswordlessPool pool : List.of(passwordPolicy, withoutUserAuth)) {
+            Response page = loginPage(null, "/cognito-idp/oauth2/authorize", authorizeRequest(pool.clientId()));
+            assertEquals("<input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" "
+                    + "required>", input(page.asString(), "password"));
+            Response signedIn = submit(null, page, pool.email(), PASSWORD);
+            redeem(null, pool.clientId(), code(signedIn), VERIFIER).then().statusCode(200);
+        }
+    }
+
     /** Without a custom domain Host, /login stays S3's path-style bucket route. */
     @Test
     void loginOnFlocisOwnHostIsNotManagedLogin() {
@@ -823,6 +995,62 @@ class CognitoManagedLoginIntegrationTest {
         return new Pool(poolId, clientId, user.path("Username").asText(), sub);
     }
 
+    /** A pool with email usernames and a sign-in policy, a client that allows USER_AUTH, and a user with a verified email. */
+    private record PasswordlessPool(String poolId, String clientId, String email, String sub) {
+    }
+
+    private static PasswordlessPool newPasswordlessPool(List<String> firstFactors, boolean withPassword)
+            throws Exception {
+        String poolId = cognitoJson("CreateUserPool", """
+                {"PoolName":"PasswordlessPool","UsernameAttributes":["email"],
+                 "Policies":{"SignInPolicy":{"AllowedFirstAuthFactors":%s}}}
+                """.formatted(MAPPER.writeValueAsString(firstFactors))).path("UserPool").path("Id").asText();
+        String clientId = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId":"%s","ClientName":"passwordless","AllowedOAuthFlowsUserPoolClient":true,
+                 "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":["openid","email"],"CallbackURLs":["%s"],
+                 "SupportedIdentityProviders":["COGNITO"],"ExplicitAuthFlows":["ALLOW_USER_AUTH","ALLOW_REFRESH_TOKEN_AUTH"]}
+                """.formatted(poolId, CALLBACK)).path("UserPoolClient").path("ClientId").asText();
+        String email = "passwordless-" + System.nanoTime() + "@example.com";
+        cognitoAction("AdminCreateUser", """
+                {"UserPoolId":"%s","Username":"%s","MessageAction":"SUPPRESS",
+                 "UserAttributes":[{"Name":"email","Value":"%s"},{"Name":"email_verified","Value":"true"}]}
+                """.formatted(poolId, email, email)).then().statusCode(200);
+        if (withPassword) {
+            cognitoAction("AdminSetUserPassword", """
+                    {"UserPoolId":"%s","Username":"%s","Password":"%s","Permanent":true}
+                    """.formatted(poolId, email, PASSWORD)).then().statusCode(200);
+        }
+        JsonNode user = cognitoJson("AdminGetUser", """
+                {"UserPoolId":"%s","Username":"%s"}
+                """.formatted(poolId, email));
+        String sub = null;
+        for (JsonNode attribute : user.path("UserAttributes")) {
+            if ("sub".equals(attribute.path("Name").asText())) {
+                sub = attribute.path("Value").asText();
+            }
+        }
+        return new PasswordlessPool(poolId, clientId, email, sub);
+    }
+
+    /** The code in the one message Floci's SES holds for {@code email}. */
+    private static String latestEmailCode(String email) throws Exception {
+        JsonNode messages = emailsTo(email);
+        assertEquals(1, messages.size(), messages.toString());
+        Matcher matcher = SIX_DIGIT_CODE.matcher(messages.get(0).path("Body").path("text_part").asText());
+        assertTrue(matcher.find(), messages.toString());
+        return matcher.group(1);
+    }
+
+    private static JsonNode emailsTo(String email) throws Exception {
+        String body = given().queryParam("email", email).when().get("/_aws/ses")
+                .then().statusCode(200).extract().asString();
+        return MAPPER.readTree(body).path("messages");
+    }
+
+    private static String differentCode(String code) {
+        return "000000".equals(code) ? "000001" : "000000";
+    }
+
     /** A PKCE authorization request, as a single-page app sends one. */
     private static Map<String, String> authorizeRequest(String clientId) {
         Map<String, String> query = new LinkedHashMap<>();
@@ -872,6 +1100,20 @@ class CognitoManagedLoginIntegrationTest {
                 .formParams(hiddenFields(html))
                 .formParam("username", username)
                 .formParam("password", password);
+        if (host != null) {
+            request.header("Host", host);
+        }
+        return request.when().post(formAction(html));
+    }
+
+    /** Submits a page's form as a browser does: its hidden fields and CSRF cookie, with {@code fields} filled in. */
+    private static Response post(String host, Response page, Map<String, String> fields) {
+        String html = page.asString();
+        Map<String, String> form = new LinkedHashMap<>(hiddenFields(html));
+        form.putAll(fields);
+        RequestSpecification request = given().redirects().follow(false)
+                .cookie("XSRF-TOKEN", page.getCookie("XSRF-TOKEN"))
+                .formParams(form);
         if (host != null) {
             request.header("Host", host);
         }
@@ -943,6 +1185,12 @@ class CognitoManagedLoginIntegrationTest {
             fields.put(unescapeHtml(matcher.group(1)), unescapeHtml(matcher.group(2)));
         }
         return fields;
+    }
+
+    /** The {@code <input>} element with {@code id}, or null when the page has none. */
+    private static String input(String html, String id) {
+        Matcher matcher = Pattern.compile("<input id=\"" + Pattern.quote(id) + "\"[^>]*>").matcher(html);
+        return matcher.find() ? matcher.group() : null;
     }
 
     private static String formAction(String html) {

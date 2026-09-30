@@ -2942,6 +2942,27 @@ public class CognitoService implements ResourceProvider {
                 username, password);
     }
 
+    /** Managed login's choice-based sign-in; see {@link CognitoAuthFlowHandler#managedLoginFirstFactors}. */
+    List<String> managedLoginFirstFactors(UserPoolClient client) {
+        return authFlowHandler.managedLoginFirstFactors(describeUserPool(client.getUserPoolId()), client);
+    }
+
+    /** See {@link CognitoAuthFlowHandler#managedLoginChallenges}. */
+    List<String> managedLoginChallenges(UserPoolClient client, String username) {
+        return authFlowHandler.managedLoginChallenges(describeUserPool(client.getUserPoolId()), username);
+    }
+
+    /** See {@link CognitoAuthFlowHandler#startManagedLoginEmailOtp}. */
+    String startManagedLoginEmailOtp(UserPoolClient client, String username) {
+        return authFlowHandler.startManagedLoginEmailOtp(describeUserPool(client.getUserPoolId()), client, username);
+    }
+
+    /** See {@link CognitoAuthFlowHandler#completeManagedLoginEmailOtp}. */
+    CognitoUser completeManagedLoginEmailOtp(UserPoolClient client, String session, String code) {
+        return authFlowHandler.completeManagedLoginEmailOtp(describeUserPool(client.getUserPoolId()), client,
+                session, code);
+    }
+
     public Map<String, Object> respondToAuthChallenge(String clientId, String challengeName,
                                                        String session, Map<String, String> responses) {
         return authFlowHandler.respondToAuthChallenge(clientId, challengeName, session, responses, Map.of());
