@@ -18,6 +18,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -126,6 +127,34 @@ class ApiGatewayApiKeyCfnProvisionerTest {
     }
 
     @Test
+    void createWithEnabledOmittedLeavesTheServiceDefault() {
+        when(apiGateway.createApiKey(eq(REGION), anyMap()))
+                .thenReturn(key("abc123", "my-key", "abc123", false, null, Map.of()));
+
+        provisioner.provision(resource(null), mapper.createObjectNode().put("Name", "my-key"), ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
+        verify(apiGateway).createApiKey(eq(REGION), request.capture());
+        assertFalse(request.getValue().containsKey("enabled"), request.getValue().toString());
+    }
+
+    @Test
+    void updateWithEnabledOmittedDisablesAnEnabledKey() {
+        ApiKey existing = key("abc123", "my-key", "abc123", true, null, Map.of());
+        when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
+        when(apiGateway.updateApiKey(eq(REGION), eq("abc123"), anyList())).thenReturn(existing);
+
+        provisioner.provision(resource("abc123"), mapper.createObjectNode().put("Name", "my-key"), ctx("abc123"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, String>>> patches = ArgumentCaptor.forClass(List.class);
+        verify(apiGateway).updateApiKey(eq(REGION), eq("abc123"), patches.capture());
+        assertTrue(patches.getValue().stream().anyMatch(op ->
+                "/enabled".equals(op.get("path")) && "false".equals(op.get("value"))), patches.getValue().toString());
+    }
+
+    @Test
     void updatePatchesDescriptionAndEnabledInPlace() {
         ApiKey existing = key("abc123", "my-key", "abc123", false, "old", Map.of());
         existing.setCustomerId("marketplace-customer-1");
@@ -171,7 +200,7 @@ class ApiGatewayApiKeyCfnProvisionerTest {
 
     @Test
     void anUnchangedUpdateTouchesNothing() {
-        ApiKey existing = key("abc123", "my-key", "abc123", true, "same", Map.of("team", "core"));
+        ApiKey existing = key("abc123", "my-key", "abc123", false, "same", Map.of("team", "core"));
         when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
         ObjectNode props = tags("team", "core").put("Name", "my-key").put("Description", "same");
         StackResource r = resource("abc123");
@@ -186,7 +215,7 @@ class ApiGatewayApiKeyCfnProvisionerTest {
 
     @Test
     void changedTagsAreReplacedWholesale() {
-        ApiKey existing = key("abc123", "my-key", "abc123", true, null, Map.of("team", "core", "stale", "x"));
+        ApiKey existing = key("abc123", "my-key", "abc123", false, null, Map.of("team", "core", "stale", "x"));
         when(apiGateway.findApiKey(REGION, "abc123")).thenReturn(Optional.of(existing));
         when(apiGateway.replaceApiKeyTags(eq(REGION), eq("abc123"), anyMap())).thenReturn(existing);
 

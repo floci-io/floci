@@ -96,7 +96,7 @@ class ApiGatewayApiKeyCfnIntegrationTest {
         getApiKey(unnamedId)
             .statusCode(200)
             .body("name", startsWith(STACK + "-Unnamed-"))
-            .body("enabled", equalTo(true));
+            .body("enabled", equalTo(false));
 
         // A caller-chosen value with a distinct id keeps the value and mints a separate id.
         assertNotEquals(CHOSEN_VALUE, distinctId);

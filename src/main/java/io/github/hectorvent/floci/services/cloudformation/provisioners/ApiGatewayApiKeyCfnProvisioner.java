@@ -117,9 +117,9 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
         if (!Objects.equals(blankToNull(description), blankToNull(existing.getDescription()))) {
             patches.add(patch("/description", description));
         }
-        // Enabled defaults to true when the template omits it, as in AWS.
+        // Enabled defaults to false when the template omits it, as in the AWS registry schema.
         Boolean enabled = resolveBoolean(props, "Enabled", ctx);
-        boolean desiredEnabled = enabled == null || enabled;
+        boolean desiredEnabled = enabled != null && enabled;
         if (desiredEnabled != existing.isEnabled()) {
             patches.add(patch("/enabled", Boolean.toString(desiredEnabled)));
         }

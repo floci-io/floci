@@ -1063,7 +1063,7 @@ public class ApiGatewayService {
     public ApiKey createApiKey(String region, Map<String, Object> request) {
         ApiKey apiKey = new ApiKey();
         apiKey.setName((String) request.get("name"));
-        apiKey.setEnabled(!Boolean.FALSE.equals(request.get("enabled")));
+        apiKey.setEnabled(Boolean.TRUE.equals(request.get("enabled")));
         apiKey.setCreatedDate(System.currentTimeMillis() / 1000L);
         apiKey.setLastUpdatedDate(apiKey.getCreatedDate());
         apiKey.setDescription((String) request.get("description"));
