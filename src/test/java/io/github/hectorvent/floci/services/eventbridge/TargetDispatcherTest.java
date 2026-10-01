@@ -193,7 +193,8 @@ class TargetDispatcherTest {
     @ValueSource(strings = {
             "arn:aws:sqs:us-east-1:000000000000:orders-dlq.fifo",
             "arn:aws:sns:us-east-1:000000000000:orders-dlq",
-            "arn:aws:sqs:eu-west-1:000000000000:orders-dlq"
+            "arn:aws:sqs:eu-west-1:000000000000:orders-dlq",
+            "   "
     })
     void unsupportedDeadLetterQueueIsSkipped(String deadLetterArn) {
         when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION))

@@ -198,7 +198,7 @@ public class TargetDispatcher implements Resettable {
         LOG.warnv("EventBridge rule {0} did not deliver an event to target {1}: error {2}, condition {3}, retries {4}",
                 delivery.ruleArn(), target.getId(), delivery.errorCode(), condition, delivery.retryAttempts());
         String queueArn = target.getDeadLetterConfig() != null ? target.getDeadLetterConfig().arn() : null;
-        if (queueArn == null || queueArn.isBlank()) {
+        if (queueArn == null) {
             return;
         }
         if (!isStandardSqsQueueArn(queueArn) || !AwsArnUtils.parse(queueArn).region().equals(delivery.region())) {
