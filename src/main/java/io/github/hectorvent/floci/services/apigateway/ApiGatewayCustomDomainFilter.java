@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigateway;
 import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
+import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -36,12 +37,15 @@ public class ApiGatewayCustomDomainFilter implements ContainerRequestFilter {
     private static final String REGIONAL_SUFFIX = ".regional.local";
 
     private final ApiGatewayService apiGatewayService;
+    private final ApiGatewayV2Service apiGatewayV2Service;
     private final ApiGatewayExecuteRouteContext routeContext;
 
     @Inject
     public ApiGatewayCustomDomainFilter(ApiGatewayService apiGatewayService,
+                                        ApiGatewayV2Service apiGatewayV2Service,
                                         ApiGatewayExecuteRouteContext routeContext) {
         this.apiGatewayService = apiGatewayService;
+        this.apiGatewayV2Service = apiGatewayV2Service;
         this.routeContext = routeContext;
     }
 
@@ -107,6 +111,14 @@ public class ApiGatewayCustomDomainFilter implements ContainerRequestFilter {
         LOG.debugv("Custom domain routing: {0}{1} -> {2}", host, path, newUri.getPath());
         // AWS_IAM dispatch rebuilds the caller's canonical request, which covers the path they
         // signed: the custom-domain path, not the /execute-api/... form this rewrite produces.
+        // Older persisted mappings have no type. Prefer REST if that API exists; otherwise
+        // retain v2 routing when a v2 API owns the id.
+        if ("REST".equals(mapping.getApiType())
+                || (mapping.getApiType() == null
+                        && (apiGatewayService.hasRestApi(restApiId)
+                                || apiGatewayV2Service.findApiOwner(restApiId).isEmpty()))) {
+            routeContext.routeToRestApi();
+        }
         routeContext.recordSignedRequestPath(path);
         requestContext.setRequestUri(newUri);
     }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.InlineZipPackager;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -24,6 +25,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -32,6 +34,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -53,6 +56,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
     private static final String HOT_RELOAD_BUCKET = "hot-reload";
     private static final String LAMBDA_NAME_MODE_ATTR = "FlociLambdaFunctionNameMode";
     private static final String LAMBDA_PACKAGE_TYPE_ATTR = "FlociLambdaPackageType";
+    private static final String LAMBDA_TEMPLATE_TAG_KEYS_ATTR = "FlociLambdaTemplateTagKeys";
     private static final String NAME_MODE_EXPLICIT = "explicit";
     private static final String NAME_MODE_GENERATED = "generated";
 
@@ -108,18 +112,31 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         boolean replacement = lambdaRequiresReplacement(r, desired, existing);
 
         LambdaFunction func;
+        boolean adopted = false;
         if (existing == null || replacement) {
             if (replacement && desired.functionName().equals(r.getPhysicalId())) {
                 throw new AwsException("ValidationError",
                         "Cannot replace Lambda function " + r.getPhysicalId()
                                 + " without a new FunctionName", 400);
             }
-            func = createLambdaFunction(region, desired, !replacement);
+            try {
+                func = lambdaService.createFunction(region, desired.createRequest());
+            } catch (AwsException e) {
+                if (!replacement && ("ResourceConflictException".equals(e.getErrorCode())
+                        || (e.getMessage() != null && e.getMessage().contains("Function already exist")))) {
+                    func = lambdaService.getFunction(region, desired.functionName());
+                    adopted = true;
+                } else {
+                    throw e;
+                }
+            }
             if (replacement && r.getPhysicalId() != null) {
                 deleteReplacedLambda(region, r.getPhysicalId());
             }
         } else {
             func = updateLambdaFunction(region, existing, desired, r);
+            reconcileTags(func.getFunctionArn(), r.getAttributes().get(LAMBDA_TEMPLATE_TAG_KEYS_ATTR),
+                    desired.tags());
         }
 
         applyLambdaReservedConcurrency(region, func, desired);
@@ -130,6 +147,13 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put(LAMBDA_NAME_MODE_ATTR,
                 desired.explicitFunctionName() ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
         r.getAttributes().put(LAMBDA_PACKAGE_TYPE_ATTR, desired.packageType());
+        if (adopted) {
+            r.getAttributes().remove(LAMBDA_TEMPLATE_TAG_KEYS_ATTR);
+        } else {
+            // Tag keys cannot contain a comma, so the sorted keys join losslessly.
+            r.getAttributes().put(LAMBDA_TEMPLATE_TAG_KEYS_ATTR,
+                    String.join(",", new TreeSet<>(desired.tags().keySet())));
+        }
     }
 
     private LambdaDesiredState buildLambdaDesiredState(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -186,7 +210,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         createRequest.put("PackageType", packageType);
 
         String role = ctx.resolveOrDefault(props, "Role",
-                AwsArnUtils.Arn.of("iam", "", ctx.accountId(), "role/default").toString());
+                AwsArnUtils.Arn.global(AwsRegions.partitionFor(ctx.region()), "iam", ctx.accountId(),
+                        "role/default").toString());
         createRequest.put("Role", role);
         configRequest.put("Role", role);
 
@@ -236,6 +261,11 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         putResolvedMapIfPresent(configRequest, props, "ImageConfig", "ImageConfig", engine);
 
         createRequest.putAll(configRequest);
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        LambdaService.validateTagKeys(tags);
+        if (!tags.isEmpty()) {
+            createRequest.put("Tags", tags);
+        }
         Integer reservedConcurrentExecutions = null;
         String reserved = ctx.resolveOptional(props, "ReservedConcurrentExecutions");
         if (reserved != null) {
@@ -248,7 +278,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         }
 
         return new LambdaDesiredState(functionName, hasExplicitName, packageType,
-                createRequest, code, configRequest, props != null && props.has("ReservedConcurrentExecutions"),
+                createRequest, code, configRequest, tags, props != null && props.has("ReservedConcurrentExecutions"),
                 reservedConcurrentExecutions);
     }
 
@@ -354,18 +384,6 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         return !Objects.equals(existingPackageType, desired.packageType());
     }
 
-    private LambdaFunction createLambdaFunction(String region, LambdaDesiredState desired, boolean allowAdopt) {
-        try {
-            return lambdaService.createFunction(region, desired.createRequest());
-        } catch (AwsException e) {
-            if (allowAdopt && ("ResourceConflictException".equals(e.getErrorCode())
-                    || (e.getMessage() != null && e.getMessage().contains("Function already exist")))) {
-                return lambdaService.getFunction(region, desired.functionName());
-            }
-            throw e;
-        }
-    }
-
     private LambdaFunction updateLambdaFunction(String region,
                                                 LambdaFunction existing,
                                                 LambdaDesiredState desired,
@@ -379,6 +397,26 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             current = lambdaService.updateFunctionCode(region, current.getFunctionName(), desired.code().request());
         }
         return current;
+    }
+
+    /**
+     * Applies the template's tags to an in-place updated function and untags only the keys the
+     * previous template set and this one drops, so a tag added outside the template stays, as in
+     * AWS. A function provisioned before the keys were recorded has none to drop. A created
+     * function already carries its tags in the create request.
+     */
+    private void reconcileTags(String functionArn, String previousTemplateKeys, Map<String, String> desired) {
+        List<String> dropped = previousTemplateKeys == null || previousTemplateKeys.isEmpty()
+                ? List.of()
+                : Arrays.stream(previousTemplateKeys.split(","))
+                        .filter(key -> !desired.containsKey(key))
+                        .toList();
+        if (!dropped.isEmpty()) {
+            lambdaService.untagResource(functionArn, dropped);
+        }
+        if (!desired.isEmpty()) {
+            lambdaService.tagResource(functionArn, desired);
+        }
     }
 
     private void deleteReplacedLambda(String region, String functionName) {
@@ -886,6 +924,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                                       Map<String, Object> createRequest,
                                       LambdaCodeSpec code,
                                       Map<String, Object> configRequest,
+                                      Map<String, String> tags,
                                       boolean reservedConcurrentExecutionsPresent,
                                       Integer reservedConcurrentExecutions) {}
 

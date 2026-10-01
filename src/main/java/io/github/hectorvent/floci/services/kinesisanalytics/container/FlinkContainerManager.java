@@ -121,9 +121,8 @@ public class FlinkContainerManager {
     private String runtimeKey(FlinkApplication app) {
         String arn = app.getApplicationArn();
         if (arn == null || arn.isBlank()) {
-            arn = "arn:aws:kinesisanalytics:" + regionResolver.getDefaultRegion() + ":"
-                    + regionResolver.getAccountId() + ":application/"
-                    + app.getApplicationName();
+            arn = AwsArnUtils.Arn.of("kinesisanalytics", regionResolver.getDefaultRegion(),
+                    regionResolver.getAccountId(), "application/" + app.getApplicationName()).toString();
         }
         return arn.replace(':', '-').replace('/', '-');
     }

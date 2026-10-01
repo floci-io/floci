@@ -398,6 +398,49 @@ class EmbeddedDnsServerTest {
         assertEquals(15, buffer.getInt(firstTtl + 16));
     }
 
+    // ── spoof-aws-endpoints: transparent endpoint injection ──────────────────
+
+    @Test
+    void spoofAwsEndpoints_answersAmazonawsAQueriesWithFlociIp() {
+        EmbeddedDnsServer spoofing = new EmbeddedDnsServer(List.of(), true);
+        assertEquals(List.of("172.19.0.2"), spoofing.resolveARecord("sts.amazonaws.com", "172.19.0.2"));
+        assertEquals(List.of("172.19.0.2"), spoofing.resolveARecord("sts.us-east-1.amazonaws.com", "172.19.0.2"));
+        assertEquals(List.of("172.19.0.2"), spoofing.resolveARecord("organizations.us-east-1.amazonaws.com", "172.19.0.2"));
+        assertEquals(List.of("172.19.0.2"), spoofing.resolveARecord("my-bucket.s3.us-east-1.amazonaws.com", "172.19.0.2"));
+        assertEquals(List.of("172.19.0.2"), spoofing.resolveARecord("amazonaws.com", "172.19.0.2"));
+    }
+
+    @Test
+    void spoofAwsEndpoints_coversEveryPartitionSuffix() {
+        // Catches: interception limited to the commercial suffix, leaving China, EUSC and ISO endpoints on real AWS
+        EmbeddedDnsServer spoofing = new EmbeddedDnsServer(List.of(), true);
+        assertEquals(List.of("172.19.0.2"), spoofing.resolveARecord("sts.cn-north-1.amazonaws.com.cn", "172.19.0.2"));
+        assertEquals(List.of("172.19.0.2"), spoofing.resolveARecord("sts.eusc-de-east-1.amazonaws.eu", "172.19.0.2"));
+        assertEquals(List.of("172.19.0.2"), spoofing.resolveARecord("sts.us-iso-east-1.c2s.ic.gov", "172.19.0.2"));
+    }
+
+    @Test
+    void spoofAwsEndpoints_offByDefault_amazonawsQueriesAreForwarded() {
+        assertTrue(dns.resolveARecord("sts.amazonaws.com", "172.19.0.2").isEmpty());
+        assertTrue(dns.resolveARecord("sts.us-east-1.amazonaws.com", "172.19.0.2").isEmpty());
+        assertTrue(dns.resolveARecord("my-bucket.s3.us-east-1.amazonaws.com", "172.19.0.2").isEmpty());
+    }
+
+    @Test
+    void spoofAwsEndpoints_doesNotCaptureOtherDomains() {
+        EmbeddedDnsServer spoofing = new EmbeddedDnsServer(List.of(), true);
+        assertFalse(spoofing.matchesSuffix("business-api.tiktok.com"));
+        assertFalse(spoofing.matchesSuffix("myamazonaws.com"));
+        assertFalse(spoofing.matchesSuffix("amazonaws.com.evil.example"));
+    }
+
+    @Test
+    void spoofAwsEndpoints_flociDomainsStillResolve() {
+        EmbeddedDnsServer spoofing = new EmbeddedDnsServer(List.of(), true);
+        assertTrue(spoofing.matchesSuffix("my-bucket.s3.localhost.floci.io"));
+        assertTrue(spoofing.matchesSuffix("my-bucket.localhost.localstack.cloud"));
+    }
+
     // ── matchesSuffix — built-in emulator domains ─────────────────────────────
 
     @Test

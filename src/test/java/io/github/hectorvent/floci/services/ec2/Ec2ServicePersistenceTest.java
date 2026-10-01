@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -357,6 +358,40 @@ class Ec2ServicePersistenceTest {
         assertEquals(List.of("legacy-no-versions"),
                 noVersions.getInstanceTags().stream().map(Tag::getValue).toList(),
                 "instance tags on a legacy template with no versions map must survive restart");
+    }
+
+    @Test
+    void legacyLaunchTemplateUserDataDecodesOnRead(@TempDir Path dir) throws IOException {
+        String encoded = "IyEvYmluL2Jhc2gKZWNobyBoaQo=";
+        String legacyJson = """
+                {
+                  "us-east-1::lt-legacy-user-data": {
+                    "launchTemplateId": "lt-legacy-user-data",
+                    "launchTemplateName": "legacy-user-data",
+                    "defaultVersionNumber": "1",
+                    "latestVersionNumber": "1",
+                    "region": "us-east-1",
+                    "data": { "encodedUserData": "%s" },
+                    "versions": {
+                      "1": { "encodedUserData": "%s" }
+                    }
+                  }
+                }
+                """.formatted(encoded, encoded);
+        Files.writeString(dir.resolve("ec2-launch-templates.json"), legacyJson);
+
+        Ec2Service restarted = newService(dir);
+        LaunchTemplateData resolved = restarted.resolveLaunchTemplateData(
+                REGION, "lt-legacy-user-data", null, "1");
+        assertEquals(encoded, resolved.getEncodedUserData());
+        assertEquals("#!/bin/bash\necho hi\n", resolved.getUserData());
+
+        LaunchTemplateData described = restarted.describeLaunchTemplateVersions(
+                REGION, "lt-legacy-user-data", null, List.of("1")).getFirst().getData();
+        assertEquals(encoded, described.getEncodedUserData());
+        assertNull(described.getUserData());
+        assertNull(restarted.describeLaunchTemplates(REGION, List.of("lt-legacy-user-data"),
+                List.of(), Map.of()).getFirst().getData().getUserData());
     }
 
     private BlockDeviceMapping blockDeviceMapping(String snapshotId, int volumeSize) {

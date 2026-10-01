@@ -95,6 +95,8 @@ public class CognitoJsonHandler {
             case "AdminInitiateAuth" -> handleAdminInitiateAuth(request);
             case "RespondToAuthChallenge" -> handleRespondToAuthChallenge(request);
             case "AdminRespondToAuthChallenge" -> handleAdminRespondToAuthChallenge(request);
+            case "AssociateSoftwareToken" -> handleAssociateSoftwareToken(request);
+            case "VerifySoftwareToken" -> handleVerifySoftwareToken(request);
             case "SignUp" -> handleSignUp(request);
             case "ConfirmSignUp" -> handleConfirmSignUp(request);
             case "ResendConfirmationCode" -> handleResendConfirmationCode(request);
@@ -103,6 +105,7 @@ public class CognitoJsonHandler {
             case "ForgotPassword" -> handleForgotPassword(request);
             case "ConfirmForgotPassword" -> handleConfirmForgotPassword(request);
             case "GetUser" -> handleGetUser(request);
+            case "GetUserAuthFactors" -> handleGetUserAuthFactors(request);
             case "GetUserAttributeVerificationCode" -> handleGetUserAttributeVerificationCode(request);
             case "VerifyUserAttribute" -> handleVerifyUserAttribute(request);
             case "UpdateUserAttributes" -> handleUpdateUserAttributes(request);
@@ -916,6 +919,19 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.valueToTree(result)).build();
     }
 
+    private Response handleAssociateSoftwareToken(JsonNode request) {
+        Map<String, Object> result = service.associateSoftwareToken(
+                request.path("AccessToken").asText(null), request.path("Session").asText(null));
+        return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
+    private Response handleVerifySoftwareToken(JsonNode request) {
+        Map<String, Object> result = service.verifySoftwareToken(
+                request.path("AccessToken").asText(null), request.path("Session").asText(null),
+                request.path("UserCode").asText(null));
+        return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
     private Response handleSignUp(JsonNode request) {
         Map<String, String> attrs = new HashMap<>();
         request.path("UserAttributes").forEach(a -> attrs.put(a.path("Name").asText(), a.path("Value").asText()));
@@ -1005,6 +1021,11 @@ public class CognitoJsonHandler {
 
     private Response handleGetUser(JsonNode request) {
         Map<String, Object> result = service.getUser(request.path("AccessToken").asText());
+        return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
+    private Response handleGetUserAuthFactors(JsonNode request) {
+        Map<String, Object> result = service.getUserAuthFactors(request.path("AccessToken").asText());
         return Response.ok(objectMapper.valueToTree(result)).build();
     }
 

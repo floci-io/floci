@@ -336,7 +336,7 @@ public class SqsQueryHandler {
             if (id == null) break;
             String receiptHandle = getParam(params, "DeleteMessageBatchRequestEntry." + i + ".ReceiptHandle");
             try {
-                sqsService.deleteMessage(queueUrl, receiptHandle, region);
+                sqsService.deleteMessageInBatch(queueUrl, receiptHandle, region);
                 xml.start("DeleteMessageBatchResultEntry").elem("Id", id).end("DeleteMessageBatchResultEntry");
             } catch (AwsException e) {
                 xml.start("BatchResultErrorEntry")

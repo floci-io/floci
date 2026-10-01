@@ -25,11 +25,16 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -53,6 +58,7 @@ class AslExecutorNestedStartExecutionTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private AslExecutor executor;
     private StepFunctionsService childSfn;
+    private List<HistoryEvent> history;
 
     @BeforeEach
     @SuppressWarnings("unchecked")
@@ -91,6 +97,11 @@ class AslExecutorNestedStartExecutionTest {
     }
 
     private Execution runParent(String parentDefinition, String input) {
+        return runParent(parentDefinition, input, new ArrayList<>());
+    }
+
+    /** {@code recorded} is the history the execution starts with, counted towards the event limit. */
+    private Execution runParent(String parentDefinition, String input, List<HistoryEvent> recorded) {
         StateMachine sm = new StateMachine();
         sm.setName("parent");
         sm.setStateMachineArn("arn:aws:states:us-east-1:000000000000:stateMachine:parent");
@@ -101,7 +112,8 @@ class AslExecutorNestedStartExecutionTest {
         exec.setExecutionArn("arn:aws:states:us-east-1:000000000000:execution:parent:pe");
         exec.setStateMachineArn(sm.getStateMachineArn());
         exec.setInput(input);
-        executor.executeSync(sm, exec, new ArrayList<HistoryEvent>(), (u, e) -> {
+        history = recorded;
+        executor.executeSync(sm, exec, history, (u, e) -> {
         });
         return exec;
     }
@@ -260,11 +272,136 @@ class AslExecutorNestedStartExecutionTest {
         assertEquals("StepFunctions.StateMachineDoesNotExistException", exec.getError());
     }
 
+    /**
+     * Measured on AWS: .sync returns the child's DescribeExecution response in PascalCase, keys in
+     * alphabetical order, dates in epoch milliseconds, Input and Output as JSON strings.
+     */
+    @Test
+    void syncReturnsTheExecutionEnvelopeWithPayloadsAsJsonStrings() {
+        childSucceeds();
+
+        Execution exec = runParent(parentMode(".sync"), "{}");
+
+        assertEquals("SUCCEEDED", exec.getStatus(), exec.getCause());
+        assertEquals("{\"ExecutionArn\":\"arn:aws:states:us-east-1:000000000000:execution:child:e1\","
+                + "\"Input\":\"{\\\"k\\\":1}\",\"InputDetails\":{\"Included\":true},\"Name\":\"e1\","
+                + "\"Output\":\"{\\\"ok\\\":true}\",\"OutputDetails\":{\"Included\":true},"
+                + "\"RedriveCount\":0,\"RedriveStatus\":\"NOT_REDRIVABLE\","
+                + "\"RedriveStatusReason\":\"Execution is SUCCEEDED and cannot be redriven\","
+                + "\"StartDate\":1000,\"StateMachineArn\":\"" + CHILD_ARN + "\","
+                + "\"Status\":\"SUCCEEDED\",\"StopDate\":2000}", exec.getOutput());
+    }
+
+    /** Measured on AWS: .sync:2 returns the same envelope with Input and Output as JSON values. */
+    @Test
+    void sync2ReturnsTheExecutionEnvelopeWithPayloadsAsJsonValues() {
+        childSucceeds();
+
+        Execution exec = runParent(parentMode(".sync:2"), "{}");
+
+        assertEquals("SUCCEEDED", exec.getStatus(), exec.getCause());
+        assertEquals("{\"ExecutionArn\":\"arn:aws:states:us-east-1:000000000000:execution:child:e1\","
+                + "\"Input\":{\"k\":1},\"InputDetails\":{\"Included\":true},\"Name\":\"e1\","
+                + "\"Output\":{\"ok\":true},\"OutputDetails\":{\"Included\":true},"
+                + "\"RedriveCount\":0,\"RedriveStatus\":\"NOT_REDRIVABLE\","
+                + "\"RedriveStatusReason\":\"Execution is SUCCEEDED and cannot be redriven\","
+                + "\"StartDate\":1000,\"StateMachineArn\":\"" + CHILD_ARN + "\","
+                + "\"Status\":\"SUCCEEDED\",\"StopDate\":2000}", exec.getOutput());
+    }
+
+    /** Measured on AWS: a child started through an alias carries the alias and its version. */
+    @Test
+    void syncEnvelopeCarriesTheAliasAndVersionTheChildWasStartedThrough() throws Exception {
+        Execution done = childSucceeds();
+        done.setStateMachineAliasArn(CHILD_ARN + ":live");
+        done.setStateMachineVersionArn(CHILD_ARN + ":1");
+
+        Execution exec = runParent(parentMode(".sync:2"), "{}");
+
+        List<String> keys = new ArrayList<>();
+        mapper.readTree(exec.getOutput()).fieldNames().forEachRemaining(keys::add);
+        assertEquals(List.of("ExecutionArn", "Input", "InputDetails", "Name", "Output", "OutputDetails",
+                "RedriveCount", "RedriveStatus", "RedriveStatusReason", "StartDate", "StateMachineAliasArn",
+                "StateMachineArn", "StateMachineVersionArn", "Status", "StopDate"), keys);
+    }
+
+    /**
+     * Measured on AWS: request-response returns the StartExecution response in PascalCase with
+     * StartDate in epoch milliseconds (and the SDK metadata, which Floci omits).
+     */
+    @Test
+    void requestResponseReturnsTheStartExecutionResponseInPascalCase() {
+        Execution exec = runParent(parentMode(""), "{}");
+
+        assertEquals("SUCCEEDED", exec.getStatus(), exec.getCause());
+        assertEquals("{\"ExecutionArn\":\"arn:aws:states:us-east-1:000000000000:execution:child:e1\","
+                + "\"StartDate\":1000}", exec.getOutput());
+    }
+
+    /**
+     * AWS records TaskSubmitted once StartExecution has returned and before it waits on the child
+     * (measured: resourceType states, resource startExecution.sync:2, the response in PascalCase with
+     * StartDate in epoch milliseconds, chained to TaskStarted). It also names the integration as
+     * states / startExecution.sync:2 on every event, not startExecution.sync / 2.
+     */
     @ParameterizedTest
     @ValueSource(strings = {".sync", ".sync:2"})
-    void syncChildSuccessIsUndisturbedByTheWrap(String mode) throws Exception {
-        // Regression guard: wrapping the start call in try/catch must not disturb the .sync/.sync:2
-        // success branches. The child starts RUNNING (setUp) then the poll observes it SUCCEEDED.
+    void syncRecordsTaskSubmittedWithTheStartExecutionResponse(String mode) throws Exception {
+        childSucceeds();
+
+        Execution exec = runParent(parentMode(mode), "{}");
+
+        assertEquals("SUCCEEDED", exec.getStatus(), exec.getCause());
+        assertEquals(List.of("TaskStateEntered", "TaskScheduled", "TaskStarted", "TaskSubmitted",
+                "TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"), types());
+        HistoryEvent submitted = history.get(3);
+        assertEquals(history.get(2).getId(), submitted.getPreviousEventId().longValue());
+        assertEquals(submitted.getId(), history.get(4).getPreviousEventId().longValue());
+        assertEquals("states", submitted.getDetails().get("resourceType"));
+        assertEquals("startExecution" + mode, submitted.getDetails().get("resource"));
+        assertEquals("{\"ExecutionArn\":\"arn:aws:states:us-east-1:000000000000:execution:child:e1\","
+                + "\"StartDate\":1000}", submitted.getDetails().get("output"));
+        assertEquals(Map.of("truncated", false), submitted.getDetails().get("outputDetails"));
+        for (int i = 1; i <= 4; i++) {
+            assertEquals("states", history.get(i).getDetails().get("resourceType"), history.get(i).getType());
+            assertEquals("startExecution" + mode, history.get(i).getDetails().get("resource"), history.get(i).getType());
+        }
+    }
+
+    /**
+     * TaskSubmitted is the first event after the child exists. When it is the one that hits the
+     * 25,000-event limit, the wait that would abort the child is never entered, so the child is
+     * aborted on the way out instead of running on.
+     */
+    @Test
+    void aChildWhoseTaskSubmittedHitsTheHistoryLimitIsAborted() {
+        List<HistoryEvent> recorded = new ArrayList<>();
+        for (int i = 0; i < 24_996; i++) {
+            recorded.add(new HistoryEvent());
+        }
+
+        Execution exec = runParent(parentMode(".sync:2"), "{}", recorded);
+
+        assertEquals("FAILED", exec.getStatus());
+        assertEquals("States.Runtime", exec.getError());
+        assertEquals("The execution reached the maximum number of history events (25000).", exec.getCause());
+        assertEquals("TaskStarted", history.get(24_998).getType());
+        assertFalse(types().contains("TaskSubmitted"), "the event that hit the limit is not recorded");
+        verify(childSfn).stopExecution(eq("arn:aws:states:us-east-1:000000000000:execution:child:e1"),
+                eq("The Task state in AWS Step Functions execution "
+                        + "[arn:aws:states:us-east-1:000000000000:execution:parent:pe]"
+                        + " which was managing this resource was aborted"), isNull());
+    }
+
+    @Test
+    void requestResponseRecordsNoTaskSubmitted() {
+        Execution exec = runParent(parentMode(""), "{}");
+
+        assertEquals("SUCCEEDED", exec.getStatus(), exec.getCause());
+        assertFalse(types().contains("TaskSubmitted"), types().toString());
+    }
+
+    private Execution childSucceeds() {
         Execution done = new Execution();
         done.setExecutionArn("arn:aws:states:us-east-1:000000000000:execution:child:e1");
         done.setStateMachineArn(CHILD_ARN);
@@ -272,17 +409,13 @@ class AslExecutorNestedStartExecutionTest {
         done.setStatus("SUCCEEDED");
         done.setStartDate(1.0);
         done.setStopDate(2.0);
+        done.setInput("{\"k\":1}");
         done.setOutput("{\"ok\":true}");
         when(childSfn.describeExecution(any())).thenReturn(done);
+        return done;
+    }
 
-        Execution exec = runParent(parentMode(mode), "{}");
-        assertEquals("SUCCEEDED", exec.getStatus());
-        var output = mapper.readTree(exec.getOutput());
-        if (".sync:2".equals(mode)) {
-            assertTrue(output.path("ok").asBoolean(), "sync:2 returns the parsed child output");
-        } else {
-            assertEquals("SUCCEEDED", output.path("status").asText(), "sync returns the execution envelope");
-            assertEquals("{\"ok\":true}", output.path("output").asText(), "envelope output is the child output JSON string");
-        }
+    private List<String> types() {
+        return history.stream().map(HistoryEvent::getType).toList();
     }
 }

@@ -30,14 +30,27 @@ explicit `Deny` always wins. Both `Action` and `NotAction` elements are honored 
 `sts:AssumeRole`. Roles that Floci has no record of stay permissive, so this only affects roles
 created through IAM with a real trust policy.
 
+The caller is the account that owns the request's credentials, whether they sign the
+`Authorization` header or a presigned query string: an IAM user's or a role session's access key
+belongs to its own account, not to the default one. A role session matches a `Principal` that
+names its session ARN or its role's ARN, path included.
+
+`Condition` blocks are evaluated with the same operators as identity and resource policies. The
+request context holds `sts:RoleSessionName`, `sts:ExternalId` when the caller passes `ExternalId`,
+`aws:PrincipalArn` (for a caller using assumed-role credentials, the role's ARN with its path, as on AWS),
+`aws:PrincipalAccount`, `aws:ResourceAccount`, `aws:RequestedRegion` and
+`aws:PrincipalIsAWSService`. A trust policy that requires `sts:ExternalId`, the confused-deputy
+guard, refuses a call that omits it or passes another value, and a conditional `Deny` applies only
+when its condition matches.
+
 ### Known limitations
 
-- **`Condition` blocks are not evaluated for `AssumeRole`.** A trust policy that requires
-  `sts:ExternalId` (the confused-deputy guard) is matched on its principal alone, so the role is
-  assumable without passing `ExternalId`, and the `ExternalId` request parameter is ignored. This
-  matches moto/LocalStack. Conditions *are* evaluated on the `AssumeRoleWithWebIdentity` path (see below).
-- **Only the trust policy is checked.** Cross-account `AssumeRole` in AWS also requires the caller's
-  own identity policy to allow `sts:AssumeRole`; that side is not enforced.
+- **Session tags and source identity are not modelled.** `aws:RequestTag/*`, `aws:TagKeys`,
+  `sts:TransitiveTagKeys` and `sts:SourceIdentity` are not in the request context, so a condition
+  on them does not match, and `sts:TagSession` and `sts:SetSourceIdentity` are not checked.
+- **The caller's own permission is checked against `*`.** The caller's identity policy must allow
+  `sts:AssumeRole`, but it is evaluated for resource `*` rather than the role's ARN, so a policy
+  that names the role in `Resource` does not grant it.
 
 ## Web Identity Validation (IRSA)
 

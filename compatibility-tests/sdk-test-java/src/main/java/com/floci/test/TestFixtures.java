@@ -19,6 +19,7 @@ import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
 import software.amazon.awssdk.services.servicediscovery.ServiceDiscoveryClient;
 import software.amazon.awssdk.services.emr.EmrClient;
+import software.amazon.awssdk.services.emrserverless.EmrServerlessClient;
 import software.amazon.awssdk.services.wafv2.Wafv2Client;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.kinesis.KinesisAsyncClient;
@@ -180,12 +181,22 @@ public final class TestFixtures {
         ENDPOINT = URI.create(endpointStr);
     }
 
-    private static final Region REGION = Region.US_EAST_1;
+    /**
+     * The region every fixture client signs for: {@code AWS_REGION} when set (the variable the
+     * SDK itself reads), else {@code us-east-1}. The China compat run sets {@code cn-north-1}, so
+     * the same suite exercises a non-commercial partition end to end.
+     */
+    private static final Region REGION = resolveRegion();
 
     private static final StaticCredentialsProvider CREDENTIALS =
             StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
 
     private TestFixtures() {}
+
+    private static Region resolveRegion() {
+        String region = System.getenv("AWS_REGION");
+        return region == null || region.isBlank() ? Region.US_EAST_1 : Region.of(region.trim());
+    }
 
     /**
      * Returns true when running against real AWS (no endpoint override).
@@ -896,6 +907,14 @@ public final class TestFixtures {
 
     public static EmrClient emrClient() {
         return EmrClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static EmrServerlessClient emrServerlessClient() {
+        return EmrServerlessClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

@@ -218,7 +218,9 @@ class IamEnforcementFilterTest {
         when(containerRequest.getMediaType()).thenReturn(MediaType.valueOf(contentType));
         stubClaim(containerRequest, protocol, dynamoDbDescriptor());
         when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
-        when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:PutItem");
+        // A REST-claimed request resolves from its route, the others from the registry's full rules.
+        lenient().when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:PutItem");
+        lenient().when(actionRegistry.resolveRoute("dynamodb", containerRequest)).thenReturn("dynamodb:PutItem");
         when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), eq("dynamodb:PutItem"), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
 
@@ -288,7 +290,9 @@ class IamEnforcementFilterTest {
 
         newFilter().filter(containerRequest);
 
-        verify(actionRegistry).resolve(eq("s3"), eq(containerRequest));
+        verify(actionRegistry).resolveRoute(eq("s3"), eq(containerRequest));
+        // Nor does the header name the action: a REST request never reaches the header-reading rules.
+        verify(actionRegistry, never()).resolve(any(), any());
     }
 
     @Test
@@ -305,14 +309,14 @@ class IamEnforcementFilterTest {
         when(catalog.byResourceClass(ApiGatewayController.class))
                 .thenReturn(Optional.of(descriptor("apigateway", ServiceProtocol.REST_JSON,
                         Set.of("apigateway", "execute-api"), ApiGatewayController.class)));
-        when(actionRegistry.resolve("apigateway", containerRequest)).thenReturn("apigateway:POST");
+        when(actionRegistry.resolveRoute("apigateway", containerRequest)).thenReturn("apigateway:POST");
         when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
 
         IamEnforcementFilter filter = newFilter(resourceInfo(ApiGatewayController.class));
         filter.filter(containerRequest);
 
-        verify(actionRegistry).resolve("apigateway", containerRequest);
-        verify(actionRegistry, never()).resolve("iam", containerRequest);
+        verify(actionRegistry).resolveRoute("apigateway", containerRequest);
+        verify(actionRegistry, never()).resolveRoute("iam", containerRequest);
         verify(arnBuilder).buildResources("apigateway", containerRequest,
                 "us-east-1", "000000000000");
         verify(conditionContextResolver).resolve("apigateway", "apigateway:POST", containerRequest);
@@ -332,14 +336,14 @@ class IamEnforcementFilterTest {
                 .thenReturn(Optional.of(descriptor("s3", ServiceProtocol.REST_XML,
                         Set.of("s3", "s3express"), S3Controller.class)));
         when(catalog.canonicalCredentialScope("s3express")).thenReturn("s3");
-        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:CreateBucket");
+        when(actionRegistry.resolveRoute("s3", containerRequest)).thenReturn("s3:CreateBucket");
         when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
 
         IamEnforcementFilter filter = newFilter(resourceInfo(S3Controller.class));
         filter.filter(containerRequest);
 
-        verify(actionRegistry).resolve("s3", containerRequest);
-        verify(actionRegistry, never()).resolve("apigateway", containerRequest);
+        verify(actionRegistry).resolveRoute("s3", containerRequest);
+        verify(actionRegistry, never()).resolveRoute("apigateway", containerRequest);
     }
 
     @Test

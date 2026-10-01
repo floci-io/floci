@@ -334,7 +334,7 @@ public class SqsJsonHandler {
                 String id = entry.path("Id").asText();
                 String receiptHandle = entry.path("ReceiptHandle").asText(null);
                 try {
-                    sqsService.deleteMessage(queueUrl, receiptHandle, region);
+                    sqsService.deleteMessageInBatch(queueUrl, receiptHandle, region);
                     ObjectNode success = objectMapper.createObjectNode();
                     success.put("Id", id);
                     successful.add(success);

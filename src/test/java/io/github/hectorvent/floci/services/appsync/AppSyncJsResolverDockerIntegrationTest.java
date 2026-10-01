@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.appsync;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
@@ -31,7 +32,7 @@ import static org.hamcrest.Matchers.nullValue;
  * <p>Needs Docker for both sidecars, and skips without it.
  */
 @QuarkusTest
-@TestProfile(AppSyncResolverCallbackProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class AppSyncJsResolverDockerIntegrationTest {
 
     private static final String AUTH =
@@ -173,7 +174,7 @@ class AppSyncJsResolverDockerIntegrationTest {
 
     @BeforeAll
     static void configure() {
-        AppSyncGraphqlSidecarProfile.requireDockerAndTheSidecarImage();
+        SidecarContainersProfile.requireDockerAndImage("floci.services.appsync.graphql-image");
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 

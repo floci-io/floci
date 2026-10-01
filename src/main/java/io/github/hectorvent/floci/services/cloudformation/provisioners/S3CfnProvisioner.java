@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -86,7 +87,8 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         applyLifecycleConfiguration(bucketName, props, ctx);
         applyBucketTags(bucketName, props, ctx);
         r.setPhysicalId(bucketName);
-        r.getAttributes().put("Arn", AwsArnUtils.Arn.of("s3", "", "", bucketName).toString());
+        r.getAttributes().put("Arn",
+                AwsArnUtils.Arn.global(AwsRegions.partitionFor(ctx.region()), "s3", "", bucketName).toString());
         r.getAttributes().put("DomainName", AwsEndpoints.s3Host(bucketName, ctx.region()));
         r.getAttributes().put("RegionalDomainName", AwsEndpoints.s3RegionalHost(bucketName, ctx.region()));
         if (AwsPartitions.forRegionOrCommercial(ctx.region()).supportsS3DualStack(ctx.region())) {

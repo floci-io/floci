@@ -3,21 +3,29 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
-import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -195,5 +203,39 @@ class Ec2LaunchTemplateCfnProvisionerTest {
                 captor.getValue().getIamInstanceProfile().getArn());
         assertNull(captor.getValue().getIamInstanceProfile().getName());
         assertEquals(List.of("sg-1", "sg-2"), captor.getValue().getSecurityGroupIds());
+    }
+
+    @Test
+    void provisionedUserDataIsDecodedForInstanceLaunch() {
+        when(ec2.createLaunchTemplate(any(), any(), any(), any())).thenReturn(template("lt-userdata"));
+        String script = "#!/bin/bash\necho from-cfn\n";
+        String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+        ObjectNode data = mapper.createObjectNode().put("UserData", encoded);
+        ObjectNode props = mapper.createObjectNode();
+        props.set("LaunchTemplateData", data);
+
+        provisioner.provision(resource("Lt"), props, ctx());
+
+        ArgumentCaptor<LaunchTemplateData> captor = ArgumentCaptor.forClass(LaunchTemplateData.class);
+        verify(ec2).createLaunchTemplate(eq("us-east-1"), anyString(), captor.capture(), isNull());
+        assertEquals(encoded, captor.getValue().getEncodedUserData());
+        assertEquals(script, captor.getValue().getUserData());
+    }
+
+    @Test
+    void oversizedGzippedUserDataIsRejectedBeforeTemplateCreation() throws IOException {
+        ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(compressed)) {
+            gzip.write("A".repeat(UserDataPipeline.MAX_DECOMPRESSED_USER_DATA_BYTES + 1)
+                    .getBytes(StandardCharsets.UTF_8));
+        }
+        ObjectNode props = mapper.createObjectNode();
+        props.set("LaunchTemplateData", mapper.createObjectNode()
+                .put("UserData", Base64.getEncoder().encodeToString(compressed.toByteArray())));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("Lt"), props, ctx()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        verify(ec2, never()).createLaunchTemplate(any(), any(), any(), any());
     }
 }

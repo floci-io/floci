@@ -38,6 +38,7 @@ import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskNetworkInterface;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
 import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -249,6 +250,7 @@ public class EcsContainerManager {
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         // Resolved before any container is created, so a registry-startup failure can't leak one already started.
         Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
+        Map<String, String> imageDigestsByContainer = new LinkedHashMap<>();
         // The task metadata id has to exist before the container does: its own environment carries
         // the URI, so it cannot be derived from the Docker id the daemon hands back afterwards.
         Map<String, String> metadataIdsByContainer = new LinkedHashMap<>();
@@ -262,7 +264,20 @@ public class EcsContainerManager {
                 metadataIdsByContainer.put(def.getName(), metadataId);
                 envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region,
                         metadataId, taskRoleEndpoint.vending()));
-                imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
+                imagesByContainer.put(def,
+                        containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(def.getImage())));
+            }
+            // Pulled for every container before any is created, as the ECS agent does, so a tag
+            // moved in its registry since the last launch is what this task runs. Each container is
+            // created from the image id its pull resolved to, so a concurrent launch that moves the
+            // tag again cannot swap the image under this task's reported digest.
+            for (ContainerDefinition def : launchOrder) {
+                LaunchImage launchImage = lifecycleManager.resolveImageForLaunch(imagesByContainer.get(def),
+                        config.services().ecs().imagePullBehavior());
+                imagesByContainer.put(def, launchImage.imageId());
+                if (launchImage.manifestDigest() != null) {
+                    imageDigestsByContainer.put(def.getName(), launchImage.manifestDigest());
+                }
             }
 
             if (firelensRouter != null) {
@@ -489,6 +504,7 @@ public class EcsContainerManager {
                 // Build ECS container model
                 Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region,
                         metadataIdsByContainer.get(def.getName()));
+                container.setImageDigest(imageDigestsByContainer.get(def.getName()));
                 runtimeContainers.add(container);
                 containerIds.put(def.getName(), dockerId);
 

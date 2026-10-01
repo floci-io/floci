@@ -47,7 +47,7 @@ public class EksOidcService implements OidcIssuerKeyLookup {
 
     private static final Logger LOG = Logger.getLogger(EksOidcService.class);
 
-    public static final String STS_AUDIENCE = "sts.amazonaws.com";
+    public static final String STS_AUDIENCE = "sts.amazonaws.com"; // partition-literal: web-identity audience; no source outside the commercial partition (P9)
     private static final int DEFAULT_TOKEN_LIFETIME_SECONDS = 86400;
     private static final int MAX_TOKEN_LIFETIME_SECONDS = 604800;
 

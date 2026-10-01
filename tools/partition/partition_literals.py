@@ -58,6 +58,10 @@ class Category:
     regex: re.Pattern
     gated: bool
     description: str
+    # "literal" runs the regex over each string literal's content; "code" over the whole source
+    # with comments and text blocks blanked, for a partition bug that is a call shape rather than a
+    # literal, even one split across lines.
+    scope: str = "literal"
 
 
 # Regexes run against the content of one string literal (one line of a text block), never
@@ -94,6 +98,14 @@ CATEGORIES: tuple[Category, ...] = (
         ),
         True,
         "a region or availability-zone id; take it from the request or the resource, or the configured default",
+    ),
+    Category(
+        "blank-region-arn",
+        re.compile(r'Arn\.of\(\s*"[^"]*"\s*,\s*(?:""|null)\s*,'),
+        True,
+        "an ARN minted by Arn.of with a blank region, which silently means the commercial partition; "
+        "use Arn.global with the resource's or the request's partition",
+        "code",
     ),
 )
 
@@ -181,6 +193,44 @@ def scan_java(text: str) -> tuple[list[Literal], dict[int, str]]:
     return literals, escapes
 
 
+def code_text(text: str) -> str:
+    """The source with every comment and text block blanked, string literals kept as written.
+
+    Newlines survive, so an offset maps back to its line. Uses the same lexing rules as
+    scan_java: a `//` inside a string is not a comment, a call shape inside a comment, javadoc or
+    text block never counts, and a call split across lines is still one match.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            out.append(" " * (end - i))
+            i = end
+        elif text.startswith("/*", i) or text.startswith('"""', i):
+            closer = "*/" if text[i + 1] == "*" else '"""'
+            j = i + len(closer)
+            while j < n and not text.startswith(closer, j):
+                j += 2 if closer == '"""' and text[j] == "\\" else 1
+            end = min(j + len(closer), n)
+            out.append("".join(c if c == "\n" else " " for c in text[i:end]))
+            i = end
+        elif text[i] in "\"'":
+            quote = text[i]
+            j = i + 1
+            while j < n and text[j] not in quote + "\n":
+                j += 2 if text[j] == "\\" else 1
+            end = j + 1 if j < n and text[j] == quote else j
+            out.append(text[i:end])
+            i = end
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
 @dataclass(frozen=True)
 class AllowRule:
     kind: str
@@ -220,19 +270,22 @@ def collect_findings(source_root: Path, rules: list[AllowRule]) -> list[Finding]
         text = java.read_text(encoding="utf-8")
         lines = text.split("\n")
         literals, escapes = scan_java(text)
+        hits: list[tuple[str, int]] = []
         for literal in literals:
-            source_line = lines[literal.line - 1] if literal.line - 1 < len(lines) else ""
             for category in CATEGORIES:
-                hits = len(category.regex.findall(literal.text))
-                if hits == 0:
-                    continue
-                excuse = excuse_for(rel_path, source_line, rules)
-                if excuse is None and literal.line in escapes:
-                    excuse = f"escape: {escapes[literal.line]}"
-                findings.extend(
-                    Finding(category.name, rel_path, literal.line, source_line.strip(), excuse)
-                    for _ in range(hits)
-                )
+                if category.scope == "literal":
+                    hits += [(category.name, literal.line)] * len(category.regex.findall(literal.text))
+        code = code_text(text)
+        for category in CATEGORIES:
+            if category.scope == "code":
+                hits += [(category.name, code.count("\n", 0, match.start()) + 1)
+                         for match in category.regex.finditer(code)]
+        for name, line_number in hits:
+            source_line = lines[line_number - 1] if line_number - 1 < len(lines) else ""
+            excuse = excuse_for(rel_path, source_line, rules)
+            if excuse is None and line_number in escapes:
+                excuse = f"escape: {escapes[line_number]}"
+            findings.append(Finding(name, rel_path, line_number, source_line.strip(), excuse))
     return findings
 
 

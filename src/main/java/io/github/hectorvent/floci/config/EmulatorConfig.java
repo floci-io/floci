@@ -75,6 +75,15 @@ public interface EmulatorConfig {
         Optional<String> id();
 
         /**
+         * Refuse requests signed for a service AWS does not publish in the request's partition
+         * (CloudFront in GovCloud, IAM in {@code aws-eusc}). On AWS such a request never reaches
+         * an API because its endpoint does not resolve; Floci serves every enabled service in
+         * every partition unless this is set.
+         */
+        @WithDefault("false")
+        boolean strict();
+
+        /**
          * Accept a request whose SigV4 credential scope names a region that no partition
          * publishes or admits by its region pattern ({@code polygondwanaland-west-1}). Refused by
          * default, as moto ({@code MOTO_ALLOW_NONEXISTENT_REGION}) and LocalStack
@@ -209,6 +218,29 @@ public interface EmulatorConfig {
          */
         @WithDefault("8.8.8.8,8.8.4.4")
         List<String> containerFallbackServers();
+
+        /**
+         * When {@code true}, the embedded DNS server also answers A queries for every AWS
+         * partition's DNS and dual-stack suffix (amazonaws.com, api.aws, amazonaws.com.cn,
+         * api.amazonwebservices.com.cn, amazonaws.eu, api.amazonwebservices.eu, c2s.ic.gov,
+         * api.aws.ic.gov, sc2s.sgov.gov, api.aws.scloud, cloud.adc-e.uk,
+         * api.cloud-aws.adc-e.uk, csp.hci.ic.gov, api.aws.hci.ic.gov) and every subdomain
+         * (any depth: {@code sts.amazonaws.com},
+         * {@code organizations.us-east-1.amazonaws.com}, virtual-hosted S3 like
+         * {@code bucket.s3.us-east-1.amazonaws.com}) with Floci's container IP,
+         * LocalStack-style transparent endpoint injection. Tools that construct SDK
+         * clients with explicit real-AWS endpoints (overriding {@code AWS_ENDPOINT_URL})
+         * then land on Floci instead of escaping to real AWS.
+         *
+         * <p>Combine with {@code floci.tls.enabled=true} so hardcoded {@code https://}
+         * endpoints are served on port 443 with a certificate covering the AWS wildcards.
+         *
+         * <p>Off by default: it hijacks all real-AWS traffic from spawned containers, including
+         * live suffixes such as {@code api.aws} and {@code amazonaws.eu}.
+         * Env: {@code FLOCI_DNS_SPOOF_AWS_ENDPOINTS}
+         */
+        @WithDefault("false")
+        boolean spoofAwsEndpoints();
     }
 
     interface SecurityConfig {
@@ -1277,6 +1309,9 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean clearFifoDeduplicationCacheOnPurge();
+
+        @WithDefault("local-emulator-secret")
+        String receiptHandleSecret();
     }
 
     interface S3ServiceConfig {
@@ -2075,7 +2110,42 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean allowUnsafeHostVolumes();
 
+        /**
+         * When true, Floci removes on startup, in Docker mode, every ECS container a previous run
+         * of <em>this same</em> Floci left on the daemon (matched by the {@code floci_owner_port}
+         * label), task-role credentials proxies included, before the service scheduler starts
+         * replacement tasks. Turn it off when two Floci instances share a daemon with the same
+         * port and no resource namespace, so one does not remove the other's containers.
+         *
+         * Env var: FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
+
+        /**
+         * How a task's container images are pulled when the task starts, with the values and
+         * semantics of the ECS agent's {@code ECS_IMAGE_PULL_BEHAVIOR}. The default pulls on every
+         * launch, so a tag moved in its registry (a rebuilt {@code :latest}) is what the next task
+         * runs.
+         */
+        @WithDefault("default")
+        ImagePullBehavior imagePullBehavior();
+
         EcsTaskRoleCredentialsConfig taskRoleCredentials();
+
+        enum ImagePullBehavior {
+            /** Pull on every launch; when the pull fails, run the cached image if there is one. */
+            DEFAULT,
+            /** Pull on every launch; when the pull fails, the task fails. */
+            ALWAYS,
+            /**
+             * Pull when Floci has not pulled the image since it started or the cached image is
+             * gone; otherwise run the cached image.
+             */
+            ONCE,
+            /** Pull only when there is no cached image. */
+            PREFER_CACHED
+        }
     }
 
     interface EcsTaskRoleCredentialsConfig {

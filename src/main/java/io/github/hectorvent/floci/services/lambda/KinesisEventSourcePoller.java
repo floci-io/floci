@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
@@ -122,18 +123,22 @@ public class KinesisEventSourcePoller implements Resettable {
                 if (fn == null) return;
 
                 String streamName = streamNameFromArn(esm.getEventSourceArn());
-                KinesisStream stream = kinesisService.describeStream(streamName, esm.getRegion());
+                KinesisStream stream = kinesisService.describeStreamForAccount(
+                        esm.getAccountId(), streamName, esm.getRegion());
 
                 for (KinesisShard shard : stream.getShards()) {
                     String lastSeq = esm.getShardSequenceNumbers().get(shard.getShardId());
                     String iterator;
                     if (lastSeq == null) {
-                        iterator = kinesisService.getShardIterator(streamName, shard.getShardId(), "TRIM_HORIZON", null, esm.getRegion());
+                        iterator = kinesisService.getShardIteratorForAccount(esm.getAccountId(),
+                                streamName, shard.getShardId(), "TRIM_HORIZON", null, esm.getRegion());
                     } else {
-                        iterator = kinesisService.getShardIterator(streamName, shard.getShardId(), "AFTER_SEQUENCE_NUMBER", lastSeq, esm.getRegion());
+                        iterator = kinesisService.getShardIteratorForAccount(esm.getAccountId(),
+                                streamName, shard.getShardId(), "AFTER_SEQUENCE_NUMBER", lastSeq, esm.getRegion());
                     }
 
-                    Map<String, Object> result = kinesisService.getRecords(iterator, esm.getBatchSize(), esm.getRegion());
+                    Map<String, Object> result = kinesisService.getRecordsForAccount(
+                            esm.getAccountId(), iterator, esm.getBatchSize(), esm.getRegion());
                     List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
 
                     if (records.isEmpty()) {
@@ -210,7 +215,8 @@ public class KinesisEventSourcePoller implements Resettable {
                 record.put("eventVersion", "1.0");
                 record.put("eventID", shardId + ":" + rec.getSequenceNumber());
                 record.put("eventName", "aws:kinesis:record");
-                record.put("invokeIdentityArn", AwsArnUtils.Arn.of("iam", "", esm.getAccountId(), "role/lambda-role").toString());
+                record.put("invokeIdentityArn", AwsArnUtils.Arn.global(AwsRegions.partitionFor(esm.getRegion()), "iam",
+                        esm.getAccountId(), "role/lambda-role").toString());
                 record.put("awsRegion", esm.getRegion());
                 record.put("eventSourceARN", esm.getEventSourceArn());
                 recordsArray.add(record);

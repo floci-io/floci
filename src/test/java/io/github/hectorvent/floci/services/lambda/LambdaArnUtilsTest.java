@@ -12,24 +12,26 @@ class LambdaArnUtilsTest {
 
     @ParameterizedTest
     @CsvSource({
-            // input, expectedName, expectedQualifier, expectedRegion
-            "my-fn, my-fn, , ",
-            "my-fn:prod, my-fn, prod, ",
-            "my-fn:$LATEST, my-fn, $LATEST, ",
-            "my-fn:42, my-fn, 42, ",
-            "000000000000:function:my-fn, my-fn, , ",
-            "000000000000:function:my-fn:prod, my-fn, prod, ",
-            "arn:aws:lambda:us-east-1:000000000000:function:my-fn, my-fn, , us-east-1",
-            "arn:aws:lambda:eu-west-1:123456789012:function:my-fn, my-fn, , eu-west-1",
-            "arn:aws:lambda:us-east-1:000000000000:function:my-fn:prod, my-fn, prod, us-east-1",
-            "arn:aws:lambda:us-east-1:000000000000:function:my-fn:$LATEST, my-fn, $LATEST, us-east-1",
-            "arn:aws:lambda:us-east-1:000000000000:function:my_fn-1, my_fn-1, , us-east-1",
+            // input, expectedName, expectedQualifier, expectedRegion, expectedAccount
+            "my-fn, my-fn, , , ",
+            "my-fn:prod, my-fn, prod, , ",
+            "my-fn:$LATEST, my-fn, $LATEST, , ",
+            "my-fn:42, my-fn, 42, , ",
+            "000000000000:function:my-fn, my-fn, , , 000000000000",
+            "111122223333:function:my-fn:prod, my-fn, prod, , 111122223333",
+            "arn:aws:lambda:us-east-1:000000000000:function:my-fn, my-fn, , us-east-1, 000000000000",
+            "arn:aws:lambda:eu-west-1:123456789012:function:my-fn, my-fn, , eu-west-1, 123456789012",
+            "arn:aws:lambda:us-east-1:000000000000:function:my-fn:prod, my-fn, prod, us-east-1, 000000000000",
+            "arn:aws:lambda:us-east-1:000000000000:function:my-fn:$LATEST, my-fn, $LATEST, us-east-1, 000000000000",
+            "arn:aws:lambda:us-east-1:000000000000:function:my_fn-1, my_fn-1, , us-east-1, 000000000000",
     })
-    void resolveAcceptsValidForms(String input, String expectedName, String expectedQualifier, String expectedRegion) {
+    void resolveAcceptsValidForms(String input, String expectedName, String expectedQualifier, String expectedRegion,
+                                  String expectedAccount) {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(input);
         assertEquals(expectedName, ref.name());
         assertEquals(emptyToNull(expectedQualifier), ref.qualifier());
         assertEquals(emptyToNull(expectedRegion), ref.region());
+        assertEquals(emptyToNull(expectedAccount), ref.account());
     }
 
     @ParameterizedTest
@@ -235,5 +237,35 @@ class LambdaArnUtilsTest {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(extracted);
         assertEquals("myFn", ref.name());
         assertEquals("PROD", ref.qualifier());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            // reference, expected full ARN (partition aws, region us-east-1, default account 000000000000)
+            "rotator, arn:aws:lambda:us-east-1:000000000000:function:rotator",
+            "rotator:live, arn:aws:lambda:us-east-1:000000000000:function:rotator:live",
+            "111122223333:function:rotator, arn:aws:lambda:us-east-1:111122223333:function:rotator",
+            "111122223333:function:rotator:7, arn:aws:lambda:us-east-1:111122223333:function:rotator:7",
+            "arn:aws:lambda:eu-west-1:111122223333:function:rotator, arn:aws:lambda:eu-west-1:111122223333:function:rotator",
+    })
+    void functionArnCompletesAReferenceTheWayLambdaReadsIt(String reference, String expected) {
+        assertEquals(expected, LambdaArnUtils.functionArn(reference, "aws", "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void functionArnUsesThePartitionItIsGiven() {
+        assertEquals("arn:aws-cn:lambda:cn-north-1:000000000000:function:rotator",
+                LambdaArnUtils.functionArn("rotator", "aws-cn", "cn-north-1", "000000000000"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "us-east-1:111122223333:function:rotator",
+            "arn:aws:lambda:us-east-1:abc:function:rotator",
+    })
+    void functionArnRefusesAReferenceLambdaCannotRead(String reference) {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> LambdaArnUtils.functionArn(reference, "aws", "us-east-1", "000000000000"));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
     }
 }

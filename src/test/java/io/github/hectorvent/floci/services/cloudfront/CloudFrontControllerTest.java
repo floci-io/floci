@@ -15,6 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -61,7 +62,7 @@ class CloudFrontControllerTest {
         CloudFrontFunction second = function("beta");
         CloudFrontFunction third = function("gamma");
         CloudFrontFunction fourth = function("omega");
-        when(service.getAccountId()).thenReturn("000000000000");
+        when(service.arn(anyString())).thenAnswer(call -> "arn:aws:cloudfront::000000000000:" + call.getArgument(0));
         when(service.listFunctions(null, null, 3))
                 .thenReturn(List.of(first, second, third));
         when(service.listFunctions(null, "beta", 3))

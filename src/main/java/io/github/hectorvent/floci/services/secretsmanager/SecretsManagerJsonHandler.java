@@ -1,14 +1,15 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
-import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
-import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -33,14 +34,31 @@ public class SecretsManagerJsonHandler {
 
     private final SecretsManagerService service;
     private final ObjectMapper objectMapper;
+    private final IamEnforcementFilter iamEnforcementFilter;
 
     @Inject
-    public SecretsManagerJsonHandler(SecretsManagerService service, ObjectMapper objectMapper) {
+    public SecretsManagerJsonHandler(SecretsManagerService service, ObjectMapper objectMapper,
+                                     IamEnforcementFilter iamEnforcementFilter) {
         this.service = service;
         this.objectMapper = objectMapper;
+        this.iamEnforcementFilter = iamEnforcementFilter;
     }
 
+    /**
+     * Handles a request that carries no caller credential of its own, such as an API Gateway
+     * service integration. Checks that authorize the caller for a second resource have no caller to
+     * authorize here, so they are skipped, as {@link IamEnforcementFilter} skips unsigned requests.
+     */
     public Response handle(String action, JsonNode request, String region) {
+        return handle(action, request, region, null);
+    }
+
+    /**
+     * @param authorization the caller's credential as {@link IamEnforcementFilter#requestAuthorization}
+     *                      reads it, used where an operation authorizes the caller for a second
+     *                      resource
+     */
+    public Response handle(String action, JsonNode request, String region, String authorization) {
         return switch (action) {
             case "CreateSecret" -> handleCreateSecret(request, region);
             case "GetSecretValue" -> handleGetSecretValue(request, region);
@@ -50,7 +68,7 @@ public class SecretsManagerJsonHandler {
             case "ListSecrets" -> handleListSecrets(request, region);
             case "DeleteSecret" -> handleDeleteSecret(request, region);
             case "RestoreSecret" -> handleRestoreSecret(request, region);
-            case "RotateSecret" -> handleRotateSecret(request, region);
+            case "RotateSecret" -> handleRotateSecret(request, region, authorization);
             case "CancelRotateSecret" -> handleCancelRotateSecret(request, region);
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
@@ -613,7 +631,7 @@ public class SecretsManagerJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleRotateSecret(JsonNode request, String region) {
+    private Response handleRotateSecret(JsonNode request, String region, String authorization) {
         String secretId = request.path("SecretId").asText();
         String clientRequestToken = request.has("ClientRequestToken") ? request.path("ClientRequestToken").asText() : UUID.randomUUID().toString();
         
@@ -638,7 +656,8 @@ public class SecretsManagerJsonHandler {
             rotationRules = new Secret.RotationRules(automaticallyAfterDays, duration, scheduleExpression);
         }
 
-        Secret secret = service.rotateSecret(secretId, clientRequestToken, lambdaArn, rotationRules, rotateImmediately, region);
+        Secret secret = service.rotateSecret(secretId, clientRequestToken, lambdaArn, rotationRules, rotateImmediately,
+                region, functionArn -> authorizeRotationInvoke(authorization, functionArn));
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ARN", secret.getArn());
@@ -649,6 +668,24 @@ public class SecretsManagerJsonHandler {
         boolean serviceManaged = secret.getOwningService() != null && secret.getCurrentVersionId() != null;
         response.put("VersionId", serviceManaged ? secret.getCurrentVersionId() : clientRequestToken);
         return Response.ok(response).build();
+    }
+
+    /**
+     * RotateSecret also needs {@code lambda:InvokeFunction} on the rotation function (Secrets Manager
+     * API Reference, RotateSecret, "Required permissions"). The filter has already authorized
+     * {@code secretsmanager:RotateSecret}; this authorizes the invoke for the same caller. The filter
+     * reports a denial as S3's {@code AccessDenied}, so it is raised here the way Secrets Manager
+     * reports one: {@code AccessDeniedException} with HTTP 400 (API Reference, "Common Errors").
+     */
+    private void authorizeRotationInvoke(String authorization, String functionArn) {
+        try {
+            iamEnforcementFilter.authorizeAdditionalResource(authorization, "lambda:InvokeFunction", functionArn);
+        } catch (AwsException e) {
+            if (!"AccessDenied".equals(e.getErrorCode())) {
+                throw e;
+            }
+            throw new AwsException("AccessDeniedException", e.getMessage(), 400);
+        }
     }
 
     private Response handleCancelRotateSecret(JsonNode request, String region) {

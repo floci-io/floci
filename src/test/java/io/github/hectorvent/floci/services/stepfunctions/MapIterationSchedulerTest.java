@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -225,5 +226,63 @@ class MapIterationSchedulerTest {
             assertTrue(blockedInterrupted.await(2, TimeUnit.SECONDS),
                     "the iterations still running should be interrupted once the deadline passes");
         }
+    }
+    @Test
+    void namesEachInFlightIterationBeforeCancellingItOnFailure() throws Exception {
+        CountDownLatch othersStarted = new CountDownLatch(2);
+        CountDownLatch neverRelease = new CountDownLatch(1);
+        CountDownLatch othersInterrupted = new CountDownLatch(2);
+        List<Integer> cut = new CopyOnWriteArrayList<>();
+        List<Integer> namedWhenInterrupted = new CopyOnWriteArrayList<>();
+
+        try (ExecutorService driver = Executors.newSingleThreadExecutor()) {
+            Future<List<Integer>> execution = driver.submit(() -> MapIterationScheduler.execute(
+                    3, 3, index -> () -> {
+                        if (index == 1) {
+                            if (!othersStarted.await(2, TimeUnit.SECONDS)) {
+                                fail("the other iterations did not start");
+                            }
+                            throw new IllegalStateException("middle iteration failed");
+                        }
+                        othersStarted.countDown();
+                        try {
+                            neverRelease.await();
+                            return index;
+                        } catch (InterruptedException e) {
+                            if (cut.contains(index)) {
+                                namedWhenInterrupted.add(index);
+                            }
+                            othersInterrupted.countDown();
+                            throw e;
+                        }
+                    }, Long.MAX_VALUE, cut::add));
+
+            assertThrows(ExecutionException.class, () -> execution.get(2, TimeUnit.SECONDS));
+        }
+
+        assertEquals(List.of(0, 2), cut, "every in-flight iteration, in start order, never the failed one");
+        assertTrue(othersInterrupted.await(2, TimeUnit.SECONDS));
+        assertEquals(List.of(0, 2), namedWhenInterrupted.stream().sorted().toList(),
+                "each was named before it was cancelled");
+    }
+
+    @Test
+    void namesNoIterationWhenTheDeadlineEndsTheRun() throws Exception {
+        CountDownLatch neverRelease = new CountDownLatch(1);
+        List<Integer> cut = new CopyOnWriteArrayList<>();
+
+        try (ExecutorService driver = Executors.newSingleThreadExecutor()) {
+            Future<List<Integer>> execution = driver.submit(() -> MapIterationScheduler.execute(
+                    2, 2, index -> () -> {
+                        neverRelease.await();
+                        return index;
+                    }, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100), cut::add));
+
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> execution.get(2, TimeUnit.SECONDS));
+            assertEquals(TimeoutException.class, failure.getCause().getClass());
+        }
+
+        assertEquals(List.of(), cut);
     }
 }

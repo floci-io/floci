@@ -222,8 +222,9 @@ class SesIdentityAttributesTest {
         sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder().emailIdentity(email).build());
         sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder().emailIdentity(domain).build());
         try {
+            // Other classes share this Floci, so ask for a page large enough to hold every identity.
             List<IdentityInfo> identities = sesV2.listEmailIdentities(
-                    ListEmailIdentitiesRequest.builder().build()).emailIdentities();
+                    ListEmailIdentitiesRequest.builder().pageSize(1000).build()).emailIdentities();
             IdentityInfo emailIdentity = identities.stream()
                     .filter(i -> email.equals(i.identityName())).findFirst().orElseThrow();
             IdentityInfo domainIdentity = identities.stream()

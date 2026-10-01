@@ -92,7 +92,9 @@ did before.
   are `com.amazonaws.<region>.<service>` everywhere, except the (region, service) pairs the CDK
   lists for China, ISO and EUSC, which reverse the DNS suffix (`cn.com.amazonaws.cn-north-1.lambda`).
   GovCloud keeps `com.amazonaws`. Gateway endpoints and their AWS-managed prefix lists (S3,
-  DynamoDB) are `com.amazonaws.<region>.<service>` in every partition.
+  DynamoDB) are `com.amazonaws.<region>.<service>` in every partition. S3 offers both kinds: where
+  the two names agree it is one service carrying both types, and in China it is listed twice, the
+  gateway `com.amazonaws.cn-north-1.s3` and the interface `cn.com.amazonaws.cn-north-1.s3`.
 - **Lambda runtime images** pull from ECR Public (`public.ecr.aws`), which exists only in the
   commercial partition; point `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI` at a mirror elsewhere.
 - **WAF `CLOUDFRONT` scope**: available only where CloudFront exists (`aws`, `aws-cn`), and its
@@ -101,17 +103,62 @@ did before.
 ## What does not change
 
 - **Service principals** are `<service>.amazonaws.com` in every partition; that is the rule
-  the AWS CDK applies today, and the older per-partition forms (`.amazonaws.com.cn`) are legacy.
+  the AWS CDK applies today, and everything Floci emits (generated trust policies, CloudTrail's
+  `eventSource`, service-linked role paths) uses it. The older per-partition forms the CDK
+  retired (`elasticmapreduce.amazonaws.com.cn`, `logs.<region>.amazonaws.com.cn`,
+  `config.c2s.ic.gov`) are still accepted wherever Floci matches a principal against a policy,
+  such as a role's trust policy, so a policy written in either form works; matching stays exact
+  and case-sensitive. `CreateServiceLinkedRole` given a legacy form creates the same role as the
+  universal one: its name, path and trust policy all use `<service>.amazonaws.com`.
 - **XML namespaces** and the S3 canned-ACL group URIs (`http://acs.amazonaws.com/groups/...`)
   are identifiers, not hosts.
 - **AWS managed policy ARNs** keep the literal `aws` account slot: `arn:aws-cn:iam::aws:policy/AdministratorAccess`.
+  The catalog Floci bundles is the commercial one; every other partition's is derived from it on
+  first use, with the partition in every ARN (what AWS's own SAM translator does) and the
+  partition's DNS suffix in the region-bearing `kms:ViaService` hosts (`s3.*.amazonaws.com.cn`).
+  Service principals and service-linked role paths are the same in every partition and are left
+  alone. Whether AWS's China or GovCloud documents differ in content beyond that is an open
+  question below.
 
 ## Partition-absent services
 
 AWS publishes which services exist in each partition (CloudFront is not in GovCloud, IAM is
 not in `aws-eusc`). On AWS a request for an absent service never reaches an API: the SDK
-fails to resolve the host. Floci serves every enabled service in every partition; a strict
-mode that mirrors the SDK failure is planned as an opt-in flag.
+fails to resolve the host and reports an `UnknownHostException`. Floci serves every enabled
+service in every partition by default.
+
+Set `FLOCI_PARTITIONS_STRICT=true` (`floci.partitions.strict`) to mirror AWS instead. A request
+whose SigV4 signing name the request's partition does not publish is refused with a 404
+`UnknownOperationException` whose message names the service and the partition; Floci cannot
+fail DNS, so this is the same shape the unknown-service guard uses. The check reads the vendored
+service list, matching the signing name directly or through the endpoint prefixes it covers
+(`ecr` signs for `api.ecr`, `bedrock` for `bedrock-runtime`), so a China ECR client is served
+while a GovCloud CloudFront client is refused. Only a service the data lists in some other
+partition is refused: `endpoints.json` omits the newer services that ship an endpoint ruleset
+alone (FIS, MWAA, S3 Tables), and those are served everywhere.
+
+STS is regionalized everywhere and its global host `sts.amazonaws.com` exists only in `aws`, so
+IAM's `GetAccountSummary` reports `GlobalEndpointTokenVersion` only there.
+
+An IAM resource (user, group, role, policy, instance profile, OIDC provider) is created in the
+request's partition and keeps it: a rename signed for another partition does not move it. On AWS
+an account belongs to one partition, but one Floci process serves them all, so anything derived
+from a stored resource follows that resource. A role's sessions (`assumed-role`) and the OIDC
+provider its web-identity trust policy names take the stored role's partition, whichever partition
+the request's `RoleArn` names, so `AssumeRole` and a later `GetCallerIdentity` agree whatever region
+each call is signed for. The credential report is kept per partition, so its root row always
+names the caller's. ARNs with nothing stored
+behind them, the `root` fallback of `GetCallerIdentity` and `federated-user`, take the request's
+partition.
+
+## How it is tested
+
+Every partition-dependent rule has unit and integration tests over all eight partitions. On top
+of that, the nightly Partition Compatibility workflow runs the Java SDK compatibility suite
+against a Floci deployed with `FLOCI_DEFAULT_REGION=cn-north-1`, with the SDK clients signing for
+`cn-north-1`, so the SDK's own China partition handling has to round-trip end to end. Its known
+failures are listed in `.github/ci/compat-partition-allowlist-cn-north-1.txt`; the list only
+shrinks.
 
 ## Open questions
 
@@ -131,5 +178,5 @@ the commercial value or Floci's own base host until sourced:
 
 ## Related
 
-- [Environment Variables](environment-variables.md): `FLOCI_DEFAULT_REGION`, `FLOCI_PARTITIONS_ID`
+- [Environment Variables](environment-variables.md): `FLOCI_DEFAULT_REGION`, `FLOCI_PARTITIONS_ID`, `FLOCI_PARTITIONS_STRICT`
 - [Multi-Account Isolation](multi-account.md): the account half of the credential scope

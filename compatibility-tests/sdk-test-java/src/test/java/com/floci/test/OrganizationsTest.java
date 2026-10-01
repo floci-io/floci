@@ -71,11 +71,15 @@ public class OrganizationsTest {
         try {
             assertThat(client.describeOrganization().organization().id()).isEqualTo(organization.id());
 
-            // 2. The root exists and carries the AWS-managed FullAWSAccess SCP.
+            // 2. The root exists with no policy types enabled, and carries the AWS-managed
+            //    FullAWSAccess SCP. SCPs have to be enabled on it before one can be created.
             Root root = client.listRoots().roots().get(0);
             assertThat(root.id()).matches("r-[a-z0-9]{4}");
             assertThat(root.name()).isEqualTo("Root");
-            assertThat(root.policyTypes()).anyMatch(p -> p.type() == PolicyType.SERVICE_CONTROL_POLICY);
+            assertThat(root.policyTypes()).isEmpty();
+            client.enablePolicyType(r -> r.rootId(root.id()).policyType(PolicyType.SERVICE_CONTROL_POLICY));
+            assertThat(client.listRoots().roots().get(0).policyTypes())
+                    .anyMatch(p -> p.type() == PolicyType.SERVICE_CONTROL_POLICY);
 
             assertThat(client.listPoliciesForTarget(r -> r.targetId(root.id())
                             .filter(PolicyType.SERVICE_CONTROL_POLICY)).policies())

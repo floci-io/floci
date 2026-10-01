@@ -290,16 +290,17 @@ class SesServiceSmtpTest {
         verify(smtpRelay).relayRaw(any(SmtpRelay.RawRelayMessage.class));
     }
 
-    // Template errors (a missing stored template, empty inline content) are reported before the
-    // envelope checks, so envelope validation must not move ahead of the content switch.
+    // AWS reports a missing sender before a missing stored template, but empty inline content
+    // before either (probe-confirmed).
     @Test
-    void sendEmail_unknownTemplate_reportedBeforeMissingSource() {
+    void sendEmail_missingSource_reportedBeforeUnknownTemplate() {
         AwsException e = assertThrows(AwsException.class, () -> service.sendEmail(SendEmailRequest.builder()
                 .region("us-east-1")
                 .content(new EmailContent.Template("ghost", null, List.of()))
                 .build()));
 
-        assertEquals("TemplateDoesNotExist", e.getErrorCode());
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertEquals("Source email is required.", e.getMessage());
     }
 
     @Test

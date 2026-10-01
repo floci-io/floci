@@ -215,32 +215,48 @@ public class SesService {
     }
 
     public String sendEmail(SendEmailRequest request) {
-        return switch (request.content()) {
-            case EmailContent.Simple simple -> sendSimpleEmail(request, simple);
+        if (request.content() instanceof EmailContent.Raw raw) {
+            return sendRawEmail(request, raw);
+        }
+        if (request.content() instanceof EmailContent.InlineTemplate inline) {
+            requireInlineTemplateContent(inline.subject(), inline.textPart(), inline.htmlPart());
+        }
+        // AWS reports an unknown configuration set, then an over-long address, and only then a
+        // missing stored template (probe-confirmed), so the content is resolved after these checks.
+        String effectiveConfigSet = validateEnvelope(request);
+        SesAddressLength.requireEnvelope(request);
+        EmailContent.Simple content = switch (request.content()) {
+            case EmailContent.Simple simple -> simple;
             case EmailContent.Template template ->
-                    sendInlineTemplatedEmail(request, templateService.inline(template, request.region()));
-            case EmailContent.InlineTemplate inline -> sendInlineTemplatedEmail(request, inline);
-            case EmailContent.Raw raw -> sendRawEmail(request, raw);
+                    renderInlineTemplate(templateService.inline(template, request.region()));
+            case EmailContent.InlineTemplate inline -> SesTemplateService.render(inline);
+            case EmailContent.Raw raw -> throw new IllegalStateException("Raw content is sent above");
         };
+        return sendSimpleEmail(request.toBuilder().content(content).build(), content, effectiveConfigSet);
     }
 
-    private String sendInlineTemplatedEmail(SendEmailRequest request, EmailContent.InlineTemplate template) {
+    private static EmailContent.Simple renderInlineTemplate(EmailContent.InlineTemplate template) {
         requireInlineTemplateContent(template.subject(), template.textPart(), template.htmlPart());
-        EmailContent.Simple rendered = SesTemplateService.render(template);
-        return sendSimpleEmail(request.toBuilder().content(rendered).build(), rendered);
+        return SesTemplateService.render(template);
     }
 
-    private String sendSimpleEmail(SendEmailRequest request, EmailContent.Simple content) {
+    private String validateEnvelope(SendEmailRequest request) {
         String source = request.source();
-        String region = request.region();
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
         if (!request.hasRecipients()) {
             throw new AwsException("InvalidParameterValue", "At least one destination address is required.", 400);
         }
-        String effectiveConfigSet = resolveDefaultConfigurationSet(request.configurationSetName(), source, region);
-        configSetService.validateForSending(effectiveConfigSet, region);
+        String effectiveConfigSet = resolveDefaultConfigurationSet(request.configurationSetName(), source,
+                request.region());
+        configSetService.validateForSending(effectiveConfigSet, request.region());
+        return effectiveConfigSet;
+    }
+
+    private String sendSimpleEmail(SendEmailRequest request, EmailContent.Simple content, String effectiveConfigSet) {
+        String source = request.source();
+        String region = request.region();
 
         // Resolve suppression before recording the message so a bad ListManagementOptions (e.g. an
         // unknown contact list) fails the whole send without leaving an orphaned SentEmail record.
@@ -363,6 +379,7 @@ public class SesService {
             // both with this message.
             throw new AwsException("InvalidParameterValue", "Missing required header 'From'.", 400);
         }
+        SesAddressLength.requireRaw(request, parsed.message());
         // FromEmailAddress was omitted, so the configuration set couldn't be resolved from the
         // sender until the MIME "From" was parsed. Re-resolve from the effective sender now so an
         // email identity's default configuration set still applies to a Raw send without an
@@ -1499,7 +1516,10 @@ public class SesService {
                         .region(request.region())
                         .content(rendered)
                         .build();
-                String messageId = sendSimpleEmail(entryRequest, rendered);
+                // SesAddressLength is not applied: AWS rejects an over-long bulk sender as "Invalid
+                // email address", and an over-long destination did not fail the length check ahead
+                // of sender verification (probe-confirmed; the verified-sender case is unprobed).
+                String messageId = sendSimpleEmail(entryRequest, rendered, validateEnvelope(entryRequest));
                 results.add(BulkEmailEntryResult.success(messageId));
             } catch (AwsException e) {
                 results.add(BulkEmailEntryResult.failure(

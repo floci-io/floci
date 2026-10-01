@@ -395,4 +395,82 @@ class S3VersioningIntegrationTest {
         assertEquals(1, versions.size(),
                 "only the newly uploaded version should exist — deleted versions must not resurrect");
     }
+
+    @Test
+    @Order(20)
+    void deleteSpecificVersionSendsObjectRemovedDeleteToQueue() {
+        String notifBucket = "version-delete-notif-test";
+        given().when().put("/" + notifBucket).then().statusCode(200);
+        given()
+            .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+            .put("/" + notifBucket + "?versioning")
+        .then()
+            .statusCode(200);
+
+        String queueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "version-delete-notif-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .contentType("application/xml")
+                .queryParam("notification", "")
+                .body("""
+                    <NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <QueueConfiguration>
+                            <Id>removed</Id>
+                            <Queue>arn:aws:sqs:us-east-1:000000000000:version-delete-notif-queue</Queue>
+                            <Event>s3:ObjectRemoved:*</Event>
+                        </QueueConfiguration>
+                    </NotificationConfiguration>
+                """)
+            .when()
+                .put("/" + notifBucket)
+            .then()
+                .statusCode(200);
+
+            String olderVersionId = given()
+                .body("v1")
+                .contentType("text/plain")
+            .when()
+                .put("/" + notifBucket + "/k.txt")
+            .then()
+                .statusCode(200)
+                .extract().header("x-amz-version-id");
+            given().body("v2").contentType("text/plain").when().put("/" + notifBucket + "/k.txt")
+                .then().statusCode(200);
+
+            given()
+            .when()
+                .delete("/" + notifBucket + "/k.txt?versionId=" + olderVersionId)
+            .then()
+                .statusCode(204);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", allOf(
+                    containsString("\"eventName\":\"ObjectRemoved:Delete\""),
+                    containsString("\"versionId\":\"" + olderVersionId + "\"")));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", queueUrl)
+                .post("/");
+        }
+    }
 }

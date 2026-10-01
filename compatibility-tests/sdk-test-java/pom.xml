@@ -346,6 +346,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>emr</artifactId>
         </dependency>
+        <!-- EMR Serverless client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>emrserverless</artifactId>
+        </dependency>
         <!-- WAF v2 client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

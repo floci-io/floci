@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.secretsmanager;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -157,7 +158,8 @@ class SecretsManagerRotationLockTest {
         // A rotation adds its AWSPENDING version from the rotation executor while a request thread
         // is building DescribeSecret's VersionIdsToStages from the same map. Park the reader one
         // entry into that iteration, add the version, and let the reader continue.
-        SecretsManagerJsonHandler handler = new SecretsManagerJsonHandler(service, new ObjectMapper());
+        SecretsManagerJsonHandler handler = new SecretsManagerJsonHandler(service, new ObjectMapper(),
+                mock(IamEnforcementFilter.class));
         ParkingIterationVersions versions = new ParkingIterationVersions(secret.getVersions());
         secret.setVersions(versions);
         assertTrue(secret.getVersions() instanceof ConcurrentMap,

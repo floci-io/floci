@@ -15,6 +15,10 @@ from two sources and a rule:
 - `s3DualStackRegions` per partition: the regions whose S3 endpoint publishes a `dualstack`
   variant in `endpoints.json` (the service defaults cover every region in the commercial, China
   and GovCloud partitions; the ISO partitions list them per region and the EUSC one has none).
+- botocore's per-service `service-2.json` metadata, for the services whose SigV4 signing name
+  differs from their `endpoints.json` key (`ecr` signs what `api.ecr` publishes, `bedrock`
+  covers `bedrock-runtime`). `signingNames` maps each such signing name to its endpoint
+  prefixes so a request's credential scope can be checked against a partition's service list.
 - The AWS CDK's `region-info/lib/aws-entities.ts` (Apache-2.0), whose ordered region list
   carries two rule markers: regions before `RULE_S3_WEBSITE_REGIONAL_SUBDOMAIN` use the
   legacy `s3-website-<region>` endpoint form, and commercial regions after
@@ -30,6 +34,7 @@ Run from anywhere in the repo:
 from __future__ import annotations
 
 import argparse
+import gzip
 import importlib
 import json
 import re
@@ -84,6 +89,22 @@ def load_json(path: Path) -> dict:
         return json.load(handle)
 
 
+def service_model(version_dir: Path) -> Path | None:
+    """A version directory's `service-2.json`, plain as the botocore checkout has it or gzipped
+    as the botocore wheel ships it, or None when the directory holds neither."""
+    for name in ("service-2.json", "service-2.json.gz"):
+        if (version_dir / name).is_file():
+            return version_dir / name
+    return None
+
+
+def load_model(path: Path) -> dict:
+    if path.suffix == ".gz":
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            return json.load(handle)
+    return load_json(path)
+
+
 def parse_cdk_entities(text: str) -> list[str]:
     """The ordered `AWS_REGIONS_AND_RULES` entries: region ids and RULE_ markers, in file order."""
     entries: list[str] = []
@@ -129,8 +150,24 @@ def cdk_flags(entries: list[str], region: str, partition: str) -> tuple[bool, bo
 # --------------------------------------------------------------------------- #
 # Generation
 # --------------------------------------------------------------------------- #
+def collect_signing_names(botocore_data: Path) -> dict[str, list[str]]:
+    """Signing name -> endpoint prefixes, for the services where the two differ."""
+    by_signing_name: dict[str, set[str]] = {}
+    for service_dir in sorted(p for p in botocore_data.iterdir() if p.is_dir()):
+        versions = sorted(v for v in service_dir.iterdir() if service_model(v) is not None)
+        if not versions:
+            continue
+        metadata = load_model(service_model(versions[-1])).get("metadata", {})
+        endpoint_prefix = metadata.get("endpointPrefix")
+        signing_name = metadata.get("signingName") or endpoint_prefix
+        if endpoint_prefix and signing_name != endpoint_prefix:
+            by_signing_name.setdefault(signing_name, set()).add(endpoint_prefix)
+    return {name: sorted(prefixes) for name, prefixes in sorted(by_signing_name.items())}
+
+
 def build(partitions_doc: dict, endpoints_doc: dict, entities: list[str] | None,
-          carried: dict | None, provenance: str) -> dict:
+          carried: dict | None, provenance: str,
+          signing_names: dict[str, list[str]] | None = None) -> dict:
     endpoint_partitions = {p["partition"]: p for p in endpoints_doc["partitions"]}
     carried_flags = {}
     for partition in (carried or {}).get("partitions", []):
@@ -216,6 +253,7 @@ def build(partitions_doc: dict, endpoints_doc: dict, entities: list[str] | None,
             "regionFlags": "aws-cdk region-info/lib/aws-entities.ts rules" if entities is not None
                            else "carried over from the previous file (no aws-cdk checkout)",
         },
+        "signingNames": signing_names if signing_names is not None else (carried or {}).get("signingNames", {}),
         "partitions": result_partitions,
     }
 
@@ -231,7 +269,7 @@ def generate(botocore_data: Path, provenance: str, cdk_root: Path | None, existi
     if cdk_root is not None and (cdk_root / CDK_ENTITIES).exists():
         entities = parse_cdk_entities((cdk_root / CDK_ENTITIES).read_text(encoding="utf-8"))
     carried = load_json(existing) if existing.exists() else None
-    return build(partitions_doc, endpoints_doc, entities, carried, provenance)
+    return build(partitions_doc, endpoints_doc, entities, carried, provenance, collect_signing_names(botocore_data))
 
 
 def main(argv: list[str] | None = None) -> int:

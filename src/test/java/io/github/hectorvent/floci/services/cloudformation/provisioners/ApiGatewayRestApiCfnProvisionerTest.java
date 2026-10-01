@@ -7,15 +7,19 @@ import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
 import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
 import io.github.hectorvent.floci.services.apigateway.model.Deployment;
+import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
+import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
 import io.github.hectorvent.floci.services.apigateway.model.RestApi;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -51,9 +55,7 @@ class ApiGatewayRestApiCfnProvisionerTest {
         RestApi created = new RestApi();
         created.setId("api-1");
         when(api.createRestApi(eq("us-east-1"), anyMap())).thenReturn(created);
-        ApiGatewayResource root = new ApiGatewayResource();
-        root.setId("root-1");
-        when(api.getResources("us-east-1", "api-1")).thenReturn(List.of(root));
+        when(api.findRootResourceId("us-east-1", "api-1")).thenReturn(Optional.of("root-1"));
 
         StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
         provisioner.provision(r, props("{\"Name\": \"shop\"}"), ctx());
@@ -63,6 +65,105 @@ class ApiGatewayRestApiCfnProvisionerTest {
         assertEquals("api-1", r.getAttributes().get("RestApiId"));
         assertEquals("root-1", r.getAttributes().get("RootResourceId"));
         verify(api, never()).putRestApi(anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void restApiUpdateKeepsTheApiAndPatchesItInPlace() throws Exception {
+        existingApi(restApi("api-1", "shop", "v1", "REGIONAL"));
+
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+        provisioner.provision(r, props("{\"Description\": \"v2\"}"), ctx("api-1"));
+
+        assertEquals("api-1", r.getPhysicalId());
+        assertEquals("root-1", r.getAttributes().get("RootResourceId"));
+        verify(api, never()).createRestApi(anyString(), anyMap());
+        // An undeclared Name keeps the API's own rather than a newly generated one, and an
+        // undeclared EndpointConfiguration is left alone.
+        verify(api).updateRestApi("us-east-1", "api-1", List.of(
+                op("replace", "/name", "shop"), op("replace", "/description", "v2")));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void restApiUpdateAppliesAChangedEndpointConfiguration() throws Exception {
+        existingApi(restApi("api-1", "shop", null, "REGIONAL"));
+
+        provisioner.provision(resource("AWS::ApiGateway::RestApi", "Api"), props("""
+                {"Name": "shop", "EndpointConfiguration": {"Types": ["PRIVATE"], "VpcEndpointIds": ["vpce-1"]}}
+                """), ctx("api-1"));
+
+        // The type's path names the type the API has now.
+        verify(api).updateRestApi("us-east-1", "api-1", List.of(
+                op("replace", "/name", "shop"), op("replace", "/description", null),
+                op("replace", "/endpointConfiguration/types/REGIONAL", "PRIVATE"),
+                op("add", "/endpointConfiguration/vpcEndpointIds", "vpce-1")));
+    }
+
+    @Test
+    void restApiRollbackPutsBackWhatTheUpdatePatched() throws Exception {
+        existingApi(restApi("api-1", "shop", "v1", "REGIONAL"));
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+        provisioner.provision(r, props("""
+                {"Name": "shop", "Description": "v2",
+                 "EndpointConfiguration": {"Types": ["PRIVATE"], "VpcEndpointIds": ["vpce-1"]}}
+                """), ctx("api-1"));
+        when(api.getRestApi("us-east-1", "api-1")).thenReturn(restApi("api-1", "shop", "v2", "PRIVATE", "vpce-1"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(api).updateRestApi("us-east-1", "api-1", List.of(
+                op("replace", "/name", "shop"), op("replace", "/description", "v1"),
+                op("replace", "/endpointConfiguration/types/PRIVATE", "REGIONAL"),
+                op("remove", "/endpointConfiguration/vpcEndpointIds", "vpce-1")));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void restApiRollbackOfAnUpdateThatAppliedABodyIsNotImplemented() throws Exception {
+        existingApi(restApi("api-1", "shop", "v1", "REGIONAL"));
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+        provisioner.provision(r, props("""
+                {"Name": "shop", "Body": {"openapi": "3.0.1", "info": {"title": "shop"}, "paths": {}}}
+                """), ctx("api-1"));
+        verify(api).putRestApi(eq("us-east-1"), eq("api-1"), eq("overwrite"), anyString());
+
+        // PutRestApi replaced the API's resources, methods and models, which the snapshot does not hold.
+        assertFalse(provisioner.rollbackUpdate(r));
+    }
+
+    @Test
+    void restApiUpdateWhoseBodyIsRejectedPutsThePatchBack() throws Exception {
+        existingApi(restApi("api-1", "shop", "v1", "REGIONAL"));
+        when(api.putRestApi(eq("us-east-1"), eq("api-1"), eq("overwrite"), anyString()))
+                .thenThrow(new AwsException("BadRequestException", "Invalid OpenAPI input", 400));
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"Name": "shop", "Description": "v2", "Body": {"openapi": "3.0.1", "paths": {}}}
+                """), ctx("api-1")));
+
+        verify(api).updateRestApi("us-east-1", "api-1", List.of(
+                op("replace", "/name", "shop"), op("replace", "/description", "v2")));
+        verify(api).updateRestApi("us-east-1", "api-1", List.of(
+                op("replace", "/name", "shop"), op("replace", "/description", "v1")));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void restApiUpdateRecreatesAnApiRemovedOutOfBandAndItsRollbackDeletesIt() throws Exception {
+        when(api.getRestApi("us-east-1", "api-1"))
+                .thenThrow(new AwsException("NotFoundException", "Invalid API id specified", 404));
+        when(api.createRestApi(eq("us-east-1"), anyMap())).thenReturn(restApi("api-2", "shop", null, "REGIONAL"));
+        when(api.findRootResourceId("us-east-1", "api-2")).thenReturn(Optional.of("root-2"));
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+
+        provisioner.provision(r, props("{\"Name\": \"shop\"}"), ctx("api-1"));
+        assertEquals("api-2", r.getPhysicalId());
+        assertEquals("root-2", r.getAttributes().get("RootResourceId"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        assertEquals("api-1", r.getPhysicalId());
+        verify(api).deleteRestApi("us-east-1", "api-2");
     }
 
     @Test
@@ -344,7 +445,41 @@ class ApiGatewayRestApiCfnProvisionerTest {
             return node == null ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolveStringList(any())).thenAnswer(inv -> {
+            List<String> values = new ArrayList<>();
+            ((JsonNode) inv.getArgument(0)).forEach(value -> values.add(value.asText()));
+            return values;
+        });
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
+    }
+
+    /** Stubs what an in-place update of {@code existing} looks up and patches. */
+    private void existingApi(RestApi existing) {
+        when(api.getRestApi("us-east-1", existing.getId())).thenReturn(existing);
+        when(api.updateRestApi(eq("us-east-1"), eq(existing.getId()), any())).thenReturn(existing);
+        when(api.findRootResourceId("us-east-1", existing.getId())).thenReturn(Optional.of("root-1"));
+    }
+
+    private static RestApi restApi(String id, String name, String description, String endpointType,
+                                   String... vpcEndpointIds) {
+        RestApi restApi = new RestApi();
+        restApi.setId(id);
+        restApi.setName(name);
+        restApi.setDescription(description);
+        EndpointConfiguration endpoint = new EndpointConfiguration();
+        endpoint.setTypes(List.of(EndpointType.valueOf(endpointType)));
+        endpoint.setVpcEndpointIds(List.of(vpcEndpointIds));
+        restApi.setEndpointConfiguration(endpoint);
+        return restApi;
+    }
+
+    /** A patch operation as the provisioner builds one; unlike {@code Map.of}, it takes a null value. */
+    private static Map<String, String> op(String op, String path, String value) {
+        Map<String, String> operation = new HashMap<>();
+        operation.put("op", op);
+        operation.put("path", path);
+        operation.put("value", value);
+        return operation;
     }
 
     /** A Resource created as res-1 at /orders, then replaced by res-2 at /items. */

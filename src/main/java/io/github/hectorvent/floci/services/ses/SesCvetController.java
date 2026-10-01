@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
 import jakarta.inject.Inject;
@@ -17,13 +18,13 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-import java.util.List;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
@@ -79,15 +80,19 @@ public class SesCvetController {
 
     @GET
     @Path("/custom-verification-email-templates")
-    public Response listCustomVerificationEmailTemplates(@Context HttpHeaders headers) {
+    public Response listCustomVerificationEmailTemplates(@Context HttpHeaders headers,
+                                                         @QueryParam("PageSize") String pageSize,
+                                                         @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
+        PaginatedResult<CustomVerificationEmailTemplate> page = cvetService.listCustomVerificationEmailTemplates(
+                region, SesListPaging.V2_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES,
+                SesListPaging.parseQueryPageSize(pageSize), nextToken);
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode items = result.putArray("CustomVerificationEmailTemplates");
-        List<CustomVerificationEmailTemplate> templates =
-                cvetService.listCustomVerificationEmailTemplates(region);
-        for (CustomVerificationEmailTemplate t : templates) {
+        for (CustomVerificationEmailTemplate t : page.items()) {
             items.add(cvetJson(t, false));
         }
+        result.put("NextToken", page.nextToken());
         return Response.ok(result).build();
     }
 

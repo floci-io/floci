@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.route53.Route53Service;
@@ -18,6 +19,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -185,13 +187,23 @@ public class SesIdentityService {
         return id != null && "Success".equals(id.getVerificationStatus());
     }
 
+    /**
+     * The cursor is the identity name and carries no type filter: a token taken with
+     * {@code IdentityType=Domain} continues the unfiltered list when reused without the filter, as
+     * on SES.
+     */
+    public PaginatedResult<Identity> listIdentities(String identityType, String region, SesListPaging paging,
+                                                    Integer pageSize, String nextToken) {
+        return paging.page(region, listIdentities(identityType, region), Identity::getIdentity, pageSize,
+                nextToken);
+    }
+
+    /** By name, the order Floci settles on where SES's own varies between calls. */
     public List<Identity> listIdentities(String identityType, String region) {
-        List<Identity> all = identityStore.scan(k -> k.startsWith(keyPrefix(region)));
-        if (identityType == null || identityType.isBlank()) {
-            return all;
-        }
-        return all.stream()
-                .filter(i -> identityType.equals(i.getIdentityType()))
+        return identityStore.scan(k -> k.startsWith(keyPrefix(region))).stream()
+                .filter(i -> identityType == null || identityType.isBlank()
+                        || identityType.equals(i.getIdentityType()))
+                .sorted(Comparator.comparing(Identity::getIdentity))
                 .toList();
     }
 

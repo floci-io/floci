@@ -193,6 +193,12 @@ public class ApiGatewayV2Service {
                 .map(entry -> new ApiOwner(entry.accountId(), regionFromApiKey(entry.key())));
     }
 
+    /** Connection management only needs to know whether any owner uses this ID for WebSocket. */
+    public boolean hasWebSocketApi(String apiId) {
+        return apiStore.scanAllAccountEntries(key -> key.endsWith("::" + apiId)).stream()
+                .anyMatch(entry -> "WEBSOCKET".equals(entry.value().getProtocolType()));
+    }
+
     private static String regionFromApiKey(String key) {
         int delimiter = key.indexOf("::");
         if (delimiter <= 0) {

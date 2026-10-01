@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.model.LambdaUrlConfig;
 import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,6 +21,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.HashMap;
@@ -40,6 +42,11 @@ import static org.mockito.Mockito.*;
 class LambdaServiceTest {
 
     private static final String REGION = "us-east-1";
+
+    private static final String TAG_KEYS_CONSTRAINT = " at 'tags' failed to satisfy constraint: Map keys must"
+            + " satisfy constraint: [Member must have length less than or equal to 128, Member must have length"
+            + " greater than or equal to 1, Member must satisfy regular expression pattern:"
+            + " ([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)]";
 
     private LambdaService service;
 
@@ -333,6 +340,70 @@ class LambdaServiceTest {
                 () -> service.getFunction(REGION, "nonexistent"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
+    }
+
+    @Test
+    void tagResource_keyOutsideTheAwsPattern_isRejectedBeforeTheLookup() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.tagResource(
+                "arn:aws:lambda:us-east-1:000000000000:function:no-such-fn", Map.of("a,b", "x")));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("1 validation error detected: Value '{a,b=x}'" + TAG_KEYS_CONSTRAINT, ex.getMessage());
+    }
+
+    @Test
+    void tagResource_emptyOrTooLongKeyIsRejected() {
+        LambdaFunction fn = service.createFunction(REGION, baseRequest("tag-length-fn"));
+        String longKey = "k".repeat(129);
+
+        AwsException empty = assertThrows(AwsException.class,
+                () -> service.tagResource(fn.getFunctionArn(), Map.of("", "x")));
+        AwsException tooLong = assertThrows(AwsException.class,
+                () -> service.tagResource(fn.getFunctionArn(), Map.of(longKey, "x")));
+
+        assertEquals("ValidationException", empty.getErrorCode());
+        assertEquals("1 validation error detected: Value '{=x}'" + TAG_KEYS_CONSTRAINT, empty.getMessage());
+        assertEquals("ValidationException", tooLong.getErrorCode());
+        assertEquals("1 validation error detected: Value '{" + longKey + "=x}'" + TAG_KEYS_CONSTRAINT,
+                tooLong.getMessage());
+        assertTrue(service.listTags(fn.getFunctionArn()).isEmpty());
+    }
+
+    @Test
+    void tagResource_keyLengthCountsCodePoints() {
+        LambdaFunction fn = service.createFunction(REGION, baseRequest("tag-code-points-fn"));
+        String letter = new String(Character.toChars(0x20000));
+
+        service.tagResource(fn.getFunctionArn(), Map.of(letter.repeat(128), "x"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.tagResource(fn.getFunctionArn(), Map.of(letter.repeat(129), "x")));
+
+        assertEquals(Map.of(letter.repeat(128), "x"), service.listTags(fn.getFunctionArn()));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void tagResource_validKeyIsApplied() {
+        LambdaFunction fn = service.createFunction(REGION, baseRequest("tag-valid-fn"));
+
+        service.tagResource(fn.getFunctionArn(), Map.of("team:name/x=y+z-@_. 1", "v"));
+
+        assertEquals(Map.of("team:name/x=y+z-@_. 1", "v"), service.listTags(fn.getFunctionArn()));
+    }
+
+    @Test
+    void createFunction_invalidTagKeyIsRejectedAndTheFunctionIsNotCreated() {
+        Map<String, Object> request = baseRequest("tag-rejected-fn");
+        request.put("Tags", Map.of("a,b", "x"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createFunction(REGION, request));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("1 validation error detected: Value '{a,b=x}'" + TAG_KEYS_CONSTRAINT, ex.getMessage());
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.getFunction(REGION, "tag-rejected-fn"));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
     }
 
     @Test
@@ -1315,6 +1386,372 @@ class LambdaServiceTest {
         }
     }
 
+    // ──────────────────────────── Request-shape validation ────────────────────────────
+
+    @Test
+    void createFunctionRejectsUnknownRuntime() {
+        Map<String, Object> request = baseRequest("bad-runtime-fn");
+        request.put("Runtime", "cobol99");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsUnknownRuntime() {
+        service.createFunction(REGION, baseRequest("update-bad-runtime-fn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "update-bad-runtime-fn",
+                        Map.of("Runtime", "cobol99")));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsMalformedRoleArn() {
+        Map<String, Object> request = baseRequest("bad-role-fn");
+        request.put("Role", "not-an-arn");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsHandlerWithWhitespace() {
+        Map<String, Object> request = baseRequest("bad-handler-fn");
+        request.put("Handler", "index handler");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsDescriptionOverMaxLength() {
+        Map<String, Object> request = baseRequest("bad-description-fn");
+        request.put("Description", "x".repeat(257));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsMalformedKmsKeyArn() {
+        Map<String, Object> request = baseRequest("bad-kms-fn");
+        request.put("KMSKeyArn", "not-an-arn");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsMalformedLayerArn() {
+        Map<String, Object> request = baseRequest("bad-layer-fn");
+        request.put("Layers", List.of("not-a-layer-arn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsMoreThanFiveLayers() {
+        Map<String, Object> request = baseRequest("too-many-layers-fn");
+        List<String> layers = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            layers.add("arn:aws:lambda:us-east-1:000000000000:layer:l" + i + ":1");
+        }
+        request.put("Layers", layers);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsMalformedLayerArn() {
+        service.createFunction(REGION, baseRequest("update-bad-layer-fn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "update-bad-layer-fn",
+                        Map.of("Layers", List.of("not-a-layer-arn"))));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    // Architectures is validated by upstream's validateArchitectures, which reports the error
+    // botocore actually models for CreateFunction: ValidationException is not in that operation's
+    // error set, InvalidParameterValueException is.
+    @Test
+    void createFunctionRejectsUnknownArchitecture() {
+        Map<String, Object> request = baseRequest("bad-arch-fn");
+        request.put("Architectures", List.of("mips"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsMoreThanOneArchitecture() {
+        Map<String, Object> request = baseRequest("too-many-arch-fn");
+        request.put("Architectures", List.of("x86_64", "arm64"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionCodeAppliesValidArchitecture() {
+        service.createFunction(REGION, baseRequest("update-code-arch-fn"));
+
+        LambdaFunction updated = service.updateFunctionCode(REGION, "update-code-arch-fn",
+                Map.of("Architectures", List.of("arm64")));
+
+        assertEquals(List.of("arm64"), updated.getArchitectures());
+    }
+
+    @Test
+    void updateFunctionCodeRejectsUnknownArchitecture() {
+        service.createFunction(REGION, baseRequest("update-code-bad-arch-fn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionCode(REGION, "update-code-bad-arch-fn",
+                        Map.of("Architectures", List.of("mips"))));
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+    }
+
+    @Test
+    void deleteAliasRejectsMalformedName() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.deleteAlias(REGION, "some-fn", "123"));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionUrlConfigRejectsUnknownAuthType() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunctionUrlConfig(REGION, "any-fn", null,
+                        Map.of("AuthType", "BOGUS")));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionUrlConfigRejectsUnknownInvokeMode() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunctionUrlConfig(REGION, "any-fn", null,
+                        Map.of("InvokeMode", "BOGUS")));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionUrlConfigRejectsAllNumericQualifier() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunctionUrlConfig(REGION, "any-fn", "123", Map.of()));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionUrlConfig_invalidInvokeMode_leavesAuthTypeUnchanged() {
+        // Catches: UpdateFunctionUrlConfig applying AuthType to the stored config before InvokeMode is rejected
+        service.createFunction(REGION, baseRequest("url-atomic-fn"));
+        LambdaUrlConfig seeded = new LambdaUrlConfig();
+        seeded.setAuthType("NONE");
+        service.getFunction(REGION, "url-atomic-fn").setUrlConfig(seeded);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionUrlConfig(REGION, "url-atomic-fn", null,
+                        Map.of("AuthType", "AWS_IAM", "InvokeMode", "BOGUS")));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("NONE", service.getFunctionUrlConfig(REGION, "url-atomic-fn", null).getAuthType());
+    }
+
+    @Test
+    void getAndDeleteFunctionUrlConfig_rejectMalformedQualifier() {
+        // Catches: Get/DeleteFunctionUrlConfig skipping the FunctionUrlQualifier constraint that Create/Update enforce
+        AwsException numeric = assertThrows(AwsException.class,
+                () -> service.getFunctionUrlConfig(REGION, "any-fn", "123"));
+        AwsException empty = assertThrows(AwsException.class,
+                () -> service.getFunctionUrlConfig(REGION, "any-fn", ""));
+        AwsException deleteNumeric = assertThrows(AwsException.class,
+                () -> service.deleteFunctionUrlConfig(REGION, "any-fn", "123"));
+
+        assertEquals("ValidationException", numeric.getErrorCode());
+        assertEquals("ValidationException", empty.getErrorCode());
+        assertEquals("ValidationException", deleteNumeric.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionConfiguration_overlongDescription_isRejectedAndNotStored() {
+        // Catches: UpdateFunctionConfiguration persisting a Description over the 256-character shape limit
+        service.createFunction(REGION, baseRequest("update-desc-fn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "update-desc-fn",
+                        Map.of("Description", "d".repeat(257))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertNull(service.getFunction(REGION, "update-desc-fn").getDescription());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsInvalidMemoryBeforeMutation() {
+        LambdaFunction original = service.createFunction(REGION, baseRequest("invalid-memory-update"));
+        String revisionId = original.getRevisionId();
+
+        for (Object invalid : List.of("abc", 127, 10241, 32769, 256.5)) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.updateFunctionConfiguration(REGION, "invalid-memory-update",
+                            Map.of("Description", "half-applied", "MemorySize", invalid)));
+            assertEquals("InvalidParameterValueException", error.getErrorCode());
+            LambdaFunction stored = service.getFunction(REGION, "invalid-memory-update");
+            assertNull(stored.getDescription());
+            assertEquals(256, stored.getMemorySize());
+            assertEquals(revisionId, stored.getRevisionId());
+        }
+    }
+
+    @Test
+    void updateFunctionConfigurationAcceptsMaximumMemorySize() {
+        service.createFunction(REGION, baseRequest("maximum-memory-update"));
+
+        LambdaFunction updated = service.updateFunctionConfiguration(REGION, "maximum-memory-update",
+                Map.of("MemorySize", 10240));
+
+        assertEquals(10240, updated.getMemorySize());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsNonStringArnsBeforeMutation() {
+        LambdaFunction original = service.createFunction(REGION, baseRequest("invalid-arn-update"));
+        String revisionId = original.getRevisionId();
+
+        for (Map<String, Object> invalid : List.of(
+                Map.<String, Object>of("KMSKeyArn", 123),
+                Map.<String, Object>of("DeadLetterConfig", Map.of("TargetArn", 123)))) {
+            Map<String, Object> request = new HashMap<>(invalid);
+            request.put("Description", "half-applied");
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.updateFunctionConfiguration(REGION, "invalid-arn-update", request));
+
+            assertEquals("InvalidParameterValueException", error.getErrorCode());
+            LambdaFunction stored = service.getFunction(REGION, "invalid-arn-update");
+            assertNull(stored.getDescription());
+            assertNull(stored.getKmsKeyArn());
+            assertNull(stored.getDeadLetterTargetArn());
+            assertEquals(revisionId, stored.getRevisionId());
+        }
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsInvalidTimeoutBeforeMutation() {
+        LambdaFunction original = service.createFunction(REGION, baseRequest("invalid-timeout-update"));
+        String revisionId = original.getRevisionId();
+
+        for (Object invalid : List.of("abc", 0, 901, 1.5)) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.updateFunctionConfiguration(REGION, "invalid-timeout-update",
+                            Map.of("Description", "half-applied", "Timeout", invalid)));
+            assertEquals("InvalidParameterValueException", error.getErrorCode());
+            LambdaFunction stored = service.getFunction(REGION, "invalid-timeout-update");
+            assertNull(stored.getDescription());
+            assertEquals(10, stored.getTimeout());
+            assertEquals(revisionId, stored.getRevisionId());
+        }
+    }
+
+    @Test
+    void createFunction_bareStringLayers_isRejectedAsSerializationError() {
+        // Catches: a non-list Layers value being treated as absent instead of rejected
+        Map<String, Object> request = baseRequest("bare-layers-fn");
+        request.put("Layers", "arn:aws:lambda:us-east-1:000000000000:layer:l0:1");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("SerializationException", error.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionConfiguration_bareStringLayers_isRejectedAndKeepsStoredLayers() {
+        // Catches: a non-list Layers value on update silently clearing the stored layers
+        service.createFunction(REGION, baseRequest("bare-layers-update-fn"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "bare-layers-update-fn",
+                        Map.of("Layers", "not-a-list")));
+
+        assertEquals("SerializationException", error.getErrorCode());
+    }
+
+    @Test
+    void listEventSourceMappingsRejectsMalformedFunctionName() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.listEventSourceMappings("not a valid name!"));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    // Catches: EventSourceArn pattern missing the optional eusc- region prefix from the Arn shape.
+    @Test
+    void listEventSourceMappingsAcceptsEuscRegionEventSourceArn() {
+        assertEquals(List.of(),
+                service.listEventSourceMappings(null, "arn:aws-eusc:sqs:eusc-de-east-1:000000000000:q"));
+    }
+
+    // Catches: FunctionName pattern missing "." in the name characters, so a dotted name is rejected.
+    @Test
+    void listEventSourceMappingsAcceptsDottedFunctionName() {
+        assertNotRejectedByListEsmPattern("my.func");
+    }
+
+    // Catches: FunctionName pattern missing the optional eusc- region prefix.
+    @Test
+    void listEventSourceMappingsAcceptsEuscRegionFunctionArn() {
+        assertEquals(List.of(), service.listEventSourceMappings(
+                "arn:aws-eusc:lambda:eusc-de-east-1:000000000000:function:my-func"));
+    }
+
+    // Catches: FunctionName pattern missing the $LATEST.PUBLISHED qualifier.
+    @Test
+    void listEventSourceMappingsAcceptsLatestPublishedQualifier() {
+        assertNotRejectedByListEsmPattern(
+                "arn:aws:lambda:us-east-1:000000000000:function:my-func:$LATEST.PUBLISHED");
+    }
+
+    // LambdaArnUtils.resolve still rejects dotted names and $LATEST.PUBLISHED downstream, so only the
+    // ListEventSourceMappings pattern check (anchored with ^) is asserted here.
+    private void assertNotRejectedByListEsmPattern(String functionName) {
+        try {
+            service.listEventSourceMappings(functionName);
+        } catch (AwsException e) {
+            assertFalse(e.getMessage().contains("pattern: ^(arn:"), e.getMessage());
+        }
+    }
+
+    // Catches: LayerVersionArn pattern missing the AWS-managed awslayer alternative, so a valid
+    // AWS-managed layer ARN is rejected as a ValidationException.
+    @Test
+    void createFunctionAcceptsAwsManagedLayerArn() {
+        Map<String, Object> request = baseRequest("aws-layer-fn");
+        request.put("Layers", List.of("arn:aws:lambda:::awslayer:AmazonLinux2"));
+
+        LambdaFunction created = service.createFunction(REGION, request);
+
+        assertEquals(List.of("arn:aws:lambda:::awslayer:AmazonLinux2"), created.getLayers());
+    }
+
+    @Test
+    void listEventSourceMappingsRejectsMalformedEventSourceArn() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.listEventSourceMappings(null, "not-an-arn"));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
     @Test
     void createEventSourceMapping_selfManagedKafka_success() {
         service.createFunction(REGION, baseRequest("kafka-fn"));
@@ -1516,6 +1953,26 @@ class LambdaServiceTest {
         assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
                 "Topics", List.of(456)
         )));
+    }
+
+    @Test
+    void updateEventSourceMapping_invalidLaterField_leavesBatchSizeAndEnabledUnchanged() {
+        // Catches: UpdateEventSourceMapping mutating the stored mapping before a later member fails validation
+        service.createFunction(REGION, baseRequest("kafka-fn-update-atomic"));
+        EventSourceMapping esm = service.createEventSourceMapping(REGION, Map.of(
+                "FunctionName", "kafka-fn-update-atomic",
+                "Topics", List.of("valid-topic"),
+                "SelfManagedEventSource", Map.of(
+                        "Endpoints", Map.of("KAFKA_BOOTSTRAP_SERVERS", List.of("localhost:9092")))));
+
+        assertThrows(AwsException.class, () -> service.updateEventSourceMapping(esm.getUuid(), Map.of(
+                "BatchSize", 5,
+                "Enabled", false,
+                "FunctionResponseTypes", List.of("Bogus"))));
+
+        EventSourceMapping stored = service.getEventSourceMapping(esm.getUuid());
+        assertEquals(10, stored.getBatchSize());
+        assertTrue(stored.isEnabled());
     }
 
     @Test
@@ -1761,5 +2218,72 @@ class LambdaServiceTest {
             release.countDown();
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void updateFunctionConfiguration_malformedKmsKeyArn_isRejectedAndNotStored() {
+        // Catches: UpdateFunctionConfiguration storing a KMSKeyArn that violates the botocore pattern
+        service.createFunction(REGION, baseRequest("kms-update-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateFunctionConfiguration(
+                REGION, "kms-update-fn", new HashMap<>(Map.of("KMSKeyArn", "not-an-arn"))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertNull(service.getFunction(REGION, "kms-update-fn").getKmsKeyArn());
+    }
+
+    @Test
+    void createAlias_invalidName_isRejectedAndNotStored() {
+        // Catches: CreateAlias accepting an all-digit or over-128-character alias name
+        service.createFunction(REGION, baseRequest("alias-name-fn"));
+
+        AwsException digits = assertThrows(AwsException.class,
+                () -> service.createAlias(REGION, "alias-name-fn", "123", "$LATEST", null, null));
+        AwsException tooLong = assertThrows(AwsException.class,
+                () -> service.createAlias(REGION, "alias-name-fn", "a".repeat(129), "$LATEST", null, null));
+
+        assertEquals("ValidationException", digits.getErrorCode());
+        assertEquals("ValidationException", tooLong.getErrorCode());
+        assertEquals(0, service.listAliases(REGION, "alias-name-fn").size());
+    }
+
+    @Test
+    void createAlias_emptyOrMissingName_isRejected() {
+        // Catches: CreateAlias accepting an empty or null alias name despite the 1-character minimum
+        service.createFunction(REGION, baseRequest("alias-empty-fn"));
+
+        AwsException empty = assertThrows(AwsException.class,
+                () -> service.createAlias(REGION, "alias-empty-fn", "", "$LATEST", null, null));
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.createAlias(REGION, "alias-empty-fn", null, "$LATEST", null, null));
+
+        assertEquals("ValidationException", empty.getErrorCode());
+        assertEquals("ValidationException", missing.getErrorCode());
+        assertEquals(0, service.listAliases(REGION, "alias-empty-fn").size());
+    }
+
+    @Test
+    void createEventSourceMapping_malformedEventSourceArn_isRejectedAndNotStored() {
+        // Catches: CreateEventSourceMapping accepting an ARN that only contains ":sqs:" but is not a valid ARN
+        LambdaFunction fn = service.createFunction(REGION, baseRequest("esm-arn-fn"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createEventSourceMapping(REGION,
+                new HashMap<>(Map.of("FunctionName", "esm-arn-fn", "EventSourceArn", "junk:sqs:queue"))));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(0, service.listEventSourceMappings(fn.getFunctionArn()).size());
+    }
+
+    @Test
+    void createFunction_unknownPackageType_isRejectedAndNotStored() {
+        // Catches: CreateFunction accepting a PackageType outside the Zip/Image enum
+        Map<String, Object> request = baseRequest("package-type-fn");
+        request.put("PackageType", "Rar");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(REGION, request));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("ResourceNotFoundException",
+                assertThrows(AwsException.class, () -> service.getFunction(REGION, "package-type-fn")).getErrorCode());
     }
 }

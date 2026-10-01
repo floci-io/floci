@@ -186,17 +186,17 @@ class WebIdentityTrustPolicyEvaluatorTest {
 
     @Test
     void caseSensitiveGlobHandlesWildcardsAndQuestionMarks() {
-        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("abc", "abc"));
-        assertFalse(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("abc", "ABC"));
-        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("a*", "abcdef"));
-        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("*f", "abcdef"));
-        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("a*e?", "abcdef"));
-        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("**abc**", "xxabcyy"));
-        assertTrue(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("*", ""));
-        assertFalse(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("a?c", "ac"));
-        assertFalse(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("abc", "abcd"));
-        assertFalse(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive(null, "abc"));
-        assertFalse(WebIdentityTrustPolicyEvaluator.globMatchesCaseSensitive("abc", null));
+        assertTrue(IamPolicyEvaluator.caseSensitiveGlobMatches("abc", "abc"));
+        assertFalse(IamPolicyEvaluator.caseSensitiveGlobMatches("abc", "ABC"));
+        assertTrue(IamPolicyEvaluator.caseSensitiveGlobMatches("a*", "abcdef"));
+        assertTrue(IamPolicyEvaluator.caseSensitiveGlobMatches("*f", "abcdef"));
+        assertTrue(IamPolicyEvaluator.caseSensitiveGlobMatches("a*e?", "abcdef"));
+        assertTrue(IamPolicyEvaluator.caseSensitiveGlobMatches("**abc**", "xxabcyy"));
+        assertTrue(IamPolicyEvaluator.caseSensitiveGlobMatches("*", ""));
+        assertFalse(IamPolicyEvaluator.caseSensitiveGlobMatches("a?c", "ac"));
+        assertFalse(IamPolicyEvaluator.caseSensitiveGlobMatches("abc", "abcd"));
+        assertFalse(IamPolicyEvaluator.caseSensitiveGlobMatches(null, "abc"));
+        assertFalse(IamPolicyEvaluator.caseSensitiveGlobMatches("abc", null));
     }
 
     @Test

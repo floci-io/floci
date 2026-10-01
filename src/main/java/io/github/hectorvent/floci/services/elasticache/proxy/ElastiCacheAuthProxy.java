@@ -33,15 +33,51 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
 
     @Override
     protected boolean authRequired() {
+        if (passwordValidator.hasMembers()) {
+            AuthMode defaultMode = passwordValidator.memberAuthMode("default");
+            if (defaultMode != null) {
+                return defaultMode != AuthMode.NO_AUTH;
+            }
+            return true;
+        }
         return authMode != AuthMode.NO_AUTH;
     }
 
     @Override
     protected boolean authenticate(String username, String password) {
+        String effectiveUser = (username == null || username.isEmpty()) ? "default" : username;
+        if (passwordValidator.hasMembers()) {
+            if ("default".equals(effectiveUser)) {
+                if (passwordValidator.validatePassword(username, password)) {
+                    return true;
+                }
+                AuthMode defaultMode = passwordValidator.memberAuthMode("default");
+                if (defaultMode == null) {
+                    defaultMode = passwordValidator.memberAuthMode(username);
+                }
+                if (defaultMode == AuthMode.IAM) {
+                    return sigV4Validator.validate(password, groupId, "default");
+                }
+                return false;
+            }
+
+            AuthMode userMode = passwordValidator.memberAuthMode(effectiveUser);
+            if (userMode == null && username != null) {
+                userMode = passwordValidator.memberAuthMode(username);
+            }
+            if (userMode != null) {
+                return switch (userMode) {
+                    case IAM -> sigV4Validator.validate(password, groupId, effectiveUser);
+                    case PASSWORD, NO_AUTH -> passwordValidator.validatePassword(effectiveUser, password);
+                };
+            }
+            return false;
+        }
+
         return switch (authMode) {
-            case IAM -> sigV4Validator.validate(password, groupId, username);
+            case IAM -> sigV4Validator.validate(password, groupId, effectiveUser);
             case PASSWORD -> passwordValidator.validatePassword(username, password);
-            case NO_AUTH -> true; // unreachable: authRequired() is false for NO_AUTH
+            case NO_AUTH -> true;
         };
     }
 
@@ -62,10 +98,18 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     }
 
     /**
-     * Callback interface for password validation, provided by ElastiCacheService.
+     * Callback interface for credential checks, provided by ElastiCacheService.
      */
     @FunctionalInterface
     public interface PasswordValidator {
         boolean validatePassword(String username, String password);
+
+        default boolean hasMembers() {
+            return false;
+        }
+
+        default AuthMode memberAuthMode(String username) {
+            return null;
+        }
     }
 }

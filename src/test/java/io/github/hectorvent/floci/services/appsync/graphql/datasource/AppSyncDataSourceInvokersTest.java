@@ -95,8 +95,9 @@ class AppSyncDataSourceInvokersTest {
         when(services.iam()).thenReturn(iamConfig);
         when(iamConfig.enforcementEnabled()).thenReturn(true);
         ObjectMapper mapper = new ObjectMapper();
+        IamPolicyEvaluator policyEvaluator = new IamPolicyEvaluator(mapper);
         AppSyncDataSourceAuthorizer authorizer = new AppSyncDataSourceAuthorizer(iam,
-                new AssumeRolePolicyEvaluator(mapper), new IamPolicyEvaluator(mapper),
+                new AssumeRolePolicyEvaluator(mapper, policyEvaluator), policyEvaluator,
                 mock(RegionResolver.class), mapper, config);
         AppSyncDataSourceInvoker invoker = mock(AppSyncDataSourceInvoker.class);
         when(invoker.type()).thenReturn(DataSourceType.AWS_LAMBDA);
@@ -138,8 +139,9 @@ class AppSyncDataSourceInvokersTest {
         when(iamConfig.enforcementEnabled()).thenReturn(false);
         IamService iam = mock(IamService.class);
         ObjectMapper mapper = new ObjectMapper();
+        IamPolicyEvaluator policyEvaluator = new IamPolicyEvaluator(mapper);
         AppSyncDataSourceAuthorizer authorizer = new AppSyncDataSourceAuthorizer(iam,
-                new AssumeRolePolicyEvaluator(mapper), new IamPolicyEvaluator(mapper),
+                new AssumeRolePolicyEvaluator(mapper, policyEvaluator), policyEvaluator,
                 mock(RegionResolver.class), mapper, config);
         AppSyncDataSourceInvoker invoker = mock(AppSyncDataSourceInvoker.class);
         when(invoker.type()).thenReturn(DataSourceType.AWS_LAMBDA);

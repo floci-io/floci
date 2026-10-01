@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
 import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
 import io.github.hectorvent.floci.services.apigateway.model.Deployment;
+import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
+import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
 import io.github.hectorvent.floci.services.apigateway.model.RestApi;
 import io.github.hectorvent.floci.services.apigateway.model.Stage;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
@@ -19,6 +21,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -54,6 +57,7 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
      * after the update commits, or a rollback, deletes the right one.
      */
     private static final String LOCATIONS_ATTR = "__FlociApiGatewayLocations";
+    private static final String VPC_ENDPOINT_IDS_PATH = "/endpointConfiguration/vpcEndpointIds";
 
     private final ApiGatewayService apiGatewayService;
     private final S3Service s3Service;
@@ -171,20 +175,45 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
     /**
-     * Puts a replaced Resource or Method back when a later resource fails the update. Without a
-     * replacement, a Resource update changed nothing, since all its properties are createOnly, so
-     * there is nothing to undo. A Method the update kept was written in place, with no snapshot to
-     * put back.
+     * Puts a replaced RestApi, Resource or Method back when a later resource fails the update, and a
+     * RestApi patched in place back to its snapshot. Without a replacement, a Resource update
+     * changed nothing, since all its properties are createOnly, so there is nothing to undo. A
+     * Method the update kept was written in place, with no snapshot to put back.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        return ReplacementCleanup.rollback(resource,
-                (type, physicalId, region) -> deleteEntity(resource, physicalId, region))
-                || RESOURCE.equals(resource.getResourceType());
+        if (ReplacementCleanup.rollback(resource,
+                (type, physicalId, region) -> deleteEntity(resource, physicalId, region))) {
+            return true;
+        }
+        if (REST_API.equals(resource.getResourceType())) {
+            return rollbackRestApiUpdate(resource);
+        }
+        return RESOURCE.equals(resource.getResourceType());
+    }
+
+    /**
+     * Patches the API back from the snapshot taken before its in-place update. An update that also
+     * re-applied an OpenAPI document replaced the API's resources, methods and models, which the
+     * snapshot does not hold, so its rollback is not implemented. With no snapshot, nothing changed.
+     */
+    private boolean rollbackRestApiUpdate(StackResource resource) {
+        if (!resource.getAttributes().containsKey(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR)) {
+            return true;
+        }
+        JsonNode snapshot = readSnapshot(resource);
+        if (snapshot.path("body").asBoolean(false)) {
+            return false;
+        }
+        // Spent only once the restore succeeded, so a restore that throws can be tried again.
+        restore(resource.getPhysicalId(), snapshot);
+        resource.getAttributes().remove(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR);
+        return true;
     }
 
     /** A resource of a REST API, or with an HTTP method, one of that resource's methods. */
@@ -227,41 +256,169 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionRestApi(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR);
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         String region = ctx.region();
         CloudFormationTemplateEngine engine = ctx.engine();
+        // No RestApi property requires replacement, so an update keeps the API, and with it the id
+        // and the invoke URL. An API removed out of band is created again.
+        RestApi existing = ctx.isUpdate()
+                ? findPrior("REST API", ctx.priorPhysicalId(),
+                        () -> apiGatewayService.getRestApi(region, ctx.priorPhysicalId()))
+                : null;
         String name = ctx.resolveOptional(props, "Name");
         if (name == null || name.isBlank()) {
-            name = ctx.generatePhysicalName(r.getLogicalId(), 255, false);
+            name = existing != null
+                    ? existing.getName()
+                    : ctx.generatePhysicalName(r.getLogicalId(), 255, false);
         }
         String description = ctx.resolveOptional(props, "Description");
-        Map<String, Object> req = new HashMap<>();
-        req.put("name", name);
-        req.put("description", description);
-
-        if (props != null && props.has("EndpointConfiguration")) {
-            JsonNode epNode = props.get("EndpointConfiguration");
-            Map<String, Object> epReq = new HashMap<>();
-            epReq.put("types", ctx.resolveStringList(epNode, "Types"));
-            epReq.put("vpcEndpointIds", ctx.resolveStringList(epNode, "VpcEndpointIds"));
-            req.put("endpointConfiguration", epReq);
-        }
-
-        RestApi api = apiGatewayService.createRestApi(region, req);
-        r.setPhysicalId(api.getId());
-        r.getAttributes().put("RestApiId", api.getId());
-        r.getAttributes().put("RootResourceId",
-                apiGatewayService.getResources(region, api.getId()).get(0).getId());
-
+        JsonNode endpoint = props != null ? props.get("EndpointConfiguration") : null;
         // A declared Body or BodyS3Location is the whole OpenAPI document. Measured on real AWS
         // it becomes the RestApi's Body with no synthesized Resource or Method, so putRestApi plus
-        // applyOpenApiSpec is the only place that turns it into resources and methods. putRestApi
-        // overwrites Name and Description from the document's info, so the declared Name and
-        // Description (null clearing an undeclared Description) are re-applied immediately after.
+        // applyOpenApiSpec is the only place that turns it into resources and methods. Resolved
+        // before anything changes, so a document that cannot be read leaves the API as it was.
         JsonNode openApiDocument = OpenApiDocuments.resolve(props, engine, s3Service, objectMapper);
+
+        RestApi api;
+        if (existing != null) {
+            snapshotBeforeUpdate(r, existing, region, openApiDocument != null);
+            List<Map<String, String>> operations = new ArrayList<>(List.of(
+                    replacePatchOp("/name", name), replacePatchOp("/description", description)));
+            if (endpoint != null) {
+                List<String> types = ctx.resolveStringList(endpoint, "Types");
+                operations.addAll(endpointPatchOps(existing.getEndpointConfiguration(),
+                        types.isEmpty() ? null : types.getFirst(), ctx.resolveStringList(endpoint, "VpcEndpointIds")));
+            }
+            api = apiGatewayService.updateRestApi(region, existing.getId(), operations);
+        } else {
+            Map<String, Object> req = new HashMap<>();
+            req.put("name", name);
+            req.put("description", description);
+            if (endpoint != null) {
+                Map<String, Object> epReq = new HashMap<>();
+                epReq.put("types", ctx.resolveStringList(endpoint, "Types"));
+                epReq.put("vpcEndpointIds", ctx.resolveStringList(endpoint, "VpcEndpointIds"));
+                req.put("endpointConfiguration", epReq);
+            }
+            api = apiGatewayService.createRestApi(region, req);
+        }
+        r.setPhysicalId(api.getId());
+        r.getAttributes().put("RestApiId", api.getId());
+        // Not the first of getResources, which is the root only on a freshly created API.
+        r.getAttributes().put("RootResourceId",
+                apiGatewayService.findRootResourceId(region, api.getId()).orElseThrow());
+
+        // putRestApi overwrites Name and Description from the document's info, so the declared Name
+        // and Description (null clearing an undeclared Description) are re-applied immediately after.
         if (openApiDocument != null) {
-            apiGatewayService.putRestApi(region, api.getId(), "overwrite", openApiDocument.toString());
+            try {
+                apiGatewayService.putRestApi(region, api.getId(), "overwrite", openApiDocument.toString());
+            } catch (RuntimeException failure) {
+                if (existing != null) {
+                    unwind(r, failure);
+                }
+                throw failure;
+            }
             apiGatewayService.updateRestApi(region, api.getId(),
                     List.of(replacePatchOp("/name", name), replacePatchOp("/description", description)));
+        }
+        // An API created in place of one removed out of band is a replacement: a rollback deletes it.
+        ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    /**
+     * The patch operations that take the endpoint configuration {@code current} to {@code type} and
+     * {@code vpcEndpointIds}: the type through the path that names the one the API has now, as
+     * UpdateRestApi requires, then each VPC endpoint to associate or disassociate. A null
+     * {@code type} keeps the current one.
+     */
+    private List<Map<String, String>> endpointPatchOps(EndpointConfiguration current, String type,
+                                                       List<String> vpcEndpointIds) {
+        String currentType = endpointType(current);
+        List<String> currentIds = current == null ? List.of() : current.getVpcEndpointIds();
+        List<Map<String, String>> operations = new ArrayList<>();
+        if (type != null && !type.equalsIgnoreCase(currentType)) {
+            operations.add(replacePatchOp("/endpointConfiguration/types/" + currentType, type));
+        }
+        for (String id : vpcEndpointIds) {
+            if (!currentIds.contains(id)) {
+                operations.add(Map.of("op", "add", "path", VPC_ENDPOINT_IDS_PATH, "value", id));
+            }
+        }
+        for (String id : currentIds) {
+            if (!vpcEndpointIds.contains(id)) {
+                operations.add(Map.of("op", "remove", "path", VPC_ENDPOINT_IDS_PATH, "value", id));
+            }
+        }
+        return operations;
+    }
+
+    /** The API's endpoint type; one stored without an endpoint configuration is REGIONAL. */
+    private static String endpointType(EndpointConfiguration endpoint) {
+        return endpoint == null || endpoint.getTypes().isEmpty()
+                ? EndpointType.REGIONAL.name()
+                : endpoint.getTypes().getFirst().name();
+    }
+
+    /**
+     * Keeps what an in-place update is about to patch, the name, description and endpoint
+     * configuration the API has now, so {@link #rollbackUpdate} can put them back, and whether the
+     * update also re-applies an OpenAPI document.
+     */
+    private void snapshotBeforeUpdate(StackResource r, RestApi existing, String region, boolean body) {
+        ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.put("region", region);
+        snapshot.put("name", existing.getName());
+        snapshot.put("description", existing.getDescription());
+        snapshot.put("endpointType", endpointType(existing.getEndpointConfiguration()));
+        ArrayNode vpcEndpointIds = snapshot.putArray("vpcEndpointIds");
+        if (existing.getEndpointConfiguration() != null) {
+            existing.getEndpointConfiguration().getVpcEndpointIds().forEach(vpcEndpointIds::add);
+        }
+        snapshot.put("body", body);
+        r.getAttributes().put(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    private JsonNode readSnapshot(StackResource r) {
+        try {
+            return objectMapper.readTree(r.getAttributes().get(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the REST API update snapshot for "
+                    + r.getLogicalId(), e);
+        }
+    }
+
+    /** Patches the API back to the name, description and endpoint configuration {@code snapshot} holds. */
+    private void restore(String apiId, JsonNode snapshot) {
+        String region = snapshot.path("region").asText();
+        List<String> vpcEndpointIds = new ArrayList<>();
+        snapshot.path("vpcEndpointIds").forEach(id -> vpcEndpointIds.add(id.asText()));
+        List<Map<String, String>> operations = new ArrayList<>(List.of(
+                replacePatchOp("/name", snapshot.path("name").asText(null)),
+                replacePatchOp("/description", snapshot.path("description").asText(null))));
+        operations.addAll(endpointPatchOps(apiGatewayService.getRestApi(region, apiId).getEndpointConfiguration(),
+                snapshot.path("endpointType").asText(), vpcEndpointIds));
+        apiGatewayService.updateRestApi(region, apiId, operations);
+    }
+
+    /**
+     * An in-place update whose OpenAPI document putRestApi rejected puts back the name, description
+     * and endpoint configuration it had already patched; putRestApi left the definition as it was.
+     * CloudFormationService restores the resource the stack held before the attempt, which never
+     * carried the snapshot, so the rollback walker would leave the patch in place. A restore that
+     * fails is recorded as a rollback failure, so the stack ends in UPDATE_ROLLBACK_FAILED instead
+     * of reporting the API intact.
+     */
+    private void unwind(StackResource r, RuntimeException failure) {
+        try {
+            restore(r.getPhysicalId(), readSnapshot(r));
+        } catch (RuntimeException unwindFailure) {
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                    "Could not roll back the update of REST API " + r.getPhysicalId() + ": "
+                            + unwindFailure.getMessage());
+            failure.addSuppressed(unwindFailure);
         }
     }
 

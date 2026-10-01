@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
+import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
@@ -29,7 +30,8 @@ class ApiGatewayCustomDomainFilterTest {
                 URI.create("http://" + DOMAIN + ".regional.local:4566/v1/iam?tenant=alpha"));
         ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
 
-        new ApiGatewayCustomDomainFilter(service, routeContext).filter(request.context());
+        new ApiGatewayCustomDomainFilter(service, mock(ApiGatewayV2Service.class), routeContext)
+                .filter(request.context());
 
         assertEquals("/execute-api/" + API_ID + "/prod/iam", request.routedUri().getRawPath());
         assertEquals("tenant=alpha", request.routedUri().getRawQuery());
@@ -43,7 +45,8 @@ class ApiGatewayCustomDomainFilterTest {
                 DOMAIN, URI.create("http://" + DOMAIN + "/orders/42"));
         ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
 
-        new ApiGatewayCustomDomainFilter(service, routeContext).filter(request.context());
+        new ApiGatewayCustomDomainFilter(service, mock(ApiGatewayV2Service.class), routeContext)
+                .filter(request.context());
 
         assertEquals("/execute-api/" + API_ID + "/prod/orders/42", request.routedUri().getRawPath());
         assertEquals("/orders/42", routeContext.signedRequestPath());
@@ -56,7 +59,8 @@ class ApiGatewayCustomDomainFilterTest {
                 "localhost:4566", URI.create("http://localhost:4566/v1/iam"));
         ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
 
-        new ApiGatewayCustomDomainFilter(service, routeContext).filter(request.context());
+        new ApiGatewayCustomDomainFilter(service, mock(ApiGatewayV2Service.class), routeContext)
+                .filter(request.context());
 
         assertNull(request.routedUri());
         assertNull(routeContext.signedRequestPath());
@@ -72,7 +76,8 @@ class ApiGatewayCustomDomainFilterTest {
                 DOMAIN, URI.create("http://" + DOMAIN + "/unmapped"));
         ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
 
-        new ApiGatewayCustomDomainFilter(service, routeContext).filter(request.context());
+        new ApiGatewayCustomDomainFilter(service, mock(ApiGatewayV2Service.class), routeContext)
+                .filter(request.context());
 
         assertNull(request.routedUri());
         assertNull(routeContext.signedRequestPath());
@@ -83,6 +88,7 @@ class ApiGatewayCustomDomainFilterTest {
         CustomDomain domain = new CustomDomain();
         domain.setDomainName(DOMAIN);
         BasePathMapping mapping = new BasePathMapping(basePath, API_ID, stage);
+        mapping.setApiType("REST");
         when(service.findDomainByRegionalHostname(DOMAIN + ".regional.local")).thenReturn(domain);
         when(service.findDomainByName(DOMAIN)).thenReturn(domain);
         when(service.resolveBasePathMapping(anyString(), anyString())).thenReturn(mapping);

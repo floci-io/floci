@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -18,6 +19,7 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -121,13 +123,16 @@ public class SesIdentityController {
 
     @GET
     @Path("/identities")
-    public Response listEmailIdentities(@Context HttpHeaders headers) {
+    public Response listEmailIdentities(@Context HttpHeaders headers,
+                                        @QueryParam("PageSize") String pageSize,
+                                        @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        List<Identity> identities = identityService.listIdentities(null, region);
+        PaginatedResult<Identity> page = identityService.listIdentities(null, region,
+                SesListPaging.V2_LIST_EMAIL_IDENTITIES, SesListPaging.parseQueryPageSize(pageSize), nextToken);
 
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode items = result.putArray("EmailIdentities");
-        for (Identity id : identities) {
+        for (Identity id : page.items()) {
             // Only a not-yet-verified domain can still transition (via its DKIM records),
             // so refresh just those; refreshing every identity would scan Route53 per call.
             Identity current = id;
@@ -145,6 +150,7 @@ public class SesIdentityController {
             item.put("VerificationStatus", toV2Status(current.getVerificationStatus()));
             items.add(item);
         }
+        result.put("NextToken", page.nextToken());
         return Response.ok(result).build();
     }
 
