@@ -51,11 +51,16 @@ just test-java
 
 ## Configuration
 
-| Variable         | Default                 | Description             |
-| ---------------- | ----------------------- | ----------------------- |
-| `FLOCI_ENDPOINT` | `http://localhost:4566` | Floci emulator endpoint |
+| Variable         | Default                 | Description                                        |
+| ---------------- | ----------------------- | -------------------------------------------------- |
+| `FLOCI_ENDPOINT` | `http://localhost:4566` | Floci emulator endpoint                            |
+| `AWS_REGION`     | `us-east-1`             | Region the `TestFixtures` clients sign for         |
 
-AWS credentials are always `test` / `test` / `us-east-1`.
+AWS credentials are always `test` / `test`. Setting `AWS_REGION=cn-north-1` (with Floci started
+with `FLOCI_DEFAULT_REGION=cn-north-1`) runs the suite in the China partition; the nightly
+Partition Compatibility workflow does exactly that, and tolerates only the failures listed in
+`.github/ci/compat-partition-allowlist-cn-north-1.txt`. Tests that build their own client with an
+explicit region keep that region.
 
 ## Metric filter publishing checks
 
