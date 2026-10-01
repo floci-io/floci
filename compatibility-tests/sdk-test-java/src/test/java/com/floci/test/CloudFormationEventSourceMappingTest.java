@@ -44,7 +44,7 @@ class CloudFormationEventSourceMappingTest {
     private static final String DDB_TABLE_NAME = "compat-cfn-esm-ddb-table";
     private static final String DLQ_NAME       = "compat-cfn-esm-ddb-dlq";
     private static final String FILTER_PATTERN = "{\"body\":{\"kind\":[\"order\"]}}";
-    private static final int WINDOW_SECONDS = 5;
+    private static final int WINDOW_SECONDS = 10;
 
     // Logs each delivered batch as "<body id>@<receive count>" and reports a message flagged "fail"
     // as a batch item failure on its first delivery.
@@ -363,7 +363,7 @@ class CloudFormationEventSourceMappingTest {
 
     private static List<List<String>> readBatches(long since) {
         try {
-            return logs.filterLogEvents(r -> r.logGroupName("/aws/lambda/" + FUNC_NAME).startTime(since))
+            return logs.filterLogEventsPaginator(r -> r.logGroupName("/aws/lambda/" + FUNC_NAME).startTime(since))
                     .events().stream()
                     .sorted(Comparator.comparing(FilteredLogEvent::timestamp))
                     .map(e -> BATCH_LOG.matcher(String.valueOf(e.message())))
