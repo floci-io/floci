@@ -114,7 +114,8 @@ public class RamController {
                 request.hasNonNull("name") ? request.path("name").asText() : null,
                 stringList(request.path("resourceShareArns")),
                 request.hasNonNull("resourceShareStatus")
-                        ? request.path("resourceShareStatus").asText() : null);
+                        ? request.path("resourceShareStatus").asText() : null,
+                regionResolver.getRegion());
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = objectMapper.createArrayNode();
@@ -199,7 +200,8 @@ public class RamController {
         String resourceOwner = request.hasNonNull("resourceOwner")
                 ? request.path("resourceOwner").asText() : null;
         List<PrincipalAssociation> principals = service.listPrincipals(
-                regionResolver.getAccountId(), resourceOwner, stringList(request.path("resourceShareArns")));
+                regionResolver.getAccountId(), resourceOwner, stringList(request.path("resourceShareArns")),
+                regionResolver.getRegion());
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = objectMapper.createArrayNode();
@@ -246,7 +248,8 @@ public class RamController {
         List<ResourceShareInvitation> invitations = service.getResourceShareInvitations(
                 regionResolver.getAccountId(),
                 stringList(request.path("resourceShareArns")),
-                stringList(request.path("resourceShareInvitationArns")));
+                stringList(request.path("resourceShareInvitationArns")),
+                regionResolver.getRegion());
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = objectMapper.createArrayNode();
@@ -308,7 +311,8 @@ public class RamController {
         String resourceOwner = request.hasNonNull("resourceOwner")
                 ? request.path("resourceOwner").asText() : null;
         List<SharedResource> resources = service.listResources(
-                regionResolver.getAccountId(), resourceOwner, stringList(request.path("resourceShareArns")));
+                regionResolver.getAccountId(), resourceOwner, stringList(request.path("resourceShareArns")),
+                regionResolver.getRegion());
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = objectMapper.createArrayNode();

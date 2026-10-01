@@ -119,9 +119,9 @@ public class RamService {
         return stored;
     }
 
-    /** The unfiltered read: every share visible to the caller under {@code resourceOwner}. */
-    public List<ResourceShare> getResourceShares(String callerAccountId, String resourceOwner) {
-        return getResourceShares(callerAccountId, resourceOwner, null, List.of(), null);
+    /** The unfiltered read: every share in {@code region} visible to the caller under {@code resourceOwner}. */
+    public List<ResourceShare> getResourceShares(String callerAccountId, String resourceOwner, String region) {
+        return getResourceShares(callerAccountId, resourceOwner, null, List.of(), null, region);
     }
 
     /**
@@ -130,14 +130,15 @@ public class RamService {
      * @param name exact share name to match, or null for any
      * @param resourceShareArns share ARNs to restrict the result to, or empty for any
      * @param resourceShareStatus one {@code ResourceShareStatus} value to match, or null for any
+     * @param region the request's region: a resource share is a regional resource
      */
     public List<ResourceShare> getResourceShares(String callerAccountId, String resourceOwner,
                                                  String name, List<String> resourceShareArns,
-                                                 String resourceShareStatus) {
+                                                 String resourceShareStatus, String region) {
         requireResourceOwner(resourceOwner);
         requireResourceShareStatus(resourceShareStatus);
         List<ResourceShare> result = new ArrayList<>();
-        for (ResourceShare share : allShares()) {
+        for (ResourceShare share : sharesIn(region)) {
             if (!isVisible(share, callerAccountId, resourceOwner)) {
                 continue;
             }
@@ -161,7 +162,8 @@ public class RamService {
      */
     public List<ResourceShareInvitation> getResourceShareInvitations(String callerAccountId,
                                                                       List<String> resourceShareArns,
-                                                                      List<String> resourceShareInvitationArns) {
+                                                                      List<String> resourceShareInvitationArns,
+                                                                      String region) {
         requireValidArns(resourceShareArns);
         requireValidArns(resourceShareInvitationArns);
         List<ResourceShareInvitation> result = new ArrayList<>();
@@ -169,7 +171,8 @@ public class RamService {
             // "Retrieves details about invitations that you have received": receiver only,
             // not the sender (verified against the API reference; unlike GetResourceShares,
             // there is no SELF/OTHER-ACCOUNTS style toggle here).
-            if (!callerAccountId.equals(invitation.receiverAccountId())) {
+            if (!callerAccountId.equals(invitation.receiverAccountId())
+                    || !region.equals(extractRegion(invitation.resourceShareArn()))) {
                 continue;
             }
             if (!resourceShareArns.isEmpty() && !resourceShareArns.contains(invitation.resourceShareArn())) {
@@ -307,10 +310,10 @@ public class RamService {
     }
 
     public List<SharedResource> listResources(String callerAccountId, String resourceOwner,
-                                              List<String> resourceShareArns) {
+                                              List<String> resourceShareArns, String region) {
         requireResourceOwner(resourceOwner);
         List<SharedResource> result = new ArrayList<>();
-        for (ResourceShare share : allShares()) {
+        for (ResourceShare share : sharesIn(region)) {
             if (!isVisible(share, callerAccountId, resourceOwner)) {
                 continue;
             }
@@ -380,10 +383,10 @@ public class RamService {
      *                      {@link #getResourceShares}
      */
     public List<PrincipalAssociation> listPrincipals(String callerAccountId, String resourceOwner,
-                                                      List<String> resourceShareArns) {
+                                                      List<String> resourceShareArns, String region) {
         requireResourceOwner(resourceOwner);
         List<PrincipalAssociation> result = new ArrayList<>();
-        for (ResourceShare share : allShares()) {
+        for (ResourceShare share : sharesIn(region)) {
             if (!isVisible(share, callerAccountId, resourceOwner)) {
                 continue;
             }
@@ -465,6 +468,16 @@ public class RamService {
         }
         shares.put(stamped.getResourceShareArn(), stamped);
         return stamped;
+    }
+
+    /**
+     * The shares of one region. A resource share is a regional resource, so the listing operations
+     * answer for the request's region only, which also keeps a share out of another partition.
+     */
+    private List<ResourceShare> sharesIn(String region) {
+        return allShares().stream()
+                .filter(share -> region.equals(extractRegion(share.getResourceShareArn())))
+                .toList();
     }
 
     private List<ResourceShare> allShares() {

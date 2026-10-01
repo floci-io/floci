@@ -67,12 +67,12 @@ class RamServiceTest {
                 "delete-me", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
         service.deleteResourceShare(share.getResourceShareArn(), OWNER);
 
-        assertTrue(service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of()).isEmpty());
-        assertTrue(service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS", List.of()).isEmpty());
-        assertTrue(service.listResources(OWNER, "SELF", List.of()).isEmpty());
+        assertTrue(service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
+        assertTrue(service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
+        assertTrue(service.listResources(OWNER, "SELF", List.of(), "us-east-1").isEmpty());
 
         // The share itself remains readable with DELETED status.
-        List<ResourceShare> own = service.getResourceShares(OWNER, "SELF");
+        List<ResourceShare> own = service.getResourceShares(OWNER, "SELF", "us-east-1");
         assertEquals(1, own.size());
         assertEquals("DELETED", own.get(0).getStatus());
     }
@@ -86,7 +86,7 @@ class RamServiceTest {
         assertTrue(share.getResourceShareArn().startsWith("arn:aws:ram:us-east-1:" + OWNER + ":resource-share/"));
         assertEquals("ACTIVE", share.getStatus());
 
-        List<ResourceShare> own = service.getResourceShares(OWNER, "SELF");
+        List<ResourceShare> own = service.getResourceShares(OWNER, "SELF", "us-east-1");
         assertEquals(1, own.size());
         assertEquals("us-east-1-tgw-share", own.get(0).getName());
         assertEquals(OWNER, own.get(0).getOwningAccountId());
@@ -97,7 +97,7 @@ class RamServiceTest {
         service.createResourceShare(
                 "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
-        List<ResourceShare> visible = service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS");
+        List<ResourceShare> visible = service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "us-east-1");
         assertEquals(1, visible.size());
         assertEquals(OWNER, visible.get(0).getOwningAccountId());
     }
@@ -107,8 +107,8 @@ class RamServiceTest {
         service.createResourceShare(
                 "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
-        assertTrue(service.getResourceShares(OWNER, "OTHER-ACCOUNTS").isEmpty());
-        assertTrue(service.getResourceShares(ACCEPTER, "SELF").isEmpty());
+        assertTrue(service.getResourceShares(OWNER, "OTHER-ACCOUNTS", "us-east-1").isEmpty());
+        assertTrue(service.getResourceShares(ACCEPTER, "SELF", "us-east-1").isEmpty());
     }
 
     @Test
@@ -118,7 +118,26 @@ class RamServiceTest {
                 List.of("arn:aws-cn:ec2:cn-north-1:111111111111:transit-gateway/tgw-0abc"),
                 false, "cn-north-1", OWNER);
 
-        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").size());
+        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "cn-north-1").size());
+        // A China share never reaches a commercial request, even for a member of the organization.
+        assertTrue(service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "us-east-1").isEmpty());
+    }
+
+    /** A resource share is regional: the listing operations answer for the request's region only. */
+    @Test
+    void listingsAnswerForTheRequestsRegionOnly() {
+        ResourceShare share = service.createResourceShare(
+                "eu-share", List.of(ACCEPTER, OU_ARN), List.of(TGW_ARN), false, "eu-west-1", OWNER);
+
+        assertEquals(1, service.getResourceShares(OWNER, "SELF", "eu-west-1").size());
+        assertTrue(service.getResourceShares(OWNER, "SELF", "us-east-1").isEmpty());
+        assertTrue(service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "us-east-1").isEmpty());
+        assertTrue(service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
+        assertTrue(service.listPrincipals(OWNER, "SELF", List.of(), "us-east-1").isEmpty());
+        assertEquals(List.of(share.getResourceShareArn()),
+                service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "eu-west-1").stream()
+                        .map(ResourceShareInvitation::resourceShareArn).toList());
+        assertTrue(service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").isEmpty());
     }
 
     @Test
@@ -126,7 +145,7 @@ class RamServiceTest {
         service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
-        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").size());
+        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "us-east-1").size());
     }
 
     @Test
@@ -134,23 +153,23 @@ class RamServiceTest {
         service.createResourceShare(
                 "ipam-pool-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
-        assertTrue(service.getResourceShares("000000000000", "OTHER-ACCOUNTS").isEmpty());
-        assertTrue(service.listResources("000000000000", "OTHER-ACCOUNTS", List.of()).isEmpty());
-        assertTrue(service.listPrincipals("000000000000", "OTHER-ACCOUNTS", List.of()).isEmpty());
+        assertTrue(service.getResourceShares("000000000000", "OTHER-ACCOUNTS", "us-east-1").isEmpty());
+        assertTrue(service.listResources("000000000000", "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
+        assertTrue(service.listPrincipals("000000000000", "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
     }
 
     @Test
     void rejectedInvitationNoLongerGrantsShareVisibility() {
         service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
-        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
                 .getFirst().resourceShareInvitationArn();
 
         service.rejectResourceShareInvitation(invitationArn, ACCEPTER);
 
-        assertTrue(service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").isEmpty());
-        assertTrue(service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of()).isEmpty());
-        assertTrue(service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS", List.of()).isEmpty());
+        assertTrue(service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "us-east-1").isEmpty());
+        assertTrue(service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
+        assertTrue(service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
     }
 
     @Test
@@ -158,7 +177,7 @@ class RamServiceTest {
         service.createResourceShare(
                 "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
-        assertTrue(service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).isEmpty());
+        assertTrue(service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").isEmpty());
     }
 
     @Test
@@ -167,7 +186,7 @@ class RamServiceTest {
                 "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
         List<SharedResource> resources =
-                service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(share.getResourceShareArn()));
+                service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(share.getResourceShareArn()), "us-east-1");
         assertEquals(1, resources.size());
         assertEquals(TGW_ARN, resources.get(0).arn());
         assertEquals("ec2:TransitGateway", resources.get(0).type());
@@ -183,7 +202,7 @@ class RamServiceTest {
                 List.of("arn:aws:ec2:us-east-1:111111111111:subnet/subnet-1"), false, "us-east-1", OWNER);
 
         List<SharedResource> resources =
-                service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(other.getResourceShareArn()));
+                service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(other.getResourceShareArn()), "us-east-1");
         assertEquals(1, resources.size());
         assertEquals("ec2:Subnet", resources.get(0).type());
     }
@@ -204,7 +223,7 @@ class RamServiceTest {
         assertUnknownResource(() -> service.tagResource(arn, Map.of("Owner", "attacker"), ACCEPTER));
         assertUnknownResource(() -> service.untagResource(arn, List.of("Owner"), ACCEPTER));
 
-        ResourceShare untouched = service.getResourceShares(OWNER, "SELF").get(0);
+        ResourceShare untouched = service.getResourceShares(OWNER, "SELF", "us-east-1").get(0);
         assertEquals("us-east-1-tgw-share", untouched.getName());
         assertEquals("ACTIVE", untouched.getStatus());
         assertEquals(List.of(TGW_ARN), untouched.getResourceArns());
@@ -219,7 +238,7 @@ class RamServiceTest {
 
         assertEquals("renamed", service.updateResourceShare(arn, "renamed", null, OWNER).getName());
         service.tagResource(arn, Map.of("Owner", "network"), OWNER);
-        assertEquals("network", service.getResourceShares(OWNER, "SELF").get(0).getTags().get("Owner"));
+        assertEquals("network", service.getResourceShares(OWNER, "SELF", "us-east-1").get(0).getTags().get("Owner"));
         assertEquals("DELETED", service.deleteResourceShare(arn, OWNER).getStatus());
     }
 
@@ -234,12 +253,12 @@ class RamServiceTest {
         service.createResourceShare(
                 "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
-        assertInvalidParameter(() -> service.getResourceShares(ACCEPTER, "self"));
-        assertInvalidParameter(() -> service.listPrincipals(ACCEPTER, "EVERYTHING", List.of()));
-        assertInvalidParameter(() -> service.listResources(ACCEPTER, "OTHER_ACCOUNTS", List.of()));
+        assertInvalidParameter(() -> service.getResourceShares(ACCEPTER, "self", "us-east-1"));
+        assertInvalidParameter(() -> service.listPrincipals(ACCEPTER, "EVERYTHING", List.of(), "us-east-1"));
+        assertInvalidParameter(() -> service.listResources(ACCEPTER, "OTHER_ACCOUNTS", List.of(), "us-east-1"));
 
-        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").size());
-        assertEquals(0, service.getResourceShares(ACCEPTER, "SELF").size());
+        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "us-east-1").size());
+        assertEquals(0, service.getResourceShares(ACCEPTER, "SELF", "us-east-1").size());
     }
 
     @Test
@@ -259,7 +278,7 @@ class RamServiceTest {
         assertUnknownResource(() -> service.deleteResourceShare(arn, OWNER));
 
         // Still readable with DELETED status: mutation rejection must not hide it from reads.
-        assertEquals("DELETED", service.getResourceShares(OWNER, "SELF").get(0).getStatus());
+        assertEquals("DELETED", service.getResourceShares(OWNER, "SELF", "us-east-1").get(0).getStatus());
     }
 
     @Test
@@ -268,11 +287,11 @@ class RamServiceTest {
         service.createResourceShare("ipam-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
         List<ResourceShare> matched =
-                service.getResourceShares(OWNER, "SELF", "ipam-share", List.of(), null);
+                service.getResourceShares(OWNER, "SELF", "ipam-share", List.of(), null, "us-east-1");
         assertEquals(1, matched.size());
         assertEquals("ipam-share", matched.get(0).getName());
 
-        assertTrue(service.getResourceShares(OWNER, "SELF", "no-such-share", List.of(), null).isEmpty());
+        assertTrue(service.getResourceShares(OWNER, "SELF", "no-such-share", List.of(), null, "us-east-1").isEmpty());
     }
 
     @Test
@@ -282,7 +301,7 @@ class RamServiceTest {
         service.createResourceShare("ipam-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
         List<ResourceShare> matched = service.getResourceShares(
-                OWNER, "SELF", null, List.of(wanted.getResourceShareArn()), null);
+                OWNER, "SELF", null, List.of(wanted.getResourceShareArn()), null, "us-east-1");
         assertEquals(1, matched.size());
         assertEquals(wanted.getResourceShareArn(), matched.get(0).getResourceShareArn());
     }
@@ -296,22 +315,22 @@ class RamServiceTest {
                 "gone", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
         service.deleteResourceShare(doomed.getResourceShareArn(), OWNER);
 
-        List<ResourceShare> active = service.getResourceShares(OWNER, "SELF", null, List.of(), "ACTIVE");
+        List<ResourceShare> active = service.getResourceShares(OWNER, "SELF", null, List.of(), "ACTIVE", "us-east-1");
         assertEquals(1, active.size());
         assertEquals("live", active.get(0).getName());
 
-        List<ResourceShare> deleted = service.getResourceShares(OWNER, "SELF", null, List.of(), "DELETED");
+        List<ResourceShare> deleted = service.getResourceShares(OWNER, "SELF", null, List.of(), "DELETED", "us-east-1");
         assertEquals(1, deleted.size());
         assertEquals("gone", deleted.get(0).getName());
 
         // No status filter still returns both, as it does today.
-        assertEquals(2, service.getResourceShares(OWNER, "SELF").size());
+        assertEquals(2, service.getResourceShares(OWNER, "SELF", "us-east-1").size());
     }
 
     @Test
     void unmodelledResourceShareStatusIsRejected() {
-        assertInvalidParameter(() -> service.getResourceShares(OWNER, "SELF", null, List.of(), "active"));
-        assertInvalidParameter(() -> service.getResourceShares(OWNER, "SELF", null, List.of(), "GONE"));
+        assertInvalidParameter(() -> service.getResourceShares(OWNER, "SELF", null, List.of(), "active", "us-east-1"));
+        assertInvalidParameter(() -> service.getResourceShares(OWNER, "SELF", null, List.of(), "GONE", "us-east-1"));
     }
 
     @Test
@@ -326,7 +345,7 @@ class RamServiceTest {
         assertEquals(created.getCreationTime(), renamed.getCreationTime());
 
         service.tagResource(arn, Map.of("Owner", "network"), OWNER);
-        ResourceShare tagged = service.getResourceShares(OWNER, "SELF").get(0);
+        ResourceShare tagged = service.getResourceShares(OWNER, "SELF", "us-east-1").get(0);
         assertTrue(tagged.getLastUpdatedTime().isAfter(renamed.getLastUpdatedTime()));
         assertEquals(created.getCreationTime(), tagged.getCreationTime());
     }
@@ -337,7 +356,7 @@ class RamServiceTest {
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
         List<ResourceShareInvitation> invitations =
-                service.getResourceShareInvitations(ACCEPTER, List.of(), List.of());
+                service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1");
         assertEquals(1, invitations.size());
         ResourceShareInvitation invitation = invitations.get(0);
         assertEquals(share.getResourceShareArn(), invitation.resourceShareArn());
@@ -347,9 +366,9 @@ class RamServiceTest {
 
         // Receiver-only, per the API reference ("invitations that you have received"): the
         // sender does not see its own outstanding invitations through this call.
-        assertTrue(service.getResourceShareInvitations(OWNER, List.of(), List.of()).isEmpty());
+        assertTrue(service.getResourceShareInvitations(OWNER, List.of(), List.of(), "us-east-1").isEmpty());
         // But the share itself is visible regardless: invitations are bookkeeping, not a gate.
-        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").size());
+        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "us-east-1").size());
     }
 
     @Test
@@ -357,7 +376,7 @@ class RamServiceTest {
         service.createResourceShare(
                 "ou-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
-        assertTrue(service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).isEmpty());
+        assertTrue(service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").isEmpty());
     }
 
     @Test
@@ -367,37 +386,37 @@ class RamServiceTest {
         service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
 
-        assertTrue(service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).isEmpty());
+        assertTrue(service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").isEmpty());
     }
 
     @Test
     void associatingNewAccountPrincipalCreatesInvitationButReassociatingExistingOneDoesNot() {
         ResourceShare share = service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
-        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).size());
+        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").size());
 
         // Re-associating the same principal must not spawn a second invitation.
         service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER);
-        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).size());
+        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").size());
 
         // A genuinely new principal gets its own.
         String other = "333333333333";
         service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(other), OWNER);
-        assertEquals(1, service.getResourceShareInvitations(other, List.of(), List.of()).size());
-        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).size());
+        assertEquals(1, service.getResourceShareInvitations(other, List.of(), List.of(), "us-east-1").size());
+        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").size());
     }
 
     @Test
     void acceptResourceShareInvitationTransitionsToAcceptedAndIsThenTerminal() {
         service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
-        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
                 .get(0).resourceShareInvitationArn();
 
         ResourceShareInvitation accepted = service.acceptResourceShareInvitation(invitationArn, ACCEPTER);
         assertEquals("ACCEPTED", accepted.status());
         assertEquals("ACCEPTED",
-                service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).get(0).status());
+                service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").get(0).status());
 
         AwsException repeat = assertThrows(AwsException.class,
                 () -> service.acceptResourceShareInvitation(invitationArn, ACCEPTER));
@@ -408,7 +427,7 @@ class RamServiceTest {
     void rejectResourceShareInvitationTransitionsToRejectedAndIsThenTerminal() {
         service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
-        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
                 .get(0).resourceShareInvitationArn();
 
         ResourceShareInvitation rejected = service.rejectResourceShareInvitation(invitationArn, ACCEPTER);
@@ -423,7 +442,7 @@ class RamServiceTest {
     void reassociatingAfterRejectionSendsANewInvitation() {
         ResourceShare share = service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
-        String firstArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+        String firstArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
                 .get(0).resourceShareInvitationArn();
         service.rejectResourceShareInvitation(firstArn, ACCEPTER);
 
@@ -434,24 +453,24 @@ class RamServiceTest {
         service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER);
 
         List<ResourceShareInvitation> invitations =
-                service.getResourceShareInvitations(ACCEPTER, List.of(), List.of());
+                service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1");
         assertEquals(2, invitations.size());
         assertTrue(invitations.stream().anyMatch(i -> "PENDING".equals(i.status())));
 
         // The live invitation must keep the share visible even when the rejected historical
         // invitation is returned first by storage scans.
-        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").size());
+        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "us-east-1").size());
         assertEquals(1, service.listResources(ACCEPTER, "OTHER-ACCOUNTS",
-                List.of(share.getResourceShareArn())).size());
+                List.of(share.getResourceShareArn()), "us-east-1").size());
         assertEquals(1, service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS",
-                List.of(share.getResourceShareArn())).size());
+                List.of(share.getResourceShareArn()), "us-east-1").size());
     }
 
     @Test
     void onlyTheReceiverCanAcceptOrRejectAnInvitation() {
         service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
-        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
                 .get(0).resourceShareInvitationArn();
 
         AwsException bySender = assertThrows(AwsException.class,
@@ -480,7 +499,7 @@ class RamServiceTest {
         assertEquals(400, error.getHttpStatus());
 
         AwsException filterError = assertThrows(AwsException.class, () ->
-                service.getResourceShareInvitations(ACCEPTER, List.of("not-an-arn"), List.of()));
+                service.getResourceShareInvitations(ACCEPTER, List.of("not-an-arn"), List.of(), "us-east-1"));
         assertEquals("MalformedArnException", filterError.getErrorCode());
     }
 
@@ -490,23 +509,24 @@ class RamServiceTest {
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
         service.createResourceShare(
                 "other-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
-        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).stream()
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").stream()
                 .filter(i -> i.resourceShareArn().equals(share.getResourceShareArn()))
                 .findFirst().orElseThrow().resourceShareInvitationArn();
 
         assertEquals(1, service.getResourceShareInvitations(
-                ACCEPTER, List.of(share.getResourceShareArn()), List.of()).size());
+                ACCEPTER, List.of(share.getResourceShareArn()), List.of(), "us-east-1").size());
         assertEquals(1, service.getResourceShareInvitations(
-                ACCEPTER, List.of(), List.of(invitationArn)).size());
+                ACCEPTER, List.of(), List.of(invitationArn), "us-east-1").size());
         assertTrue(service.getResourceShareInvitations(
-                ACCEPTER, List.of("arn:aws:ram:us-east-1:111111111111:resource-share/nope"), List.of()).isEmpty());
+                ACCEPTER, List.of("arn:aws:ram:us-east-1:111111111111:resource-share/nope"), List.of(),
+                "us-east-1").isEmpty());
     }
 
     @Test
     void concurrentAcceptCallsOnTheSameInvitationOnlySucceedOnce() throws Exception {
         service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
-        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of())
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
                 .get(0).resourceShareInvitationArn();
 
         int threadCount = 8;
@@ -571,7 +591,7 @@ class RamServiceTest {
             executor.shutdownNow();
         }
 
-        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of()).size());
+        assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").size());
     }
 
     private static void assertInvalidParameter(Executable read) {
