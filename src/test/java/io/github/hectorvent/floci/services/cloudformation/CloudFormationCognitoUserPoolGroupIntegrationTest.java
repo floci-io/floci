@@ -9,12 +9,16 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 @QuarkusTest
 class CloudFormationCognitoUserPoolGroupIntegrationTest {
@@ -143,6 +147,50 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
     }
 
     @Test
+    void renamingAGroupReplacesItAndDeletesTheGroupUnderTheOldName() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cognito-group-rename-" + suffix;
+
+        String poolId = createStack(stackName, poolAndGroupsTemplate("admin", 0));
+
+        updateStack(stackName, poolAndGroupsTemplate("operators", 0));
+
+        String describeXml = describeStack(stackName);
+        assertThat(describeXml, containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+        assertEquals("operators", output(describeXml, "AdminGroupName"));
+        cognito("ListGroups", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .statusCode(200)
+            .body("Groups.GroupName", containsInAnyOrder("operators", "readers"));
+        cognito("GetGroup", "{\"UserPoolId\": \"" + poolId + "\", \"GroupName\": \"admin\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void movingAnUnnamedGroupToAnotherPoolReplacesItUnderANewGeneratedName() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cognito-group-move-" + suffix;
+
+        String firstPool = createStack(stackName, twoPoolsAndUnnamedGroupTemplate("FirstPool"));
+        String describeXml = describeStack(stackName);
+        String secondPool = output(describeXml, "SecondPoolId");
+        String original = output(describeXml, "GroupName");
+
+        updateStack(stackName, twoPoolsAndUnnamedGroupTemplate("SecondPool"));
+
+        describeXml = describeStack(stackName);
+        assertThat(describeXml, containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+        String replacement = output(describeXml, "GroupName");
+        assertNotEquals(original, replacement, "a pool move replaces the group under a fresh name");
+        cognito("ListGroups", "{\"UserPoolId\": \"" + secondPool + "\"}")
+            .statusCode(200)
+            .body("Groups.GroupName", contains(replacement));
+        cognito("ListGroups", "{\"UserPoolId\": \"" + firstPool + "\"}")
+            .statusCode(200)
+            .body("Groups", hasSize(0));
+    }
+
+    @Test
     void poolSchemaCustomAttributesAreNamespacedAndStandardOnesAreNot() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-cognito-schema-" + suffix;
@@ -187,6 +235,37 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
             .extract().asString();
 
         return describeXml.split("<OutputKey>PoolId</OutputKey>")[1]
+                .split("<OutputValue>")[1].split("</OutputValue>")[0];
+    }
+
+    private void updateStack(String stackName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private String describeStack(String stackName) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+    }
+
+    private static String output(String describeXml, String key) {
+        return describeXml.split("<OutputKey>" + key + "</OutputKey>")[1]
                 .split("<OutputValue>")[1].split("</OutputValue>")[0];
     }
 
@@ -239,6 +318,36 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
                   }
                 }
                 """.formatted(adminGroupName, adminPrecedence);
+    }
+
+    /** Two pools and a group without a GroupName, placed in the pool named by {@code poolLogicalId}. */
+    private static String twoPoolsAndUnnamedGroupTemplate(String poolLogicalId) {
+        return """
+                {
+                  "Resources": {
+                    "FirstPool": {
+                      "Type": "AWS::Cognito::UserPool",
+                      "Properties": { "UserPoolName": "cfn-group-pool-first" }
+                    },
+                    "SecondPool": {
+                      "Type": "AWS::Cognito::UserPool",
+                      "Properties": { "UserPoolName": "cfn-group-pool-second" }
+                    },
+                    "Group": {
+                      "Type": "AWS::Cognito::UserPoolGroup",
+                      "Properties": {
+                        "UserPoolId": { "Ref": "%s" },
+                        "Description": "moves between pools"
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "PoolId": { "Value": { "Ref": "FirstPool" } },
+                    "SecondPoolId": { "Value": { "Ref": "SecondPool" } },
+                    "GroupName": { "Value": { "Ref": "Group" } }
+                  }
+                }
+                """.formatted(poolLogicalId);
     }
 
     private static String poolAndStudentGroupOnlyTemplate() {
