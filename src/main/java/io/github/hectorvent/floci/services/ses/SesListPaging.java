@@ -13,7 +13,10 @@ import java.util.function.Function;
  * 2026-09-27): the default page size, the bound, both error messages, what a v1 out-of-range
  * value is served and the treatment of an empty token differ per operation, while the token itself
  * belongs to the kind of resource listed, so the v1 and v2 lists of the same resources accept each
- * other's tokens and refuse any other list's. Defaults nobody could measure are noted per constant.
+ * other's tokens and refuse any other list's. A token is also bound to the region it was issued in:
+ * replayed in another region (probed 2026-10-01 on the identity and configuration-set lists), it
+ * is refused with the operation's unreadable-token error. Defaults nobody could measure are noted
+ * per constant.
  */
 public enum SesListPaging {
 
@@ -104,13 +107,13 @@ public enum SesListPaging {
         this.emptyTokenInvalid = emptyTokenInvalid;
     }
 
-    <T> PaginatedResult<T> page(List<T> all, Function<T, String> cursorOf, Integer pageSize,
+    <T> PaginatedResult<T> page(String region, List<T> all, Function<T, String> cursorOf, Integer pageSize,
                                 String nextToken) {
         int limit = pageSize(pageSize);
         if (nextToken != null && nextToken.isEmpty() && emptyTokenInvalid) {
             throw invalidToken.apply(nextToken);
         }
-        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace, invalidToken);
+        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace + "@" + region, invalidToken);
     }
 
     int pageSize(Integer requested) {

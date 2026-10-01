@@ -194,7 +194,8 @@ public class SesIdentityService {
      */
     public PaginatedResult<Identity> listIdentities(String identityType, String region, SesListPaging paging,
                                                     Integer pageSize, String nextToken) {
-        return paging.page(listIdentities(identityType, region), Identity::getIdentity, pageSize, nextToken);
+        return paging.page(region, listIdentities(identityType, region), Identity::getIdentity, pageSize,
+                nextToken);
     }
 
     /** By name, the order Floci settles on where SES's own varies between calls. */

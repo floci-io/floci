@@ -30,6 +30,8 @@ class SesIdentityPagingIntegrationTest {
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/ap-south-1/ses/aws4_request";
+    private static final String OTHER_REGION_AUTH =
+            "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-north-1/ses/aws4_request";
     private static final String V1_ROOT = "ListIdentitiesResponse.ListIdentitiesResult.";
 
     @Test
@@ -120,6 +122,24 @@ class SesIdentityPagingIntegrationTest {
 
     @Test
     @Order(7)
+    void aTokenIsRefusedInAnotherRegion() {
+        String token = given().header("Authorization", AUTH).queryParam("PageSize", 1)
+        .when().get("/v2/email/identities").then().statusCode(200)
+                .extract().path("NextToken");
+
+        given().header("Authorization", OTHER_REGION_AUTH).queryParam("NextToken", token)
+        .when().get("/v2/email/identities").then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("Invalid NextToken <" + token + ">."));
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", OTHER_REGION_AUTH)
+                .formParam("Action", "ListIdentities").formParam("NextToken", token)
+        .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("<Message>Invalid NextToken &lt;" + token + "&gt;.</Message>"));
+    }
+
+    @Test
+    @Order(8)
     void withoutAPageSizeV2ServesTwentyFiveAndV1ServesEverything() {
         for (int i = 0; i < 22; i++) {
             create("more-%02d.test".formatted(i));

@@ -127,7 +127,7 @@ public class SesTemplateService {
 
     public PaginatedResult<EmailTemplate> listTemplates(String region, SesListPaging paging, Integer pageSize,
                                                         String nextToken) {
-        return paging.page(listTemplates(region), SesTemplateService::cursor, pageSize, nextToken);
+        return paging.page(region, listTemplates(region), SesTemplateService::cursor, pageSize, nextToken);
     }
 
     /** Newest first, as SES lists them; the paged lists resume on the same order. */

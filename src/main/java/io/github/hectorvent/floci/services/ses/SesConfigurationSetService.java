@@ -131,7 +131,7 @@ public class SesConfigurationSetService {
 
     public PaginatedResult<ConfigurationSet> list(String region, SesListPaging paging, Integer pageSize,
                                                   String nextToken) {
-        return paging.page(list(region), ConfigurationSet::getName, pageSize, nextToken);
+        return paging.page(region, list(region), ConfigurationSet::getName, pageSize, nextToken);
     }
 
     /** By name, as SES lists them; the paged lists resume on the same order. */

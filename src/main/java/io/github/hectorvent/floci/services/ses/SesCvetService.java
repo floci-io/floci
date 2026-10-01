@@ -75,7 +75,7 @@ public class SesCvetService {
 
     public PaginatedResult<CustomVerificationEmailTemplate> listCustomVerificationEmailTemplates(
             String region, SesListPaging paging, Integer pageSize, String nextToken) {
-        return paging.page(listCustomVerificationEmailTemplates(region),
+        return paging.page(region, listCustomVerificationEmailTemplates(region),
                 CustomVerificationEmailTemplate::getTemplateName, pageSize, nextToken);
     }
 

@@ -381,7 +381,7 @@ public class SesExportJobService implements Resettable {
     /** Floci validates the filters before the page size and token. */
     public PaginatedResult<ExportJob> listExportJobs(String region, String sourceType, String jobStatus,
                                                      SesListPaging paging, Integer pageSize, String nextToken) {
-        return paging.page(listExportJobs(region, sourceType, jobStatus), SesExportJobService::cursor,
+        return paging.page(region, listExportJobs(region, sourceType, jobStatus), SesExportJobService::cursor,
                 pageSize, nextToken);
     }
 

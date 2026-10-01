@@ -17,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SesListPagingTest {
 
+    private static final String REGION = "us-east-1";
     private static final List<String> ITEMS = List.of("a", "b", "c");
 
     @Test
@@ -117,6 +118,17 @@ class SesListPagingTest {
     }
 
     @Test
+    void aTokenFromAnotherRegion_isRefusedAsUnreadable() {
+        String token = page(SesListPaging.V2_LIST_EMAIL_IDENTITIES, 1, null).nextToken();
+
+        assertError("BadRequestException", "Invalid NextToken <" + token + ">.",
+                () -> SesListPaging.V2_LIST_EMAIL_IDENTITIES.page("us-west-2", ITEMS, Function.identity(), 1, token));
+        assertError("InvalidParameterValue", "Invalid NextToken <" + token + ">.",
+                () -> SesListPaging.V1_LIST_IDENTITIES.page("us-west-2", ITEMS, Function.identity(), 1, token));
+        assertThat(page(SesListPaging.V1_LIST_IDENTITIES, 1, token).items(), contains("b"));
+    }
+
+    @Test
     void invalidToken_messagesQuoteTheToken() {
         assertError("BadRequestException", "Invalid PageToken <garbage>.",
                 () -> page(SesListPaging.V2_LIST_EMAIL_TEMPLATES, 1, "garbage"));
@@ -174,13 +186,13 @@ class SesListPagingTest {
     @Test
     void pageSize_isReportedBeforeTheToken() {
         assertError("BadRequestException", "PageSize must be between 1 and 100",
-                () -> SesListPaging.V2_LIST_EXPORT_JOBS.page(ITEMS, Function.identity(), 0, ""));
+                () -> SesListPaging.V2_LIST_EXPORT_JOBS.page(REGION, ITEMS, Function.identity(), 0, ""));
         assertError("BadRequestException", "The page size must be between 1 and 100",
-                () -> SesListPaging.V2_LIST_EMAIL_TEMPLATES.page(ITEMS, Function.identity(), 0, "garbage"));
+                () -> SesListPaging.V2_LIST_EMAIL_TEMPLATES.page(REGION, ITEMS, Function.identity(), 0, "garbage"));
     }
 
     private static PaginatedResult<String> page(SesListPaging paging, int size, String token) {
-        return paging.page(ITEMS, Function.identity(), size, token);
+        return paging.page(REGION, ITEMS, Function.identity(), size, token);
     }
 
     private static void assertError(String code, String message, Runnable call) {
