@@ -1073,7 +1073,7 @@ public class ApiGatewayService implements ResourceProvider {
     public ApiKey createApiKey(String region, Map<String, Object> request) {
         ApiKey apiKey = new ApiKey();
         apiKey.setName((String) request.get("name"));
-        apiKey.setEnabled(!Boolean.FALSE.equals(request.get("enabled")));
+        apiKey.setEnabled(Boolean.TRUE.equals(request.get("enabled")));
         apiKey.setCreatedDate(System.currentTimeMillis() / 1000L);
         apiKey.setLastUpdatedDate(apiKey.getCreatedDate());
         apiKey.setDescription((String) request.get("description"));
@@ -1253,9 +1253,22 @@ public class ApiGatewayService implements ResourceProvider {
             }
         });
         ReservedTags.rejectApiGatewayReservedTagsOnUpdate(changed);
+        return storeApiKeyTags(region, key, tags);
+    }
+
+    /**
+     * Sets an API key's tags to exactly the given ones, reserved tags included. It is for putting
+     * back the tags a key had before a failed stack update, which may include a reserved tag the
+     * key was created with and the update removed, so it skips the reserved-tag check.
+     */
+    public ApiKey restoreApiKeyTags(String region, String apiKeyId, Map<String, String> tags) {
+        return storeApiKeyTags(region, getApiKey(region, apiKeyId), tags);
+    }
+
+    private ApiKey storeApiKeyTags(String region, ApiKey key, Map<String, String> tags) {
         key.setTags(new HashMap<>(tags));
         key.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
-        apiKeyStore.put(apiKeyGlobalKey(region, apiKeyId), key);
+        apiKeyStore.put(apiKeyGlobalKey(region, key.getId()), key);
         return key;
     }
 

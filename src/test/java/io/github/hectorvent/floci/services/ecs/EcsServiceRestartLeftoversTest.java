@@ -141,6 +141,29 @@ class EcsServiceRestartLeftoversTest {
     }
 
     @Test
+    void optingOutLeavesThePreviousRunsContainersButReleasesItsRegistrations() {
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        EcsLoadBalancerRegistrar lbRegistrar = mock(EcsLoadBalancerRegistrar.class);
+        EcsServiceDiscoveryRegistrar discoveryRegistrar = mock(EcsServiceDiscoveryRegistrar.class);
+        EcsService restarted = service(new SharedStorageFactory(), false, false, containerManager,
+                lbRegistrar, discoveryRegistrar);
+        restarted.createCluster("app-cluster", Map.of(), REGION);
+        ContainerDefinition container = new ContainerDefinition();
+        container.setName("web");
+        container.setImage("nginx:alpine");
+        restarted.registerTaskDefinition("web", List.of(container), NetworkMode.bridge, null, null,
+                null, null, List.of(), REGION);
+
+        restarted.releasePreviousRunLeftovers();
+        restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION);
+
+        verify(containerManager, never()).removeLeftoverContainers();
+        verify(containerManager).startTask(any(), any(), any(), anyString());
+        verify(lbRegistrar).releaseRecordedTargets();
+        verify(discoveryRegistrar).releaseRecordedInstances();
+    }
+
+    @Test
     void startupReleasesLeftoversBeforeTheSchedulerRuns() {
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         EcsService service = service(new SharedStorageFactory(), false, containerManager,
@@ -223,8 +246,17 @@ class EcsServiceRestartLeftoversTest {
                                       EcsContainerManager containerManager,
                                       EcsLoadBalancerRegistrar lbRegistrar,
                                       EcsServiceDiscoveryRegistrar discoveryRegistrar) {
+        return service(storage, mockMode, true, containerManager, lbRegistrar, discoveryRegistrar);
+    }
+
+    private static EcsService service(StorageFactory storage, boolean mockMode,
+                                      boolean reconcileContainersOnStartup,
+                                      EcsContainerManager containerManager,
+                                      EcsLoadBalancerRegistrar lbRegistrar,
+                                      EcsServiceDiscoveryRegistrar discoveryRegistrar) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(mockMode);
+        when(config.services().ecs().reconcileContainersOnStartup()).thenReturn(reconcileContainersOnStartup);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
                 config, lbRegistrar, storage, null, new EcsExecSessionRegistry(), discoveryRegistrar);

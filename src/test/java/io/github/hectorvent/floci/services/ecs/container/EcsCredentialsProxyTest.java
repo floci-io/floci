@@ -224,6 +224,7 @@ class EcsCredentialsProxyTest {
 
     @Test
     void reapSurvivingProxiesRemovesOnlyThisInstancesOwnLeftovers() {
+        when(config.services().ecs().reconcileContainersOnStartup()).thenReturn(true);
         when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
         when(config.port()).thenReturn(4566);
         ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
@@ -245,7 +246,18 @@ class EcsCredentialsProxyTest {
     }
 
     @Test
+    void reapSurvivingProxiesLeavesProxiesAloneWhenStartupReconciliationIsOff() {
+        when(config.services().ecs().reconcileContainersOnStartup()).thenReturn(false);
+
+        proxy.reapSurvivingProxies();
+
+        verify(dockerClient, never()).listContainersCmd();
+        verify(lifecycleManager, never()).removeIfExists(any());
+    }
+
+    @Test
     void reapSurvivingProxiesToleratesADockerFailure() {
+        when(config.services().ecs().reconcileContainersOnStartup()).thenReturn(true);
         when(dockerClient.listContainersCmd()).thenThrow(new RuntimeException("daemon unreachable"));
 
         proxy.reapSurvivingProxies();

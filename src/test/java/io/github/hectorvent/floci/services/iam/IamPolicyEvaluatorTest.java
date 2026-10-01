@@ -7,10 +7,14 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicy
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -37,6 +41,40 @@ class IamPolicyEvaluatorTest {
     private static final String MALFORMED = "{\"Version\":\"2012-10-17\",\"Statement\":[";
 
     private final IamPolicyEvaluator evaluator = new IamPolicyEvaluator(new ObjectMapper());
+
+    @Test
+    void globMatchingWithRepeatedWildcardsDoesNotBacktrackExponentially() {
+        String pattern = "*a".repeat(10) + "*b";
+        String value = "a".repeat(40);
+
+        assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
+            assertFalse(IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value));
+            assertFalse(IamPolicyEvaluator.globMatches(pattern, value));
+            assertTrue(IamPolicyEvaluator.caseSensitiveGlobMatches("*a?*b", "zzacccb"));
+        });
+    }
+
+    @Test
+    void wildcardMatchesLiteralAsteriskInValue() {
+        assertTrue(IamPolicyEvaluator.caseSensitiveGlobMatches("a*", "a*b"));
+        assertTrue(IamPolicyEvaluator.globMatches("A*", "a*b"));
+    }
+
+    @Test
+    void resourceDenyMatchesS3KeyContainingLiteralAsterisk() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"*"},
+                  {"Effect":"Deny","Action":"s3:GetObject",
+                   "Resource":"arn:aws:s3:::bucket/private/*"}
+                ]}""";
+        CallerContext caller = CallerContext.of(List.of(policy));
+
+        assertEquals(Decision.DENY,
+                evaluator.evaluate(caller, null, "s3:GetObject", "arn:aws:s3:::bucket/private/*x", null));
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(caller, null, "s3:GetObject", "arn:aws:s3:::bucket/public/*x", null));
+    }
 
     private static CallerContext adminWithScps(List<List<String>> scpLevels) {
         return CallerContext.of(List.of(ALLOW_ALL)).withScpLevels(scpLevels);
@@ -377,6 +415,43 @@ class IamPolicyEvaluatorTest {
         assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
                 List.of(anyValue), "dynamodb:GetItem", "*",
                 Map.of("dynamodb:LeadingKeys", List.of("USER_alice"))));
+    }
+
+    @Test
+    void negatedOperatorOnAnAbsentKeyHolds() {
+        // IAM User Guide, condition operators: when the condition requires that the key is not
+        // matched and the key is not present, the condition is true. A Deny written that way
+        // applies to a request that does not carry the key.
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"sqs:SendMessage","Resource":"*"},
+              {"Effect":"Deny","Action":"sqs:SendMessage","Resource":"*",
+               "Condition":{"ArnNotLike":{"aws:SourceArn":"arn:aws:sns:us-east-1:111122223333:*"}}}
+            ]}""";
+
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(policy), "sqs:SendMessage", "*", Map.of()));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(
+                List.of(policy), "sqs:SendMessage", "*",
+                Map.of("aws:SourceArn", List.of("arn:aws:sns:us-east-1:999999999999:topic"))));
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(policy), "sqs:SendMessage", "*",
+                Map.of("aws:SourceArn", List.of("arn:aws:sns:us-east-1:111122223333:topic"))));
+    }
+
+    @Test
+    void negatedSetOperatorOnAnAbsentKeyKeepsTheSetOperatorRule() {
+        // The set operators have their own rule for an absent key: ForAnyValue with a Deny effect
+        // evaluates as no match when the key is not present (IAM User Guide, set operators).
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":"*"},
+              {"Effect":"Deny","Action":"dynamodb:GetItem","Resource":"*",
+               "Condition":{"ForAnyValue:StringNotEquals":{"dynamodb:Attributes":["name"]}}}
+            ]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(
+                List.of(policy), "dynamodb:GetItem", "*", Map.of()));
     }
 
     @Test

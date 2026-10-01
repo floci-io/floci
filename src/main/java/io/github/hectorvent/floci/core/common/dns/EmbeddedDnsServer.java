@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common.dns;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsConfigSource;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.quarkus.runtime.Startup;
 import io.vertx.core.Vertx;
@@ -37,6 +38,10 @@ import java.util.regex.Pattern;
  * Resolves *.{floci.hostname} (and any configured extra-suffixes) to Floci's own
  * Docker network IP so virtual-hosted S3 URLs (my-bucket.floci:4566) work from
  * inside Lambda containers without requiring wildcard Docker aliases.
+ *
+ * When floci.dns.spoof-aws-endpoints is enabled, every AWS partition suffix and all of its
+ * subdomains resolve to Floci's IP as well (transparent endpoint injection), so
+ * clients built with explicit real-AWS endpoints land on the emulator.
  *
  * Also answers for any name a {@link DnsRecordSource} owns, which is how a service that holds
  * a private DNS zone (Cloud Map) gets real records rather than only API responses.
@@ -91,6 +96,22 @@ public class EmbeddedDnsServer {
         this(suffixes, List.of());
     }
 
+    /**
+     * The certificate generator cannot read application.yml, so DNS spoofing without AWS SANs on
+     * the certificate only happens when the flag and TLS are on but the flag is not visible to it.
+     */
+    static boolean shouldWarnSpoofInvisibleToTls(boolean spoofConfigured, boolean tlsEnabled,
+                                                 boolean spoofVisibleToTls) {
+        return spoofConfigured && tlsEnabled && !spoofVisibleToTls;
+    }
+
+    EmbeddedDnsServer(List<String> suffixes, boolean spoofAwsEndpoints) {
+        this(suffixes, List.of());
+        if (spoofAwsEndpoints) {
+            this.suffixes.addAll(TlsConfigSource.awsEndpointSuffixes());
+        }
+    }
+
     EmbeddedDnsServer(List<String> suffixes, Iterable<DnsRecordSource> recordSources) {
         this(suffixes, recordSources, List.of(), List.of());
     }
@@ -124,6 +145,13 @@ public class EmbeddedDnsServer {
             suffixes.addAll(BUILTIN_SUFFIXES);
             config.hostname().ifPresent(suffixes::add);
             config.dns().extraSuffixes().ifPresent(suffixes::addAll);
+            if (config.dns().spoofAwsEndpoints()) {
+                suffixes.addAll(TlsConfigSource.awsEndpointSuffixes());
+                if (shouldWarnSpoofInvisibleToTls(true, TlsConfigSource.tlsEnabledVisibleToTls(),
+                        TlsConfigSource.spoofAwsEndpointsVisibleToTls())) {
+                    LOG.warnv("floci.dns.spoof-aws-endpoints is set in application config but the TLS certificate only reads it from FLOCI_DNS_SPOOF_AWS_ENDPOINTS or -Dfloci.dns.spoof-aws-endpoints; https:// calls to {0} will fail the handshake until it is set there.", TlsConfigSource.awsEndpointSuffixes());
+                }
+            }
 
             DatagramSocket socket = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));
             socket.listen(DNS_PORT, "0.0.0.0", ar -> {

@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
@@ -20,16 +23,19 @@ import java.util.Set;
  * {@link ApiGatewayService}. {@code Ref} and {@code Fn::GetAtt [Key, APIKeyId]} both yield the key
  * id, matching AWS.
  *
- * <p>Description, Enabled and Tags update in place. Name, Value and GenerateDistinctId are
- * createOnly in the registry schema: AWS replaces the key for a change to any of them, and this
- * provisioner has no replacement path, so such a change is reported rather than applied to a key
- * whose value callers already hold. The deprecated StageKeys property is accepted without effect.
+ * <p>CustomerId, Description, Enabled and Tags update in place, and the values the key had are kept
+ * on the resource so a failed stack update can put all four back. Name, Value and
+ * GenerateDistinctId are createOnly in the registry schema: AWS replaces the key for a change to
+ * any of them, and this provisioner has no replacement path, so such a change is reported rather
+ * than applied to a key whose value callers already hold. The deprecated StageKeys property is
+ * accepted without effect.
  */
 @ApplicationScoped
 public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String TYPE = "AWS::ApiGateway::ApiKey";
     private static final String NOT_FOUND = "NotFoundException";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     /** Well under AWS's 1024-character name limit, and in line with the other generated names. */
     private static final int GENERATED_NAME_MAX = 128;
 
@@ -47,6 +53,8 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(CfnRollback.API_KEY_UPDATE_SNAPSHOT_ATTR);
         if (ctx.isUpdate()) {
             // An update re-invokes provision with the prior physical id. Creating unconditionally
             // would mint a second key on every update and orphan the first, which then outlives the
@@ -58,6 +66,21 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         create(r, props, ctx);
+        if (ctx.isUpdate()) {
+            recordCreatedByUpdate(r, ctx);
+        }
+    }
+
+    /**
+     * Records that this update created the key because the one at the prior physical id was gone,
+     * so {@link #rollbackUpdate} can delete it and name the prior id again.
+     */
+    private static void recordCreatedByUpdate(StackResource r, ProvisionContext ctx) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("region", ctx.region());
+        snapshot.put("createdId", r.getPhysicalId());
+        snapshot.put("priorId", ctx.priorPhysicalId());
+        r.getAttributes().put(CfnRollback.API_KEY_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
     }
 
     private void create(StackResource r, JsonNode props, ProvisionContext ctx) {
@@ -108,30 +131,77 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
-        List<Map<String, String>> patches = new ArrayList<>();
-        String customerId = ctx.resolveOptional(props, "CustomerId");
-        if (!Objects.equals(blankToNull(customerId), blankToNull(existing.getCustomerId()))) {
-            patches.add(patch("/customerId", customerId));
-        }
-        String description = ctx.resolveOptional(props, "Description");
-        if (!Objects.equals(blankToNull(description), blankToNull(existing.getDescription()))) {
-            patches.add(patch("/description", description));
-        }
-        // Enabled defaults to true when the template omits it, as in AWS.
+        // Enabled defaults to false when the template omits it, as in the AWS registry schema.
         Boolean enabled = resolveBoolean(props, "Enabled", ctx);
-        boolean desiredEnabled = enabled == null || enabled;
-        if (desiredEnabled != existing.isEnabled()) {
-            patches.add(patch("/enabled", Boolean.toString(desiredEnabled)));
-        }
-        ApiKey key = patches.isEmpty()
-                ? existing
-                : apiGatewayService.updateApiKey(ctx.region(), existing.getId(), patches);
-
+        List<Map<String, String>> patches = patchesTo(existing, ctx.resolveOptional(props, "CustomerId"),
+                ctx.resolveOptional(props, "Description"), enabled != null && enabled);
         Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
-        if (!desiredTags.equals(key.getTags())) {
-            key = apiGatewayService.replaceApiKeyTags(ctx.region(), key.getId(), desiredTags);
+        boolean tagsChanged = !desiredTags.equals(existing.getTags());
+        if (!patches.isEmpty() || tagsChanged) {
+            snapshotBeforeUpdate(r, existing, ctx.region());
+        }
+
+        // Tags go first: the service refuses a tag change that adds a reserved tag key, and refusing
+        // it before the patch leaves the key exactly as the stack last committed it.
+        ApiKey key = existing;
+        try {
+            if (tagsChanged) {
+                key = apiGatewayService.replaceApiKeyTags(ctx.region(), existing.getId(), desiredTags);
+            }
+            if (!patches.isEmpty()) {
+                key = apiGatewayService.updateApiKey(ctx.region(), existing.getId(), patches);
+            }
+        } catch (RuntimeException failure) {
+            // The stack skips rollbackUpdate for a resource whose own update failed, so undo it here.
+            try {
+                rollbackUpdate(r);
+            } catch (RuntimeException restoreFailure) {
+                r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                        "Could not roll back the update of API key " + existing.getId() + ": "
+                                + restoreFailure.getMessage());
+                if (restoreFailure != failure) {
+                    failure.addSuppressed(restoreFailure);
+                }
+            }
+            throw failure;
         }
         record(r, key);
+    }
+
+    /**
+     * The patches that set the key's customer id, description and enabled flag to the given values,
+     * one for each value that differs from the key's. A blank string and no value count as equal.
+     */
+    private static List<Map<String, String>> patchesTo(ApiKey key, String customerId, String description,
+                                                       boolean enabled) {
+        List<Map<String, String>> patches = new ArrayList<>();
+        if (!Objects.equals(blankToNull(customerId), blankToNull(key.getCustomerId()))) {
+            patches.add(patch("/customerId", customerId));
+        }
+        if (!Objects.equals(blankToNull(description), blankToNull(key.getDescription()))) {
+            patches.add(patch("/description", description));
+        }
+        if (enabled != key.isEnabled()) {
+            patches.add(patch("/enabled", Boolean.toString(enabled)));
+        }
+        return patches;
+    }
+
+    /**
+     * Keeps the customer id, description, enabled flag and tags the key has before an in-place
+     * update changes them, so {@link #rollbackUpdate} can put them back. Written as text before the
+     * first mutating call, because the service updates the stored key object in place.
+     */
+    private static void snapshotBeforeUpdate(StackResource r, ApiKey existing, String region) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("region", region);
+        snapshot.put("id", existing.getId());
+        snapshot.put("customerId", existing.getCustomerId());
+        snapshot.put("description", existing.getDescription());
+        snapshot.put("enabled", existing.isEnabled());
+        ObjectNode tags = snapshot.putObject("tags");
+        existing.getTags().forEach(tags::put);
+        r.getAttributes().put(CfnRollback.API_KEY_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
     }
 
     private static void record(StackResource r, ApiKey key) {
@@ -176,5 +246,66 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
         }
         CfnDeletes.safeDelete("API key", physicalId,
                 () -> apiGatewayService.deleteApiKey(region, physicalId), NOT_FOUND);
+    }
+
+    /**
+     * Undoes the update from the snapshot on the resource, and is also called by {@code update} when
+     * one of its own mutating calls fails. When the update created the key because
+     * the one at the prior physical id was gone, the created key is deleted and the resource names
+     * the prior id again. Otherwise the customer id, description, enabled flag and tags are put
+     * back, writing only the values where the live key differs from the snapshot, so an update that
+     * failed before it changed anything writes nothing. With no snapshot on the resource the update
+     * changed nothing, since every mutating call is preceded by the snapshot or followed by the
+     * creation record, so there is nothing to undo.
+     * A key deleted since the update fails the rollback with NotFoundException, and the stack
+     * reports the rollback as failed.
+     */
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        // The snapshot is spent only once the restore succeeded: a restore that throws leaves it in
+        // place for the next attempt instead of reporting a rollback that never happened.
+        String raw = resource.getAttributes().get(CfnRollback.API_KEY_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return true;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the API key update snapshot for "
+                    + resource.getLogicalId(), e);
+        }
+        String region = snapshot.path("region").asText();
+        String createdId = snapshotText(snapshot, "createdId");
+        if (createdId != null) {
+            // Deleted before the resource names the prior id again, so a failed delete leaves the
+            // resource naming the created key and deleting the stack still removes it.
+            delete(TYPE, createdId, region);
+            String priorId = snapshot.path("priorId").asText();
+            resource.setPhysicalId(priorId);
+            resource.getAttributes().put("APIKeyId", priorId);
+            resource.getAttributes().remove(CfnRollback.API_KEY_UPDATE_SNAPSHOT_ATTR);
+            return true;
+        }
+        String id = snapshot.path("id").asText();
+        ApiKey live = apiGatewayService.getApiKey(region, id);
+        Map<String, String> tags = new HashMap<>();
+        snapshot.path("tags").fields().forEachRemaining(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
+        if (!tags.equals(live.getTags())) {
+            apiGatewayService.restoreApiKeyTags(region, id, tags);
+        }
+        List<Map<String, String>> patches = patchesTo(live, snapshotText(snapshot, "customerId"),
+                snapshotText(snapshot, "description"), snapshot.path("enabled").asBoolean());
+        if (!patches.isEmpty()) {
+            apiGatewayService.updateApiKey(region, id, patches);
+        }
+        resource.getAttributes().remove(CfnRollback.API_KEY_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    /** A snapshotted string, or null when the key carried none. */
+    private static String snapshotText(JsonNode snapshot, String field) {
+        JsonNode value = snapshot.get(field);
+        return value == null || value.isNull() ? null : value.asText();
     }
 }

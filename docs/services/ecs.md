@@ -524,7 +524,14 @@ nothing manages:
   ECS starts no task until it is gone, retrying the removal before each launch: a service's
   replacement on a reconciliation tick, or a `RunTask` or `StartTask` call, whose task then stops
   with a `TaskFailedToStart` reason naming the leftovers. Each distinct failure is logged as a
-  warning once.
+  warning once. Two Floci instances that share a daemon with the same API port and no
+  `FLOCI_DOCKER_RESOURCE_NAMESPACE` carry the same owner label and would remove each other's task
+  containers: give each its own namespace, or set
+  `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP=false` to skip this sweep, as EC2's
+  `FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP` does for instance containers. It also
+  skips the startup removal of task-role credentials proxies, which carry the same label.
+  Registrations are still released either way, since each Floci releases only what its own
+  persisted state recorded.
 - Every load balancer target and Cloud Map instance a previous run's tasks registered is
   deregistered. Floci registers task containers by address, and Docker hands a dead container's
   address to the next container it starts, so a stale target would route to an unrelated
@@ -750,6 +757,7 @@ Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default CPU units when the task definition omits it |
 | `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | *(unset)* | Approved parent directories for host volume bind mounts (`volumes[].host.sourcePath`) |
 | `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES` | `false` | Allow any host path, bypassing the `HOST_VOLUME_ROOTS` allowlist; traversal, the bare root, and the Docker socket are still always rejected |
+| `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | On startup, in Docker mode, remove the ECS containers a previous run of this Floci left on the daemon before the scheduler starts replacement tasks (see [Restarts](#restarts)) |
 | `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED` | `false` | Vend real task IAM role credentials to task containers |
 | `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_TTL_SECONDS` | `21600` | Lifetime of the vended credentials |
 | `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT` | `51679` | Floci-side port serving the credentials endpoint |

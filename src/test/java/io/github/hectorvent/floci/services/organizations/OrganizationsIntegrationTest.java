@@ -12,6 +12,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasItems;
@@ -108,7 +109,9 @@ class OrganizationsIntegrationTest {
 
     @Test
     @Order(4)
-    void listRootsReturnsRootWithServiceControlPolicyEnabled() {
+    void listRootsReturnsRootWithNoPolicyTypesEnabled() {
+        // AvailablePolicyTypes above lists SCPs for an all-features organization, but that is not
+        // the same as the root having them enabled: a new root starts with none.
         rootId = organizations("ListRoots", "{}")
         .when()
             .post("/")
@@ -118,13 +121,31 @@ class OrganizationsIntegrationTest {
             .body("Roots[0].Id", matchesPattern("r-[a-z0-9]{4}"))
             .body("Roots[0].Name", equalTo("Root"))
             .body("Roots[0].Arn", startsWith("arn:aws:organizations::000000000000:root/" + organizationId))
-            .body("Roots[0].PolicyTypes.Type", hasItem("SERVICE_CONTROL_POLICY"))
-            .body("Roots[0].PolicyTypes.Status", hasItem("ENABLED"))
+            .body("Roots[0].PolicyTypes", empty())
             .extract().jsonPath().getString("Roots[0].Id");
     }
 
     @Test
     @Order(5)
+    void serviceControlPoliciesCanBeEnabledOnTheNewRoot() {
+        organizations("EnablePolicyType", "{\"RootId\":\"" + rootId + "\",\"PolicyType\":\"SERVICE_CONTROL_POLICY\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Root.PolicyTypes.Type", contains("SERVICE_CONTROL_POLICY"));
+
+        organizations("ListRoots", "{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Roots[0].PolicyTypes.Type", contains("SERVICE_CONTROL_POLICY"))
+            .body("Roots[0].PolicyTypes.Status", contains("ENABLED"));
+    }
+
+    @Test
+    @Order(6)
     void fullAwsAccessIsAttachedToTheRoot() {
         organizations("ListPoliciesForTarget",
                 "{\"TargetId\":\"" + rootId + "\",\"Filter\":\"SERVICE_CONTROL_POLICY\"}")
