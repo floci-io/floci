@@ -50,7 +50,7 @@ Use this only when the socket's permissions require root. Without the option, Fl
 
 ## Connection Pool
 
-Every Docker call Floci makes goes through one shared client with a bounded connection pool. Some of those connections stay open for as long as a container runs: each Lambda container holds two (its followed log stream and the watcher that notices its runtime exiting) plus one per Lambda extension, and other container-backed services hold one for their log stream. When those long-lived connections fill the pool, every other Docker call (create, start, stop, remove) waits for one to free up, and Floci stops making progress.
+Every Docker call Floci makes goes through one shared client with a bounded connection pool. Some of those connections stay open for as long as a container runs: each Lambda container holds one (the watcher that notices its runtime exiting) plus one per Lambda extension. Log-follow streams use a second pool, described below. When those long-lived connections fill the pool, every other Docker call (create, start, stop, remove) waits for one to free up, and Floci stops making progress.
 
 The default of 1024 connections covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows. Raise it if you widen that range or run many other containers at the same time:
 
