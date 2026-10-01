@@ -1000,11 +1000,12 @@ public class LambdaService implements ResourceProvider {
         LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
         functionName = fn.getFunctionName();
         String arn = fn.getFunctionArn();
-        warmPool.drainFunction(functionName);
-        // Before anything is deleted, so no queued or running event starts or reports on a function being removed.
+        // Before the drain and anything is deleted, so no queued or running event starts a container for,
+        // or reports on, a function being removed.
         if (executorService != null) {
             executorService.dropPending(fn);
         }
+        warmPool.drainFunction(functionName);
         // Take the same per-function lock used by Put/DeleteFunctionConcurrency
         // so a concurrent concurrency mutation cannot interleave with the
         // limiter reset and store delete and leave the two views out of sync.

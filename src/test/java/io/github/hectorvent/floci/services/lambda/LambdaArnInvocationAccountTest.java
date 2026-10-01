@@ -247,7 +247,7 @@ class LambdaArnInvocationAccountTest {
     }
 
     @Test
-    void deleteFunctionDropsPendingEventsBeforeAndAfterRemovingTheFunction() {
+    void deleteFunctionDropsPendingEventsBeforeDrainingAndAfterRemovingTheFunction() {
         String defaultAccount = "000000000000";
         String region = "ap-south-1";
         String functionName = "deleted-function";
@@ -256,14 +256,16 @@ class LambdaArnInvocationAccountTest {
         functionStore.save(region, function(functionName,
                 "arn:aws:lambda:" + region + ":" + defaultAccount + ":function:" + functionName, "$LATEST"));
         LambdaExecutorService executor = mock(LambdaExecutorService.class);
-        LambdaService service = service(functionStore, null, executor, region, defaultAccount);
-        List<Boolean> storedAtEachDrop = new ArrayList<>();
-        doAnswer(invocation -> storedAtEachDrop.add(service.isLive(invocation.getArgument(0))))
+        WarmPool warmPool = mock(WarmPool.class);
+        LambdaService service = service(functionStore, null, executor, warmPool, region, defaultAccount);
+        List<String> steps = new ArrayList<>();
+        doAnswer(invocation -> steps.add(service.isLive(invocation.getArgument(0)) ? "drop stored" : "drop gone"))
                 .when(executor).dropPending(any());
+        doAnswer(invocation -> steps.add("drain")).when(warmPool).drainFunction(functionName);
 
         service.deleteFunction(region, functionName);
 
-        assertEquals(List.of(true, false), storedAtEachDrop);
+        assertEquals(List.of("drop stored", "drain", "drop gone"), steps);
     }
 
     private static LambdaFunction function(String functionName, String functionArn, String version) {
@@ -280,11 +282,21 @@ class LambdaArnInvocationAccountTest {
             LambdaExecutorService executor,
             String region,
             String defaultAccount) {
+        return service(functionStore, aliasStore, executor, new WarmPool(), region, defaultAccount);
+    }
+
+    private static LambdaService service(
+            LambdaFunctionStore functionStore,
+            LambdaAliasStore aliasStore,
+            LambdaExecutorService executor,
+            WarmPool warmPool,
+            String region,
+            String defaultAccount) {
         return new LambdaService(
                 functionStore,
                 executor,
                 new LambdaConcurrencyLimiter(),
-                new WarmPool(),
+                warmPool,
                 new CodeStore(Path.of("target/test-data/lambda-code")),
                 new ZipExtractor(),
                 null,

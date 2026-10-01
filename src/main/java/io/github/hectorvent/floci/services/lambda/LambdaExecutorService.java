@@ -360,10 +360,10 @@ public class LambdaExecutorService implements Resettable {
 
     /**
      * Drops the pending asynchronous events of a deleted function: AWS runs no further attempt and
-     * delivers no record for them. DeleteFunction calls it twice. The call before it deletes anything
-     * stops the events already queued or running, so none starts, or reports a failure for, a function
-     * whose code is being removed. The call after the function has left the store stops an Event invoke
-     * that read the count between the two calls and still found the function stored.
+     * delivers no record for them. DeleteFunction calls it twice. The call before it drains the warm pool
+     * and deletes anything stops the events already queued or running, so none starts, or reports a failure
+     * for, a function whose code is being removed. The call after the function has left the store stops an
+     * Event invoke that read the count between the two calls and still found the function stored.
      */
     void dropPending(LambdaFunction fn) {
         // ponytail: deleting a single published version does not drop its pending events; they fail
