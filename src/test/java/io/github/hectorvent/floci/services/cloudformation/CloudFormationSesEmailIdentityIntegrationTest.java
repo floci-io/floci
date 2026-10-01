@@ -21,6 +21,8 @@ import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
@@ -195,6 +197,98 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             doCallRealMethod().when(sesService).setEmailIdentityMailFromAttributes(identityName, mailFromDomain,
                     "UseDefaultValue", "us-east-1");
             doCallRealMethod().when(sesService).deleteIdentity(identityName, "us-east-1");
+        }
+    }
+
+    @Test
+    void failedReplacementCleanupSurvivesRejectedUpdatesUntilSuccessfulUpdate() throws Exception {
+        String original = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        String replacement = "replacement-" + original;
+        String mailFromDomain = "mail." + replacement;
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        cfn("CreateStack", template(original, false)).then().statusCode(200);
+        awaitStatus("CREATE_COMPLETE");
+        List<String> originalTokens = sesIdentity(original).jsonPath()
+                .getList("DkimAttributes.Tokens", String.class);
+        doThrow(new AwsException("BadRequestException", "MAIL FROM rejected", 400))
+                .when(sesService).setEmailIdentityMailFromAttributes(replacement, mailFromDomain,
+                        "RejectMessage", "us-east-1");
+        doThrow(new AwsException("ServiceUnavailableException", "temporary delete failure", 503))
+                .doCallRealMethod().when(sesService).deleteIdentity(replacement, "us-east-1");
+
+        try {
+            cfn("UpdateStack", template(replacement, true)).then().statusCode(200);
+            String rolledBack = awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+            assertEquals(original, XmlParser.extractPairs(rolledBack,
+                    "Outputs", "OutputKey", "OutputValue").get("IdentityRef"));
+            assertEquals(200, sesIdentity(replacement).statusCode(),
+                    "The failed cleanup must retain the replacement for a later retry");
+            Response identity = sesIdentity(original);
+            assertEquals(200, identity.statusCode(), identity.asString());
+            assertEquals(originalTokens, identity.jsonPath().getList("DkimAttributes.Tokens", String.class));
+            assertEquals("old", identity.jsonPath().getString("Tags.find { it.Key == 'purpose' }.Value"));
+
+            ObjectNode rejected = (ObjectNode) MAPPER.readTree(template(original, false));
+            rejected.withObject("/Resources/Identity/Properties").set("DkimSigningAttributes",
+                    MAPPER.valueToTree(Map.of("NextSigningKeyLength", "INVALID")));
+            cfn("UpdateStack", rejected.toString()).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+            assertEquals(originalTokens,
+                    sesIdentity(original).jsonPath().getList("DkimAttributes.Tokens", String.class));
+            assertEquals(200, sesIdentity(replacement).statusCode());
+            verify(sesService, times(1)).deleteIdentity(replacement, "us-east-1");
+
+            cfn("UpdateStack", template(original, true)).then().statusCode(200);
+            awaitStatus("UPDATE_COMPLETE");
+            assertEquals(404, sesIdentity(replacement).statusCode(),
+                    "A committed update must retry cleanup of the earlier failed replacement");
+            assertEquals("new", sesIdentity(original).jsonPath()
+                    .getString("Tags.find { it.Key == 'purpose' }.Value"));
+            verify(sesService, times(2)).deleteIdentity(replacement, "us-east-1");
+
+            cfn("DeleteStack", null).then().statusCode(200);
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                    assertEquals(404, sesIdentity(original).statusCode()));
+            stack = null;
+        } finally {
+            doCallRealMethod().when(sesService).setEmailIdentityMailFromAttributes(replacement, mailFromDomain,
+                    "RejectMessage", "us-east-1");
+            doCallRealMethod().when(sesService).deleteIdentity(replacement, "us-east-1");
+            given().header("Authorization", SES_AUTH)
+                    .delete("/v2/email/identities/{identity}", replacement).then().statusCode(anyOf(is(200), is(404)));
+        }
+    }
+
+    @Test
+    void stackDeletionRetriesCleanupOfFailedReplacement() throws Exception {
+        String original = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        String replacement = "replacement-" + original;
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        cfn("CreateStack", template(original, false)).then().statusCode(200);
+        awaitStatus("CREATE_COMPLETE");
+        doThrow(new AwsException("ServiceUnavailableException", "temporary read failure", 503))
+                .when(sesService).getEmailIdentity(replacement, "us-east-1");
+        doThrow(new AwsException("ServiceUnavailableException", "temporary delete failure", 503))
+                .doCallRealMethod().when(sesService).deleteIdentity(replacement, "us-east-1");
+
+        try {
+            cfn("UpdateStack", template(replacement, false)).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+            assertEquals(200, sesIdentity(original).statusCode());
+            assertEquals(200, sesIdentity(replacement).statusCode());
+
+            cfn("DeleteStack", null).then().statusCode(200);
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+                assertEquals(404, sesIdentity(original).statusCode());
+                assertEquals(404, sesIdentity(replacement).statusCode());
+            });
+            verify(sesService, times(2)).deleteIdentity(replacement, "us-east-1");
+            stack = null;
+        } finally {
+            doCallRealMethod().when(sesService).getEmailIdentity(replacement, "us-east-1");
+            doCallRealMethod().when(sesService).deleteIdentity(replacement, "us-east-1");
+            given().header("Authorization", SES_AUTH)
+                    .delete("/v2/email/identities/{identity}", replacement).then().statusCode(anyOf(is(200), is(404)));
         }
     }
 

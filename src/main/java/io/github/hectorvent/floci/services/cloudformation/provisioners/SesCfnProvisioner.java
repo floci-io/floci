@@ -136,8 +136,9 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public boolean retainsFailedUpdateState(StackResource resource) {
-        return resource.getAttributes().containsKey(UPDATE_SNAPSHOT_ATTR)
-                || resource.getAttributes().containsKey(CfnRollback.REPLACEMENT_CLEANUP_ATTR);
+        // Orphan cleanup is additive ownership, not a mutation of the prior identity. Without a
+        // current snapshot, let the engine restore the prior resource and carry that ownership over.
+        return resource.getAttributes().containsKey(UPDATE_SNAPSHOT_ATTR);
     }
 
     @Override

@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -82,6 +83,7 @@ class SesCfnProvisionerTest {
 
         provisioner.provision(resource, props, context("example.com"));
 
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
         verify(ses, never()).createEmailIdentity(anyString(), any(), any(), anyString());
         verify(ses).setEmailIdentityConfigurationSet("example.com", "new", "us-east-1");
         verify(ses).setEmailIdentityDkimSigningAttributes("example.com", "RSA_1024_BIT", "us-east-1");
@@ -109,6 +111,7 @@ class SesCfnProvisionerTest {
                 context("example.com"));
 
         assertEquals("other.example.com", resource.getPhysicalId());
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
         verify(ses, never()).deleteIdentity("example.com", "us-east-1");
         assertTrue(provisioner.rollbackUpdate(resource));
         assertEquals("example.com", resource.getPhysicalId());
@@ -186,6 +189,32 @@ class SesCfnProvisionerTest {
         verify(ses).deleteIdentity("other.example.com", "us-east-1");
         assertEquals("example.com", resource.getPhysicalId());
         assertEquals(Map.of("__FlociSesManagedTags", "old"), resource.getAttributes());
+    }
+
+    @Test
+    void failedReplacementCleanupDoesNotRetainUnmutatedUpdateState() throws Exception {
+        Identity identity = domain("other.example.com");
+        when(ses.createEmailIdentity(eq("other.example.com"), isNull(), eq(List.of()), eq("us-east-1")))
+                .thenReturn(identity);
+        when(ses.listResourceTags(anyString(), eq("us-east-1"))).thenReturn(List.of());
+        when(ses.getEmailIdentity("other.example.com", "us-east-1"))
+                .thenThrow(new AwsException("ServiceUnavailableException", "temporary read failure", 503));
+        doThrow(new AwsException("ServiceUnavailableException", "temporary delete failure", 503))
+                .doNothing().when(ses).deleteIdentity("other.example.com", "us-east-1");
+        StackResource resource = resource();
+        resource.setPhysicalId("example.com");
+        resource.getAttributes().put("DkimDNSTokenName1", "prior-token._domainkey.example.com");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource,
+                props("{\"EmailIdentity\":\"other.example.com\"}"), context("example.com")));
+
+        assertEquals(1, failure.getSuppressed().length);
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
+        assertEquals("example.com", resource.getPhysicalId());
+        assertEquals("prior-token._domainkey.example.com", resource.getAttributes().get("DkimDNSTokenName1"));
+        provisioner.delete(resource, "us-east-1");
+        verify(ses, times(2)).deleteIdentity("other.example.com", "us-east-1");
+        verify(ses).deleteIdentity("example.com", "us-east-1");
     }
 
     @Test
