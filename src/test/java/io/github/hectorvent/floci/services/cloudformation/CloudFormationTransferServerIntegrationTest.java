@@ -37,6 +37,7 @@ class CloudFormationTransferServerIntegrationTest {
     private static final String STACK = "cfn-transfer-server-integration";
     private static final String ROLLBACK_STACK = "cfn-transfer-server-rollback-integration";
     private static final String WEST_STACK = "cfn-transfer-server-west-integration";
+    private static final String LEGACY_STACK = "cfn-transfer-server-legacy-integration";
 
     private static final String TEMPLATE = """
             {
@@ -53,7 +54,9 @@ class CloudFormationTransferServerIntegrationTest {
                 "ServerRef": {"Value": {"Ref": "Server"}},
                 "ServerId": {"Value": {"Fn::GetAtt": ["Server", "ServerId"]}},
                 "ServerArn": {"Value": {"Fn::GetAtt": ["Server", "Arn"]}},
-                "DefaultedRef": {"Value": {"Ref": "Defaulted"}}
+                "ServerState": {"Value": {"Fn::GetAtt": ["Server", "State"]}},
+                "DefaultedRef": {"Value": {"Ref": "Defaulted"}},
+                "DefaultedId": {"Value": {"Fn::GetAtt": ["Defaulted", "ServerId"]}}
               }
             }
             """;
@@ -64,7 +67,12 @@ class CloudFormationTransferServerIntegrationTest {
                   "LoggingRole":"%s", "Tags":[{"Key":"stage","Value":"%s"}]
                 }}%s
               },
-              "Outputs": {"ServerRef":{"Value":{"Ref":"Server"}}}
+              "Outputs": {
+                "ServerRef":{"Value":{"Ref":"Server"}},
+                "ServerId":{"Value":{"Fn::GetAtt":["Server","ServerId"]}},
+                "ServerArn":{"Value":{"Fn::GetAtt":["Server","Arn"]}},
+                "ServerState":{"Value":{"Fn::GetAtt":["Server","State"]}}
+              }
             }
             """;
 
@@ -77,10 +85,13 @@ class CloudFormationTransferServerIntegrationTest {
     void createUpdateAndDeleteBackedServers() {
         cloudFormation("CreateStack", template("role-1", "TransferSecurityPolicy-2023-05", "first"));
         Map<String, String> outputs = outputs("CREATE_COMPLETE");
-        String serverId = outputs.get("ServerRef");
-        String defaultedId = outputs.get("DefaultedRef");
-        assertEquals(serverId, outputs.get("ServerId"));
-        assertTrue(outputs.get("ServerArn").endsWith("server/" + serverId));
+        String serverId = outputs.get("ServerId");
+        String serverArn = outputs.get("ServerArn");
+        String defaultedId = outputs.get("DefaultedId");
+        assertEquals(serverArn, outputs.get("ServerRef"));
+        assertTrue(serverArn.endsWith("server/" + serverId));
+        assertTrue(outputs.get("DefaultedRef").endsWith("server/" + defaultedId));
+        assertEquals("ONLINE", outputs.get("ServerState"));
         describeServer(serverId)
                 .body("Server.ServerId", equalTo(serverId))
                 .body("Server.Arn", equalTo(outputs.get("ServerArn")))
@@ -95,7 +106,10 @@ class CloudFormationTransferServerIntegrationTest {
         tagServer(outputs.get("ServerArn"), "external", "keep");
 
         cloudFormation("UpdateStack", template("role-2", "TransferSecurityPolicy-2020-06", "second"));
-        assertEquals(serverId, outputs("UPDATE_COMPLETE").get("ServerRef"));
+        Map<String, String> updatedOutputs = outputs("UPDATE_COMPLETE");
+        assertEquals(serverId, updatedOutputs.get("ServerId"));
+        assertEquals(serverArn, updatedOutputs.get("ServerRef"));
+        assertEquals("ONLINE", updatedOutputs.get("ServerState"));
         StackResource updated = cloudFormationService.describeStackResources(STACK, "us-east-1").stream()
                 .filter(resource -> "Server".equals(resource.getLogicalId()))
                 .findFirst().orElseThrow();
@@ -107,7 +121,7 @@ class CloudFormationTransferServerIntegrationTest {
                 .body("Server.Tags.find { it.Key == 'external' }.Value", equalTo("keep"));
 
         cloudFormation("UpdateStack", TEMPLATE.formatted("\"Protocols\": [\"SFTP\"]"));
-        assertEquals(serverId, outputs("UPDATE_COMPLETE").get("ServerRef"));
+        assertEquals(serverArn, outputs("UPDATE_COMPLETE").get("ServerRef"));
         describeServer(serverId)
                 .body("Server.LoggingRole", nullValue())
                 .body("Server.Tags.find { it.Key == 'stage' }", nullValue())
@@ -124,7 +138,10 @@ class CloudFormationTransferServerIntegrationTest {
     void laterResourceFailureRestoresServerSettings() {
         cloudFormation(ROLLBACK_STACK, "CreateStack",
                 ROLLBACK_TEMPLATE.formatted("original-role", "original", ""));
-        String serverId = outputs(ROLLBACK_STACK, "CREATE_COMPLETE").get("ServerRef");
+        Map<String, String> created = outputs(ROLLBACK_STACK, "CREATE_COMPLETE");
+        String serverId = created.get("ServerId");
+        String serverArn = created.get("ServerArn");
+        assertEquals(serverArn, created.get("ServerRef"));
         describeServer(serverId).body("Server.Tags.find { it.Key == 'stage' }.Value", equalTo("original"));
         String failingResource = """
                 , "BadServer": {
@@ -135,10 +152,22 @@ class CloudFormationTransferServerIntegrationTest {
 
         cloudFormation(ROLLBACK_STACK, "UpdateStack",
                 ROLLBACK_TEMPLATE.formatted("changed-role", "changed", failingResource));
-        assertEquals(serverId, outputs(ROLLBACK_STACK, "UPDATE_ROLLBACK_COMPLETE").get("ServerRef"));
+        Map<String, String> restored = outputs(ROLLBACK_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        assertEquals(serverArn, restored.get("ServerRef"));
+        assertEquals(serverId, restored.get("ServerId"));
+        assertEquals("ONLINE", restored.get("ServerState"));
         describeServer(serverId)
                 .body("Server.LoggingRole", equalTo("original-role"))
                 .body("Server.Tags.find { it.Key == 'stage' }.Value", equalTo("original"));
+
+        cloudFormation(ROLLBACK_STACK, "UpdateStack",
+                ROLLBACK_TEMPLATE.formatted("retry-role", "retry", ""));
+        Map<String, String> retried = outputs(ROLLBACK_STACK, "UPDATE_COMPLETE");
+        assertEquals(serverArn, retried.get("ServerRef"));
+        assertEquals(serverId, retried.get("ServerId"));
+        describeServer(serverId)
+                .body("Server.LoggingRole", equalTo("retry-role"))
+                .body("Server.Tags.find { it.Key == 'stage' }.Value", equalTo("retry"));
 
         cloudFormation(ROLLBACK_STACK, "DeleteStack", null);
         CfnStackWaits.awaitStackDeleted(ROLLBACK_STACK);
@@ -150,8 +179,11 @@ class CloudFormationTransferServerIntegrationTest {
         cloudFormation(WEST_STACK, "CreateStack", TEMPLATE.formatted("\"LoggingRole\":\"west-original\""),
                 WEST_CFN_AUTH);
         Map<String, String> created = outputs(WEST_STACK, "CREATE_COMPLETE", WEST_CFN_AUTH);
-        String serverId = created.get("ServerRef");
-        assertTrue(created.get("ServerArn").contains(":us-west-2:"));
+        String serverId = created.get("ServerId");
+        String serverArn = created.get("ServerArn");
+        assertEquals(serverArn, created.get("ServerRef"));
+        assertTrue(serverArn.contains(":us-west-2:"));
+        assertEquals("ONLINE", created.get("ServerState"));
         describeServer(serverId, WEST_TRANSFER_AUTH)
                 .statusCode(200)
                 .body("Server.LoggingRole", equalTo("west-original"));
@@ -159,7 +191,7 @@ class CloudFormationTransferServerIntegrationTest {
 
         cloudFormation(WEST_STACK, "UpdateStack", TEMPLATE.formatted("\"LoggingRole\":\"west-updated\""),
                 WEST_CFN_AUTH);
-        assertEquals(serverId, outputs(WEST_STACK, "UPDATE_COMPLETE", WEST_CFN_AUTH).get("ServerRef"));
+        assertEquals(serverArn, outputs(WEST_STACK, "UPDATE_COMPLETE", WEST_CFN_AUTH).get("ServerRef"));
         describeServer(serverId, WEST_TRANSFER_AUTH)
                 .statusCode(200)
                 .body("Server.LoggingRole", equalTo("west-updated"));
@@ -168,6 +200,31 @@ class CloudFormationTransferServerIntegrationTest {
         cloudFormation(WEST_STACK, "DeleteStack", null, WEST_CFN_AUTH);
         CfnStackWaits.awaitStackDeleted(WEST_STACK, WEST_CFN_AUTH);
         describeServer(serverId, WEST_TRANSFER_AUTH).statusCode(404);
+    }
+
+    @Test
+    void legacyServerIdCanUpdateAndDeleteWithArnRef() {
+        cloudFormation(LEGACY_STACK, "CreateStack", TEMPLATE.formatted("\"LoggingRole\":\"legacy-role\""));
+        Map<String, String> created = outputs(LEGACY_STACK, "CREATE_COMPLETE");
+        String serverId = created.get("ServerId");
+        String serverArn = created.get("ServerArn");
+        StackResource legacy = cloudFormationService.describeStackResources(LEGACY_STACK, "us-east-1").stream()
+                .filter(resource -> "Server".equals(resource.getLogicalId()))
+                .findFirst().orElseThrow();
+        legacy.setPhysicalId(serverId);
+        legacy.getAttributes().remove("State");
+
+        cloudFormation(LEGACY_STACK, "UpdateStack", TEMPLATE.formatted("\"LoggingRole\":\"updated-role\""));
+        Map<String, String> updated = outputs(LEGACY_STACK, "UPDATE_COMPLETE");
+        assertEquals(serverId, updated.get("ServerId"));
+        assertEquals(serverArn, updated.get("ServerRef"));
+        assertEquals(serverArn, updated.get("ServerArn"));
+        assertEquals("ONLINE", updated.get("ServerState"));
+        describeServer(serverId).body("Server.LoggingRole", equalTo("updated-role"));
+
+        cloudFormation(LEGACY_STACK, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(LEGACY_STACK);
+        describeServer(serverId).statusCode(404);
     }
 
     private static String template(String role, String policy, String stage) {

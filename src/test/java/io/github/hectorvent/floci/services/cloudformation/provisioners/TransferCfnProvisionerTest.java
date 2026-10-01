@@ -41,13 +41,14 @@ class TransferCfnProvisionerTest {
 
         provisioner.provision(resource, mapper.readTree("{}"), context(null));
 
-        assertEquals(server.getServerId(), resource.getPhysicalId());
+        assertEquals(server.getArn(), resource.getPhysicalId());
         assertEquals(server.getServerId(), resource.getAttributes().get("ServerId"));
         assertEquals(server.getArn(), resource.getAttributes().get("Arn"));
+        assertEquals("ONLINE", resource.getAttributes().get("State"));
     }
 
     @Test
-    void updateKeepsIdAndClearsRemovedOptionalProperties() throws Exception {
+    void updateUsesArnAndClearsRemovedOptionalProperties() throws Exception {
         Server server = server();
         server.setDomain("S3");
         server.setIdentityProviderType("SERVICE_MANAGED");
@@ -59,10 +60,31 @@ class TransferCfnProvisionerTest {
         StackResource resource = resource();
         resource.getAttributes().put("__FlociTransferServerTemplateTagKeys", "[\"stale\"]");
 
+        provisioner.provision(resource, mapper.readTree("{}"), context(server.getArn()));
+
+        assertEquals(server.getArn(), resource.getPhysicalId());
+        verify(transfer).untagResource(server.getArn(), List.of("stale"));
+    }
+
+    @Test
+    void updateLegacyServerIdMigratesRefWithoutCreatingAnotherServer() throws Exception {
+        Server server = server();
+        server.setDomain("S3");
+        server.setIdentityProviderType("SERVICE_MANAGED");
+        server.setState("OFFLINE");
+        when(transfer.getServer(server.getServerId())).thenReturn(server);
+        when(transfer.replaceServerConfiguration(eq(server.getServerId()), any(), any(), any(), any(), any(), any()))
+                .thenReturn(server);
+        when(transfer.listTagsForResource(server.getArn())).thenReturn(Map.of());
+        StackResource resource = resource();
+        resource.setPhysicalId(server.getServerId());
+
         provisioner.provision(resource, mapper.readTree("{}"), context(server.getServerId()));
 
-        assertEquals(server.getServerId(), resource.getPhysicalId());
-        verify(transfer).untagResource(server.getArn(), List.of("stale"));
+        assertEquals(server.getArn(), resource.getPhysicalId());
+        assertEquals(server.getServerId(), resource.getAttributes().get("ServerId"));
+        assertEquals("OFFLINE", resource.getAttributes().get("State"));
+        verify(transfer, never()).createServer(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -129,6 +151,21 @@ class TransferCfnProvisionerTest {
     }
 
     @Test
+    void identityProviderTypeChangeIsRejectedAsFlociLimitation() throws Exception {
+        Server server = server();
+        server.setDomain("S3");
+        server.setIdentityProviderType("SERVICE_MANAGED");
+        when(transfer.getServer(server.getServerId())).thenReturn(server);
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource(),
+                mapper.readTree("{\"IdentityProviderType\":\"AWS_LAMBDA\"}"), context(server.getArn())));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals("Updating IdentityProviderType is not supported by Floci.", failure.getMessage());
+        verify(transfer, never()).replaceServerConfiguration(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void failedTagUpdateRestoresPriorServerConfiguration() throws Exception {
         Server server = server();
         server.setDomain("S3");
@@ -145,12 +182,13 @@ class TransferCfnProvisionerTest {
         doThrow(new AwsException("InvalidRequestException", "tag rejected", 400))
                 .when(transfer).tagResource(server.getArn(), Map.of("new", "value"));
         StackResource resource = resource();
+        resource.setPhysicalId(server.getArn());
         JsonNode props = mapper.readTree("""
                 {"LoggingRole":"new-role", "Tags":[{"Key":"new", "Value":"value"}]}
                 """);
 
         AwsException failure = assertThrows(AwsException.class,
-                () -> provisioner.provision(resource, props, context(server.getServerId())));
+                () -> provisioner.provision(resource, props, context(server.getArn())));
 
         assertEquals("InvalidRequestException", failure.getErrorCode());
         verify(transfer).replaceServerConfiguration(server.getServerId(), List.of("SFTP"), "PUBLIC", null,
@@ -159,6 +197,8 @@ class TransferCfnProvisionerTest {
                 null, "original-role", "TransferSecurityPolicy-2020-06");
         verify(transfer).tagResource(server.getArn(), Map.of("old", "value"));
         assertEquals("true", resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+        assertEquals(server.getArn(), resource.getPhysicalId());
+        assertEquals("ONLINE", resource.getAttributes().get("State"));
     }
 
     @Test
@@ -177,12 +217,15 @@ class TransferCfnProvisionerTest {
         StackResource resource = resource();
 
         provisioner.provision(resource, mapper.readTree("{\"LoggingRole\":\"new-role\"}"),
-                context(server.getServerId()));
+                context(server.getArn()));
         provisioner.rollbackUpdate(resource);
 
         verify(transfer).replaceServerConfiguration(server.getServerId(), List.of("SFTP"), "PUBLIC", null,
                 null, "original-role", "TransferSecurityPolicy-2020-06");
         assertNull(resource.getAttributes().get("__FlociTransferServerUpdateSnapshot"));
+        assertEquals(server.getArn(), resource.getPhysicalId());
+        assertEquals(server.getServerId(), resource.getAttributes().get("ServerId"));
+        assertEquals("ONLINE", resource.getAttributes().get("State"));
     }
 
     @Test
@@ -223,6 +266,23 @@ class TransferCfnProvisionerTest {
         assertEquals("ConflictException", failure.getErrorCode());
     }
 
+    @Test
+    void deleteArnResolvesServerIdAcrossPartitions() {
+        provisioner.delete("AWS::Transfer::Server",
+                "arn:aws-cn:transfer:cn-north-1:000000000000:server/s-123", "cn-north-1");
+
+        verify(transfer).deleteServer("s-123");
+    }
+
+    @Test
+    void deleteRejectsArnForAnotherResourceType() {
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.delete("AWS::Transfer::Server",
+                "arn:aws:transfer:us-east-1:000000000000:user/s-123/user", "us-east-1"));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(transfer, never()).deleteServer(any());
+    }
+
     private ProvisionContext context(String priorId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(invocation -> ((JsonNode) invocation.getArgument(0)).asText());
@@ -249,6 +309,7 @@ class TransferCfnProvisionerTest {
         Server server = new Server();
         server.setServerId("s-12345678901234567");
         server.setArn("arn:aws:transfer:us-east-1:000000000000:server/s-12345678901234567");
+        server.setState("ONLINE");
         return server;
     }
 }

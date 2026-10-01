@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.transfer.TransferService;
@@ -70,9 +71,9 @@ public class TransferCfnProvisioner implements CfnResourceProvisioner {
 
         Server server;
         if (ctx.isUpdate()) {
-            Server existing = transferService.getServer(ctx.priorPhysicalId());
-            rejectReplacement("Domain", existing.getDomain(), domain);
-            rejectReplacement("IdentityProviderType", existing.getIdentityProviderType(), identityProviderType);
+            Server existing = transferService.getServer(serverId(ctx.priorPhysicalId()));
+            rejectUnsupportedChange("Domain", existing.getDomain(), domain);
+            rejectUnsupportedChange("IdentityProviderType", existing.getIdentityProviderType(), identityProviderType);
             Map<String, String> previousTags = transferService.listTagsForResource(existing.getArn());
             String previousTemplateTagKeys = resource.getAttributes().get(TEMPLATE_TAG_KEYS);
             ConfigurationSnapshot previous = new ConfigurationSnapshot(existing.getServerId(),
@@ -101,16 +102,14 @@ public class TransferCfnProvisioner implements CfnResourceProvisioner {
             server = transferService.createServer(ctx.region(), domain, protocols, endpointType, endpointDetails,
                     identityProviderType, identityProviderDetails, loggingRole, securityPolicyName, tags);
         }
-        resource.setPhysicalId(server.getServerId());
-        resource.getAttributes().put("ServerId", server.getServerId());
-        resource.getAttributes().put("Arn", server.getArn());
+        recordServer(resource, server);
         resource.getAttributes().put(TEMPLATE_TAG_KEYS, MAPPER.valueToTree(tags.keySet()).toString());
     }
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         CfnDeletes.safeDelete("Transfer server", physicalId,
-                () -> transferService.deleteServer(physicalId), "ResourceNotFoundException");
+                () -> transferService.deleteServer(serverId(physicalId)), "ResourceNotFoundException");
     }
 
     @Override
@@ -137,6 +136,7 @@ public class TransferCfnProvisioner implements CfnResourceProvisioner {
                 previous.endpointType(), previous.endpointDetails(), previous.identityProviderDetails(),
                 previous.loggingRole(), previous.securityPolicyName());
         reconcileTags(server.getArn(), previous.newTagKeys(), previous.tags());
+        recordServer(resource, server);
         if (previous.previousTemplateTagKeys() == null) {
             resource.getAttributes().remove(TEMPLATE_TAG_KEYS);
         } else {
@@ -144,6 +144,24 @@ public class TransferCfnProvisioner implements CfnResourceProvisioner {
         }
         resource.getAttributes().remove(UPDATE_SNAPSHOT);
         return true;
+    }
+
+    private static void recordServer(StackResource resource, Server server) {
+        resource.setPhysicalId(server.getArn());
+        resource.getAttributes().put("ServerId", server.getServerId());
+        resource.getAttributes().put("Arn", server.getArn());
+        resource.getAttributes().put("State", server.getState());
+    }
+
+    private static String serverId(String physicalId) {
+        if (!AwsArnUtils.isArn(physicalId)) {
+            return physicalId;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(physicalId);
+        if (!"transfer".equals(arn.service()) || !arn.resource().startsWith("server/")) {
+            throw new AwsException("ValidationError", "Invalid Transfer server ARN: " + physicalId, 400);
+        }
+        return arn.resource().substring("server/".length());
     }
 
     private void reconcileTags(String arn, List<String> managedKeys, Map<String, String> desired) {
@@ -204,10 +222,10 @@ public class TransferCfnProvisioner implements CfnResourceProvisioner {
         return MAPPER.convertValue(resolved, type);
     }
 
-    private static void rejectReplacement(String name, String current, String requested) {
+    private static void rejectUnsupportedChange(String name, String current, String requested) {
         if (!Objects.equals(current, requested)) {
             throw new AwsException("ValidationError",
-                    "Updating " + name + " requires resource replacement, which is not supported.", 400);
+                    "Updating " + name + " is not supported by Floci.", 400);
         }
     }
 }
