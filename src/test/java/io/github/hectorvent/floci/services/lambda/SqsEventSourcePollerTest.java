@@ -22,6 +22,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -531,6 +535,17 @@ class SqsEventSourcePollerTest {
         }
     }
 
+    private static void awaitPoll(Future<?> poll) {
+        try {
+            poll.get(5, TimeUnit.SECONDS);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("interrupted while waiting for the poll", ie);
+        } catch (ExecutionException | TimeoutException e) {
+            throw new AssertionError("poll did not complete", e);
+        }
+    }
+
     private void pollUntilInvoked(EventSourceMapping esm, LambdaFunction fn) {
         long deadline = System.currentTimeMillis() + 5000;
         while (true) {
@@ -564,10 +579,10 @@ class SqsEventSourcePollerTest {
         when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(new InvokeResult());
 
-        // Polls inside the window buffer the record without invoking.
+        // Polls inside the window buffer the record without invoking. Each poll finishes before
+        // the clock moves, so the window starts at 0 however long the poll thread takes to run.
         for (int i = 0; i < 4; i++) {
-            poller.pollAndInvoke(esm);
-            sleep(25);
+            awaitPoll(poller.pollAndInvoke(esm));
             now.addAndGet(1000); // reaches 4s, short of the 5s window
         }
         verify(sqsService, atLeast(1))
