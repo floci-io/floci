@@ -193,6 +193,55 @@ class S3BucketPolicyEnforcementIntegrationTest {
     }
 
     @Test
+    void aRoleSessionsPrincipalArnInABucketPolicyIsItsRolesArn() {
+        // S3 evaluates the bucket policy itself (s3.enforce-auth, and the CopyObject source check),
+        // and there aws:PrincipalArn is the ARN of the role that was assumed, not the session's: a
+        // Deny keyed on the role's ARN fires, one keyed on the session ARN does not.
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "bp-role-session-" + suffix;
+        String role = "bp-role-" + suffix;
+        String roleArn = "arn:aws:iam::000000000000:role/team/" + role;
+        createBucket(bucket);
+        putObject(bucket, "denied/x.txt", "denied");
+        putObject(bucket, "session/x.txt", "session");
+        given().formParam("Action", "CreateRole").formParam("RoleName", role).formParam("Path", "/team/")
+                .formParam("AssumeRolePolicyDocument", """
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                          "Principal":{"AWS":"arn:aws:iam::000000000000:root"},"Action":"sts:AssumeRole"}]}""")
+                .header("Authorization", auth("000000000000", "iam")).when().post("/").then().statusCode(200);
+        given().formParam("Action", "PutRolePolicy").formParam("RoleName", role).formParam("PolicyName", "s3")
+                .formParam("PolicyDocument", """
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}""")
+                .header("Authorization", auth("000000000000", "iam")).when().post("/").then().statusCode(200);
+        ExtractableResponse<Response> assumed = given().formParam("Action", "AssumeRole")
+                .formParam("RoleArn", roleArn).formParam("RoleSessionName", "s")
+                .header("Authorization", auth("000000000000", "sts")).when().post("/")
+                .then().statusCode(200).extract();
+        String sessionArn = assumed.path("AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn");
+        S3RequestSigner session = S3RequestSigner.signedAs(
+                assumed.path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId"),
+                assumed.path("AssumeRoleResponse.AssumeRoleResult.Credentials.SecretAccessKey"),
+                assumed.path("AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken"));
+        putBucketPolicy(bucket, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/denied/*",
+                   "Condition":{"ArnEquals":{"aws:PrincipalArn":"%2$s"}}},
+                  {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/session/*",
+                   "Condition":{"ArnEquals":{"aws:PrincipalArn":"%3$s"}}}]}""".formatted(bucket, roleArn, sessionArn));
+
+        given().filter(session).when().get("/" + bucket + "/session/x.txt")
+                .then().statusCode(200).body(equalTo("session"));
+        given().filter(session).when().get("/" + bucket + "/denied/x.txt")
+                .then().statusCode(403);
+        given().filter(session).header("x-amz-copy-source", "/" + bucket + "/session/x.txt")
+                .when().put("/" + bucket + "/copied-session.txt")
+                .then().statusCode(200);
+        given().filter(session).header("x-amz-copy-source", "/" + bucket + "/denied/x.txt")
+                .when().put("/" + bucket + "/copied-denied.txt")
+                .then().statusCode(403);
+    }
+
+    @Test
     void enforcesBucketPolicyForSignedCallers() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String bucket = "bp-enforce-" + suffix;
