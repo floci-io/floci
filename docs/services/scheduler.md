@@ -83,6 +83,29 @@ and `Message`, Step Functions `stateMachineArn` and `input`, EventBridge
 launch type, group, and network configuration. Non-JSON input of a universal
 target is encoded as a JSON string field.
 
+## CloudFormation
+
+`AWS::Scheduler::Schedule` creates a real schedule. `Ref` returns its name and
+`Fn::GetAtt Arn` returns its Scheduler ARN. An omitted `Name` is generated once
+and kept on updates. Expression, state, dates, timezone, time window, KMS key and
+target changes update the schedule in place. A `Name` change creates a replacement;
+`GroupName` changes keep the same `Ref` and move the schedule to the requested group.
+The group must already exist or be declared as an `AWS::Scheduler::ScheduleGroup`.
+
+The displaced schedule stays until the stack update commits, then is deleted.
+`UpdateReplacePolicy: Retain` keeps a schedule displaced by a name replacement;
+it does not retain the old address of a group move. A failed stack update restores
+the original schedule configuration and removes a replacement or group-move destination.
+During a group move the old schedule is disabled before creating the destination,
+so the stored schedules are not both enabled. A rollback disables the destination
+before restoring the original state. A name replacement can briefly leave both
+schedules enabled until commit, following the existing replacement lifecycle.
+
+Target parameters are limited to those the Scheduler API currently models:
+retry/dead-letter configuration, SQS, ECS and EventBridge parameters. Kinesis and
+SageMaker pipeline parameters are rejected instead of silently discarded.
+Invocation support and time-window limitations are the same as the Scheduler API.
+
 ## Configuration
 
 | Variable | Default | Description |

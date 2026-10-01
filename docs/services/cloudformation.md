@@ -154,7 +154,7 @@ cross-resource references.
 | Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup` |
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
-| EventBridge Scheduler | `ScheduleGroup` |
+| EventBridge Scheduler | `Schedule`, `ScheduleGroup` |
 | Backup | `BackupVault` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
