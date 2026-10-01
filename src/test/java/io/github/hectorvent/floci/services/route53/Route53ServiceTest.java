@@ -250,6 +250,39 @@ class Route53ServiceTest {
     }
 
     @Test
+    void aNameWithOrWithoutTheTrailingDotAndABlankSetIdentifierAreTheSameRecord() {
+        Route53Service service = newService();
+        String zoneId = service.createHostedZone("example.com.", "ref-fqdn", null, null).zone().getId();
+        // How an earlier CloudFormation provisioner stored a record: the template's undotted Name and
+        // empty SetIdentifier, as written.
+        ResourceRecordSet legacy = aRecord("www.example.com", 300, "1.2.3.4");
+        legacy.setSetIdentifier("");
+        service.changeResourceRecordSets(zoneId, List.of(change("CREATE", legacy)), null);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("www.example.com.", 300, "5.6.7.8"))), null));
+        assertEquals("InvalidChangeBatch", e.getErrorCode());
+
+        service.changeResourceRecordSets(zoneId,
+                List.of(change("UPSERT", aRecord("www.example.com.", 300, "5.6.7.8"))), null);
+        List<ResourceRecordSet> records = typeARecords(service, zoneId);
+        assertThat(records, hasSize(1));
+        assertEquals("www.example.com.", records.get(0).getName());
+        assertEquals("5.6.7.8", records.get(0).getRecords().get(0).getValue());
+
+        ResourceRecordSet undotted = aRecord("www.example.com", 300, "5.6.7.8");
+        undotted.setSetIdentifier("");
+        service.changeResourceRecordSets(zoneId, List.of(change("DELETE", undotted)), null);
+        assertThat(typeARecords(service, zoneId), empty());
+    }
+
+    private static List<ResourceRecordSet> typeARecords(Route53Service service, String zoneId) {
+        return service.listResourceRecordSets(zoneId, null, null, 0).stream()
+                .filter(rrs -> "A".equals(rrs.getType()))
+                .toList();
+    }
+
+    @Test
     void deleteThenCreateOfSameNameAndTypeInOneBatchSucceeds() {
         Route53Service service = newService();
         String zoneId = service.createHostedZone("example.com.", "ref-replace", null, null).zone().getId();

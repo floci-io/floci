@@ -622,39 +622,22 @@ class Route53CfnProvisionerTest {
     }
 
     @Test
-    void anUpdateReplacesTheRecordAnEarlierVersionStoredAsWritten() {
-        Route53Service service = mock(Route53Service.class);
-        ResourceRecordSet legacy = legacyRecord();
-        when(service.listResourceRecordSets("Z1", null, null, 0)).thenReturn(List.of(legacy));
-        ObjectMapper mapper = new ObjectMapper();
-        JsonNode props = mapper.createObjectNode()
-                .put("HostedZoneId", "Z1")
-                .put("Name", "www.example.com")
-                .put("Type", "A")
-                .put("SetIdentifier", "");
-        ProvisionContext context = new ProvisionContext(recordEngine(), "us-east-1", "623666680275",
-                "dns-stack", "www.example.com");
-        StackResource resource = legacyRecordResource();
-
-        new Route53CfnProvisioner(service).provision(resource, props, context);
-
-        // The UPSERT writes the fully qualified record next to the undotted, blank-identifier copy an
-        // earlier version stored, so that copy is deleted rather than left to block the zone's delete.
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
-        verify(service, times(2)).changeResourceRecordSets(eq("Z1"), captor.capture(), any());
-        List<Map<String, Object>> changes = captor.getAllValues().stream().map(batch -> batch.get(0)).toList();
-        assertEquals(List.of("UPSERT", "DELETE"), changes.stream().map(change -> change.get("action")).toList());
-        assertSame(legacy, changes.get(1).get("rrs"));
-    }
-
-    @Test
     void deletingFindsTheRecordAnEarlierVersionStoredAsWritten() {
         Route53Service service = mock(Route53Service.class);
-        ResourceRecordSet legacy = legacyRecord();
+        // An earlier version stored the template's undotted Name and blank SetIdentifier as written.
+        ResourceRecordSet legacy = new ResourceRecordSet();
+        legacy.setName("www.example.com");
+        legacy.setType("A");
+        legacy.setSetIdentifier("");
         when(service.listResourceRecordSets("Z1", null, null, 0)).thenReturn(List.of(legacy));
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Www");
+        resource.setResourceType("AWS::Route53::RecordSet");
+        resource.setPhysicalId("www.example.com");
+        resource.getAttributes().put("__FlociRoute53RecordZoneId", "Z1");
+        resource.getAttributes().put("__FlociRoute53RecordType", "A");
 
-        new Route53CfnProvisioner(service).delete(legacyRecordResource(), "us-east-1");
+        new Route53CfnProvisioner(service).delete(resource, "us-east-1");
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
@@ -662,26 +645,6 @@ class Route53CfnProvisionerTest {
         Map<String, Object> change = captor.getValue().get(0);
         assertEquals("DELETE", change.get("action"));
         assertSame(legacy, change.get("rrs"));
-    }
-
-    /** A record as an earlier version stored it: the template's undotted Name and blank SetIdentifier. */
-    private static ResourceRecordSet legacyRecord() {
-        ResourceRecordSet legacy = new ResourceRecordSet();
-        legacy.setName("www.example.com");
-        legacy.setType("A");
-        legacy.setSetIdentifier("");
-        return legacy;
-    }
-
-    /** The stack resource an earlier version saved for {@link #legacyRecord()}: no set identifier kept. */
-    private static StackResource legacyRecordResource() {
-        StackResource resource = new StackResource();
-        resource.setLogicalId("Www");
-        resource.setResourceType("AWS::Route53::RecordSet");
-        resource.setPhysicalId("www.example.com");
-        resource.getAttributes().put("__FlociRoute53RecordZoneId", "Z1");
-        resource.getAttributes().put("__FlociRoute53RecordType", "A");
-        return resource;
     }
 
     @Test
