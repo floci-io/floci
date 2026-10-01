@@ -163,7 +163,7 @@ cross-resource references.
 | CloudFront | `CachePolicy`, `Distribution`, `OriginAccessControl`, `OriginRequestPolicy`, `ResponseHeadersPolicy` |
 | CloudWatch | `Alarm`, `Dashboard` |
 | CloudWatch Logs | `LogGroup`, `LogStream`, `MetricFilter` |
-| WAFv2 | `WebACL` |
+| WAFv2 | `WebACL`, `WebACLAssociation` |
 | Config | `ConfigRule` |
 | CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
 | CloudTrail | `Trail` |
