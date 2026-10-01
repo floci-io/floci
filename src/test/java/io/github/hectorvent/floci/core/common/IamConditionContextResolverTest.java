@@ -507,6 +507,7 @@ class IamConditionContextResolverTest {
         assertEquals(List.of("000000000000"), conditions.get("aws:ResourceAccount"));
         assertEquals(List.of("000000000000"), conditions.get("aws:PrincipalAccount"));
         assertEquals(List.of("eu-west-2"), conditions.get("aws:RequestedRegion"));
+        assertEquals(List.of("false"), conditions.get("aws:PrincipalIsAWSService"));
     }
 
     @Test

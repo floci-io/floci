@@ -97,6 +97,28 @@ containers, not to processes on the host.
 and `ALL` health filters, and matches instances whose attributes contain every
 key/value pair supplied in `QueryParameters`.
 
+## CloudFormation
+
+Floci provisions these resource types:
+
+- `AWS::ServiceDiscovery::HttpNamespace`
+- `AWS::ServiceDiscovery::PrivateDnsNamespace`
+- `AWS::ServiceDiscovery::PublicDnsNamespace`
+- `AWS::ServiceDiscovery::Service`
+
+`Ref` returns the namespace or service id. `Fn::GetAtt` exposes `Id` and `Arn` on all of them,
+`HostedZoneId` on a DNS namespace, and `Name` on a service.
+
+`Description`, `DnsConfig`, `HealthCheckConfig`, and `Tags` update in place and keep the id. Only
+the TTLs in `DnsConfig` can change, as on AWS: an update that changes anything else in it, such as
+the record types or `RoutingPolicy`, fails with `InvalidInput`. A change to a createOnly property
+(`Name`, and `Vpc` on a private DNS namespace; `Name`, `NamespaceId`, `Type`, or
+`HealthCheckCustomConfig` on a service) replaces the resource: the new one is created and the old
+one is deleted once the stack update completes. As on AWS, a replacement that keeps the same name
+fails, since the name is still taken.
+
+`ServiceAttributes` and `Properties.DnsProperties.SOA` are accepted but ignored.
+
 ## Configuration
 
 | Variable | Default | Description |

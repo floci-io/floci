@@ -553,12 +553,25 @@ public class CognitoService implements ResourceProvider {
         if (request.containsKey("AdminCreateUserConfig")) pool.setAdminCreateUserConfig((Map<String, Object>) request.get("AdminCreateUserConfig"));
         if (request.containsKey("UserPoolAddOns")) pool.setUserPoolAddOns((Map<String, Object>) request.get("UserPoolAddOns"));
         if (request.containsKey("UsernameConfiguration")) pool.setUsernameConfiguration((Map<String, Object>) request.get("UsernameConfiguration"));
-        if (request.containsKey("AccountRecoverySetting")) pool.setAccountRecoverySetting((Map<String, Object>) request.get("AccountRecoverySetting"));
+        if (request.containsKey("AccountRecoverySetting")) {
+            pool.setAccountRecoverySetting((Map<String, Object>) request.get("AccountRecoverySetting"));
+            validateAccountRecoverySetting(pool);
+        }
         if (request.containsKey("UserAttributeUpdateSettings")) {
             pool.setUserAttributeUpdateSettings(validateUserAttributeUpdateSettings(
                     (Map<String, Object>) request.get("UserAttributeUpdateSettings")));
         }
         if (request.containsKey("UserPoolTier")) pool.setUserPoolTier((String) request.get("UserPoolTier"));
+    }
+
+    private void validateAccountRecoverySetting(UserPool pool) {
+        List<String> mechanisms = accountRecoveryMechanisms(pool);
+        if (mechanisms.contains("admin_only") && mechanisms.stream().anyMatch(name -> !"admin_only".equals(name))) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid account recovery setting parameter. "
+                            + "Account Recovery Setting cannot use admin_only setting with any other recovery mechanisms.",
+                    400);
+        }
     }
 
     private Map<String, Object> validateUserAttributeUpdateSettings(Map<String, Object> settings) {
@@ -2145,6 +2158,12 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminResetUserPassword(String userPoolId, String username) {
+        UserPool pool = describeUserPool(userPoolId);
+        if (accountRecoveryMechanisms(pool).contains("admin_only")) {
+            throw new AwsException("NotAuthorizedException",
+                    "This userpool does not have password recovery mechanism, the administrator must set a new password.",
+                    400);
+        }
         CognitoUser resolvedUser = adminGetUser(userPoolId, username);
         synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
             adminResetUserPasswordUnderUserLock(userPoolId, resolvedUser.getUsername());
@@ -2943,6 +2962,54 @@ public class CognitoService implements ResourceProvider {
         return authFlowHandler.adminRespondToAuthChallenge(userPoolId, clientId, challengeName, session, responses, clientMetadata);
     }
 
+    public Map<String, Object> associateSoftwareToken(String accessToken, String session) {
+        return authFlowHandler.associateSoftwareToken(accessToken, session);
+    }
+
+    public Map<String, Object> verifySoftwareToken(String accessToken, String session, String userCode) {
+        return authFlowHandler.verifySoftwareToken(accessToken, session, userCode);
+    }
+
+    void beginSoftwareTokenMfa(String poolId, String username, String secret) {
+        synchronized (userLock(poolId, username)) {
+            CognitoUser user = adminGetUser(poolId, username);
+            user.setPendingSoftwareTokenMfaSecret(secret);
+            user.setPendingSoftwareTokenMfaAttemptsRemaining(CognitoTotp.MAX_FAILED_ATTEMPTS);
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(poolId, user.getUsername()), user);
+        }
+    }
+
+    boolean activateSoftwareTokenMfa(String poolId, String username, String expectedSecret,
+                                     String code, Instant now) {
+        synchronized (userLock(poolId, username)) {
+            CognitoUser user = adminGetUser(poolId, username);
+            String pending = user.getPendingSoftwareTokenMfaSecret();
+            if (pending == null) {
+                throw new AwsException("InvalidParameterException", "No software token is awaiting verification", 400);
+            }
+            if (expectedSecret != null && !expectedSecret.equals(pending)) {
+                throw new AwsException("NotAuthorizedException", "Software token association has changed", 400);
+            }
+            Integer storedAttempts = user.getPendingSoftwareTokenMfaAttemptsRemaining();
+            int attemptsRemaining = storedAttempts == null ? CognitoTotp.MAX_FAILED_ATTEMPTS : storedAttempts;
+            if (attemptsRemaining <= 0) {
+                return false;
+            }
+            if (!CognitoTotp.validCode(pending, code, now)) {
+                user.setPendingSoftwareTokenMfaAttemptsRemaining(attemptsRemaining - 1);
+                userStore.put(userKey(poolId, user.getUsername()), user);
+                return false;
+            }
+            user.setSoftwareTokenMfaSecret(pending);
+            user.setPendingSoftwareTokenMfaSecret(null);
+            user.setPendingSoftwareTokenMfaAttemptsRemaining(null);
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(poolId, user.getUsername()), user);
+            return true;
+        }
+    }
+
     public void changePassword(String accessToken, String previousPassword, String proposedPassword) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
         String username = token.username();
@@ -2970,8 +3037,11 @@ public class CognitoService implements ResourceProvider {
     public Map<String, Object> forgotPassword(String clientId, String username) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
-        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
         UserPool pool = describeUserPool(client.getUserPoolId());
+        if (accountRecoveryMechanisms(pool).contains("admin_only")) {
+            throw new AwsException("NotAuthorizedException", "Contact administrator to reset password.", 400);
+        }
+        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
         ensureVerificationWiring();
         DeliveryTarget deliveryTarget = resolveForgotPasswordDeliveryTarget(pool, user);
 
@@ -3018,6 +3088,41 @@ public class CognitoService implements ResourceProvider {
         List<Map<String, String>> attrs = new ArrayList<>();
         user.getAttributes().forEach((k, v) -> attrs.add(Map.of("Name", k, "Value", v)));
         result.put("UserAttributes", attrs);
+        return result;
+    }
+
+    /**
+     * GetUserAuthFactors. The MFA members come from the email MFA preference, the one per-user
+     * MFA setting Floci stores; SetUserMFAPreference accepts SMS and software-token settings
+     * without keeping them.
+     */
+    public Map<String, Object> getUserAuthFactors(String accessToken) {
+        VerifiedAccessToken token;
+        try {
+            token = verifyAccessToken(accessToken);
+        } catch (AwsException e) {
+            if ("NotAuthorizedException".equals(e.getErrorCode())
+                    && INVALID_ACCESS_TOKEN_MESSAGE.equals(e.getMessage())) {
+                throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
+            }
+            throw e;
+        }
+        requireScope(accessToken, "aws.cognito.signin.user.admin");
+
+        CognitoUser user = adminGetUser(token.poolId(), token.username());
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("Username", user.getUsername());
+        List<String> factors = authFlowHandler.configuredUserAuthFactors(user);
+        if (!factors.isEmpty()) {
+            result.put("ConfiguredUserAuthFactors", factors);
+        }
+        EmailMfaSettings emailMfa = user.getEmailMfaSettings();
+        if (emailMfa != null && emailMfa.isEnabled()) {
+            if (emailMfa.isPreferredMfa()) {
+                result.put("PreferredMfaSetting", "EMAIL_OTP");
+            }
+            result.put("UserMFASettingList", List.of("EMAIL_OTP"));
+        }
         return result;
     }
 
@@ -3622,7 +3727,11 @@ public class CognitoService implements ResourceProvider {
             if (override.scopesToAdd() != null) {
                 for (String s : override.scopesToAdd()) if (!current.contains(s)) current.add(s);
             }
-            if (!current.isEmpty()) claims.put("scope", String.join(" ", current));
+            if (current.isEmpty()) {
+                claims.remove("scope");
+            } else {
+                claims.put("scope", String.join(" ", current));
+            }
         }
     }
 
@@ -4505,39 +4614,40 @@ public class CognitoService implements ResourceProvider {
 
 
     /**
-     * Extracts the space-separated {@code scope} claim from an already-verified access token
-     * (call after {@link #verifyAccessToken}). {@code null} means no scope claim at all, which
-     * every token this simulator currently issues also is not the case for access tokens (see
-     * {@code generateSignedJwt}, which always sets a default scope) but a caller-suppressed
-     * scope list still needs to be tolerated as "no restriction modeled" rather than treated the
-     * same as an empty, restrictive list.
+     * The scopes in the space-separated {@code scope} claim of an already-verified access token
+     * (call after {@link #verifyAccessToken}), empty when the claim is absent or blank. Every access
+     * token Floci mints sets the claim (see {@code generateSignedJwt}); it is missing only when a
+     * PreTokenGeneration trigger removed it, and such a token grants no scope.
      */
     private Set<String> extractScopesFromToken(String token) {
         try {
             String[] parts = token.split("\\.", -1);
             JsonNode claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
             String scope = textClaim(claims, "scope");
-            if (scope == null || scope.isBlank()) return null;
             Set<String> scopes = new HashSet<>();
+            if (scope == null) {
+                return scopes;
+            }
             for (String s : scope.split(" ")) {
                 if (!s.isBlank()) scopes.add(s);
             }
             return scopes;
         } catch (Exception e) {
-            return null;
+            LOG.debug("Could not read the scope claim of an access token", e);
+            return Set.of();
         }
     }
 
     /**
      * AWS requires an access token carrying the given scope for some operations (for example
-     * VerifyUserAttribute requires aws.cognito.signin.user.admin). Call after
-     * {@link #verifyAccessToken}, which already confirms the token is a valid, unexpired access
-     * token; this only adds the scope check on top.
+     * VerifyUserAttribute requires aws.cognito.signin.user.admin), and refuses a token with no
+     * scope claim. Call after {@link #verifyAccessToken}, which already confirms the token is a
+     * valid, unexpired access token; this only adds the scope check on top.
      */
-    private void requireScope(String accessToken, String requiredScope) {
+    void requireScope(String accessToken, String requiredScope) {
         Set<String> scopes = extractScopesFromToken(accessToken);
-        if (scopes != null && !scopes.contains(requiredScope)) {
-            throw new AwsException("NotAuthorizedException", "Access Token does not have the required scope", 400);
+        if (!scopes.contains(requiredScope)) {
+            throw new AwsException("NotAuthorizedException", "Access Token does not have required scopes", 400);
         }
     }
 
@@ -4956,7 +5066,7 @@ public class CognitoService implements ResourceProvider {
         }
         return recoveryMechanisms.stream().filter(Map.class::isInstance).map(Map.class::cast)
                 .sorted(Comparator.comparingInt(this::recoveryPriority))
-                .map(m -> String.valueOf(m.get("Name"))).filter(name -> !"admin_only".equals(name))
+                .map(m -> String.valueOf(m.get("Name")))
                 .toList();
     }
 

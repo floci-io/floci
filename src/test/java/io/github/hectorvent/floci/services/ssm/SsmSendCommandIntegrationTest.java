@@ -14,6 +14,8 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -477,6 +479,61 @@ class SsmSendCommandIntegrationTest {
         .then()
             .statusCode(200)
             .body("Messages", empty());
+    }
+
+    // ── InstanceIds limit ──────────────────────────────────────────────────
+
+    @Test
+    @Order(13)
+    void sendCommandRejectsMoreThanFiftyInstanceIds() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.SendCommand")
+            .contentType(SSM_CT)
+            .body("""
+                {
+                    "InstanceIds": %s,
+                    "DocumentName": "AWS-RunShellScript",
+                    "Parameters": {
+                        "commands": ["echo hello"]
+                    }
+                }
+                """.formatted(instanceIdsJson(51)))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("at 'instanceIds' failed to satisfy constraint"))
+            .body("message", containsString("less than or equal to 50"));
+    }
+
+    @Test
+    @Order(14)
+    void sendCommandAcceptsFiftyInstanceIds() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.SendCommand")
+            .contentType(SSM_CT)
+            .body("""
+                {
+                    "InstanceIds": %s,
+                    "DocumentName": "AWS-RunShellScript",
+                    "Parameters": {
+                        "commands": ["echo hello"]
+                    }
+                }
+                """.formatted(instanceIdsJson(50)))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Command.TargetCount", equalTo(50))
+            .body("Command.InstanceIds", hasSize(50));
+    }
+
+    private static String instanceIdsJson(int count) {
+        return IntStream.range(0, count)
+                .mapToObj(i -> "\"i-limit-" + i + "\"")
+                .collect(Collectors.joining(",", "[", "]"));
     }
 
     private static String buildReplyPayload(String stdout, String status, int returnCode) {

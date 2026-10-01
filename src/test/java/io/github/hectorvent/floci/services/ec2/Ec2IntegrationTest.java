@@ -965,6 +965,53 @@ class Ec2IntegrationTest {
                     everyItem(equalTo("us-east-1")));
     }
 
+    @Test
+    @Order(22)
+    void describeNanoInstanceTypeOfferingsInEveryAvailabilityZone() {
+        // terratest's GetRecommendedInstanceType picks the first type offered in every AZ.
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "availability-zone")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "t2.nano")
+            .formParam("Filter.1.Value.2", "t3.nano")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(6))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.findAll { it.instanceType == 't2.nano' }.location",
+                    containsInAnyOrder("us-east-1a", "us-east-1b", "us-east-1c"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.findAll { it.instanceType == 't3.nano' }.location",
+                    containsInAnyOrder("us-east-1a", "us-east-1b", "us-east-1c"));
+    }
+
+    @Test
+    @Order(22)
+    void describeSmallBurstableInstanceTypes() {
+        given()
+            .formParam("Action", "DescribeInstanceTypes")
+            .formParam("InstanceType.1", "t3a.nano")
+            .formParam("InstanceType.2", "t2.small")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.size()", equalTo(2))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.find { it.instanceType == 't3a.nano' }.vCpuInfo.defaultVCpus",
+                    equalTo("2"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.find { it.instanceType == 't3a.nano' }.memoryInfo.sizeInMiB",
+                    equalTo("512"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.find { it.instanceType == 't2.small' }.vCpuInfo.defaultVCpus",
+                    equalTo("1"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.find { it.instanceType == 't2.small' }.memoryInfo.sizeInMiB",
+                    equalTo("2048"));
+    }
+
     // =========================================================================
     // VPCs
     // =========================================================================

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
@@ -542,7 +543,7 @@ class SamTransformProcessor {
         ObjectNode permProps = objectMapper.createObjectNode();
         permProps.set("FunctionName", ref(route.functionLogicalId()));
         permProps.put("Action", "lambda:InvokeFunction");
-        permProps.put("Principal", "apigateway.amazonaws.com");
+        permProps.put("Principal", ServicePrincipals.of("apigateway"));
         perm.set("Properties", permProps);
         resources.set(permissionLogicalId, perm);
     }
@@ -628,7 +629,7 @@ class SamTransformProcessor {
                 ObjectNode permissionProps = objectMapper.createObjectNode();
                 permissionProps.set("FunctionName", functionArn.deepCopy());
                 permissionProps.put("Action", "lambda:InvokeFunction");
-                permissionProps.put("Principal", "apigateway.amazonaws.com");
+                permissionProps.put("Principal", ServicePrincipals.of("apigateway"));
                 permission.set("Properties", permissionProps);
                 resources.set(uniqueId(logicalId + "Permission", resources), permission);
             }
@@ -760,7 +761,7 @@ class SamTransformProcessor {
             ObjectNode pp = objectMapper.createObjectNode();
             pp.set("FunctionName", ref(fn));
             pp.put("Action", "lambda:InvokeFunction");
-            pp.put("Principal", "apigateway.amazonaws.com");
+            pp.put("Principal", ServicePrincipals.of("apigateway"));
             perm.set("Properties", pp);
             resources.set(uniqueId(fn + "ApiPermission", resources), perm);
         }
@@ -1007,7 +1008,7 @@ class SamTransformProcessor {
         ObjectNode stmt = objectMapper.createObjectNode();
         stmt.put("Effect", "Allow");
         ObjectNode principal = objectMapper.createObjectNode();
-        principal.put("Service", "lambda.amazonaws.com");
+        principal.put("Service", ServicePrincipals.of("lambda"));
         stmt.set("Principal", principal);
         stmt.put("Action", "sts:AssumeRole");
         statements.add(stmt);

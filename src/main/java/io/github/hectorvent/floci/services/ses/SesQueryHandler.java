@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
@@ -57,6 +58,7 @@ public class SesQueryHandler {
     private final SesConfigurationSetService configSetService;
     private final SesPolicyService policyService;
     private final SesSentEmailService sentEmailService;
+    private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
@@ -65,7 +67,8 @@ public class SesQueryHandler {
                            SesCvetService cvetService, SesAccountService accountService,
                            SesConfigurationSetService configSetService,
                            SesPolicyService policyService,
-                           SesSentEmailService sentEmailService, ObjectMapper objectMapper) {
+                           SesSentEmailService sentEmailService, RegionResolver regionResolver,
+                           ObjectMapper objectMapper) {
         this.sesService = sesService;
         this.receiptRuleService = receiptRuleService;
         this.identityService = identityService;
@@ -75,6 +78,7 @@ public class SesQueryHandler {
         this.configSetService = configSetService;
         this.policyService = policyService;
         this.sentEmailService = sentEmailService;
+        this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
 
@@ -123,7 +127,7 @@ public class SesQueryHandler {
                 case "GetCustomVerificationEmailTemplate" ->
                         handleGetCustomVerificationEmailTemplate(params, region);
                 case "ListCustomVerificationEmailTemplates" ->
-                        handleListCustomVerificationEmailTemplates(region);
+                        handleListCustomVerificationEmailTemplates(params, region);
                 case "UpdateCustomVerificationEmailTemplate" ->
                         handleUpdateCustomVerificationEmailTemplate(params, region);
                 case "DeleteCustomVerificationEmailTemplate" ->
@@ -132,7 +136,7 @@ public class SesQueryHandler {
                         handleSendCustomVerificationEmail(params, region);
                 case "CreateConfigurationSet" -> handleCreateConfigurationSet(params, region);
                 case "DescribeConfigurationSet" -> handleDescribeConfigurationSet(params, region);
-                case "ListConfigurationSets" -> handleListConfigurationSets(region);
+                case "ListConfigurationSets" -> handleListConfigurationSets(params, region);
                 case "DeleteConfigurationSet" -> handleDeleteConfigurationSet(params, region);
                 case "CreateConfigurationSetEventDestination" ->
                         handleCreateConfigurationSetEventDestination(params, region);
@@ -203,13 +207,17 @@ public class SesQueryHandler {
 
     private Response handleListIdentities(MultivaluedMap<String, String> params, String region) {
         String identityType = getParam(params, "IdentityType");
-        List<Identity> identities = identityService.listIdentities(identityType, region);
+        PaginatedResult<Identity> page = identityService.listIdentities(identityType, region,
+                SesListPaging.V1_LIST_IDENTITIES,
+                SesListPaging.parseQueryProtocolPageSize(getParam(params, "MaxItems")),
+                getParam(params, "NextToken"));
 
-        var xml = new XmlBuilder().start("Identities");
-        for (Identity id : identities) {
+        XmlBuilder xml = new XmlBuilder().start("Identities");
+        for (Identity id : page.items()) {
             xml.elem("member", id.getIdentity());
         }
         xml.end("Identities");
+        xml.elem("NextToken", page.nextToken());
         return Response.ok(AwsQueryResponse.envelope("ListIdentities", AwsNamespaces.SES, xml.build())).build();
     }
 
@@ -583,8 +591,8 @@ public class SesQueryHandler {
     }
 
     private Response handleListTemplates(MultivaluedMap<String, String> params, String region) {
-        PaginatedResult<EmailTemplate> page = SesListPaging.V1_LIST_TEMPLATES.page(
-                templateService.listTemplates(region), SesListPaging::templateCursor,
+        PaginatedResult<EmailTemplate> page = templateService.listTemplates(region,
+                SesListPaging.V1_LIST_TEMPLATES,
                 SesListPaging.parseQueryProtocolPageSize(getParam(params, "MaxItems")),
                 getParam(params, "NextToken"));
         XmlBuilder xml = new XmlBuilder().start("TemplatesMetadata");
@@ -687,11 +695,14 @@ public class SesQueryHandler {
                 "GetCustomVerificationEmailTemplate", AwsNamespaces.SES, xml)).build();
     }
 
-    private Response handleListCustomVerificationEmailTemplates(String region) {
+    private Response handleListCustomVerificationEmailTemplates(MultivaluedMap<String, String> params,
+                                                                String region) {
+        PaginatedResult<CustomVerificationEmailTemplate> page = cvetService.listCustomVerificationEmailTemplates(
+                region, SesListPaging.V1_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES,
+                SesListPaging.parseQueryProtocolPageSize(getParam(params, "MaxResults")),
+                getParam(params, "NextToken"));
         XmlBuilder xml = new XmlBuilder().start("CustomVerificationEmailTemplates");
-        List<CustomVerificationEmailTemplate> templates =
-                cvetService.listCustomVerificationEmailTemplates(region);
-        for (CustomVerificationEmailTemplate t : templates) {
+        for (CustomVerificationEmailTemplate t : page.items()) {
             xml.start("member")
                     .elem("TemplateName", t.getTemplateName())
                     .elem("FromEmailAddress", t.getFromEmailAddress())
@@ -701,6 +712,7 @@ public class SesQueryHandler {
                     .end("member");
         }
         xml.end("CustomVerificationEmailTemplates");
+        xml.elem("NextToken", page.nextToken());
         return Response.ok(AwsQueryResponse.envelope(
                 "ListCustomVerificationEmailTemplates", AwsNamespaces.SES, xml.build())).build();
     }
@@ -924,13 +936,17 @@ public class SesQueryHandler {
         }
     }
 
-    private Response handleListConfigurationSets(String region) {
-        List<ConfigurationSet> all = configSetService.list(region);
+    private Response handleListConfigurationSets(MultivaluedMap<String, String> params, String region) {
+        PaginatedResult<ConfigurationSet> page = configSetService.list(region,
+                SesListPaging.V1_LIST_CONFIGURATION_SETS,
+                SesListPaging.parseQueryProtocolPageSize(getParam(params, "MaxItems")),
+                getParam(params, "NextToken"));
         XmlBuilder xml = new XmlBuilder().start("ConfigurationSets");
-        for (ConfigurationSet cs : all) {
+        for (ConfigurationSet cs : page.items()) {
             xml.start("member").elem("Name", cs.getName()).end("member");
         }
         xml.end("ConfigurationSets");
+        xml.elem("NextToken", page.nextToken());
         return Response.ok(AwsQueryResponse.envelope("ListConfigurationSets", AwsNamespaces.SES, xml.build())).build();
     }
 
@@ -948,7 +964,7 @@ public class SesQueryHandler {
         String configSet = requireParam(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        configSetService.createEventDestination(configSet, edName, dest, region);
+        configSetService.createEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "CreateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }
@@ -958,7 +974,7 @@ public class SesQueryHandler {
         String configSet = requireParam(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        configSetService.updateEventDestination(configSet, edName, dest, region);
+        configSetService.updateEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }

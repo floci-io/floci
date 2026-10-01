@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.CheckpointLifetime;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.Position;
@@ -38,6 +39,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.stubbing.Answer;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -869,7 +871,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         buckets.putForAccount(bucketOwnerAccountId, "my-failed-events", new Bucket("my-failed-events"));
 
         StorageFactory storageFactory = mock(StorageFactory.class);
-        when(storageFactory.create(eq("s3"), anyString(), any())).thenAnswer(invocation -> {
+        Answer<Object> s3Stores = invocation -> {
             String fileName = invocation.getArgument(1);
             return switch (fileName) {
                 case "s3-buckets.json" -> buckets;
@@ -878,7 +880,9 @@ class DynamoDbStreamsEventSourcePollerTest {
                 case "s3-account-public-access-block.json" -> accountPublicAccessBlocks;
                 default -> throw new AssertionError("Unexpected S3 store: " + fileName);
             };
-        });
+        };
+        when(storageFactory.create(eq("s3"), anyString(), any())).thenAnswer(s3Stores);
+        when(storageFactory.create(eq("s3"), anyString(), any(), any(WriteProfile.class))).thenAnswer(s3Stores);
 
         EmulatorConfig.StorageConfig storageConfig = mock(EmulatorConfig.StorageConfig.class);
         when(storageConfig.persistentPath()).thenReturn(Path.of("target", "s3-onfailure-test").toString());

@@ -561,6 +561,11 @@ requests. REST-JSON requests return HTTP 403 `AccessDeniedException`; AWS Query 
 requests retain HTTP 403 XML `AccessDenied` responses. The routed protocol determines
 the status, not just the request's content type.
 
+A REST request is authorized as the operation of the route it reached. An `X-Amz-Target` header or
+a Query `Action` field on it does not change the action it is checked as, and its path is matched
+still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
+the route's rule miss.
+
 ### Resource-based policies
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries registered `ResourcePolicyProvider` SPI implementations (such as S3 bucket policies) during request authorization:
@@ -640,7 +645,8 @@ account key carries no identity policies of its own.
 - `ArnEquals`, `ArnLike`, `ArnNotEquals`, `ArnNotLike`: case-sensitive glob matching
   of each of the six ARN components independently. Wildcards cannot cross the first five
   colon separators; colons within the resource component are retained. `ArnEquals` and
-  `ArnLike` behave identically, as do their negated forms.
+  `ArnLike` behave identically, as do their negated forms. Service-principal trust policies
+  use the same component-by-component ARN matching for `aws:SourceArn`.
 - `NumericEquals`, `NumericNotEquals`, `NumericLessThan`, `NumericGreaterThan` (and Equals variants)
 - `DateEquals`, `DateNotEquals`, `DateLessThan`, `DateGreaterThan` (and Equals variants)
 - `Bool`, `IpAddress`, `NotIpAddress`, `Null`
@@ -713,7 +719,10 @@ floci populates:
 operator on an absent key makes the whole statement *not apply*: it neither matches nor
 blocks. A `DenyRootUser`-style guardrail keyed on `aws:PrincipalArn` therefore fires against
 the account root the same way it does on real AWS, consistent with the account root already
-being bounded by SCPs (below): both forms of root enforcement now agree.
+being bounded by SCPs (below): both forms of root enforcement now agree. A negated operator
+(`StringNotEquals`, `ArnNotLike`, `NotIpAddress` and the rest) is the exception, as on AWS: an
+absent key cannot equal what the policy names, so the condition holds, and a `Deny` written
+that way applies when the key is missing.
 
 **Caveat:** `resolveCallerArn` hardcodes the assumed-role session name as `floci-session`,
 so `aws:PrincipalArn` for an assumed-role caller will not match a condition that pins a

@@ -100,6 +100,12 @@ aws sqs set-queue-attributes \
 
 `SqsManagedSseEnabled` is `true` for a queue with no `KmsMasterKeyId`, matching AWS, and `false` once a KMS key is set. It is derived on read rather than stored, so clearing `KmsMasterKeyId` returns the queue to `true`, unless you set `SqsManagedSseEnabled` yourself, in which case your value stands. AWS does not document the cleared-key case crisply, so that behaviour is Floci's choice rather than a copied one.
 
+## Message Retention
+
+A message older than the queue's `MessageRetentionPeriod` is no longer returned or counted, including a message in flight. A shorter period applies to messages already in the queue. A message moved to a FIFO dead-letter queue, or moved by `StartMessageMoveTask`, starts its retention period over. A message moved to a standard dead-letter queue keeps its original enqueue time. Expired messages are freed from memory and storage every 60 seconds.
+
+`CreateQueue` and `SetQueueAttributes` reject a `MessageRetentionPeriod` outside 60 to 1209600 seconds with `InvalidAttributeValue`.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -108,6 +114,7 @@ aws sqs set-queue-attributes \
 | `FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT` | `30` | Default message visibility timeout (seconds) |
 | `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message size in bytes (1 MiB) |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | When `true`, `PurgeQueue` also clears the FIFO deduplication cache for the queue and any SNS FIFO topics subscribed to it |
+| `FLOCI_SERVICES_SQS_RECEIPT_HANDLE_SECRET` | `local-emulator-secret` | HMAC secret that signs receipt handles, so a handle that was edited or built by hand is rejected |
 
 ## Examples
 

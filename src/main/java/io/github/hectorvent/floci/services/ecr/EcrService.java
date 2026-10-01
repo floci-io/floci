@@ -428,7 +428,9 @@ public class EcrService implements ResourceProvider {
     // ============================================================
 
     public AuthorizationData getAuthorizationToken() {
-        requireRegistry();
+        // Deliberately not gated on the backing registry: AWS answers this call from the
+        // control plane, and both values here are computed without Docker. Gating it made
+        // every SDK client retry a 500 before its first repository call.
         String token = Base64.getEncoder()
                 .encodeToString("AWS:floci".getBytes(StandardCharsets.UTF_8));
         Instant expires = Instant.now().plusSeconds(12 * 60 * 60);

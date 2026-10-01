@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -11,6 +13,7 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
@@ -178,12 +181,32 @@ class OrganizationsCfnIntegrationTest {
                         "DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus")));
     }
 
+    /**
+     * {@link #TEMPLATE} without the SCP. A new root has no policy types enabled and CloudFormation
+     * has no resource that enables one, so a template cannot create an organization and an SCP in
+     * the same operation: the SCP arrives in an update once EnablePolicyType has run.
+     */
+    private static String templateWithoutScp() throws Exception {
+        ObjectNode template = (ObjectNode) new ObjectMapper().readTree(TEMPLATE);
+        ((ObjectNode) template.get("Resources")).remove("Scp");
+        ((ObjectNode) template.get("Outputs")).remove(List.of("PolicyId", "PolicyArn", "PolicyAwsManaged"));
+        return template.toString();
+    }
+
     @Test
     @Order(1)
-    void createStackProvisionsEveryOrganizationsResourceType() {
-        cloudFormation("CreateStack", "StackName", STACK_NAME, "TemplateBody", TEMPLATE)
+    void createStackProvisionsEveryOrganizationsResourceType() throws Exception {
+        cloudFormation("CreateStack", "StackName", STACK_NAME, "TemplateBody", templateWithoutScp())
                 .then().statusCode(200);
         awaitStackStatus("CREATE_COMPLETE");
+
+        organizations("EnablePolicyType", "{\"RootId\":\"" + output(describeStacks(), "RootId")
+                + "\",\"PolicyType\":\"SERVICE_CONTROL_POLICY\"}")
+                .then().statusCode(200);
+
+        cloudFormation("UpdateStack", "StackName", STACK_NAME, "TemplateBody", TEMPLATE)
+                .then().statusCode(200);
+        awaitStackStatus("UPDATE_COMPLETE");
     }
 
     @Test

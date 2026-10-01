@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigateway;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import org.junit.jupiter.api.BeforeEach;
@@ -46,7 +47,8 @@ class ApiGatewayDomainTlsServiceTest {
         certificateManager = mock(TlsCertificateManager.class);
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().cloudfront().domainSuffix()).thenReturn("cloudfront.net");
-        service = new ApiGatewayService(storageFactory, config, certificateManager);
+        service = new ApiGatewayService(storageFactory, config, certificateManager,
+                new RegionResolver(REGION, "000000000000"));
     }
 
     private static Map<String, Object> regional(String domain) {

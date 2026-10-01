@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
@@ -906,6 +907,192 @@ class CognitoIntegrationTest {
         assertEquals("SMS", delivery.path("DeliveryMedium").asText());
         assertNotEquals(phone, delivery.path("Destination").asText());
         assertTrue(delivery.path("Destination").asText().contains("*"));
+    }
+
+    @Test
+    @Order(8)
+    void forgotPasswordUnderAdminOnlyRecoveryIsRefusedWithoutSendingCode() throws Exception {
+        String pool = createAdminOnlyRecoveryPool();
+        String client = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "admin-only-recovery-client"
+                }
+                """.formatted(pool)).path("UserPoolClient").path("ClientId").asText();
+
+        String email = "admin-only+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" },
+                    { "Name": "email_verified", "Value": "true" }
+                  ]
+                }
+                """.formatted(pool, email, email))
+                .then()
+                .statusCode(200);
+        cognitoAction("AdminSetUserPassword", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "Password": "OrigPass123!",
+                  "Permanent": true
+                }
+                """.formatted(pool, email))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("ForgotPassword", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(client, email))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"))
+                .body("message", equalTo("Contact administrator to reset password."));
+
+        given()
+                .queryParam("email", email)
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .body("messages", hasSize(0));
+    }
+
+    @Test
+    @Order(8)
+    void forgotPasswordUnderAdminOnlyRecoveryRefusesUnknownUserTheSameWay() throws Exception {
+        String pool = createAdminOnlyRecoveryPool();
+        String client = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "admin-only-recovery-client"
+                }
+                """.formatted(pool)).path("UserPoolClient").path("ClientId").asText();
+
+        cognitoAction("ForgotPassword", """
+                {
+                  "ClientId": "%s",
+                  "Username": "nobody+%s@example.com"
+                }
+                """.formatted(client, UUID.randomUUID()))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"))
+                .body("message", equalTo("Contact administrator to reset password."));
+    }
+
+    @Test
+    @Order(8)
+    void adminResetUserPasswordUnderAdminOnlyRecoveryIsRefusedAndLeavesUserConfirmed() throws Exception {
+        String pool = createAdminOnlyRecoveryPool();
+        String email = "admin-reset+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" },
+                    { "Name": "email_verified", "Value": "true" }
+                  ]
+                }
+                """.formatted(pool, email, email))
+                .then()
+                .statusCode(200);
+        cognitoAction("AdminSetUserPassword", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "Password": "OrigPass123!",
+                  "Permanent": true
+                }
+                """.formatted(pool, email))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("AdminResetUserPassword", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(pool, email))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"))
+                .body("message", equalTo(
+                        "This userpool does not have password recovery mechanism, the administrator must set a new password."));
+
+        JsonNode user = cognitoJson("AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(pool, email));
+        assertEquals("CONFIRMED", user.path("UserStatus").asText());
+    }
+
+    @Test
+    void createUserPoolRejectsAdminOnlyCombinedWithAnotherRecoveryMechanism() {
+        cognitoAction("CreateUserPool", """
+                {
+                  "PoolName": "AdminOnlyCombinedPool",
+                  "AccountRecoverySetting": {
+                    "RecoveryMechanisms": [
+                      { "Priority": 1, "Name": "admin_only" },
+                      { "Priority": 2, "Name": "verified_email" }
+                    ]
+                  }
+                }
+                """)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo("Invalid account recovery setting parameter. "
+                        + "Account Recovery Setting cannot use admin_only setting with any other recovery mechanisms."));
+    }
+
+    @Test
+    void updateUserPoolRejectsAdminOnlyCombinedWithAnotherRecoveryMechanism() throws Exception {
+        String pool = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "EmailRecoveryPoolToUpdate",
+                  "AccountRecoverySetting": {
+                    "RecoveryMechanisms": [
+                      { "Priority": 1, "Name": "verified_email" }
+                    ]
+                  }
+                }
+                """).path("UserPool").path("Id").asText();
+
+        cognitoAction("UpdateUserPool", """
+                {
+                  "UserPoolId": "%s",
+                  "AccountRecoverySetting": {
+                    "RecoveryMechanisms": [
+                      { "Priority": 1, "Name": "verified_phone_number" },
+                      { "Priority": 2, "Name": "admin_only" }
+                    ]
+                  }
+                }
+                """.formatted(pool))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo("Invalid account recovery setting parameter. "
+                        + "Account Recovery Setting cannot use admin_only setting with any other recovery mechanisms."));
+
+        JsonNode mechanisms = cognitoJson("DescribeUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(pool)).path("UserPool").path("AccountRecoverySetting").path("RecoveryMechanisms");
+        assertEquals(1, mechanisms.size());
+        assertEquals("verified_email", mechanisms.get(0).path("Name").asText());
     }
 
     // ── Groups ────────────────────────────────────────────────────────
@@ -3129,6 +3316,19 @@ class CognitoIntegrationTest {
                 }
                 """.formatted(clientId, USERNAME, PASSWORD));
         return auth.path("AuthenticationResult").path("AccessToken").asText();
+    }
+
+    private static String createAdminOnlyRecoveryPool() throws Exception {
+        return cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "AdminOnlyRecoveryPool",
+                  "AccountRecoverySetting": {
+                    "RecoveryMechanisms": [
+                      { "Priority": 1, "Name": "admin_only" }
+                    ]
+                  }
+                }
+                """).path("UserPool").path("Id").asText();
     }
 
     private static String fetchLatestSesVerificationCode(String recipient) throws Exception {

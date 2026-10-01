@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
-import io.github.hectorvent.floci.services.appsync.AppSyncGraphqlSidecarProfile;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
@@ -37,12 +37,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * never touches a developer's own running sidecar, and skips (rather than fails) without Docker.
  */
 @QuarkusTest
-@TestProfile(AppSyncGraphqlSidecarProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class AppSyncCfnIntegrationTest {
 
     @BeforeAll
     static void requireDockerAndTheSidecarImage() {
-        AppSyncGraphqlSidecarProfile.requireDockerAndTheSidecarImage();
+        SidecarContainersProfile.requireDockerAndImage("floci.services.appsync.graphql-image");
     }
 
     private static final String CFN_AUTH =

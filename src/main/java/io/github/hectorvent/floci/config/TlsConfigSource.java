@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import org.bouncycastle.asn1.x509.Extension;
 import org.eclipse.microprofile.config.spi.ConfigSource;
 import org.jboss.logging.Logger;
 
@@ -124,8 +127,7 @@ public class TlsConfigSource implements ConfigSource {
             trustAnchor = ca.certificatePath();
 
             if (Files.exists(certFile) && Files.exists(keyFile)) {
-                List<String> currentHostnames = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
-                currentHostnames.addAll(extractCustomHostnames());
+                List<String> currentHostnames = configuredSanHostnames();
 
                 // Regenerate when the hostname config changed, when the existing leaf was not
                 // issued by the current CA (a pre-CA self-signed cert, or the CA was regenerated),
@@ -207,11 +209,134 @@ public class TlsConfigSource implements ConfigSource {
         return defaultValue;
     }
 
+    /**
+     * Whether {@code floci.dns.spoof-aws-endpoints} is set where this source can read it (system
+     * property or environment variable). It cannot see application.yml, so a flag set only there
+     * leaves the certificate without the AWS SANs.
+     */
+    public static boolean spoofAwsEndpointsVisibleToTls() {
+        return "true".equalsIgnoreCase(resolveProperty("floci.dns.spoof-aws-endpoints", "false"));
+    }
+
+    /** Whether {@code floci.tls.enabled} is set where this source can read it. */
+    public static boolean tlsEnabledVisibleToTls() {
+        return "true".equalsIgnoreCase(resolveProperty("floci.tls.enabled", "false"));
+    }
+
+    /**
+     * The full SAN list the server certificate must cover for the current configuration:
+     * defaults, custom hostnames, and the AWS endpoint wildcards when
+     * {@code floci.dns.spoof-aws-endpoints} is enabled. Used both for generation and for the
+     * change detection that triggers regeneration, so flipping the spoof flag regenerates the
+     * certificate.
+     */
+    private List<String> configuredSanHostnames() {
+        List<String> sans = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
+        sans.addAll(extractCustomHostnames());
+        sans.addAll(awsSpoofSans());
+        return sans;
+    }
+
+    /**
+     * The suffixes floci.dns.spoof-aws-endpoints intercepts, shared by the embedded DNS server and
+     * the certificate SANs: every partition's DNS and dual-stack suffix. Each covers the suffix
+     * itself and its subdomains at any depth, so explicit SDK endpoints like
+     * {@code sts.us-east-1.<suffix>} resolve to Floci instead of real AWS.
+     */
+    public static Set<String> awsEndpointSuffixes() {
+        Set<String> result = new LinkedHashSet<>();
+        for (AwsPartition partition : AwsPartitions.all()) {
+            result.add(partition.dnsSuffix());
+            result.add(partition.dualStackDnsSuffix());
+        }
+        return result;
+    }
+
+    /** Service infixes that AWS virtual-hosts with an extra resource-id label before the region. */
+    private static final List<String> MULTI_LABEL_REGIONAL_SERVICE_INFIXES = List.of(
+            "execute-api", "dkr.ecr", "s3-control", "s3.dualstack", "s3-website",
+            "s3-fips", "s3-fips.dualstack");
+
+    /**
+     * S3 endpoint prefixes that join the region with a hyphen instead of a dot: the legacy
+     * {@code s3-<region>} form and its website counterpart {@code s3-website-<region>}, per
+     * {@code S3VirtualHostFilter#isS3QualifierTail}, the authoritative list of endpoint forms
+     * Floci itself recognizes as S3.
+     */
+    private static final List<String> HYPHEN_JOINED_REGIONAL_S3_PREFIXES = List.of("s3", "s3-website");
+
+    /** Regionless S3 transfer-acceleration endpoints, with and without dualstack. */
+    private static final List<String> REGIONLESS_S3_INFIXES = List.of("s3-accelerate", "s3-accelerate.dualstack");
+
+    /**
+     * SANs covering AWS endpoint hostnames spoofed by the embedded DNS server.
+     * Wildcards match a single label, so {@code *.amazonaws.com} covers global
+     * endpoints ({@code sts.amazonaws.com}) but not regional ones
+     * ({@code sts.us-east-1.amazonaws.com}), which need their own
+     * {@code *.<region>.amazonaws.com} entry. A client can hit an explicit endpoint outside
+     * {@code floci.default-region} (a cross-region call, a Lambda whose own AWS_REGION differs
+     * from the emulator default, or a published region this emulator doesn't advertise via
+     * DescribeRegions); DNS spoofing routes it to Floci regardless of region, so every
+     * {@link AwsRegions#KNOWN_IDS published region id} gets a SAN, not just the configured default.
+     *
+     * <p>A single wildcard label also cannot cover multi-label endpoints, where a resource id
+     * contributes an extra label before the service name:
+     * {@code <api-id>.execute-api.<region>.amazonaws.com},
+     * {@code <account>.dkr.ecr.<region>.amazonaws.com},
+     * {@code <account>.s3-control.<region>.amazonaws.com}, and
+     * {@code <bucket>.s3.dualstack.<region>.amazonaws.com}. Each needs its own
+     * {@code *.<infix>.<region>.amazonaws.com} SAN.
+     *
+     * <p>S3 publishes several more forms: some join the region with a hyphen
+     * ({@code <bucket>.s3-<region>.amazonaws.com}, {@code <bucket>.s3-website-<region>.amazonaws.com}),
+     * and two are regionless transfer-acceleration endpoints
+     * ({@code <bucket>.s3-accelerate.amazonaws.com},
+     * {@code <bucket>.s3-accelerate.dualstack.amazonaws.com}). The set follows
+     * {@code S3VirtualHostFilter#isS3QualifierTail}, which documents every S3 endpoint form Floci
+     * itself routes; keep the two in sync so the SAN list does not drift from what gets spoofed.
+     *
+     * <p>The suffix is never fixed: global names use every partition's DNS suffix from
+     * {@link AwsPartitions#all()}, and each region's names use {@link AwsRegions#dnsSuffixFor}, so
+     * {@code cn-north-1} is named under the China suffix and never under the commercial one. Lambda
+     * function URLs ({@code <url-id>.lambda-url.<region>.on.aws}) live outside the partition suffix
+     * and are not intercepted, so they get no SAN.
+     */
+    private List<String> awsSpoofSans() {
+        if (!spoofAwsEndpointsVisibleToTls()) {
+            return List.of();
+        }
+        List<String> sans = new ArrayList<>();
+        for (String suffix : awsEndpointSuffixes()) {
+            sans.add("*." + suffix);
+            sans.add("*.s3." + suffix);
+            for (String infix : REGIONLESS_S3_INFIXES) {
+                sans.add("*." + infix + "." + suffix);
+            }
+        }
+        for (String region : AwsRegions.KNOWN_IDS.stream().sorted().toList()) {
+            String suffix = AwsRegions.dnsSuffixFor(region);
+            // A wildcard matches exactly one label (RFC 6125 6.4.3), so the two broad
+            // wildcards miss virtual-hosted addressing, where the bucket adds a label:
+            // my-bucket.s3.<suffix> and my-bucket.s3.<region>.<suffix>. The DNS
+            // spoof does route those, so without these the handshake fails on a hostname
+            // mismatch rather than the request reaching Floci.
+            sans.add("*." + region + "." + suffix);
+            sans.add("*.s3." + region + "." + suffix);
+            sans.add("*." + region + "." + AwsPartitions.forRegionOrCommercial(region).dualStackDnsSuffix());
+            for (String infix : MULTI_LABEL_REGIONAL_SERVICE_INFIXES) {
+                sans.add("*." + infix + "." + region + "." + suffix);
+            }
+            for (String prefix : HYPHEN_JOINED_REGIONAL_S3_PREFIXES) {
+                sans.add("*." + prefix + "-" + region + "." + suffix);
+            }
+        }
+        return sans;
+    }
+
     private void generateServerCert(Path tlsDir, Path certFile, Path keyFile, FlociCertificateAuthority ca) {
         try {
             Files.createDirectories(tlsDir);
-            List<String> configured = new ArrayList<>(DEFAULT_SAN_HOSTNAMES);
-            configured.addAll(extractCustomHostnames());
+            List<String> configured = configuredSanHostnames();
             List<String> learned = readLearnedHostnames(tlsDir, certFile);
             List<String> allSans = new ArrayList<>(configured);
             for (String name : learned) {
@@ -310,6 +435,11 @@ public class TlsConfigSource implements ConfigSource {
             X509Certificate cert = new CertificateGenerator().parseCertificate(Files.readString(certFile));
             if (!ca.isIssuedByUs(cert)) {
                 LOG.infov("TLS: existing server certificate was not issued by the local CA; regenerating");
+                return false;
+            }
+            if (cert.getExtensionValue(Extension.subjectKeyIdentifier.getId()) == null
+                    || cert.getExtensionValue(Extension.authorityKeyIdentifier.getId()) == null) {
+                LOG.info("TLS: existing server certificate lacks key identifiers; regenerating");
                 return false;
             }
             cert.checkValidity();

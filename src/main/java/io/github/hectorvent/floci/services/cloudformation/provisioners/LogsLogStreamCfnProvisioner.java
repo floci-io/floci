@@ -188,12 +188,6 @@ public class LogsLogStreamCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
-    public boolean hasPendingRollbackCleanup(StackResource resource) {
-        return "true".equals(resource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR))
-                || resource.getAttributes().containsKey(CLEANUP_ATTR);
-    }
-
-    @Override
     public boolean hasReplacementUpdate(StackResource resource) {
         return resource.getAttributes().containsKey(CLEANUP_ATTR);
     }

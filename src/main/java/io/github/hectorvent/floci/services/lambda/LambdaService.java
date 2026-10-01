@@ -85,6 +85,8 @@ public class LambdaService implements ResourceProvider {
             "^arn:(aws[a-zA-Z-]*)?:iam::\\d{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+$");
     private static final Pattern HANDLER_PATTERN = Pattern.compile("^[^\\s]+$");
     private static final int MAX_HANDLER_LENGTH = 128;
+    private static final Pattern TAG_KEY_PATTERN = Pattern.compile("([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)");
+    private static final int MAX_TAG_KEY_LENGTH = 128;
     private static final Pattern KMS_KEY_ARN_PATTERN = Pattern.compile(
             "^(arn:(aws[a-zA-Z-]*)?:[a-z0-9-.]+:.*)?$");
     private static final Pattern LAYER_VERSION_ARN_PATTERN = Pattern.compile(
@@ -436,6 +438,9 @@ public class LambdaService implements ResourceProvider {
         validateEnum(runtime, "runtime", RUNTIME_VALUES);
         validateMaxLength(description, "description", 256);
 
+        @SuppressWarnings("unchecked")
+        Map<String, String> tags = (Map<String, String>) request.get("Tags");
+        validateTagKeys(tags);
         if (functionStore.get(region, functionName).isPresent()) {
             throw new AwsException("ResourceConflictException",
                     "Function already exist: " + functionName, 409);
@@ -463,8 +468,6 @@ public class LambdaService implements ResourceProvider {
         }
 
         // Handle tags
-        @SuppressWarnings("unchecked")
-        Map<String, String> tags = (Map<String, String>) request.get("Tags");
         if (tags != null) fn.setTags(tags);
 
         if (architectures != null && !architectures.isEmpty()) {
@@ -787,7 +790,10 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("Runtime")) {
             validateEnum(request.get("Runtime"), "runtime", RUNTIME_VALUES);
         }
-        validatePattern(request.get("KMSKeyArn"), "kmsKeyArn", KMS_KEY_ARN_PATTERN);
+        String kmsKeyArn = validatedOptionalString(request.get("KMSKeyArn"), "KMSKeyArn");
+        String deadLetterTargetArn = deadLetterConfig == null ? null
+                : validatedOptionalString(deadLetterConfig.get("TargetArn"), "DeadLetterConfig.TargetArn");
+        validatePattern(kmsKeyArn, "kmsKeyArn", KMS_KEY_ARN_PATTERN);
         if (request.containsKey("SnapStart")) {
             validateSnapStart(snapStart);
         }
@@ -800,6 +806,10 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("Handler")) {
             validateHandler((String) request.get("Handler"));
         }
+        int memorySize = request.containsKey("MemorySize")
+                ? validatedConfigurationInteger(request.get("MemorySize"), "MemorySize", 128, 10240) : 0;
+        int timeout = request.containsKey("Timeout")
+                ? validatedConfigurationInteger(request.get("Timeout"), "Timeout", 1, 900) : 0;
 
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
         if (requestedVpcConfigUpdate != null) {
@@ -820,7 +830,7 @@ public class LambdaService implements ResourceProvider {
             fn.setHandler((String) request.get("Handler"));
         }
         if (request.containsKey("MemorySize")) {
-            fn.setMemorySize(((Number) request.get("MemorySize")).intValue());
+            fn.setMemorySize(memorySize);
         }
         if (request.containsKey("Role")) {
             fn.setRole((String) request.get("Role"));
@@ -829,7 +839,7 @@ public class LambdaService implements ResourceProvider {
             fn.setRuntime((String) request.get("Runtime"));
         }
         if (request.containsKey("Timeout")) {
-            fn.setTimeout(((Number) request.get("Timeout")).intValue());
+            fn.setTimeout(timeout);
         }
         if (request.containsKey("Environment")) {
             if (environment != null && environment.containsKey("Variables")) {
@@ -867,7 +877,7 @@ public class LambdaService implements ResourceProvider {
 
         if (request.containsKey("DeadLetterConfig")) {
             if (deadLetterConfig != null) {
-                fn.setDeadLetterTargetArn((String) deadLetterConfig.get("TargetArn"));
+                fn.setDeadLetterTargetArn(deadLetterTargetArn);
             }
         }
 
@@ -876,7 +886,7 @@ public class LambdaService implements ResourceProvider {
         }
 
         if (request.containsKey("KMSKeyArn")) {
-            fn.setKmsKeyArn((String) request.get("KMSKeyArn"));
+            fn.setKmsKeyArn(kmsKeyArn);
         }
 
         if (request.containsKey("VpcConfig")) {
@@ -926,6 +936,22 @@ public class LambdaService implements ResourceProvider {
         functionStore.save(region, fn);
         LOG.infov("Updated configuration for function: {0}", functionName);
         return fn;
+    }
+
+    private static int validatedConfigurationInteger(Object value, String field, int minimum, int maximum) {
+        if (!(value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long)
+                || ((Number) value).longValue() < minimum || ((Number) value).longValue() > maximum) {
+            throw new AwsException("InvalidParameterValueException",
+                    field + " must be an integer between " + minimum + " and " + maximum, 400);
+        }
+        return ((Number) value).intValue();
+    }
+
+    private static String validatedOptionalString(Object value, String field) {
+        if (value != null && !(value instanceof String)) {
+            throw new AwsException("InvalidParameterValueException", field + " must be a string", 400);
+        }
+        return (String) value;
     }
 
     /**
@@ -3356,6 +3382,7 @@ public class LambdaService implements ResourceProvider {
     }
 
     public void tagResource(String functionArn, Map<String, String> tags) {
+        validateTagKeys(tags);
         EventSourceMapping esm = taggedEventSourceMapping(functionArn);
         if (esm != null) {
             esm.getTags().putAll(tags);
@@ -3367,6 +3394,26 @@ public class LambdaService implements ResourceProvider {
         if (fn.getTags() == null) fn.setTags(new HashMap<>());
         fn.getTags().putAll(tags);
         functionStore.save(target.region, fn);
+    }
+
+    /**
+     * The key constraint AWS checks before any lookup. AWS renders the whole map in the message, so
+     * {@code toString()} gives its {@code {key=value}} form.
+     */
+    public static void validateTagKeys(Map<String, String> tags) {
+        if (tags == null) {
+            return;
+        }
+        for (String key : tags.keySet()) {
+            if (key.isEmpty() || key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH
+                    || !TAG_KEY_PATTERN.matcher(key).matches()) {
+                throw new AwsException("ValidationException", "1 validation error detected: Value '" + tags
+                        + "' at 'tags' failed to satisfy constraint: Map keys must satisfy constraint: [Member"
+                        + " must have length less than or equal to " + MAX_TAG_KEY_LENGTH + ", Member must have"
+                        + " length greater than or equal to 1, Member must satisfy regular expression pattern: "
+                        + TAG_KEY_PATTERN.pattern() + "]", 400);
+            }
+        }
     }
 
     public void untagResource(String functionArn, List<String> tagKeys) {

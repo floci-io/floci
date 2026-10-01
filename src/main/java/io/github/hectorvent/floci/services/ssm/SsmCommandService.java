@@ -45,6 +45,7 @@ public class SsmCommandService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SsmCommandService.class);
     private static final int MIN_TIMEOUT_SECONDS = 30;
+    private static final int MAX_INSTANCE_IDS = 50;
     static final int MAX_STDOUT_CHARS = 24000;
     static final int MAX_STDERR_CHARS = 8000;
 
@@ -73,11 +74,10 @@ public class SsmCommandService implements Resettable {
         this.objectMapper = objectMapper;
         this.regionResolver = regionResolver;
         this.directCommandExecutor = directCommandExecutor;
-        this.directExecutionExecutor = Executors.newCachedThreadPool(runnable -> {
-            Thread thread = new Thread(runnable, "floci-ssm-direct-execution");
-            thread.setDaemon(true);
-            return thread;
-        });
+        // Each direct execution blocks for the whole container exec, up to TimeoutSeconds, so every
+        // target gets its own virtual thread instead of a platform thread.
+        this.directExecutionExecutor = Executors.newThreadPerTaskExecutor(
+                Thread.ofVirtual().name("floci-ssm-direct-execution").factory());
     }
 
     @PreDestroy
@@ -150,6 +150,12 @@ public class SsmCommandService implements Resettable {
         request.path("InstanceIds").forEach(n -> instanceIds.add(n.asText()));
         if (instanceIds.isEmpty()) {
             throw new AwsException("InvalidInstanceId", "At least one InstanceId is required.", 400);
+        }
+        if (instanceIds.size() > MAX_INSTANCE_IDS) {
+            throw new AwsException(
+                    "ValidationException",
+                    "1 validation error detected: Value at 'instanceIds' failed to satisfy constraint: Member must have length less than or equal to " + MAX_INSTANCE_IDS,
+                    400);
         }
 
         Map<String, List<String>> parameters = parseParameters(request.path("Parameters"));
@@ -566,6 +572,9 @@ public class SsmCommandService implements Resettable {
                     .orElse(null);
             if (result == null) {
                 synchronized (invocation) {
+                    if (!"InProgress".equals(invocation.getStatus())) {
+                        return;
+                    }
                     invocation.setStatus("Pending");
                     invocation.setStatusDetails(statusDetails("Pending"));
                     invocationStore.put(invKey, invocation);
@@ -575,6 +584,9 @@ public class SsmCommandService implements Resettable {
                 return;
             }
             synchronized (invocation) {
+                if (!"InProgress".equals(invocation.getStatus())) {
+                    return;
+                }
                 applyDirectResult(invocation, result);
                 invocationStore.put(invKey, invocation);
             }

@@ -1636,7 +1636,8 @@ public class ApiGatewayController {
         v1Request.put("restApiId", apiId);
         v1Request.put("stage", stage);
         v1Request.put("basePath", basePath);
-        BasePathMapping mapping = service.createBasePathMapping(region, domainName, v1Request);
+        BasePathMapping mapping = service.createBasePathMapping(region, domainName, v1Request,
+                v2Service.getApi(region, apiId).getProtocolType());
         return Response.status(201).entity(toApiMappingNode(basePath, mapping).toString())
                 .type(MediaType.APPLICATION_JSON).build();
     }

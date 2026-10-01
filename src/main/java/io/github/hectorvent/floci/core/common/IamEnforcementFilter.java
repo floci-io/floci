@@ -24,6 +24,7 @@ import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
@@ -255,7 +256,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
         String auth = ctx.getHeaderString("Authorization");
         if (auth == null) {
-            auth = presignedCredentialAsAuthorization(ctx);
+            auth = requestAuthorization(null, ctx.getUriInfo().getQueryParameters());
         }
         if (auth == null) {
             refuseUnsignedManagementCall(ctx);
@@ -473,8 +474,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return new ResolvedAuthorization(servingScope, servingScope + ":" + queryAction);
         }
 
-        if (claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST
-                && resourceInfo != null && resourceInfo.getResourceClass() != null) {
+        boolean rest = claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST;
+        if (rest && resourceInfo != null && resourceInfo.getResourceClass() != null) {
             ServiceDescriptor descriptor = catalog.byResourceClass(resourceInfo.getResourceClass()).orElse(null);
             if (descriptor != null) {
                 ResolvedAuthorization routeAuthorization = resolveRestAuthorization(descriptor, ctx);
@@ -484,8 +485,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
 
+        // A REST request is authorized by its route alone, never by an X-Amz-Target it carries.
         String servingScope = servingCredentialScope(claimedScope, ctx);
-        return new ResolvedAuthorization(servingScope, actionRegistry.resolve(servingScope, ctx));
+        return new ResolvedAuthorization(servingScope, rest
+                ? actionRegistry.resolveRoute(servingScope, ctx)
+                : actionRegistry.resolve(servingScope, ctx));
     }
 
     private ResolvedAuthorization resolveRestAuthorization(ServiceDescriptor descriptor,
@@ -494,7 +498,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 .map(catalog::canonicalCredentialScope)
                 .distinct()
                 .sorted()
-                .map(scope -> new ResolvedAuthorization(scope, actionRegistry.resolve(scope, ctx)))
+                .map(scope -> new ResolvedAuthorization(scope, actionRegistry.resolveRoute(scope, ctx)))
                 .filter(authorization -> authorization.action() != null)
                 .findFirst()
                 .orElse(null);
@@ -703,9 +707,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             boolean accountRootPrincipal = false;
             CallerContext caller = iamService.resolveCallerContext(akid);
             if (caller == null) {
-                // No unknown-key rejection here, unlike filter(): this path runs only for a
-                // presigned POST, whose form signature S3PostPolicySigner has already verified
-                // against the key's secret, so an unknown key never reaches it.
+                // No unknown-key rejection here, unlike filter(), and none is needed. For a second
+                // resource of a request filter() has seen (CopyObject's source, RotateSecret's
+                // rotation function, the secrets behind SSM GetParameter) the credential is the one
+                // filter() evaluated, and filter() refuses an unknown key before the handler runs. A
+                // presigned POST carries its credential only in the form body, which filter() never
+                // sees: an unknown key there is refused by S3's presigned-POST signature check when
+                // S3 auth enforcement is on, and otherwise uploads as an unsigned request would.
                 if (scpLevels == null || !akid.equals(accountId)) {
                     return;
                 }
@@ -726,22 +734,24 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
             }
 
-            Map<String, List<String>> effectiveContext = conditionContext;
             ResourcePolicyDecision effectiveDecision = resourcePolicyDecision;
             String effectiveOwnerAccountId = resourceOwnerAccountId;
+            List<String> policyDocs = null;
             if (effectiveDecision == null) {
                 List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies = resolveResourcePolicies(
                         credentialScope, resource);
                 effectiveOwnerAccountId = resourcePolicies.isEmpty()
                         ? null : resourcePolicies.getFirst().ownerAccountId();
-                List<String> policyDocs = resourcePolicies.stream()
+                policyDocs = resourcePolicies.stream()
                         .map(ResourcePolicyProvider.ResourcePolicy::policyDocument)
                         .filter(doc -> doc != null && !doc.isBlank())
                         .toList();
-                String region = requestContext.getRegion() == null
-                        ? config.defaultRegion() : requestContext.getRegion();
-                effectiveContext = IamConditionContextResolver.withGlobalContext(
-                        conditionContext, resource, region, accountId, effectiveOwnerAccountId);
+            }
+            String region = requestContext.getRegion() == null
+                    ? config.defaultRegion() : requestContext.getRegion();
+            Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
+                    conditionContext, resource, region, accountId, effectiveOwnerAccountId);
+            if (effectiveDecision == null) {
                 effectiveDecision = evaluator.evaluateResourcePolicy(
                         policyDocs.isEmpty() ? null : policyDocs,
                         caller.principalArn(), action, resource, effectiveContext);
@@ -908,9 +918,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * same way for the same reason. Synthesizing a {@code Credential=...} string from the query
      * parameter lets every downstream step here - access key extraction, credential scope,
      * action resolution, resource ARNs - run unchanged for both signing styles.
+     *
+     * <p>Public so that a handler authorizing a secondary resource through
+     * {@link #authorizeAdditionalResource} hands it the same caller this filter evaluated, whichever
+     * way the request was signed.
+     *
+     * @return the {@code Authorization} header, else a {@code Credential=...} string built from
+     *         {@code X-Amz-Credential}, else {@code null}
      */
-    private static String presignedCredentialAsAuthorization(ContainerRequestContext ctx) {
-        String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
+    public static String requestAuthorization(String authorizationHeader,
+                                              MultivaluedMap<String, String> queryParameters) {
+        if (authorizationHeader != null) {
+            return authorizationHeader;
+        }
+        String credential = queryParameters == null ? null : queryParameters.getFirst("X-Amz-Credential");
         return credential == null || credential.isBlank() ? null : "Credential=" + credential;
     }
 

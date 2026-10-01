@@ -160,7 +160,36 @@ class S3BucketPolicyEnforcementIntegrationTest {
         .when()
                 .put("/" + bucketName + "?policy")
         .then()
-                .statusCode(200);
+            .statusCode(200);
+    }
+
+    @Test
+    void signedIamUserMatchesPrincipalIsAwsServiceFalseInIdentityPolicy() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "principal-service-" + suffix;
+        String userName = "principal-service-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "data.txt", "data");
+
+        Credentials user = createUserWithCredentials(userName);
+        putUserPolicy(userName, "ReadWhenIamPrincipal", """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": {
+                    "Effect": "Allow",
+                    "Action": "s3:GetObject",
+                    "Resource": "arn:aws:s3:::%s/data.txt",
+                    "Condition": {"Bool": {"aws:PrincipalIsAWSService": "false"}}
+                  }
+                }""".formatted(bucket), "000000000000");
+
+        given()
+                .filter(user.signer())
+        .when()
+                .get("/" + bucket + "/data.txt")
+        .then()
+                .statusCode(200)
+                .body(equalTo("data"));
     }
 
     @Test

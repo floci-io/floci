@@ -143,6 +143,7 @@ cross-resource references.
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook`, `ScalingPolicy` |
 | Route 53 | `HostedZone`, `RecordSet` |
+| Cloud Map | `HttpNamespace`, `PrivateDnsNamespace`, `PublicDnsNamespace`, `Service` |
 | API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account`, `DomainName`, `BasePathMapping`, `GatewayResponse`, `ApiKey`, `UsagePlan`, `UsagePlanKey` |
 | API Gateway v2 | `Api`, `Authorizer`, `Route`, `Integration`, `Stage`, `Deployment` |
 | AppSync | `GraphQLApi`, `GraphQLSchema`, `DataSource`, `FunctionConfiguration`, `Resolver`, `ApiKey` |
@@ -269,6 +270,7 @@ accepts, not only by name:
 - Replacement-only changes such as `FunctionName` or `PackageType` changes create a replacement function and remove the old one.
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
 - Hot-reload code (`S3Bucket: hot-reload`) is compared by host path: the same path is a no-op, a different path updates the bind mount in place.
+- `Tags` are applied when the function is created, including a replacement function. On `UpdateStack` the template's tags are applied and only the keys the previous template set and the new one drops are removed, so a tag added outside the template is kept, as in AWS.
 
 ## RDS Credential Dynamic References
 
@@ -309,6 +311,9 @@ before provisioning:
 
 The `AWS::SSM::Parameter` **resource** type exposes `Value`, `Type`, `Name`, and `Arn` attributes through
 `Ref` / `Fn::GetAtt` so downstream resources can consume a parameter the same stack creates.
+`Tags` are applied when the parameter is created. On `UpdateStack` the template's tags are applied and
+only the keys the previous template set and the new one drops are removed, so a tag added outside the
+template is kept, as in AWS.
 
 ## AWS::Include (`Fn::Transform`)
 

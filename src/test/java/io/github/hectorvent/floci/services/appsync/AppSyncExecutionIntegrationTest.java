@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appsync;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncErrorFormatter;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -23,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Runs against the real GraphQL sidecar image, started by {@link GraphqlSidecarManager}. */
 @QuarkusTest
-@TestProfile(AppSyncGraphqlSidecarProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class AppSyncExecutionIntegrationTest {
 
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/appsync/aws4_request";
@@ -36,7 +37,7 @@ class AppSyncExecutionIntegrationTest {
 
     @BeforeAll
     static void configureRestAssured() {
-        AppSyncGraphqlSidecarProfile.requireDockerAndTheSidecarImage();
+        SidecarContainersProfile.requireDockerAndImage("floci.services.appsync.graphql-image");
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 

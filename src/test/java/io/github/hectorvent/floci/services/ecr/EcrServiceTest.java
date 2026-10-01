@@ -375,11 +375,6 @@ class EcrServiceTest {
         service.createRepository(REPO, null, null, null, null, null, null, REGION);
         when(registryManager.tryEnsureStarted()).thenReturn(false);
 
-        AwsException auth = assertThrows(AwsException.class, () -> service.getAuthorizationToken());
-        assertEquals("ServerException", auth.getErrorCode());
-        assertEquals(500, auth.getHttpStatus());
-        assertTrue(auth.getMessage().contains("Docker"), auth.getMessage());
-
         assertEquals("ServerException",
                 assertThrows(AwsException.class, () -> service.listImages(REPO, null, REGION)).getErrorCode());
         assertEquals("ServerException",
@@ -391,6 +386,19 @@ class EcrServiceTest {
         assertEquals("ServerException",
                 assertThrows(AwsException.class,
                         () -> service.batchDeleteImage(REPO, List.of(), null, REGION)).getErrorCode());
+    }
+
+    @Test
+    void getAuthorizationToken_succeedsWhenRegistryIsUnavailable() {
+        when(registryManager.tryEnsureStarted()).thenReturn(false);
+
+        AuthorizationData data = service.getAuthorizationToken();
+
+        String decoded = new String(Base64.getDecoder().decode(data.getAuthorizationToken()));
+        assertTrue(decoded.startsWith("AWS:"), "decoded token should start with AWS: but was: " + decoded);
+        assertEquals("http://localhost:4566", data.getProxyEndpoint());
+        assertNotNull(data.getExpiresAt());
+        verify(registryManager, never()).tryEnsureStarted();
     }
 
     // ------------------------------------------------------------
@@ -567,7 +575,7 @@ class EcrServiceTest {
         assertNotNull(data.getExpiresAt());
         String decoded = new String(Base64.getDecoder().decode(data.getAuthorizationToken()));
         assertTrue(decoded.startsWith("AWS:"), "decoded token should start with AWS: but was: " + decoded);
-        Mockito.verify(registryManager).tryEnsureStarted();
+        verify(registryManager, never()).tryEnsureStarted();
     }
 
     @Test

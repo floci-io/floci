@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigateway;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
@@ -41,7 +42,8 @@ class ApiGatewayEdgeDomainPartitionTest {
                         ignored -> AccountAwareStorageBackend.inMemory("000000000000")));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().cloudfront().domainSuffix()).thenReturn("cloudfront.net");
-        service = new ApiGatewayService(storageFactory, config, mock(TlsCertificateManager.class));
+        service = new ApiGatewayService(storageFactory, config, mock(TlsCertificateManager.class),
+                new RegionResolver(GOV_REGION, "000000000000"));
     }
 
     @SuppressWarnings("unchecked")

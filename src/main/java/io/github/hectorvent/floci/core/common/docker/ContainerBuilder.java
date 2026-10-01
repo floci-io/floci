@@ -1,7 +1,5 @@
 package io.github.hectorvent.floci.core.common.docker;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import com.github.dockerjava.api.model.AccessMode;
 import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.DeviceRequest;
@@ -10,6 +8,9 @@ import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Volume;
 import com.github.dockerjava.api.model.VolumesFrom;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -92,7 +93,7 @@ public class ContainerBuilder {
     }
 
     static String resolveImage(String image, Optional<String> imageRegistryBase) {
-        if (image == null || image.isBlank()) {
+        if (image == null || image.isBlank() || ImageCacheService.isImageId(image)) {
             return image;
         }
         return normalizeImageRegistryBase(imageRegistryBase)

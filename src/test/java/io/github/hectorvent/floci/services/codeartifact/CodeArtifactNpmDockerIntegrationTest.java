@@ -2,9 +2,13 @@ package io.github.hectorvent.floci.services.codeartifact;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
 import org.hamcrest.Matcher;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -43,7 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * internal, client-unreachable address instead of back through this proxy.
  */
 @QuarkusTest
-@TestProfile(CodeArtifactNpmSidecarProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CodeArtifactNpmDockerIntegrationTest {
 
@@ -52,13 +56,16 @@ class CodeArtifactNpmDockerIntegrationTest {
     private static final String REPO = "npm-sidecar-repo";
     private static final String PACKAGE_NAME = "floci-verdaccio-spike";
 
+    @Inject
+    EmulatorConfig config;
+
     private static String bearerToken;
     private static byte[] publishFixture;
     private static byte[] expectedTarballBytes;
 
     @BeforeAll
     static void setUp() throws IOException {
-        CodeArtifactNpmSidecarProfile.requireDockerAndTheSidecarImage();
+        SidecarContainersProfile.requireDockerAndImage("floci.services.codeartifact.npm-image");
         RestAssuredJsonUtils.configureAwsContentTypes();
 
         ObjectMapper mapper = new ObjectMapper();
@@ -104,11 +111,12 @@ class CodeArtifactNpmDockerIntegrationTest {
 
         // Pins VERDACCIO_PUBLIC_URL: without it this would be the container's own internal,
         // client-unreachable address instead of a URL back through this same proxy.
-        assertTrue(tarballUrl.startsWith("http://localhost:4566/codeartifact/npm/" + DOMAIN + "/" + REPO + "/"),
+        String publicUrl = config.effectiveBaseUrl();
+        assertTrue(tarballUrl.startsWith(publicUrl + "/codeartifact/npm/" + DOMAIN + "/" + REPO + "/"),
                 "tarball URL must point back through the proxy, was: " + tarballUrl);
 
         byte[] fetchedTarball = given().header("Authorization", "Bearer " + bearerToken)
-                .get(tarballUrl.substring("http://localhost:4566".length()))
+                .get(tarballUrl.substring(publicUrl.length()))
                 .then().statusCode(200)
                 .extract().asByteArray();
         assertArrayEquals(expectedTarballBytes, fetchedTarball);
@@ -324,9 +332,9 @@ class CodeArtifactNpmDockerIntegrationTest {
                 "state reset must stop reset-repo's Verdaccio container");
     }
 
-    private static int runningVerdaccioTestContainerCount() throws IOException, InterruptedException {
+    private int runningVerdaccioTestContainerCount() throws IOException, InterruptedException {
         Process process = new ProcessBuilder("docker", "ps", "-q",
-                "--filter", "name=floci-aws-codeartifact-npm-test-verdaccio-")
+                "--filter", "name=" + ContainerStorageHelper.dockerName(config, "floci-verdaccio-"))
                 .redirectErrorStream(true).start();
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         process.waitFor();

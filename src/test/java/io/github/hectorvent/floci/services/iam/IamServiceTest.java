@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
@@ -50,6 +51,12 @@ class IamServiceTest {
 
     private static IamService iamService(boolean seedDeployerPrincipal, StorageBackend<String, AccessKey> accessKeys,
                                          StorageBackend<String, SessionCredential> sessions) {
+        return iamService(seedDeployerPrincipal, accessKeys, sessions, new RegionResolver("us-east-1", "000000000000"));
+    }
+
+    private static IamService iamService(boolean seedDeployerPrincipal, StorageBackend<String, AccessKey> accessKeys,
+                                         StorageBackend<String, SessionCredential> sessions,
+                                         RegionResolver regionResolver) {
         return new IamService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -58,9 +65,31 @@ class IamServiceTest {
                 accessKeys,
                 new InMemoryStorage<>(),
                 sessions,
-                new RegionResolver("us-east-1", "000000000000"),
+                regionResolver,
                 seedDeployerPrincipal
         );
+    }
+
+    /** The STS global endpoint, and so the token version it reports, exists only in the commercial partition. */
+    @Test
+    void accountSummaryReportsTheGlobalEndpointTokenVersionOnlyWhereStsHasAGlobalHost() {
+        assertEquals(1L, iamService.getAccountSummary().get("GlobalEndpointTokenVersion"));
+
+        IamService china = iamService(false, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("cn-north-1", "000000000000"));
+        assertFalse(china.getAccountSummary().containsKey("GlobalEndpointTokenVersion"));
+        assertEquals(0L, china.getAccountSummary().get("Users"));
+    }
+
+    @Test
+    void credentialReportRootRowCarriesThePartition() {
+        IamService china = iamService(false, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("cn-north-1", "000000000000"));
+        china.generateCredentialReport();
+
+        String report = new String(Base64.getDecoder().decode(china.getCredentialReport().base64Content()),
+                StandardCharsets.UTF_8);
+        assertTrue(report.contains("<root_account>,arn:aws-cn:iam::000000000000:root,"), report);
     }
 
     @Test
@@ -601,6 +630,20 @@ class IamServiceTest {
     }
 
     @Test
+    void createServiceLinkedRoleAcceptsTheLegacyPartitionFormOfThePrincipal() {
+        // AWS still honours the pre-universal China principal; the derived name, the path and the
+        // trust policy are the universal ones either way.
+        IamRole role = iamService.createServiceLinkedRole("autoscaling.amazonaws.com.cn", null, null);
+        assertEquals("AWSServiceRoleForAutoScaling", role.getRoleName());
+        assertEquals("/aws-service-role/autoscaling.amazonaws.com/", role.getPath());
+        assertTrue(role.getAssumeRolePolicyDocument().contains("\"Service\":\"autoscaling.amazonaws.com\""),
+                role.getAssumeRolePolicyDocument());
+
+        IamRole es = iamService.createServiceLinkedRole("es.amazonaws.com.cn", null, null);
+        assertEquals("AWSServiceRoleForEs", es.getRoleName());
+    }
+
+    @Test
     void createServiceLinkedRoleForCloud9UsesAwsCanonicalName() {
         IamRole role = iamService.createServiceLinkedRole(
                 "cloud9.amazonaws.com", null, "Cloud9 SLR");
@@ -755,7 +798,7 @@ class IamServiceTest {
 
     @Test
     void awsManagedReadOnlyPolicyAllowsReadsButDeniesWrites() {
-        String arn = AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess";
+        String arn = AwsManagedPolicies.arnPrefix("aws") + "/AmazonS3ReadOnlyAccess";
         IamPolicy policy = iamService.getPolicy(arn);
 
         assertEquals("AmazonS3ReadOnlyAccess", policy.getPolicyName());
@@ -771,9 +814,9 @@ class IamServiceTest {
     @Test
     void serviceScopedAndAdministratorManagedPoliciesUseTheirDocumentedScopes() {
         IamPolicy s3ReadOnly = iamService.getPolicy(
-                AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess");
+                AwsManagedPolicies.arnPrefix("aws") + "/AmazonS3ReadOnlyAccess");
         IamPolicy administrator = iamService.getPolicy(
-                AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess");
+                AwsManagedPolicies.arnPrefix("aws") + "/AdministratorAccess");
         IamPolicyEvaluator evaluator = new IamPolicyEvaluator(new ObjectMapper());
 
         assertEquals(IamPolicyEvaluator.Decision.DENY,
@@ -790,8 +833,8 @@ class IamServiceTest {
     @Test
     void managedPolicyActsAsPermissionsBoundary() {
         IamUser user = iamService.createUser("boundary-user", "/");
-        String adminArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
-        String boundaryArn = AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess";
+        String adminArn = AwsManagedPolicies.arnPrefix("aws") + "/AdministratorAccess";
+        String boundaryArn = AwsManagedPolicies.arnPrefix("aws") + "/AmazonS3ReadOnlyAccess";
         iamService.attachUserPolicy(user.getUserName(), adminArn);
         iamService.putUserPermissionsBoundary(user.getUserName(), boundaryArn);
 
@@ -808,7 +851,7 @@ class IamServiceTest {
 
     @Test
     void managedPolicyRetrievalPreservesFieldsAndUnavailableVersionFailsWithNoSuchEntity() {
-        String arn = AwsManagedPolicies.ARN_PREFIX + "/AmazonS3ReadOnlyAccess";
+        String arn = AwsManagedPolicies.arnPrefix("aws") + "/AmazonS3ReadOnlyAccess";
         IamPolicy policy = iamService.getPolicy(arn);
         assertEquals("AmazonS3ReadOnlyAccess", policy.getPolicyName());
         assertEquals(arn, policy.getArn());
@@ -2185,7 +2228,7 @@ class IamServiceTest {
     @Test
     void getCredentialReportOnAnExpiredReportThrowsReportExpired() {
         StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
-        credentialReports.put("credential-report",
+        credentialReports.put("credential-report/aws",
                 new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
         IamService withExpiredReport = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -2202,7 +2245,7 @@ class IamServiceTest {
     @Test
     void generateCredentialReportOnAnExpiredReportStartsANewOne() {
         StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
-        credentialReports.put("credential-report",
+        credentialReports.put("credential-report/aws",
                 new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
         IamService withExpiredReport = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),

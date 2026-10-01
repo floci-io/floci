@@ -1,11 +1,9 @@
 package io.github.hectorvent.floci.services.verifiedpermissions;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
-import org.eclipse.microprofile.config.ConfigProvider;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -25,50 +23,15 @@ import static org.hamcrest.Matchers.matchesPattern;
  * not pass silently.
  */
 @QuarkusTest
-@TestProfile(VerifiedPermissionsIntegrationTest.CedarSidecarProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class VerifiedPermissionsIntegrationTest {
     private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String AUTH = "AWS4-HMAC-SHA256 Credential=111122223333/20260101/us-east-1/verifiedpermissions/aws4_request";
 
-    /**
-     * Namespaces the sidecar container as {@code floci-vp-test-cedar}: the manager removes any
-     * container of its name before starting, and the test config uses the same empty namespace
-     * as a developer's running Floci, whose live sidecar would otherwise be killed.
-     */
-    public static class CedarSidecarProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.docker.resource-namespace", "vp-test");
-        }
-    }
-
     @BeforeAll
     static void requireDockerAndTheSidecarImage() {
         RestAssuredJsonUtils.configureAwsContentTypes();
-        Assumptions.assumeTrue(isDockerAvailable(),
-                "Docker daemon must be available for Verified Permissions integration tests");
-        String image = ConfigProvider.getConfig().getValue("floci.services.verifiedpermissions.cedar-image", String.class);
-        Assumptions.assumeTrue(imageUsable(image), "Cedar sidecar image " + image + " is not present locally");
-    }
-
-    private static boolean isDockerAvailable() {
-        return run("docker", "version", "--format", "{{.Server.Version}}");
-    }
-
-    private static boolean imageUsable(String image) {
-        if ("true".equals(System.getenv("CI"))) {
-            return true;
-        }
-        return run("docker", "image", "inspect", image);
-    }
-
-    private static boolean run(String... command) {
-        try {
-            Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
-            return process.waitFor() == 0;
-        } catch (Exception e) {
-            return false;
-        }
+        SidecarContainersProfile.requireDockerAndImage("floci.services.verifiedpermissions.cedar-image");
     }
 
     @Test

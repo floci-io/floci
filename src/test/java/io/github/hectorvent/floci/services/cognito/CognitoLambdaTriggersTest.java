@@ -28,14 +28,14 @@ import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -307,8 +307,7 @@ class CognitoLambdaTriggersTest {
     }
 
     @Test
-    @SuppressWarnings("unchecked")
-    void postAuthenticationLambdaErrorDoesNotBlockAuth() {
+    void postAuthenticationLambdaErrorBlocksAuth() {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PostAuthentication", "arn:aws:lambda:::post"));
         seedUser(pool, "alice", "Perm1234!");
         UserPoolClient client = createClient(pool);
@@ -316,12 +315,10 @@ class CognitoLambdaTriggersTest {
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::post"), any(byte[].class), any()))
                 .thenReturn(lambdaError("Unhandled"));
 
-        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
-                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
-
-        Map<String, Object> auth = (Map<String, Object>) result.get("AuthenticationResult");
-        assertNotNull(auth, "Auth should still succeed when PostAuthentication errors");
-        assertNotNull(auth.get("AccessToken"));
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("UserLambdaValidationException", error.getErrorCode());
     }
 
     // =========================================================================
@@ -492,6 +489,84 @@ class CognitoLambdaTriggersTest {
     // =========================================================================
 
     @Test
+    void preTokenGenerationLambdaErrorBlocksTokenIssuance() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(lambdaError("Unhandled"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("UserLambdaValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void preTokenGenerationMalformedResponseBlocksTokenIssuance() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(rawPayload("not-json"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("InvalidLambdaResponseException", error.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void preTokenGenerationEmptyResponseBlocksTokenIssuance(boolean nullPayload) {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+
+        byte[] payload = nullPayload ? null : new byte[0];
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(new InvokeResult(200, null, payload, null, "req-id"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("InvalidLambdaResponseException", error.getErrorCode());
+    }
+
+    @Test
+    void newPasswordMfaSetupPreservesPreTokenGenerationSource() throws Exception {
+        MutableClock clock = new MutableClock();
+        service = serviceWithClock(clock);
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "Temp1234!");
+        service.setUserPoolMfaConfig(pool.getId(), "ON", true, false);
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of()));
+
+        Map<String, Object> login = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Temp1234!"));
+        assertEquals("NEW_PASSWORD_REQUIRED", login.get("ChallengeName"));
+        Map<String, Object> setup = service.respondToAuthChallenge(client.getClientId(),
+                "NEW_PASSWORD_REQUIRED", (String) login.get("Session"),
+                Map.of("USERNAME", "alice", "NEW_PASSWORD", "Perm1234!"));
+        assertEquals("MFA_SETUP", setup.get("ChallengeName"));
+        Map<String, Object> associated = service.associateSoftwareToken(null, (String) setup.get("Session"));
+        String code = CognitoTotp.code((String) associated.get("SecretCode"), clock.instant());
+        Map<String, Object> verified = service.verifySoftwareToken(null, (String) associated.get("Session"), code);
+        Map<String, Object> tokens = service.respondToAuthChallenge(client.getClientId(),
+                "MFA_SETUP", (String) verified.get("Session"), Map.of("USERNAME", "alice"));
+        assertNotNull(tokens.get("AuthenticationResult"));
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payload.capture(), any());
+        Map<String, Object> event = MAPPER.readValue(payload.getValue(), new TypeReference<>() {});
+        assertEquals("TokenGeneration_NewPasswordChallenge", event.get("triggerSource"));
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void preTokenGenerationAddsAndOverridesClaims() {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
@@ -632,6 +707,25 @@ class CognitoLambdaTriggersTest {
         assertTrue(tokens.contains("email"), "email retained (not suppressed)");
         assertTrue(tokens.contains("profile"), "profile added by scopesToAdd");
         assertTrue(!tokens.contains("phone"), "phone dropped by scopesToSuppress");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void preTokenGenerationV2SuppressingEveryScopeRemovesTheScopeClaim() throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "accessTokenGeneration", Map.of(
+                                "scopesToSuppress", List.of("aws.cognito.signin.user.admin"))))));
+
+        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        String accessToken = (String) ((Map<String, Object>) result.get("AuthenticationResult")).get("AccessToken");
+
+        Map<String, Object> claims = MAPPER.readValue(decodeJwtPayload(accessToken), new TypeReference<>() {});
+        assertFalse(claims.containsKey("scope"), "suppressing the only scope leaves no scope claim: " + claims);
     }
 
     @Test
@@ -983,6 +1077,30 @@ class CognitoLambdaTriggersTest {
     // =========================================================================
     // CUSTOM_AUTH triggers (already covered indirectly; check triggerSource wiring)
     // =========================================================================
+
+    @Test
+    void customPasswordChallengeRequiresTotpBeforeIssuingTokens() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of(
+                "DefineAuthChallenge", "arn:aws:lambda:::define",
+                "CreateAuthChallenge", "arn:aws:lambda:::create"));
+        seedUser(pool, "alice", "Perm1234!");
+        service.setUserPoolMfaConfig(pool.getId(), "ON", true, false);
+        UserPoolClient client = createClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("challengeName", "PASSWORD_VERIFIER")))
+                .thenReturn(ok(Map.of("issueTokens", true)));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of()));
+
+        Map<String, Object> started = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                Map.of("USERNAME", "alice"));
+        assertEquals("PASSWORD_VERIFIER", started.get("ChallengeName"));
+        Map<String, Object> completed = service.respondToAuthChallenge(client.getClientId(),
+                "PASSWORD_VERIFIER", (String) started.get("Session"),
+                Map.of("USERNAME", "alice", "ANSWER", "Perm1234!"));
+        assertEquals("MFA_SETUP", completed.get("ChallengeName"));
+        assertFalse(completed.containsKey("AuthenticationResult"));
+    }
 
     @Test
     @SuppressWarnings("unchecked")

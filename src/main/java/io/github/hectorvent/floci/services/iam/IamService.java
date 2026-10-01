@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.iam;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -42,6 +44,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -112,11 +115,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
     private static final String SERVICE_LINKED_ROLE_NAME_PREFIX = "AWSServiceRoleFor";
     private static final Map<String, String> SERVICE_LINKED_ROLE_NAMES = Map.of(
-            "autoscaling.amazonaws.com", "AutoScaling",
-            "cloud9.amazonaws.com", "AWSCloud9",
-            "ram.amazonaws.com", "ResourceAccessManager"
+            ServicePrincipals.of("autoscaling"), "AutoScaling",
+            ServicePrincipals.of("cloud9"), "AWSCloud9",
+            ServicePrincipals.of("ram"), "ResourceAccessManager"
     );
-    private static final String AMAZONAWS_DOMAIN = ".amazonaws.com";
     /** AWSServiceName as AWS constrains it: 1-128 characters of {@code [\w+=,.@-]}. */
     private static final Pattern SERVICE_PRINCIPAL_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
     /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
@@ -165,8 +167,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final StorageBackend<String, String> serviceLinkedRoleDeletions;
     private final StorageBackend<String, OrganizationRootFeatures> orgRootFeatures;
     /**
-     * Holds at most one entry per account under {@link #CREDENTIAL_REPORT_KEY}: the same
-     * single-value-per-account shape as {@link #accountAliases}.
+     * Holds at most one report per account and partition, keyed by {@link #credentialReportKey}:
+     * the report's root row names the partition it was generated for, so a report generated for
+     * one partition is never handed to a caller in another.
      */
     private final StorageBackend<String, CredentialReport> credentialReports;
     private final RegionResolver regionResolver;
@@ -176,11 +179,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final Object resourceNameLock = new Object();
 
     /**
-     * AWS-managed policies (arn:aws:iam::aws:policy/...), keyed by ARN. These are global —
-     * not owned by any account — so they live here rather than in the account-partitioned
-     * {@link #policies} store, and {@link #getPolicy} resolves them for any caller.
+     * AWS-managed policies ({@code arn:<partition>:iam::aws:policy/...}), keyed by ARN, one map
+     * per partition and built on first use. These are global: not owned by any account, so they
+     * live here rather than in the account-partitioned {@link #policies} store, and
+     * {@link #getPolicy} resolves them for any caller. The partition comes from the ARN a
+     * caller names, so a China ARN resolves under any signing scope and lists in China scope.
      */
-    private final Map<String, IamPolicy> awsManagedPolicies = buildAwsManagedPolicies();
+    private final Map<String, Map<String, IamPolicy>> awsManagedPoliciesByPartition = new ConcurrentHashMap<>();
 
     @Inject
     public IamService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
@@ -317,9 +322,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         seedConfiguredAccountAlias();
     }
 
-    private static Map<String, IamPolicy> buildAwsManagedPolicies() {
+    private Map<String, IamPolicy> awsManagedPolicies(String partition) {
+        return awsManagedPoliciesByPartition.computeIfAbsent(partition, IamService::buildAwsManagedPolicies);
+    }
+
+    /** The managed policy catalog of the partition an ARN names, or empty for an unpublished one. */
+    private Map<String, IamPolicy> awsManagedPoliciesFor(String managedPolicyArn) {
+        try {
+            return awsManagedPolicies(AwsArnUtils.parse(managedPolicyArn).partition());
+        } catch (IllegalArgumentException ignored) {
+            // Only reached for an ARN that already matched the managed-policy pattern but names a
+            // partition AWS does not publish: no catalog exists there, so no policy resolves.
+            return Map.of();
+        }
+    }
+
+    private static Map<String, IamPolicy> buildAwsManagedPolicies(String partition) {
         Map<String, IamPolicy> catalog = new LinkedHashMap<>();
-        for (AwsManagedPolicies.ManagedPolicyDef def : AwsManagedPolicies.POLICIES) {
+        for (AwsManagedPolicies.ManagedPolicyDef def : AwsManagedPolicies.forPartition(partition)) {
             String arn = def.arn();
             // The bundled document is the policy's current default version, served under the
             // version id AWS actually reports for it (v3 for AmazonS3ReadOnlyAccess, v1 for
@@ -348,7 +368,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * megabyte of persisted state and several seconds of startup for nothing.
      */
     void seedAwsManagedPolicies() {
-        LOG.debugv("AWS managed policy catalog available: {0} policies", awsManagedPolicies.size());
+        LOG.debugv("AWS managed policy catalog available: {0} policies",
+                awsManagedPolicies(regionResolver.getDefaultPartition()).size());
     }
 
     private void seedConfiguredAccountAlias() {
@@ -369,7 +390,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void seedDefaultDeployerPrincipal() {
-        String adminPolicyArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
+        String adminPolicyArn = AwsManagedPolicies.arnPrefix(regionResolver.getDefaultPartition())
+                + "/AdministratorAccess";
         IamUser user = users.get(DEFAULT_DEPLOYER_USER)
                 .orElseGet(() -> {
                     String userId = "AIDA" + randomId(16);
@@ -492,7 +514,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 users.delete(userName);
                 user.setUserName(newUserName);
                 if (newPath != null) user.setPath(normalizePath(newPath));
-                user.setArn(iamArn("user", user.getPath(), newUserName));
+                user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
                 users.put(newUserName, user);
                 loginProfiles.get(userName).ifPresent(profile -> {
                     loginProfiles.delete(userName);
@@ -513,7 +535,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             } else {
                 if (newPath != null) {
                     user.setPath(normalizePath(newPath));
-                    user.setArn(iamArn("user", user.getPath(), userName));
+                    user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), userName));
                 }
                 users.put(userName, user);
             }
@@ -587,7 +609,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 if (newPath != null) {
                     group.setPath(normalizePath(newPath));
                 }
-                group.setArn(iamArn("group", group.getPath(), newGroupName));
+                group.setArn(iamArnBeside(group.getArn(), "group", group.getPath(), newGroupName));
                 groups.put(newGroupName, group);
                 // Keep member references in sync so group policies still resolve after a rename.
                 for (String memberName : group.getUserNames()) {
@@ -600,7 +622,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             } else {
                 if (newPath != null) {
                     group.setPath(normalizePath(newPath));
-                    group.setArn(iamArn("group", group.getPath(), groupName));
+                    group.setArn(iamArnBeside(group.getArn(), "group", group.getPath(), groupName));
                 }
                 groups.put(groupName, group);
             }
@@ -751,7 +773,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public IamRole createServiceLinkedRole(String awsServiceName, String customSuffix, String description) {
         if (awsServiceName == null || !SERVICE_PRINCIPAL_PATTERN.matcher(awsServiceName).matches()) {
             throw new AwsException("InvalidInput",
-                    "AWSServiceName must be 1-128 characters matching [\\w+=,.@-], for example es.amazonaws.com.", 400);
+                    "AWSServiceName must be 1-128 characters matching [\\w+=,.@-], for example es.amazonaws.com.", 400); // partition-literal: AWS's own message text
         }
         if (customSuffix != null && !customSuffix.isEmpty()
                 && !CUSTOM_SUFFIX_PATTERN.matcher(customSuffix).matches()) {
@@ -775,9 +797,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 throw new AwsException("InvalidInput",
                         "A role named " + roleName + " already exists; supply a different CustomSuffix.", 400);
             }
+            // A legacy spelling (es.amazonaws.com.cn) names the same role, so its path and trust
+            // policy carry the universal principal the name was derived from.
+            String principal = ServicePrincipals.canonical(awsServiceName);
             String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                    + "\"Principal\":{\"Service\":\"" + awsServiceName + "\"},\"Action\":\"sts:AssumeRole\"}]}";
-            IamRole role = createRole(roleName, SERVICE_LINKED_ROLE_PATH + awsServiceName + "/",
+                    + "\"Principal\":{\"Service\":\"" + principal + "\"},\"Action\":\"sts:AssumeRole\"}]}";
+            IamRole role = createRole(roleName, SERVICE_LINKED_ROLE_PATH + principal + "/",
                     trustPolicy, description, 0, Map.of());
             role.setServiceLinkedRole(true);
             roles.put(roleName, role);
@@ -819,14 +844,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * roles on AWS, and a config declaring both must not collide on one name here.
      */
     private static String derivedServiceName(String awsServiceName) {
-        String canonicalName = SERVICE_LINKED_ROLE_NAMES.get(awsServiceName);
+        // The principal may arrive in the partition form AWS accepted before the universal one
+        // (es.amazonaws.com.cn); the derived name is the same either way.
+        String canonicalName = SERVICE_LINKED_ROLE_NAMES.get(ServicePrincipals.canonical(awsServiceName));
         if (canonicalName != null) {
             return canonicalName;
         }
-        String core = awsServiceName == null ? "" : awsServiceName;
-        if (core.endsWith(AMAZONAWS_DOMAIN)) {
-            core = core.substring(0, core.length() - AMAZONAWS_DOMAIN.length());
-        }
+        String core = awsServiceName == null ? "" : ServicePrincipals.serviceName(awsServiceName);
         StringBuilder derived = new StringBuilder();
         for (String segment : core.split("[.-]")) {
             if (!segment.isEmpty()) {
@@ -835,7 +859,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         if (derived.isEmpty()) {
             throw new AwsException("InvalidInput",
-                    "The request must include a valid AWSServiceName, for example es.amazonaws.com.", 400);
+                    "The request must include a valid AWSServiceName, for example es.amazonaws.com.", 400); // partition-literal: AWS's own message text
         }
         return derived.toString();
     }
@@ -919,7 +943,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             String arn = iamArn("policy", normalizedPath, policyName);
             boolean nameTaken = resourcesInCurrentAccount(policies)
                     .filter(existing -> existing.getArn() == null
-                            || !existing.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX))
+                            || !AwsManagedPolicies.isManagedPolicyArn(existing.getArn()))
                     .map(IamPolicy::getPolicyName)
                     .anyMatch(existingName -> existingName != null && existingName.equalsIgnoreCase(policyName));
             if (nameTaken) {
@@ -937,7 +961,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public IamPolicy getPolicy(String policyArn) {
         IamPolicy policy = requirePolicy(policyArn);
-        if (policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(policyArn)) {
             return managedPolicySnapshot(policy, managedPolicyAttachmentCount(policyArn));
         }
         return policy;
@@ -957,9 +981,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * that account's {@link #policies} partition and would otherwise be silently dropped.
      */
     private Optional<IamPolicy> resolvePolicy(String arn) {
-        if (arn != null && arn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(arn)) {
             // Authorization and ListAttached* need policy documents or names, not attachment counts.
-            return Optional.ofNullable(awsManagedPolicies.get(arn));
+            return Optional.ofNullable(awsManagedPoliciesFor(arn).get(arn));
         }
         return policies.get(arn);
     }
@@ -978,7 +1002,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     private void tallyManagedPolicyAttachments(List<String> policyArns, Map<String, Integer> counts) {
         for (String policyArn : policyArns) {
-            if (policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            if (AwsManagedPolicies.isManagedPolicyArn(policyArn)) {
                 counts.merge(policyArn, 1, Integer::sum);
             }
         }
@@ -1010,7 +1034,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void incrementCustomerManagedPolicyAttachmentCount(IamPolicy policy) {
-        if (policy.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(policy.getArn())) {
             return;
         }
         policy.setAttachmentCount(policy.getAttachmentCount() + 1);
@@ -1018,7 +1042,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void decrementCustomerManagedPolicyAttachmentCount(String policyArn) {
-        if (policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(policyArn)) {
             return;
         }
         policies.get(policyArn).ifPresent(policy -> {
@@ -1028,7 +1052,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void rejectIfAwsManaged(String policyArn) {
-        if (policyArn != null && policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(policyArn)) {
             throw new AwsException("AccessDenied",
                     "Cannot modify or delete AWS managed policy: " + policyArn, 403);
         }
@@ -1087,7 +1111,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // AWS-managed ARNs mirrored into the default account at seed time — those are
             // served from the global catalog below so the default account does not see them twice.
             policies.scan(k -> true).stream()
-                    .filter(p -> !p.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX))
+                    .filter(p -> !AwsManagedPolicies.isManagedPolicyArn(p.getArn()))
                     .filter(p -> p.getPath().startsWith(prefix))
                     .forEach(result::add);
         }
@@ -1096,7 +1120,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // every caller sees the full set regardless of the request account — mirroring the
             // getPolicy fix, and keeping the ListPolicies and GetPolicy read paths consistent.
             Map<String, Integer> attachmentCounts = managedPolicyAttachmentCounts();
-            awsManagedPolicies.values().stream()
+            awsManagedPolicies(regionResolver.getPartition()).values().stream()
                     .filter(p -> p.getPath().startsWith(prefix))
                     .map(p -> managedPolicySnapshot(p, attachmentCounts.getOrDefault(p.getArn(), 0)))
                     .forEach(result::add);
@@ -1117,7 +1141,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         long localPolicyCount = 0;
         long policyVersionsInUse = 0;
         for (IamPolicy policy : policies.scan(k -> true)) {
-            if (policy.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            if (AwsManagedPolicies.isManagedPolicyArn(policy.getArn())) {
                 continue;
             }
             localPolicyCount++;
@@ -1160,7 +1184,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         summary.put("AccountAccessKeysPresent", 0L);
         summary.put("AccountSigningCertificatesPresent", 0L);
         summary.put("AccountPasswordPresent", 0L);
-        summary.put("GlobalEndpointTokenVersion", 1L);
+        // The STS global endpoint (and so the v1/v2 token choice it reports) exists only where
+        // the partition publishes one: aws today. Elsewhere AWS has no such entry to report.
+        if (AwsPartitions.byId(regionResolver.getPartition()).hasGlobalSts()) {
+            summary.put("GlobalEndpointTokenVersion", 1L);
+        }
         return summary;
     }
 
@@ -1930,7 +1958,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /**
      * AWS identifies a provider by URL, so the ARN is derived from it rather than from a random
      * id, and the scheme is stripped: {@code https://host/path} becomes
-     * {@code arn:aws:iam::<account>:oidc-provider/host/path}. Creating the same URL twice is
+     * {@code arn:<partition>:iam::<account>:oidc-provider/host/path}. Creating the same URL twice is
      * therefore a duplicate resource, not a second provider.
      */
     public OpenIDConnectProvider createOpenIDConnectProvider(String url, List<String> clientIdList,
@@ -2619,11 +2647,30 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 sessionName = session.getEc2InstanceId() != null
                         ? session.getEc2InstanceId() : "floci-session";
             }
-            return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/"
-                    + sessionName).toString());
+            // The session lives in its role's partition, as AssumeRole issued it, whatever region
+            // a later call is signed for.
+            String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
+            return Optional.of(AwsArnUtils.Arn.global(partition, "sts", accountId,
+                    "assumed-role/" + roleName + "/" + sessionName).toString());
         }
 
         return Optional.empty();
+    }
+
+    /**
+     * The caller's {@code aws:PrincipalArn}. For an IAM user it is the user's ARN, as
+     * {@link #resolveCallerArn} returns. For a role session AWS reports the ARN of the role that
+     * was assumed, path included, rather than the assumed-role session ARN, which names the role
+     * without its path. That is the ARN the session recorded when it was issued, read back as is:
+     * looking the role up by name would hand an old session the ARN of a same-named role created
+     * after it.
+     */
+    public Optional<String> resolvePrincipalArn(String accessKeyId) {
+        Optional<String> callerArn = resolveCallerArn(accessKeyId);
+        if (callerArn.isEmpty() || accessKeys.get(accessKeyId).isPresent()) {
+            return callerArn;
+        }
+        return findSessionForCallerContext(accessKeyId).map(SessionCredential::getRoleArn);
     }
 
     public Optional<String> resolveCallerUserId(String accessKeyId) {
@@ -2829,8 +2876,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return docs;
     }
 
+    /**
+     * Mints the ARN of a new IAM resource in the request's partition (the deployment's outside a
+     * request, as for the seeded deployer user). An IAM resource then stays in the partition it was
+     * created in: AWS never has to choose, since an account belongs to one partition, but Floci
+     * keys IAM by account and serves every partition from one process.
+     */
     private String iamArn(String resourceType, String path, String name) {
-        return AwsArnUtils.Arn.of("iam", "", regionResolver.getAccountId(), resourceType + path + name).toString();
+        return regionResolver.buildGlobalArn("iam", resourceType + path + name);
+    }
+
+    /** Re-mints a renamed or moved resource's ARN in the partition its current ARN names. */
+    private String iamArnBeside(String currentArn, String resourceType, String path, String name) {
+        String partition = AwsArnUtils.partitionOrDefault(currentArn, regionResolver.getPartition());
+        return AwsArnUtils.Arn.global(partition, "iam", regionResolver.getAccountId(),
+                resourceType + path + name).toString();
     }
 
     private static <T> boolean containsNameIgnoreCase(StorageBackend<String, T> storage,
@@ -2994,7 +3054,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                                    Set<String> referencedAwsManagedArns) {
         for (String arn : attachedPolicyArns) {
             attachmentCounts.merge(arn, 1, Integer::sum);
-            if (arn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            if (AwsManagedPolicies.isManagedPolicyArn(arn)) {
                 referencedAwsManagedArns.add(arn);
             }
         }
@@ -3006,7 +3066,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return;
         }
         boundaryUsageCounts.merge(permissionsBoundaryArn, 1, Integer::sum);
-        if (permissionsBoundaryArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+        if (AwsManagedPolicies.isManagedPolicyArn(permissionsBoundaryArn)) {
             referencedAwsManagedArns.add(permissionsBoundaryArn);
         }
     }
@@ -3042,22 +3102,26 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public CredentialReportGeneration generateCredentialReport() {
         Instant now = Instant.now();
-        Optional<CredentialReport> existing = credentialReports.get(CREDENTIAL_REPORT_KEY);
+        Optional<CredentialReport> existing = credentialReports.get(credentialReportKey());
         if (existing.isPresent() && now.isBefore(existing.get().getGeneratedTime().plus(CREDENTIAL_REPORT_MAX_AGE))) {
             return new CredentialReportGeneration("COMPLETE",
                     "Current report has already been generated within the past 4 hours.");
         }
         String csv = buildCredentialReportCsv();
         String base64Content = Base64.getEncoder().encodeToString(csv.getBytes(StandardCharsets.UTF_8));
-        credentialReports.put(CREDENTIAL_REPORT_KEY, new CredentialReport(base64Content, now));
+        credentialReports.put(credentialReportKey(), new CredentialReport(base64Content, now));
         String description = existing.isEmpty()
                 ? "No report exists. Starting a new report generation task"
                 : "The previous report has expired. Starting a new report generation task";
         return new CredentialReportGeneration("STARTED", description);
     }
 
+    private String credentialReportKey() {
+        return CREDENTIAL_REPORT_KEY + "/" + regionResolver.getPartition();
+    }
+
     public CredentialReportContent getCredentialReport() {
-        CredentialReport report = credentialReports.get(CREDENTIAL_REPORT_KEY)
+        CredentialReport report = credentialReports.get(credentialReportKey())
                 .orElseThrow(() -> new AwsException("ReportNotPresent",
                         "The request was rejected because the credential report does not exist. "
                                 + "To generate a credential report, use GenerateCredentialReport.", 410));
@@ -3094,7 +3158,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private String rootAccountReportRow() {
-        String arn = AwsArnUtils.Arn.of("iam", "", regionResolver.getAccountId(), "root").toString();
+        String arn = regionResolver.buildGlobalArn("iam", "root");
         return String.join(",",
                 "<root_account>", arn, "N/A",
                 "FALSE", "N/A", "N/A", "not_supported",

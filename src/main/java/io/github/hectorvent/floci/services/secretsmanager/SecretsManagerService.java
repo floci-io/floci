@@ -1,23 +1,28 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
-import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.services.lambda.LambdaService;
-import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.scheduler.SchedulerExpressionParser;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -28,21 +33,19 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
-import io.github.hectorvent.floci.core.resource.ExplorerResource;
-import io.github.hectorvent.floci.core.resource.ResourceProvider;
-import io.github.hectorvent.floci.core.resource.SupportedResourceType;
-import java.util.LinkedHashMap;
-import java.util.Set;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -1088,8 +1091,23 @@ public class SecretsManagerService implements ResourceProvider {
         return secret;
     }
 
+    /**
+     * Rotation started by Floci itself, such as the scheduled sweep, with no caller to authorize.
+     */
     public Secret rotateSecret(String secretId, String clientRequestToken, String rotationLambdaArn, Secret.RotationRules rotationRules,
                                boolean rotateImmediately, String region) {
+        return rotateSecret(secretId, clientRequestToken, rotationLambdaArn, rotationRules, rotateImmediately, region,
+                functionArn -> { });
+    }
+
+    /**
+     * @param authorizeInvoke called with the full ARN of the rotation function this call will
+     *                        invoke, before the function is looked up or the secret changed, so the
+     *                        caller can be refused {@code lambda:InvokeFunction} on exactly that
+     *                        function
+     */
+    public Secret rotateSecret(String secretId, String clientRequestToken, String rotationLambdaArn, Secret.RotationRules rotationRules,
+                               boolean rotateImmediately, String region, Consumer<String> authorizeInvoke) {
         Secret secret = resolveSecret(secretId, region);
         throwIfPendingDeletion(secret);
         throwIfReplica(secret);
@@ -1118,14 +1136,28 @@ public class SecretsManagerService implements ResourceProvider {
                     "You tried to enable rotation on a secret that doesn't already have a Lambda function ARN configured and you didn't include such an ARN as a parameter in this call.", 400);
         }
 
-        // Validate Lambda exists synchronously
+        // One full ARN for the permission check, the lookup and the invoke, so all three reach the same
+        // function: a name or partial ARN would otherwise be invoked in whatever account the rotation
+        // thread resolves, which is not necessarily the one that was checked.
+        AwsArnUtils.Arn secretArn = AwsArnUtils.parse(secret.getArn());
+        String functionArn = serviceManaged
+                ? null
+                : LambdaArnUtils.functionArn(finalLambdaArn, secretArn.partition(), region, secretArn.accountId());
+        if (!serviceManaged) {
+            authorizeInvoke.accept(functionArn);
+        }
+
+        // A function that cannot be invoked is reported the way AWS reports it, whatever the reason:
+        // AccessDeniedException with HTTP 400, and the secret left as it was.
         if (!serviceManaged && lambdaService != null) {
             try {
-                lambdaService.getFunction(region, finalLambdaArn);
+                lambdaService.getFunction(region, functionArn);
             } catch (AwsException e) {
                 if (e.getHttpStatus() == 404) {
-                    throw new AwsException("ResourceNotFoundException",
-                            "Secrets Manager cannot find the specified Lambda function.", 404);
+                    throw new AwsException("AccessDeniedException",
+                            "Secrets Manager cannot invoke the specified Lambda function. Ensure that the function "
+                                    + "policy grants access to the principal " + ServicePrincipals.of("secretsmanager")
+                                    + ".", 400);
                 }
                 throw e;
             }
@@ -1172,7 +1204,7 @@ public class SecretsManagerService implements ResourceProvider {
         
         rotationExecutor.submit(() -> {
             try {
-                executeRotationLifecycle(arn, finalToken, finalLambdaArn, rotateImmediately, isExistingVersion, region);
+                executeRotationLifecycle(arn, finalToken, functionArn, rotateImmediately, isExistingVersion, region);
             } catch (Exception e) {
                 LOG.errorv(e, "Rotation lifecycle failed for secret {0}", arn);
             }

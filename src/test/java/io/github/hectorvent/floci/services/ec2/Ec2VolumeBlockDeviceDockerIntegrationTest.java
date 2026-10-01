@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
+import io.github.hectorvent.floci.services.ec2.model.VolumeModification;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +32,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -71,6 +74,8 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
 
     private final List<String> containersToClean = new ArrayList<>();
     private final List<String> volumesToClean = new ArrayList<>();
+    private final List<String> syntheticRootVolumesToClean = new ArrayList<>();
+    private final List<String> instancesToClean = new ArrayList<>();
 
     @BeforeEach
     void checkPrerequisites() {
@@ -102,6 +107,25 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
             }
         }
         volumesToClean.clear();
+
+        for (String volId : syntheticRootVolumesToClean) {
+            try {
+                ec2Service.deleteVolumeForTest("us-east-1", volId);
+            } catch (Exception e) {
+                LOG.debugv("Ignoring delete synthetic root volume error during test cleanup: {0}", e.getMessage());
+            }
+        }
+        syntheticRootVolumesToClean.clear();
+
+        for (String iid : instancesToClean) {
+            try {
+                ec2Service.deleteInstanceForTest("us-east-1", iid);
+            } catch (Exception e) {
+                LOG.debugv("Ignoring delete test instance error during test cleanup: {0}", e.getMessage());
+            }
+        }
+        instancesToClean.clear();
+
         ec2Service.setClusterNodeInstanceProvider(null);
 
         for (String cid : containersToClean) {
@@ -146,12 +170,32 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         String instanceId = "i-" + suffix;
         Instance instance = new Instance();
         instance.setInstanceId(instanceId);
+        String rootVolId = "vol-root-" + suffix;
         instance.setDockerContainerId(containerId);
         instance.setRegion("us-east-1");
+        instance.setRootVolumeId(rootVolId);
+        instance.setRootDeviceName("/dev/xvda");
         Placement placement = new Placement();
         placement.setAvailabilityZone("us-east-1a");
         instance.setPlacement(placement);
         instance.setState(InstanceState.running());
+
+        Volume rootVol = new Volume();
+        rootVol.setVolumeId(rootVolId);
+        rootVol.setVolumeType("gp3");
+        rootVol.setSize(8);
+        rootVol.setState("in-use");
+        rootVol.setRegion("us-east-1");
+        rootVol.setAvailabilityZone("us-east-1a");
+        VolumeAttachment rootAtt = new VolumeAttachment();
+        rootAtt.setVolumeId(rootVolId);
+        rootAtt.setInstanceId(instanceId);
+        rootAtt.setDevice("/dev/xvda");
+        rootAtt.setState("attached");
+        rootVol.getAttachments().add(rootAtt);
+        ec2Service.putVolumeForTest(rootVol);
+        syntheticRootVolumesToClean.add(rootVolId);
+        instancesToClean.add(instanceId);
 
         // Register directly into service storage for hermetic test execution
         ec2Service.putInstanceForTest(instance);
@@ -391,6 +435,142 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
                 ec2Service.attachVolume("us-east-1", vol2.getVolumeId(), instance.getInstanceId(), "/dev/xvdf"));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertTrue(ex.getMessage().contains("already in use by volume"));
+    }
+
+    @Test
+    void modifyVolumeAttachedExpandsBackingFileLoopDeviceAndAllowsWritingBeyondOriginalCapacity() {
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 10);
+        Instance instance = createRunningTestInstance(suffix);
+
+        Volume volume = ec2Service.createVolume("us-east-1", "us-east-1a", "gp3", 1, false, 3000, 125, null, null);
+        volumesToClean.add(volume.getVolumeId());
+
+        VolumeAttachment attachment = ec2Service.attachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf");
+        assertNotNull(attachment);
+
+        String targetContainerId = instance.getDockerContainerId();
+
+        // 1. Initial size is 1 GiB (1073741824 bytes)
+        ContainerExec.Result checkInitialSize = execIn(targetContainerId, "blockdev --getsize64 /dev/xvdf");
+        assertEquals(0, checkInitialSize.exitCode());
+        assertEquals("1073741824", checkInitialSize.stdout().trim());
+
+        // 2. Modify volume to 2 GiB
+        VolumeModification mod = ec2Service.modifyVolume("us-east-1", volume.getVolumeId(), 2, null, null, null, null, false);
+        assertNotNull(mod);
+        assertEquals("completed", mod.getModificationState());
+        assertEquals(2, mod.getTargetSize());
+
+        // 3. Backing file size on helper is 2 GiB (2147483648 bytes)
+        String helperName = ContainerStorageHelper.resourceName(config, "ec2", null, "volume-helper");
+        ContainerExec.Result checkFileSize = execIn(helperName, "stat -c %s /volumes/" + volume.getVolumeId() + ".raw");
+        assertEquals(0, checkFileSize.exitCode());
+        assertEquals("2147483648", checkFileSize.stdout().trim());
+
+        // 4. Loop device capacity inside instance container refreshed to 2 GiB
+        ContainerExec.Result checkResizedSize = execIn(targetContainerId, "blockdev --getsize64 /dev/xvdf");
+        assertEquals(0, checkResizedSize.exitCode());
+        assertEquals("2147483648", checkResizedSize.stdout().trim());
+
+        // 5. Writing beyond the original 1 GiB capacity (at 1.5 GiB offset) succeeds
+        ContainerExec.Result writeBeyond = execIn(targetContainerId,
+                "dd if=/dev/zero of=/dev/xvdf bs=1M count=10 seek=1500 conv=notrunc");
+        assertEquals(0, writeBeyond.exitCode(), "Writing beyond original capacity should succeed: " + writeBeyond.summary());
+    }
+
+    @Test
+    void modifyVolumeUnattachedGrowsBackingFile() {
+        Volume volume = ec2Service.createVolume("us-east-1", "us-east-1a", "gp3", 1, false, 3000, 125, null, null);
+        volumesToClean.add(volume.getVolumeId());
+
+        String helperName = ContainerStorageHelper.resourceName(config, "ec2", null, "volume-helper");
+        ContainerExec.Result checkInitialSize = execIn(helperName, "stat -c %s /volumes/" + volume.getVolumeId() + ".raw");
+        assertEquals(0, checkInitialSize.exitCode());
+        assertEquals("1073741824", checkInitialSize.stdout().trim());
+
+        VolumeModification mod = ec2Service.modifyVolume("us-east-1", volume.getVolumeId(), 3, null, null, null, null, false);
+        assertNotNull(mod);
+        assertEquals("completed", mod.getModificationState());
+
+        ContainerExec.Result checkResizedSize = execIn(helperName, "stat -c %s /volumes/" + volume.getVolumeId() + ".raw");
+        assertEquals(0, checkResizedSize.exitCode());
+        assertEquals("3221225472", checkResizedSize.stdout().trim());
+    }
+
+    @Test
+    void modifyVolumeRejectsSizeDecreaseLeavingBackingFileUntouched() {
+        Volume volume = ec2Service.createVolume("us-east-1", "us-east-1a", "gp3", 5, false, 3000, 125, null, null);
+        volumesToClean.add(volume.getVolumeId());
+
+        String helperName = ContainerStorageHelper.resourceName(config, "ec2", null, "volume-helper");
+        ContainerExec.Result checkInitialSize = execIn(helperName, "stat -c %s /volumes/" + volume.getVolumeId() + ".raw");
+        assertEquals(0, checkInitialSize.exitCode());
+        assertEquals("5368709120", checkInitialSize.stdout().trim());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ec2Service.modifyVolume("us-east-1", volume.getVolumeId(), 3, null, null, null, null, false));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+
+        ContainerExec.Result checkAfterSize = execIn(helperName, "stat -c %s /volumes/" + volume.getVolumeId() + ".raw");
+        assertEquals(0, checkAfterSize.exitCode());
+        assertEquals("5368709120", checkAfterSize.stdout().trim());
+    }
+
+    @Test
+    void modifyVolumeRootVolumeUpdatesMetadataWithoutCreatingBackingFile() {
+        Instance instance = createRunningTestInstance("root-resize");
+        String rootVolId = instance.getRootVolumeId();
+        assertNotNull(rootVolId);
+
+        VolumeModification mod = ec2Service.modifyVolume("us-east-1", rootVolId, 16, null, null, null, null, false);
+        assertNotNull(mod);
+        assertEquals("completed", mod.getModificationState());
+        assertEquals(16, mod.getTargetSize());
+
+        String helperName = ContainerStorageHelper.resourceName(config, "ec2", null, "volume-helper");
+        ContainerExec.Result checkFile = execIn(helperName, "test -f /volumes/" + rootVolId + ".raw");
+        assertTrue(checkFile.exitCode() != 0);
+    }
+
+    @Test
+    void modifyVolumeDataVolumeAttachedAtRootDeviceResizesBackingFile() {
+        Instance instance = createRunningTestInstance("data-at-root");
+        String rootVolId = instance.getRootVolumeId();
+        assertNotNull(rootVolId);
+
+        ec2Service.stopInstances("us-east-1", List.of(instance.getInstanceId()));
+        await().atMost(Duration.ofSeconds(35)).until(() ->
+                "stopped".equals(ec2Service.describeInstances("us-east-1", List.of(instance.getInstanceId()), null)
+                        .getFirst().getInstances().getFirst().getState().getName()));
+        ec2Service.detachVolume("us-east-1", rootVolId, instance.getInstanceId(), instance.getRootDeviceName(), true);
+
+        // Detached root volume is no longer attached as an instance root volume; resizing it creates
+        // and expands its backing raw file so it can be reattached as a data volume.
+        VolumeModification rootMod = ec2Service.modifyVolume("us-east-1", rootVolId, 12, null, null, null, null, false);
+        assertNotNull(rootMod);
+        assertEquals("completed", rootMod.getModificationState());
+        assertEquals(12, rootMod.getTargetSize());
+
+        String helperName = ContainerStorageHelper.resourceName(config, "ec2", null, "volume-helper");
+        ContainerExec.Result checkRootFile = execIn(helperName, "stat -c %s /volumes/" + rootVolId + ".raw");
+        assertEquals(0, checkRootFile.exitCode());
+        assertEquals("12884901888", checkRootFile.stdout().trim());
+        volumesToClean.add(rootVolId);
+        syntheticRootVolumesToClean.remove(rootVolId);
+
+        Volume dataVol = ec2Service.createVolume("us-east-1", "us-east-1a", "gp3", 5, false, 3000, 125, null, null);
+        volumesToClean.add(dataVol.getVolumeId());
+
+        ec2Service.attachVolume("us-east-1", dataVol.getVolumeId(), instance.getInstanceId(), instance.getRootDeviceName());
+
+        VolumeModification mod = ec2Service.modifyVolume("us-east-1", dataVol.getVolumeId(), 10, null, null, null, null, false);
+        assertNotNull(mod);
+        assertEquals("completed", mod.getModificationState());
+        assertEquals(10, mod.getTargetSize());
+
+        ContainerExec.Result checkFile = execIn(helperName, "stat -c %s /volumes/" + dataVol.getVolumeId() + ".raw");
+        assertEquals(0, checkFile.exitCode());
+        assertEquals("10737418240", checkFile.stdout().trim());
     }
 
     private ContainerExec.Result execIn(String containerIdOrName, String command) {

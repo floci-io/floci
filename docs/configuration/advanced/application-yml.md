@@ -42,6 +42,7 @@ floci:
   default-account-id: "000000000000"
   partitions:
     # id: aws                         # Pin the partition explicitly; derived from default-region when unset
+    strict: false                     # true rejects services AWS does not publish in the request's partition
     allow-unknown-regions: false      # true serves a scope region no partition publishes or matches by pattern
 
   storage:
@@ -58,8 +59,8 @@ floci:
       # mount-user: "1001:1001"    # PosixUser: run mounting containers as uid[:gid]
       # mount-group-add: 2000      # supplementary gid added to mounting containers
     wal:
-      # Also the cadence at which journaled stores under persistent mode (CloudWatch Logs events)
-      # fold their .wal file into the store's JSON file.
+      # Also the cadence at which journaled stores under persistent mode (CloudWatch Logs events,
+      # the S3 object index) fold their .wal file into the store's JSON file.
       compaction-interval-ms: 30000
     services:
       ssm:
@@ -92,6 +93,16 @@ floci:
     # extra-suffixes:
     #   - localhost.localstack.cloud
 
+    # Transparent endpoint injection: resolve every AWS partition's DNS and dual-stack
+    # suffix (amazonaws.com, api.aws, amazonaws.eu, amazonaws.com.cn and the rest; see
+    # environment-variables.md for the full list) and every subdomain to Floci's
+    # container IP inside spawned containers, so SDK clients built with explicit
+    # real-AWS endpoints (which override AWS_ENDPOINT_URL) land on the emulator.
+    # Live suffixes like api.aws and amazonaws.eu resolve to Floci while this is on.
+    # Combine with tls.enabled for clients that hardcode https://.
+    # Via env var: FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true
+    spoof-aws-endpoints: false
+
   auth:
     validate-signatures: false               # Set to true to verify S3 presigned URL signatures
     presign-secret: local-emulator-secret    # HMAC secret for S3 pre-signed URL verification
@@ -123,6 +134,7 @@ floci:
       default-visibility-timeout: 30         # Seconds
       max-message-size: 1048576              # Bytes (1 MiB, the AWS maximum)
       clear-fifo-deduplication-cache-on-purge: false  # When true, PurgeQueue clears SQS FIFO dedup and SNS FIFO topic dedup for topics subscribed to that queue
+      receipt-handle-secret: local-emulator-secret  # HMAC secret that signs receipt handles
 
     s3:
       enabled: true
@@ -267,6 +279,7 @@ floci:
       enabled: true
       mock: false                             # true = tasks go to RUNNING without Docker (useful for CI)
       docker-network: floci-net               # required for task-role credentials; must be user-defined
+      image-pull-behavior: default            # as ECS_IMAGE_PULL_BEHAVIOR: default | always | once | prefer-cached
       task-role-credentials:
         enabled: false                        # vend real task IAM role credentials to task containers
         ttl-seconds: 21600                    # six hours, matching AWS
@@ -317,6 +330,7 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT`    | `30`             | Default visibility timeout (seconds)                          |
 | `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE`              | `1048576`        | Max message size (bytes)                                      |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | When `true`, `PurgeQueue` clears the FIFO 5-minute deduplication cache for the target queue and matching SNS FIFO topic dedup entries |
+| `FLOCI_SERVICES_SQS_RECEIPT_HANDLE_SECRET` | `local-emulator-secret` | HMAC secret that signs receipt handles, so a handle that was edited or built by hand is rejected |
 | `FLOCI_SERVICES_S3_DEFAULT_PRESIGN_EXPIRY_SECONDS` | `3600`           | Pre-signed URL expiry                                         |
 | `FLOCI_SERVICES_DOCKER_NETWORK`                    | *(unset)*        | Shared Docker network for Lambda, RDS, ElastiCache containers |
 | `FLOCI_SERVICES_RDS_DATA_ENABLED`                  | `true`           | Enable the RDS Data API service                               |
@@ -327,6 +341,8 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS`             | `256`            | Default CPU units when task definition omits it               |
 | `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS`             | *(unset)*        | Comma-separated allowlist of parent directories for host volume bind mounts; by default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
 | `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES`     | `false`          | Allow any host path, bypassing the host-volume-roots allowlist (traversal, bare root, and the Docker socket or an ancestor directory of it are still always rejected) |
+| `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP` | `true`         | Remove the ECS containers a previous run of this Floci left on the daemon before replacement tasks start |
+| `FLOCI_SERVICES_ECS_IMAGE_PULL_BEHAVIOR`           | `default`        | How task images are pulled at launch, as the ECS agent's `ECS_IMAGE_PULL_BEHAVIOR`: `default`, `always`, `once` or `prefer-cached` |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`           | `false`          | Enforce IAM identity-based policies on every request when `true` |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK`                   | `false`          | Skip Docker; domains appear active immediately (useful for CI)   |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false`        | Leave OpenSearch containers running after Floci stops            |
