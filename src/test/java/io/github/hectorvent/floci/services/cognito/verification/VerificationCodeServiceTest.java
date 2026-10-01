@@ -248,6 +248,44 @@ class VerificationCodeServiceTest {
         assertEquals(VerificationCodeException.Kind.NOT_FOUND, ex.getKind());
     }
 
+    /** A code sent while the one before it is redeemed stays usable: redeeming the old code cannot delete it. */
+    @Test
+    void issue_whilePreviousCodeIsConsumed_leavesTheNewCodeUsable() throws Exception {
+        VerificationCodeService slow = new VerificationCodeService(SlowVerificationCodeStore.factory(), clock);
+        String previous = slow.issue("pool", "alice", VerificationCode.Purpose.EMAIL_OTP, Duration.ofMinutes(5));
+        clock.advance(Duration.ofSeconds(31));
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            CountDownLatch ready = new CountDownLatch(2);
+            CountDownLatch start = new CountDownLatch(1);
+            Future<VerificationCodeException.Kind> redeemed = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                try {
+                    slow.consume("pool", "alice", VerificationCode.Purpose.EMAIL_OTP, previous);
+                    return null;
+                } catch (VerificationCodeException e) {
+                    return e.getKind();
+                }
+            });
+            Future<String> resent = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                return slow.issue("pool", "alice", VerificationCode.Purpose.EMAIL_OTP, Duration.ofMinutes(5));
+            });
+            assertTrue(ready.await(10, TimeUnit.SECONDS));
+            start.countDown();
+            VerificationCodeException.Kind previousOutcome = redeemed.get(10, TimeUnit.SECONDS);
+            String code = resent.get(10, TimeUnit.SECONDS);
+
+            assertTrue(previousOutcome == null || previousOutcome == VerificationCodeException.Kind.MISMATCH,
+                "the old code is redeemed, or is wrong once the new one replaced it: " + previousOutcome);
+            assertDoesNotThrow(() -> slow.consume("pool", "alice", VerificationCode.Purpose.EMAIL_OTP, code));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     /** Consumes each of {@code codes} as alice's EMAIL_OTP at the same moment; null where one succeeded. */
     private static List<VerificationCodeException.Kind> consumeAtOnce(VerificationCodeService service,
                                                                       List<String> codes) throws Exception {

@@ -12,9 +12,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * A verification-code store for concurrency tests. Every read comes a moment late and hands back its own
- * copy, as a read from disk does, so requests redeeming one code at once all find it unused unless
- * {@link VerificationCodeService#consume} lets only one of them read it at a time.
+ * A verification-code store for concurrency tests. Every read hands back its own copy a moment late, as a
+ * read from disk does, so requests redeeming one code at once all find it unused; and every delete lands a
+ * moment late, after a write another request made meanwhile, so redeeming a code can delete the one a resend
+ * just wrote. Neither happens unless {@link VerificationCodeService} lets one request at a time at a code.
  */
 public final class SlowVerificationCodeStore extends InMemoryStorage<String, VerificationCode> {
 
@@ -34,12 +35,22 @@ public final class SlowVerificationCodeStore extends InMemoryStorage<String, Ver
         Optional<VerificationCode> read = super.get(key).map(code -> new VerificationCode(code.getUserPoolId(),
                 code.getUsername(), code.getPurpose(), code.getCodeHash(), code.getSalt(), code.getIssuedAt(),
                 code.getExpiresAt(), code.getAttemptsRemaining(), code.isConsumed()));
+        pause();
+        return read;
+    }
+
+    @Override
+    public void delete(String key) {
+        pause();
+        super.delete(key);
+    }
+
+    private static void pause() {
         try {
             Thread.sleep(20);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while reading a verification code", e);
+            throw new IllegalStateException("Interrupted while waiting on the verification-code store", e);
         }
-        return read;
     }
 }
