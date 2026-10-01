@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -62,6 +63,18 @@ class TransferCfnProvisionerTest {
 
         assertEquals(server.getServerId(), resource.getPhysicalId());
         verify(transfer).untagResource(server.getArn(), List.of("stale"));
+    }
+
+    @Test
+    void committedUpdateClearsRollbackSnapshot() {
+        StackResource resource = resource();
+        resource.getAttributes().put("__FlociTransferServerUpdateSnapshot", "previous-state");
+        resource.setStatus("UPDATE_COMPLETE");
+
+        UpdateCleanupResult result = provisioner.completeUpdate(resource);
+
+        assertFalse(result.applicable());
+        assertNull(resource.getAttributes().get("__FlociTransferServerUpdateSnapshot"));
     }
 
     @Test

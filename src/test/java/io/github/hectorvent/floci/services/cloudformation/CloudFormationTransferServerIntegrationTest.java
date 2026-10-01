@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -15,10 +17,14 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class CloudFormationTransferServerIntegrationTest {
+
+    @Inject
+    CloudFormationService cloudFormationService;
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20261001/us-east-1/cloudformation/aws4_request";
@@ -88,6 +94,10 @@ class CloudFormationTransferServerIntegrationTest {
 
         cloudFormation("UpdateStack", template("role-2", "TransferSecurityPolicy-2020-06", "second"));
         assertEquals(serverId, outputs("UPDATE_COMPLETE").get("ServerRef"));
+        StackResource updated = cloudFormationService.describeStackResources(STACK, "us-east-1").stream()
+                .filter(resource -> "Server".equals(resource.getLogicalId()))
+                .findFirst().orElseThrow();
+        assertNull(updated.getAttributes().get("__FlociTransferServerUpdateSnapshot"));
         describeServer(serverId)
                 .body("Server.LoggingRole", equalTo("role-2"))
                 .body("Server.SecurityPolicyName", equalTo("TransferSecurityPolicy-2020-06"))

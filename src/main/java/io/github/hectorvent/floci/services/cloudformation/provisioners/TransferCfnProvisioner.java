@@ -114,6 +114,14 @@ public class TransferCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        if ("UPDATE_COMPLETE".equals(resource.getStatus())) {
+            resource.getAttributes().remove(UPDATE_SNAPSHOT);
+        }
+        return UpdateCleanupResult.notApplicable();
+    }
+
+    @Override
     public boolean rollbackUpdate(StackResource resource) {
         String saved = resource.getAttributes().get(UPDATE_SNAPSHOT);
         if (saved == null) {
