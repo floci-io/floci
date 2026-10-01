@@ -77,6 +77,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaCfn
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamRoleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamUserCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.IotAuthorizerCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IotCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IotDomainConfigurationCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.KinesisCfnProvisioner;
@@ -122,6 +123,7 @@ import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iot.IotAuthorizerService;
 import io.github.hectorvent.floci.services.iot.IotDomainConfigurationService;
 import io.github.hectorvent.floci.services.iot.IotService;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
@@ -212,6 +214,7 @@ final class CfnProvisionerFixture {
         private FlowLogService flowLogService;
         private CloudWatchDashboardsService cloudWatchDashboardsService;
         private CloudWatchLogsMetricFilterService logsMetricFilterService;
+        private IotAuthorizerService iotAuthorizerService;
         private IotDomainConfigurationService iotDomainConfigurationService;
         private IotService iotService;
         private LambdaMicrovmsService lambdaMicrovmsService;
@@ -372,6 +375,9 @@ final class CfnProvisionerFixture {
             }
             if (flowLogService != null) {
                 discovered.add(new Ec2FlowLogCfnProvisioner(flowLogService));
+            }
+            if (iotAuthorizerService != null) {
+                discovered.add(new IotAuthorizerCfnProvisioner(iotAuthorizerService));
             }
             if (iotDomainConfigurationService != null) {
                 discovered.add(new IotDomainConfigurationCfnProvisioner(iotDomainConfigurationService));
@@ -649,6 +655,11 @@ final class CfnProvisionerFixture {
 
         public Builder logsMetricFilters(CloudWatchLogsMetricFilterService v) {
             this.logsMetricFilterService = v;
+            return this;
+        }
+
+        public Builder iotAuthorizer(IotAuthorizerService v) {
+            this.iotAuthorizerService = v;
             return this;
         }
 

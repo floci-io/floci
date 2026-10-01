@@ -80,11 +80,11 @@ Status: control plane only.
 - `ListAuthorizers` returns the newest authorizer first (`isAscendingOrder=true` reverses it), filters by `status` and pages with `marker` and `pageSize` (1 to 250).
 - Setting the authorizer that already is the default fails with `ResourceAlreadyExistsException`; setting another one replaces it.
 - Tags work through `TagResource`, `UntagResource` and `ListTagsForResource` on the authorizer ARN.
+- CloudFormation provisions `AWS::IoT::Authorizer`: `Ref` is the name and `Fn::GetAtt Arn` the ARN.
 
 Current limitations:
 
 - Authorizers are not evaluated: no connection or HTTP publish invokes the function, and `TestInvokeAuthorizer` is not served (see [MQTT over WebSocket](#mqtt-over-websocket)).
-- CloudFormation `AWS::IoT::Authorizer` is not provisioned.
 
 ## MQTT Broker
 
