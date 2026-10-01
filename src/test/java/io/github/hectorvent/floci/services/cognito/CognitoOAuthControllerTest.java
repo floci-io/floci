@@ -178,14 +178,14 @@ class CognitoOAuthControllerTest {
     void authorizeRedirectsAScopeTheClientIsNotAllowedToTheCallbackForEitherProvider() {
         for (String provider : new String[] {null, "COGNITO", "ExampleOidc"}) {
             Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid phone",
-                    null, provider, "s1", null, null, null);
+                    null, provider, "s1", null, null, null, null);
 
             assertEquals(302, response.getStatus());
             assertEquals(CALLBACK_URI + "?error_description=invalid_scope&state=s1&error=invalid_request",
                     response.getHeaderString("Location"));
         }
         Response withoutState = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code",
-                "aws.cognito.signin.user.admin", null, null, null, null, null, null);
+                "aws.cognito.signin.user.admin", null, null, null, null, null, null, null);
         assertEquals(CALLBACK_URI + "?error_description=invalid_scope&error=invalid_request",
                 withoutState.getHeaderString("Location"));
         verify(federationService, never()).beginAuthorization(any(), any(), any(), any(), any(), any(), any(), any(),
@@ -220,7 +220,7 @@ class CognitoOAuthControllerTest {
                 new CognitoManagedLoginService(cognitoService, stateStore, CLOCK));
 
         String toProvider = federating.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
-                "ExampleOidc", "s1", null, null, null).getHeaderString("Location");
+                "ExampleOidc", "s1", null, null, null, null).getHeaderString("Location");
         String toCallback = federating.idpResponse(requestContext(null), queryParameter(toProvider, "state"),
                 "provider-code", null, null).getHeaderString("Location");
 
@@ -236,9 +236,9 @@ class CognitoOAuthControllerTest {
                 CLOCK.instant().plusSeconds(60)));
 
         String withoutScope = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
-                null, null, null, null, sessionId).getHeaderString("Location");
-        String withScope = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "email email",
                 null, null, null, null, null, sessionId).getHeaderString("Location");
+        String withScope = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "email email",
+                null, null, null, null, null, null, sessionId).getHeaderString("Location");
 
         assertEquals(List.of("openid", "email"), storedCode(withoutScope).scopes());
         assertEquals(List.of("email"), storedCode(withScope).scopes());
