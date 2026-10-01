@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.codepipeline;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution.ActionExecution;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
@@ -11,6 +13,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +28,7 @@ import java.util.Map;
 public class CodePipelineEventPublisher {
 
     private static final Logger LOG = Logger.getLogger(CodePipelineEventPublisher.class);
+    private static final int MAX_SNS_SUBJECT_LENGTH = 100;
 
     private final EventBridgeService eventBridgeService;
     private final SnsService snsService;
@@ -43,7 +47,7 @@ public class CodePipelineEventPublisher {
         detail.put("state", state);
         detail.put("execution-mode", execution.getExecutionMode());
         if (execution.getStartTime() != null) {
-            detail.put("start-time", execution.getStartTime());
+            detail.put("start-time", isoTimestamp(execution.getStartTime()));
         }
         publish(execution, "CodePipeline Pipeline Execution State Change", detail);
     }
@@ -88,38 +92,44 @@ public class CodePipelineEventPublisher {
     /**
      * The SNS notification a Manual approval action sends when it starts waiting.
      *
-     * <p>Known limitation: {@link SnsService#publish} resolves the topic through the
-     * caller's request context, and this runs on a worker thread with none, so the topic
-     * lookup falls back to the default account. Every async SNS publisher in the tree
-     * (EventBridge, S3, Scheduler, Pipes) shares this shape; an account-explicit publish
-     * overload is a cross-service follow-up rather than something to fork here.</p>
+     * <p>Runs on a worker thread with no request context, so the publish is wrapped in
+     * {@link RequestScopes#runAs} to resolve the topic in the pipeline's own account.
+     * The subject is truncated to the 100 characters SNS allows.</p>
      */
     public void approvalNeeded(CodePipelineExecution execution, ActionExecution action,
-                               String notificationArn, String customData, double expires) {
+                               String notificationArn, String customData,
+                               String externalEntityLink, double expires) {
         try {
             ObjectNode message = mapper.createObjectNode();
             message.put("region", execution.getRegion());
-            message.put("consoleLink", "http://localhost:4566/_floci/codepipeline/"
-                    + execution.getPipelineName());
             ObjectNode approval = message.putObject("approval");
             approval.put("pipelineName", execution.getPipelineName());
             approval.put("stageName", action.getStageName());
             approval.put("actionName", action.getActionName());
             approval.put("token", action.getToken());
-            approval.put("expires", expires);
+            approval.put("expires", isoTimestamp(expires));
             if (customData != null && !customData.isBlank()) {
                 approval.put("customData", customData);
             }
-            approval.put("approvalReviewLink", "http://localhost:4566/_floci/codepipeline/"
-                    + execution.getPipelineName() + "/approvals");
+            if (externalEntityLink != null && !externalEntityLink.isBlank()) {
+                approval.put("externalEntityLink", externalEntityLink);
+            }
             String subject = "APPROVAL NEEDED: AWS CodePipeline " + execution.getPipelineName()
                     + " for stage " + action.getStageName()
                     + " action " + action.getActionName();
-            snsService.publish(notificationArn, null, message.toString(), subject, execution.getRegion());
+            String truncated = subject.length() > MAX_SNS_SUBJECT_LENGTH
+                    ? subject.substring(0, MAX_SNS_SUBJECT_LENGTH) : subject;
+            RequestScopes.runAs(execution.getAccountId(), () -> snsService.publish(
+                    notificationArn, null, message.toString(), truncated, execution.getRegion()));
         } catch (Exception e) {
-            LOG.warnf("CodePipeline approval notification to %s skipped: %s",
+            LOG.warnv("CodePipeline approval notification to {0} skipped: {1}",
                     notificationArn, e.getMessage());
         }
+    }
+
+    /** Epoch seconds (with fraction) as the ISO-8601 UTC timestamp CodePipeline emits, e.g. 2020-01-24T22:03:07Z. */
+    private static String isoTimestamp(double epochSeconds) {
+        return Instant.ofEpochSecond((long) epochSeconds).toString();
     }
 
     private ObjectNode baseDetail(CodePipelineExecution execution) {
@@ -143,8 +153,8 @@ public class CodePipelineEventPublisher {
             // Always emit Resources (possibly empty): EventBridge pattern matching reads the
             // key unconditionally for rules with a "resources" filter.
             ArrayNode resources = mapper.createArrayNode();
-            resources.add("arn:aws:codepipeline:" + execution.getRegion() + ":"
-                    + execution.getAccountId() + ":" + execution.getPipelineName());
+            resources.add(AwsArnUtils.Arn.of("codepipeline", execution.getRegion(),
+                    execution.getAccountId(), execution.getPipelineName()).toString());
             entry.put("Resources", resources);
             // This runs on a pipeline-execution worker thread with no request context, so the
             // two-argument overload would fall back to the default (management) account and a
@@ -153,7 +163,7 @@ public class CodePipelineEventPublisher {
             eventBridgeService.putEvents(List.of(entry), execution.getRegion(),
                     execution.getAccountId());
         } catch (Exception e) {
-            LOG.warnf("CodePipeline event %s not published: %s", detailType, e.getMessage());
+            LOG.warnv("CodePipeline event {0} not published: {1}", detailType, e.getMessage());
         }
     }
 }

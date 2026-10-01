@@ -83,7 +83,8 @@ and never fails the execution.
 
 A Manual approval action whose configuration sets `NotificationArn` publishes the
 approval-needed message (subject `APPROVAL NEEDED: AWS CodePipeline ...`, JSON body with
-the approval token and `CustomData`) to that SNS topic when it starts waiting.
+the approval token, `expires` as an ISO-8601 timestamp, `CustomData` and `ExternalEntityLink`)
+to that SNS topic when it starts waiting. The subject is truncated to SNS's 100-character limit.
 
 ## Configuration
 

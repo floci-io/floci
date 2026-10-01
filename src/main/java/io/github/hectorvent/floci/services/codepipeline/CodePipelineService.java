@@ -1543,6 +1543,7 @@ public class CodePipelineService {
         if (notificationArn != null && !notificationArn.isBlank()) {
             eventPublisher.approvalNeeded(execution, state, notificationArn,
                     action.path("configuration").path("CustomData").asText(null),
+                    action.path("configuration").path("ExternalEntityLink").asText(null),
                     now() + TimeUnit.DAYS.toSeconds(7));
         }
         while ("InProgress".equals(state.getStatus()) && !execution.isStopRequested()) {
