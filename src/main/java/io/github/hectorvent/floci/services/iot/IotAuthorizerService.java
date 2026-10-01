@@ -31,8 +31,8 @@ import java.util.stream.Collectors;
 
 /**
  * AWS IoT Core custom authorizers: the records CreateAuthorizer and its peers manage, and the
- * account's default authorizer. The function ARN is checked for ARN syntax only, as on AWS; nothing
- * here invokes the function or gates a connection.
+ * account's default authorizer. The function ARN is checked for ARN syntax only, as on AWS;
+ * {@link IotCustomAuthorizer} invokes the function.
  */
 @ApplicationScoped
 public class IotAuthorizerService {
@@ -333,8 +333,7 @@ public class IotAuthorizerService {
         }
         RSAPublicKey key;
         try {
-            byte[] der = Base64.getDecoder().decode(String.join("", rest.subList(0, end)));
-            key = (RSAPublicKey) KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(der));
+            key = rsaPublicKey(pem);
         } catch (GeneralSecurityException | IllegalArgumentException e) {
             throw invalid("Authorizer " + name + " public key for key name " + keyName + " not a valid RSA key");
         }
@@ -343,6 +342,14 @@ public class IotAuthorizerService {
             throw invalid("Authorizer " + name + " public key for key name " + keyName
                     + " invalid: Key must be 2048 bits but was " + bits + " bits");
         }
+    }
+
+    /** The key of a PEM whose header and end lines {@link #requireRsa2048} has checked. */
+    static RSAPublicKey rsaPublicKey(String pem) throws GeneralSecurityException {
+        List<String> lines = pem.lines().toList();
+        List<String> body = lines.subList(lines.indexOf("-----BEGIN PUBLIC KEY-----") + 1, lines.size());
+        byte[] der = Base64.getDecoder().decode(String.join("", body.subList(0, body.indexOf("-----END PUBLIC KEY-----"))));
+        return (RSAPublicKey) KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(der));
     }
 
     private static void requireFunctionArn(String name, String functionArn) {
@@ -380,7 +387,7 @@ public class IotAuthorizerService {
                 Map.of("resourceId", authorizer.getAuthorizerName(), "resourceArn", authorizer.getAuthorizerArn()));
     }
 
-    private static AwsException constraint(String field, String constraint) {
+    static AwsException constraint(String field, String constraint) {
         return constraints(field, List.of(constraint));
     }
 
@@ -391,7 +398,7 @@ public class IotAuthorizerService {
                         .collect(Collectors.joining("; ")));
     }
 
-    private static AwsException invalid(String message) {
+    static AwsException invalid(String message) {
         return new AwsException("InvalidRequestException", message, 400);
     }
 
