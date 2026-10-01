@@ -57,7 +57,7 @@ class EcsServiceDaemonSchedulingTest {
         assertEquals(2, running.size());
         assertEquals(Set.of(a.getContainerInstanceArn(), b.getContainerInstanceArn()),
                 running.stream().map(EcsTask::getContainerInstanceArn).collect(Collectors.toSet()));
-        var svc = service.describeServices("daemon-cluster", List.of("daemon-svc"), REGION).getFirst();
+        EcsServiceModel svc = service.describeServices("daemon-cluster", List.of("daemon-svc"), REGION).getFirst();
         assertEquals(2, svc.getDesiredCount(), "desiredCount follows the instance count, as AWS reports it");
         assertEquals(2, svc.getRunningCount());
 
@@ -93,7 +93,7 @@ class EcsServiceDaemonSchedulingTest {
                 List.of(), null, null, "DAEMON", null, null, REGION);
 
         service.reconcileServices();
-        var svc = service.describeServices("daemon-fail", List.of("daemon-svc"), REGION).getFirst();
+        EcsServiceModel svc = service.describeServices("daemon-fail", List.of("daemon-svc"), REGION).getFirst();
         assertEquals(1, svc.getDesiredCount());
         assertEquals(0, svc.getRunningCount(), "a task that failed to start is not running");
         assertEquals(0, runningTasks(service).size());

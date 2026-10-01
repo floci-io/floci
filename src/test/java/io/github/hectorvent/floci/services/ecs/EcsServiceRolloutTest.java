@@ -88,7 +88,7 @@ class EcsServiceRolloutTest {
         service.createCluster("pin-cluster", REGION);
         TaskDefinition rev1 = registerTaskDef(service, "pin-fam", "app:1");
 
-        var svc = service.createService("pin-cluster", "pin-svc", "pin-fam", 0,
+        EcsServiceModel svc = service.createService("pin-cluster", "pin-svc", "pin-fam", 0,
                 LaunchType.FARGATE, List.of(), null, REGION);
 
         assertEquals(rev1.getTaskDefinitionArn(), svc.getTaskDefinition());
@@ -99,7 +99,7 @@ class EcsServiceRolloutTest {
         EcsService service = newMockModeService();
         service.createCluster("legacy-cluster", REGION);
         TaskDefinition rev1 = registerTaskDef(service, "legacy-fam", "app:1");
-        var svc = service.createService("legacy-cluster", "legacy-svc", "legacy-fam", 1,
+        EcsServiceModel svc = service.createService("legacy-cluster", "legacy-svc", "legacy-fam", 1,
                 LaunchType.FARGATE, List.of(), null, REGION);
         service.reconcileServices();
         assertEquals(1, runningTasks(service).size());
@@ -137,7 +137,7 @@ class EcsServiceRolloutTest {
         EcsService service = newMockModeService();
         service.createCluster("force-cluster", REGION);
         TaskDefinition rev1 = registerTaskDef(service, "force-fam", "app:1");
-        var created = service.createService("force-cluster", "force-svc", "force-fam", 1,
+        EcsServiceModel created = service.createService("force-cluster", "force-svc", "force-fam", 1,
                 LaunchType.FARGATE, List.of(), null, REGION);
         String firstDeploymentId = created.getDeploymentId();
         assertNotNull(firstDeploymentId, "createService assigns a deploymentId");
@@ -148,7 +148,7 @@ class EcsServiceRolloutTest {
         assertEquals(firstDeploymentId, before.getFirst().getDeploymentId());
 
         // Same task definition, force flag set.
-        var updated = service.updateService("force-cluster", "force-svc", null, null, null,
+        EcsServiceModel updated = service.updateService("force-cluster", "force-svc", null, null, null,
                 null, true, REGION);
         assertNotEquals(firstDeploymentId, updated.getDeploymentId(),
                 "forceNewDeployment mints a new deployment id");

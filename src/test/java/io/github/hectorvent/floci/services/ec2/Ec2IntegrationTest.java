@@ -25,6 +25,8 @@ import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import java.util.zip.GZIPOutputStream;
+import io.restassured.response.ExtractableResponse;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -304,7 +306,7 @@ class Ec2IntegrationTest {
      * absent from the body rather than compared as a value.
      */
     private void assertSynthesizedOwnership(String ownerScope, String expectedId, String expectedAlias) {
-        var response = given()
+        ExtractableResponse<Response> response = given()
             .formParam("Action", "DescribeImages")
             .formParam("Owner.1", ownerScope)
             .formParam("Filter.1.Name", "name")
@@ -346,7 +348,7 @@ class Ec2IntegrationTest {
     void anOwnerAliasFilterAloneStillAgreesWithTheOwnerId() {
         // The mirror of the above. Filtering on the alias with no Owner.N left the id at the
         // Amazon default, so the image reported aws-marketplace beside Amazon's account.
-        var response = given()
+        ExtractableResponse<Response> response = given()
             .formParam("Action", "DescribeImages")
             .formParam("Filter.1.Name", "name")
             .formParam("Filter.1.Value.1", "unmatched-alias-filter-only-*")

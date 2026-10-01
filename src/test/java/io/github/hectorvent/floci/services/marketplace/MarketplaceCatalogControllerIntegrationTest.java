@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.marketplace;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -25,7 +26,7 @@ class MarketplaceCatalogControllerIntegrationTest {
                 .body("ChangeSetId", notNullValue())
                 .body("ChangeSetArn", containsString(":000000000000:AWSMarketplace/ChangeSet/"))
                 .extract().path("ChangeSetId");
-        var described = given().header("Authorization", auth())
+        Response described = given().header("Authorization", auth())
                 .get("/DescribeChangeSet?catalog=AWSMarketplace&changeSetId=" + id)
                 .then().statusCode(200).body("Status", equalTo("SUCCEEDED")).extract().response();
         String entityId = described.path("ChangeSet[0].Entity.Identifier");
@@ -63,7 +64,7 @@ class MarketplaceCatalogControllerIntegrationTest {
         String cs = given().contentType("application/json").header("Authorization", auth())
                 .body("{\"Catalog\":\"AWSMarketplace\",\"ChangeSet\":[{\"ChangeType\":\"CreateProduct\",\"Entity\":{\"Type\":\"SaaSProduct@1.0\",\"Identifier\":\"@1\"},\"DetailsDocument\":{}}]}")
                 .post("/StartChangeSet").then().statusCode(200).extract().path("ChangeSetId");
-        var response = given().header("Authorization", auth())
+        Response response = given().header("Authorization", auth())
                 .get("/DescribeChangeSet?catalog=AWSMarketplace&changeSetId=" + cs)
                 .then().extract().response();
         String arn = response.path("ChangeSet[0].EntityArn");

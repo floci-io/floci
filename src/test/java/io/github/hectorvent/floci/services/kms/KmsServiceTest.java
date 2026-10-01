@@ -1203,9 +1203,9 @@ class KmsServiceTest {
         @Test
         void decryptAcceptsCiphertextMadeLocallyWithThePublicKey() throws Exception {
             KmsKey key = createRsaKey();
-            var publicKey = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(
+            PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(
                     Base64.getDecoder().decode(kmsService.getPublicKey(key.getKeyId(), REGION).getPublicKeyEncoded())));
-            var cipher = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPPadding");
+            Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
             cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey, new javax.crypto.spec.OAEPParameterSpec(
                     "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, javax.crypto.spec.PSource.PSpecified.DEFAULT));
             byte[] localCiphertext = cipher.doFinal(PLAINTEXT);

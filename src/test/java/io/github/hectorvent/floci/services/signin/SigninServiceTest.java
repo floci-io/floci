@@ -12,6 +12,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -329,9 +330,9 @@ class SigninServiceTest {
 
     @Test
     void refreshGrantRetentionNeverOutlivesAbsoluteExpiry() {
-        var expiresAt = clock.instant().plus(Duration.ofHours(12));
-        var earlierReplayExpiry = expiresAt.minus(Duration.ofMinutes(1));
-        var replayExpiresAt = expiresAt.plus(Duration.ofMinutes(14));
+        Instant expiresAt = clock.instant().plus(Duration.ofHours(12));
+        Instant earlierReplayExpiry = expiresAt.minus(Duration.ofMinutes(1));
+        Instant replayExpiresAt = expiresAt.plus(Duration.ofMinutes(14));
 
         assertEquals(expiresAt, SigninService.refreshGrantRetentionExpiry(expiresAt, null));
         assertEquals(earlierReplayExpiry,

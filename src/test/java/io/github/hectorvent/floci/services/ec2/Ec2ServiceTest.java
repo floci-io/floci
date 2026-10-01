@@ -5,8 +5,11 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
+import io.github.hectorvent.floci.services.ec2.model.PrefixList;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
@@ -1258,9 +1261,9 @@ class Ec2ServiceTest {
     @SuppressWarnings("unchecked")
     private static <T> void putViaReflection(Ec2Service service, String fieldName, String key, T value)
             throws Exception {
-        var field = Ec2Service.class.getDeclaredField(fieldName);
+        Field field = Ec2Service.class.getDeclaredField(fieldName);
         field.setAccessible(true);
-        var backend = (io.github.hectorvent.floci.core.storage.StorageBackend<String, T>) field.get(service);
+        StorageBackend<String, T> backend = (StorageBackend<String, T>) field.get(service);
         backend.put(key, value);
     }
 
@@ -2747,7 +2750,7 @@ class Ec2ServiceTest {
     void legacyDescribePrefixListsProjectsTheSameAwsManagedData() {
         Ec2Service service = prefixListService();
 
-        var legacy = service.describePrefixLists("us-east-1", List.of(),
+        List<PrefixList> legacy = service.describePrefixLists("us-east-1", List.of(),
                 Map.of("prefix-list-name", List.of("com.amazonaws.us-east-1.s3")));
 
         assertEquals(1, legacy.size());

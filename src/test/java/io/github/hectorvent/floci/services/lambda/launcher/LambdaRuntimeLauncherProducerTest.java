@@ -35,7 +35,7 @@ class LambdaRuntimeLauncherProducerTest {
 
     @BeforeEach
     void setUp() {
-        var services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambda);

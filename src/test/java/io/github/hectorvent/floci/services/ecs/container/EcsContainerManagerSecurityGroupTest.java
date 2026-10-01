@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.command.InspectVolumeCmd;
+import com.github.dockerjava.api.command.InspectVolumeResponse;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -207,12 +210,12 @@ class EcsContainerManagerSecurityGroupTest {
         when(lifecycleManager.create(any())).thenReturn("router-id");
         when(lifecycleManager.startCreated(anyString(), any()))
                 .thenReturn(new ContainerInfo("router-id", Map.of()));
-        var inspectVolumeCmd = mock(com.github.dockerjava.api.command.InspectVolumeCmd.class);
-        var volume = mock(com.github.dockerjava.api.command.InspectVolumeResponse.class);
+        InspectVolumeCmd inspectVolumeCmd = mock(InspectVolumeCmd.class);
+        InspectVolumeResponse volume = mock(InspectVolumeResponse.class);
         when(dockerClient.inspectVolumeCmd(anyString())).thenReturn(inspectVolumeCmd);
         when(inspectVolumeCmd.exec()).thenReturn(volume);
         when(volume.getMountpoint()).thenReturn("/var/lib/docker/volumes/floci-ecs-firelens-abc123/_data");
-        var copyCmd = mock(com.github.dockerjava.api.command.CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
         when(dockerClient.copyArchiveToContainerCmd("router-id")).thenReturn(copyCmd);
 
         ContainerDefinition router = new ContainerDefinition();

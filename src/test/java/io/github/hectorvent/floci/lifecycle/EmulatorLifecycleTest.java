@@ -179,7 +179,7 @@ class EmulatorLifecycleTest {
 
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
-        var inOrder = Mockito.inOrder(initializationHooksRunner, storageFactory, initLifecycleState,
+        InOrder inOrder = Mockito.inOrder(initializationHooksRunner, storageFactory, initLifecycleState,
                 iamService, rdsService);
         inOrder.verify(initializationHooksRunner).run(InitializationHook.BOOT);
         inOrder.verify(initLifecycleState).markBootCompleted();
@@ -242,7 +242,7 @@ class EmulatorLifecycleTest {
 
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
-        var inOrder = Mockito.inOrder(storageFactory, elbV2Service);
+        InOrder inOrder = Mockito.inOrder(storageFactory, elbV2Service);
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(elbV2Service).restorePersistedRuntime();
     }
@@ -331,7 +331,7 @@ class EmulatorLifecycleTest {
 
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
-        var inOrder = Mockito.inOrder(storageFactory, schemaCreationWorker);
+        InOrder inOrder = Mockito.inOrder(storageFactory, schemaCreationWorker);
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(schemaCreationWorker).recoverOrphans();
         inOrder.verify(schemaCreationWorker).rehydrateSchemas();
@@ -346,7 +346,7 @@ class EmulatorLifecycleTest {
 
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
-        var inOrder = Mockito.inOrder(storageFactory, stepFunctionsService);
+        InOrder inOrder = Mockito.inOrder(storageFactory, stepFunctionsService);
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(stepFunctionsService).abortAbandonedExecutions();
     }
@@ -360,7 +360,7 @@ class EmulatorLifecycleTest {
 
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
-        var inOrder = Mockito.inOrder(initLifecycleState, persistentPathValidator, storageFactory);
+        InOrder inOrder = Mockito.inOrder(initLifecycleState, persistentPathValidator, storageFactory);
         inOrder.verify(initLifecycleState).markBootCompleted();
         inOrder.verify(persistentPathValidator).validateAtBoot();
         inOrder.verify(storageFactory).loadAll();
@@ -572,7 +572,7 @@ class EmulatorLifecycleTest {
         // shutdown can't be cut off by the SIGTERM grace window before data is persisted
         // (regression guard for issue #1521). shutdownAll() still runs last to stop the flush
         // schedulers and capture any shutdown-time writes.
-        var inOrder = Mockito.inOrder(storageFactory, rdsContainerManager, elastiCacheContainerManager);
+        InOrder inOrder = Mockito.inOrder(storageFactory, rdsContainerManager, elastiCacheContainerManager);
         inOrder.verify(storageFactory).flushAll();
         inOrder.verify(elastiCacheContainerManager).stopAll();
         inOrder.verify(rdsContainerManager).stopAll();

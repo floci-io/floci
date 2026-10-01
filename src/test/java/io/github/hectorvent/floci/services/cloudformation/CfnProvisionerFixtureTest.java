@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -106,7 +107,7 @@ class CfnProvisionerFixtureTest {
         Path provisioners = Path.of(
                 "src/main/java/io/github/hectorvent/floci/services/cloudformation/provisioners");
         Set<String> onDisk;
-        try (var files = Files.list(provisioners)) {
+        try (Stream<Path> files = Files.list(provisioners)) {
             onDisk = files.map(f -> f.getFileName().toString())
                     .filter(n -> n.endsWith("CfnProvisioner.java"))
                     .map(n -> n.replace(".java", ""))

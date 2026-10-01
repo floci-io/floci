@@ -192,7 +192,7 @@ class KmsIntegrationTest {
 
     @Test
     void updateKeyDescriptionRoundTripThroughJsonHandler() {
-        var key = given()
+        JsonPath key = given()
             .header("X-Amz-Target", "TrentService.CreateKey")
             .contentType(KMS_CONTENT_TYPE)
             .body("""
@@ -2788,7 +2788,7 @@ class KmsIntegrationTest {
         String keyId = createRsaEncryptionKey();
         String plaintext = Base64.getEncoder().encodeToString("secret payload".getBytes(StandardCharsets.UTF_8));
 
-        var encryptResponse = given()
+        JsonPath encryptResponse = given()
                 .header("X-Amz-Target", "TrentService.Encrypt")
                 .contentType(KMS_CONTENT_TYPE)
                 .body("{\"KeyId\":\"%s\",\"Plaintext\":\"%s\",\"EncryptionAlgorithm\":\"RSAES_OAEP_SHA_256\"}"
@@ -2836,9 +2836,9 @@ class KmsIntegrationTest {
                 .body("EncryptionAlgorithms", equalTo(List.of("RSAES_OAEP_SHA_1", "RSAES_OAEP_SHA_256")))
                 .extract().path("PublicKey");
 
-        var publicKey = java.security.KeyFactory.getInstance("RSA").generatePublic(
+        PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(
                 new java.security.spec.X509EncodedKeySpec(Base64.getDecoder().decode(publicKeyBase64)));
-        var cipher = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPPadding");
+        Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
         cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey, new javax.crypto.spec.OAEPParameterSpec(
                 "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA256,
                 javax.crypto.spec.PSource.PSpecified.DEFAULT));
@@ -2931,7 +2931,7 @@ class KmsIntegrationTest {
                 .then().statusCode(200)
                 .extract().path("CiphertextBlob");
 
-        var reEncryptResponse = given()
+        JsonPath reEncryptResponse = given()
                 .header("X-Amz-Target", "TrentService.ReEncrypt")
                 .contentType(KMS_CONTENT_TYPE)
                 .body(("{\"CiphertextBlob\":\"%s\",\"SourceKeyId\":\"%s\",\"DestinationKeyId\":\"%s\","
@@ -2989,7 +2989,7 @@ class KmsIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("KMSInvalidStateException"));
 
-        var parameters = given()
+        JsonPath parameters = given()
                 .header("X-Amz-Target", "TrentService.GetParametersForImport")
                 .contentType(KMS_CONTENT_TYPE)
                 .body("{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSAES_OAEP_SHA_256\",\"WrappingKeySpec\":\"RSA_2048\"}"
@@ -3089,7 +3089,7 @@ class KmsIntegrationTest {
                 .body("KeyMetadata.KeyState", equalTo("PendingImport"))
                 .extract().path("KeyMetadata.KeyId");
 
-        var parameters = given()
+        JsonPath parameters = given()
                 .header("X-Amz-Target", "TrentService.GetParametersForImport")
                 .contentType(KMS_CONTENT_TYPE)
                 .body(("{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSA_AES_KEY_WRAP_SHA_256\","
@@ -3220,7 +3220,7 @@ class KmsIntegrationTest {
     }
 
     private void importFreshMaterial(String keyId) throws Exception {
-        var parameters = given()
+        JsonPath parameters = given()
                 .header("X-Amz-Target", "TrentService.GetParametersForImport")
                 .contentType(KMS_CONTENT_TYPE)
                 .body("{\"KeyId\":\"%s\",\"WrappingAlgorithm\":\"RSAES_OAEP_SHA_256\",\"WrappingKeySpec\":\"RSA_2048\"}"

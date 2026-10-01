@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
@@ -286,7 +287,7 @@ class ElbV2CfnProvisionerTest {
         when(elb.createRule(eq(REGION), eq(LISTENER_ARN), anyList(), eq(10), anyList(), eq(Map.of())))
                 .thenReturn(rule(LISTENER_ARN));
         ObjectNode props = mapper.createObjectNode().put("ListenerArn", LISTENER_ARN).put("Priority", "10");
-        var conditions = props.putArray("Conditions");
+        ArrayNode conditions = props.putArray("Conditions");
         conditions.addObject().put("Field", "path-pattern").putObject("PathPatternConfig").putArray("Values").add("/api/*");
         ObjectNode header = conditions.addObject().put("Field", "http-header");
         header.putObject("HttpHeaderConfig").put("HttpHeaderName", "X-Env").putArray("Values").add("prod");

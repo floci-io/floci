@@ -17,7 +17,7 @@ class SecretsManagerSelectorTest {
 
     @Test
     void plainArnPassesThroughVerbatim() {
-        var sel = SecretsManagerSelector.parse(BASE);
+        SecretsManagerSelector sel = SecretsManagerSelector.parse(BASE);
         assertEquals(BASE, sel.secretId());
         assertNull(sel.jsonKey());
         assertNull(sel.versionStage());
@@ -27,7 +27,7 @@ class SecretsManagerSelectorTest {
     @Test
     void jsonKeyOnlySelector() {
         // CDK Secret.fromSecretsManager(secret, 'token') emits ":token::".
-        var sel = SecretsManagerSelector.parse(BASE + ":token::");
+        SecretsManagerSelector sel = SecretsManagerSelector.parse(BASE + ":token::");
         assertEquals(BASE, sel.secretId());
         assertEquals("token", sel.jsonKey());
         assertNull(sel.versionStage());
@@ -37,7 +37,7 @@ class SecretsManagerSelectorTest {
     @Test
     void emptyJsonKeyWithVersionIdMeansWholeSecret() {
         // CDK fromSecretsManagerVersion(secret, {versionId}) with no field emits ":::id".
-        var sel = SecretsManagerSelector.parse(BASE + ":::v123");
+        SecretsManagerSelector sel = SecretsManagerSelector.parse(BASE + ":::v123");
         assertEquals(BASE, sel.secretId());
         assertNull(sel.jsonKey());
         assertNull(sel.versionStage());
@@ -46,7 +46,7 @@ class SecretsManagerSelectorTest {
 
     @Test
     void emptyJsonKeyWithVersionStage() {
-        var sel = SecretsManagerSelector.parse(BASE + "::AWSPREVIOUS:");
+        SecretsManagerSelector sel = SecretsManagerSelector.parse(BASE + "::AWSPREVIOUS:");
         assertNull(sel.jsonKey());
         assertEquals("AWSPREVIOUS", sel.versionStage());
         assertNull(sel.versionId());
@@ -54,7 +54,7 @@ class SecretsManagerSelectorTest {
 
     @Test
     void fullSelector() {
-        var sel = SecretsManagerSelector.parse(BASE + ":token:AWSPREVIOUS:v123");
+        SecretsManagerSelector sel = SecretsManagerSelector.parse(BASE + ":token:AWSPREVIOUS:v123");
         assertEquals(BASE, sel.secretId());
         assertEquals("token", sel.jsonKey());
         assertEquals("AWSPREVIOUS", sel.versionStage());
@@ -64,7 +64,7 @@ class SecretsManagerSelectorTest {
     @Test
     void partialArnBaseIsRebuiltWithoutSuffix() {
         String partial = "arn:aws:secretsmanager:us-east-2:000000000000:secret:app/config";
-        var sel = SecretsManagerSelector.parse(partial + ":token::");
+        SecretsManagerSelector sel = SecretsManagerSelector.parse(partial + ":token::");
         assertEquals(partial, sel.secretId());
         assertEquals("token", sel.jsonKey());
     }

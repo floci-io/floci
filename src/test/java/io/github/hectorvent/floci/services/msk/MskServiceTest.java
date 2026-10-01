@@ -79,8 +79,8 @@ class MskServiceTest {
                 });
 
         config = Mockito.mock(EmulatorConfig.class);
-        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
-        var mskConfig = Mockito.mock(EmulatorConfig.MskServiceConfig.class);
+        EmulatorConfig.ServicesConfig servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.MskServiceConfig mskConfig = Mockito.mock(EmulatorConfig.MskServiceConfig.class);
         
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.msk()).thenReturn(mskConfig);

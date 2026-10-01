@@ -6,8 +6,11 @@ import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefresh;
+import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfigurationBlockDeviceMapping;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
+import io.github.hectorvent.floci.services.autoscaling.model.ScheduledAction;
+import io.github.hectorvent.floci.services.autoscaling.model.WarmPoolConfiguration;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -91,7 +94,7 @@ class AutoScalingServiceTest {
         assertEquals(refresh.getInstanceRefreshId(), page.instanceRefreshes().getFirst().getInstanceRefreshId());
         assertNull(page.nextToken());
 
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         assertEquals("lt-updated", group.getLaunchTemplateId());
         assertEquals("2", group.getLaunchTemplateVersion());
         assertNull(group.getLaunchConfigurationName());
@@ -186,7 +189,7 @@ class AutoScalingServiceTest {
         when(ec2Service.describeInstances(REGION, List.of("i-1234567890abcdef0"), java.util.Map.of()))
                 .thenReturn(List.of(reservation));
 
-        var launchConfiguration = service.createLaunchConfiguration(REGION,
+        LaunchConfiguration launchConfiguration = service.createLaunchConfiguration(REGION,
                 "lc-from-instance",
                 "i-1234567890abcdef0",
                 null,
@@ -210,7 +213,7 @@ class AutoScalingServiceTest {
 
     @Test
     void createLaunchConfigurationDefaultsInstanceMonitoringToEnabled() {
-        var lc = service.createLaunchConfiguration(REGION, "lc-default-monitoring", null,
+        LaunchConfiguration lc = service.createLaunchConfiguration(REGION, "lc-default-monitoring", null,
                 "ami-12345678", "t3.micro", null, List.of(), null, null, null);
 
         assertEquals(Boolean.TRUE, lc.getInstanceMonitoringEnabled());
@@ -222,7 +225,7 @@ class AutoScalingServiceTest {
 
     @Test
     void createLaunchConfigurationKeepsAnExplicitInstanceMonitoringOverride() {
-        var lc = service.createLaunchConfiguration(REGION, "lc-monitoring-off", null,
+        LaunchConfiguration lc = service.createLaunchConfiguration(REGION, "lc-monitoring-off", null,
                 "ami-12345678", "t3.micro", null, List.of(), null, null, null, Boolean.FALSE, List.of());
 
         assertEquals(Boolean.FALSE, lc.getInstanceMonitoringEnabled());
@@ -233,20 +236,20 @@ class AutoScalingServiceTest {
 
     @Test
     void createLaunchConfigurationRoundTripsBlockDeviceMappings() {
-        var ebs = new LaunchConfigurationBlockDeviceMapping.Ebs();
+        LaunchConfigurationBlockDeviceMapping.Ebs ebs = new LaunchConfigurationBlockDeviceMapping.Ebs();
         ebs.setVolumeSize(100);
         ebs.setVolumeType("gp3");
         ebs.setIops(3000);
         ebs.setThroughput(125);
         ebs.setDeleteOnTermination(true);
-        var mapping = new LaunchConfigurationBlockDeviceMapping();
+        LaunchConfigurationBlockDeviceMapping mapping = new LaunchConfigurationBlockDeviceMapping();
         mapping.setDeviceName("/dev/xvda");
         mapping.setEbs(ebs);
 
         service.createLaunchConfiguration(REGION, "lc-with-root-device", null,
                 "ami-12345678", "t3.micro", null, List.of(), null, null, null, null, List.of(mapping));
 
-        var stored = service.describeLaunchConfigurations(REGION, List.of("lc-with-root-device"))
+        List<LaunchConfigurationBlockDeviceMapping> stored = service.describeLaunchConfigurations(REGION, List.of("lc-with-root-device"))
                 .getFirst().getBlockDeviceMappings();
         assertEquals(1, stored.size());
         assertEquals("/dev/xvda", stored.getFirst().getDeviceName());
@@ -319,7 +322,7 @@ class AutoScalingServiceTest {
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE, error.getMessage());
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         assertEquals("lt-original", group.getLaunchTemplateId());
         assertEquals(3, group.getMaxSize());
     }
@@ -346,7 +349,7 @@ class AutoScalingServiceTest {
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals("LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", error.getMessage());
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         assertEquals("1", group.getLaunchTemplateVersion());
         assertEquals(3, group.getMaxSize());
     }
@@ -380,7 +383,7 @@ class AutoScalingServiceTest {
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE, error.getMessage());
         assertEquals(400, error.getHttpStatus());
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         assertEquals("lt-refresh", group.getLaunchTemplateId());
         assertEquals("2", group.getLaunchTemplateVersion());
         assertEquals(3, group.getMaxSize());
@@ -452,7 +455,7 @@ class AutoScalingServiceTest {
 
     @Test
     void startInstanceRefreshWithLaunchTemplateAliasDoesNotSkipExistingInstances() {
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         group.setLaunchTemplateVersion("$Latest");
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-original", "InService", "lt-original", "1");
         InstanceRefresh request = new InstanceRefresh();
@@ -479,7 +482,7 @@ class AutoScalingServiceTest {
 
     @Test
     void startInstanceRefreshWithDefaultLaunchTemplateAliasDoesNotSkipExistingInstances() {
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         group.setLaunchTemplateVersion("$Default");
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-original", "InService", "lt-original", "1");
         InstanceRefresh request = new InstanceRefresh();
@@ -506,7 +509,7 @@ class AutoScalingServiceTest {
 
     @Test
     void startInstanceRefreshWithDefaultLaunchTemplateVersionDoesNotSkipExistingInstances() {
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         group.setLaunchTemplateVersion(null);
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-original", "InService", "lt-original", "1");
         InstanceRefresh request = new InstanceRefresh();
@@ -522,7 +525,7 @@ class AutoScalingServiceTest {
 
     @Test
     void startInstanceRefreshWithBlankLaunchTemplateVersionDoesNotSkipExistingInstances() {
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         group.setLaunchTemplateVersion("");
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-original", "InService", "lt-original", "1");
         InstanceRefresh request = new InstanceRefresh();
@@ -543,7 +546,7 @@ class AutoScalingServiceTest {
         request.setDesiredLaunchTemplateId("lt-updated");
         request.setDesiredLaunchTemplateVersion("2");
         InstanceRefresh refresh = service.startInstanceRefresh(REGION, "test-asg", request);
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         group.getInstances().clear();
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-replacement", "InService", "lt-updated", "2");
 
@@ -563,7 +566,7 @@ class AutoScalingServiceTest {
     void completeInstanceRefreshWaitsForReplacementCapacity() {
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-original", "InService", "lt-original", "1");
         InstanceRefresh refresh = service.startInstanceRefresh(REGION, "test-asg", new InstanceRefresh());
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         group.getInstances().clear();
 
         service.completeInstanceRefreshIfSettled(REGION, "test-asg");
@@ -671,7 +674,7 @@ class AutoScalingServiceTest {
 
         createWithMixedInstancesPolicy("mixed-with-lt", policy);
 
-        var group = service.describeAutoScalingGroups(REGION, List.of("mixed-with-lt")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("mixed-with-lt")).getFirst();
         assertEquals("lt-mixed",
                 group.getMixedInstancesPolicy().getLaunchTemplate()
                         .getLaunchTemplateSpecification().getLaunchTemplateId());
@@ -809,7 +812,7 @@ class AutoScalingServiceTest {
         dup2.setInstanceId("i-dup");
         dup2.setLifecycleState("InService");
         dup2.setHealthStatus("Healthy");
-        var instances = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst().getInstances();
+        List<AsgInstance> instances = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst().getInstances();
         instances.add(dup1);
         instances.add(dup2);
 
@@ -854,7 +857,7 @@ class AutoScalingServiceTest {
     void suspendProcessesRecordsNamedProcessesAndResumeClearsThem() {
         service.suspendProcesses(REGION, "test-asg", List.of("Launch", "Terminate"));
 
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         assertEquals(List.of("Launch", "Terminate"), group.getSuspendedProcesses());
 
         service.resumeProcesses(REGION, "test-asg", List.of("Launch"));
@@ -870,7 +873,7 @@ class AutoScalingServiceTest {
     void suspendProcessesWithNoNamesSuspendsEveryScalingProcess() {
         service.suspendProcesses(REGION, "test-asg", List.of());
 
-        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         assertTrue(group.getSuspendedProcesses().contains("Launch"));
         assertTrue(group.getSuspendedProcesses().contains("Terminate"));
         assertTrue(group.getSuspendedProcesses().contains("HealthCheck"));
@@ -905,7 +908,7 @@ class AutoScalingServiceTest {
         service.putScheduledUpdateGroupAction(REGION, "test-asg", "morning",
                 null, null, "0 7 * * 1-5", "Europe/Rome", 0, 1, 1);
 
-        var actions = service.describeScheduledActions(REGION, "test-asg", List.of());
+        List<ScheduledAction> actions = service.describeScheduledActions(REGION, "test-asg", List.of());
         assertEquals(1, actions.size());
         assertEquals("morning", actions.getFirst().getScheduledActionName());
         assertEquals("0 7 * * 1-5", actions.getFirst().getRecurrence());
@@ -923,7 +926,7 @@ class AutoScalingServiceTest {
     void putWarmPoolReplacesConfigurationAndMapsTheClearSentinel() {
         service.putWarmPool(REGION, "test-asg", 2, 1, "Running", true);
 
-        var pool = service.describeWarmPool(REGION, "test-asg");
+        WarmPoolConfiguration pool = service.describeWarmPool(REGION, "test-asg");
         assertEquals(2, pool.getMaxGroupPreparedCapacity());
         assertEquals(1, pool.getMinSize());
         assertEquals("Running", pool.getPoolState());

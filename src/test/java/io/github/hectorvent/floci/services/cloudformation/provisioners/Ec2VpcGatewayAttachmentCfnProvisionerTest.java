@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.util.HashMap;
 
@@ -98,7 +99,7 @@ class Ec2VpcGatewayAttachmentCfnProvisionerTest {
         provisioner.provision(r, props("vpc-new", "igw-new", null), ctx());
 
         // Order matters: a failed attach must leave the previous attachment alone.
-        var order = inOrder(ec2);
+        InOrder order = inOrder(ec2);
         order.verify(ec2).attachInternetGateway(REGION, "igw-new", "vpc-new");
         order.verify(ec2).detachInternetGateway(REGION, "igw-old", "vpc-old");
         assertEquals("igw|vpc-new|igw-new", r.getPhysicalId());

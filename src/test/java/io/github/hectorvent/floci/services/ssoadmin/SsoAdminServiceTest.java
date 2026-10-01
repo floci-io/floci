@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.ssoadmin;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ssoadmin.model.Assignment;
@@ -227,7 +229,7 @@ class SsoAdminServiceTest {
 
         ObjectNode tooMany = mapper.createObjectNode();
         tooMany.put("InstanceArn", service.getInstanceArn());
-        var attributes = tooMany.putObject("InstanceAccessControlAttributeConfiguration")
+        ArrayNode attributes = tooMany.putObject("InstanceAccessControlAttributeConfiguration")
                 .putArray("AccessControlAttributes");
         for (int i = 0; i < 51; i++) {
             attributes.addObject().put("Key", "Key" + i).putObject("Value").putArray("Source").add("value");
@@ -533,7 +535,7 @@ class SsoAdminServiceTest {
         ObjectNode request = mapper.createObjectNode();
         request.put("InstanceArn", service.getInstanceArn());
         request.put("MaxResults", 1);
-        var firstPage = service.listApplications(request, ACCOUNT_ID);
+        PaginatedResult<SsoApplication> firstPage = service.listApplications(request, ACCOUNT_ID);
         assertEquals(1, firstPage.items().size());
         assertNotNull(firstPage.nextToken());
         request.put("NextToken", firstPage.nextToken());
@@ -659,14 +661,14 @@ class SsoAdminServiceTest {
         ObjectNode request = mapper.createObjectNode();
         request.put("ApplicationArn", application.applicationArn());
         request.put("MaxResults", 1);
-        var first = service.listApplicationAccessScopes(request);
+        PaginatedResult<ApplicationAccessScope> first = service.listApplicationAccessScopes(request);
         assertEquals(1, first.items().size());
         assertEquals("api:read", first.items().get(0).scope());
         assertEquals(java.util.List.of(service.getInstanceArn()), first.items().get(0).authorizedTargets());
         assertNotNull(first.nextToken());
 
         request.put("NextToken", first.nextToken());
-        var second = service.listApplicationAccessScopes(request);
+        PaginatedResult<ApplicationAccessScope> second = service.listApplicationAccessScopes(request);
         assertEquals(1, second.items().size());
         assertEquals("api:write", second.items().get(0).scope());
         assertNull(second.nextToken());
@@ -738,7 +740,7 @@ class SsoAdminServiceTest {
                 new ApplicationAuthenticationMethod(otherApplication.applicationArn(), "IAM", method.deepCopy()));
 
         ObjectNode request = mapper.createObjectNode().put("ApplicationArn", application.applicationArn());
-        var result = service.listApplicationAuthenticationMethods(request);
+        PaginatedResult<ApplicationAuthenticationMethod> result = service.listApplicationAuthenticationMethods(request);
         assertEquals(1, result.items().size());
         assertEquals("IAM", result.items().get(0).authenticationMethodType());
         assertEquals(method, result.items().get(0).authenticationMethod());
@@ -758,7 +760,7 @@ class SsoAdminServiceTest {
         method.putObject("Iam").putObject("ActorPolicy").put("Version", "2012-10-17");
 
         service.putApplicationAuthenticationMethod(request);
-        var stored = service.getApplicationAuthenticationMethod(request);
+        ApplicationAuthenticationMethod stored = service.getApplicationAuthenticationMethod(request);
         assertEquals(method, stored.authenticationMethod());
 
         method.withObject("Iam").withObject("ActorPolicy").put("Id", "updated");
@@ -875,7 +877,7 @@ class SsoAdminServiceTest {
                 new ApplicationGrant(otherApplication.applicationArn(), "refresh_token", refreshToken.deepCopy()));
 
         ObjectNode request = mapper.createObjectNode().put("ApplicationArn", application.applicationArn());
-        var result = service.listApplicationGrants(request);
+        PaginatedResult<ApplicationGrant> result = service.listApplicationGrants(request);
         assertEquals(2, result.items().size());
         assertEquals("authorization_code", result.items().get(0).grantType());
         assertEquals("refresh_token", result.items().get(1).grantType());
@@ -1041,7 +1043,7 @@ class SsoAdminServiceTest {
     @Test
     void listApplicationProvidersReturnsCustomProviderAndValidatesPagination() {
         ObjectNode request = mapper.createObjectNode();
-        var page = service.listApplicationProviders(request, "us-east-1");
+        PaginatedResult<String> page = service.listApplicationProviders(request, "us-east-1");
         assertEquals(java.util.List.of("arn:aws:sso::aws:applicationProvider/custom"), page.items());
         assertEquals(null, page.nextToken());
 
@@ -1065,12 +1067,12 @@ class SsoAdminServiceTest {
         ObjectNode request = mapper.createObjectNode();
         request.put("ApplicationArn", application.applicationArn());
         request.put("MaxResults", 1);
-        var first = service.listApplicationAssignments(request);
+        PaginatedResult<ApplicationAssignment> first = service.listApplicationAssignments(request);
         assertEquals(1, first.items().size());
         assertNotNull(first.nextToken());
 
         request.put("NextToken", first.nextToken());
-        var second = service.listApplicationAssignments(request);
+        PaginatedResult<ApplicationAssignment> second = service.listApplicationAssignments(request);
         assertEquals(1, second.items().size());
         assertNull(second.nextToken());
 
@@ -1095,7 +1097,7 @@ class SsoAdminServiceTest {
         request.put("InstanceArn", service.getInstanceArn());
         request.put("PrincipalId", PRINCIPAL_ID);
         request.put("PrincipalType", "USER");
-        var page = service.listApplicationAssignmentsForPrincipal(request, ACCOUNT_ID);
+        PaginatedResult<ApplicationAssignment> page = service.listApplicationAssignmentsForPrincipal(request, ACCOUNT_ID);
         assertEquals(1, page.items().size());
         assertEquals(application.applicationArn(), page.items().get(0).applicationArn());
         assertEquals(PRINCIPAL_ID, page.items().get(0).principalId());
@@ -1244,7 +1246,7 @@ class SsoAdminServiceTest {
         ObjectNode listRequest = mapper.createObjectNode();
         listRequest.put("InstanceArn", service.getInstanceArn());
         listRequest.put("MaxResults", 1);
-        var firstPage = service.listRegions(listRequest);
+        PaginatedResult<RegionMetadata> firstPage = service.listRegions(listRequest);
         assertEquals(1, firstPage.items().size());
         assertNotNull(firstPage.nextToken());
         listRequest.put("NextToken", firstPage.nextToken());
@@ -1314,7 +1316,7 @@ class SsoAdminServiceTest {
         ObjectNode create = mapper.createObjectNode();
         create.put("InstanceArn", service.getInstanceArn());
         create.put("Name", "TaggedAdmins");
-        var tags = create.putArray("Tags");
+        ArrayNode tags = create.putArray("Tags");
         tags.addObject().put("Key", "Environment").put("Value", "test");
         tags.addObject().put("Key", "Owner").put("Value", "platform");
         PermissionSet permissionSet = service.createPermissionSet(create);
@@ -1322,7 +1324,7 @@ class SsoAdminServiceTest {
         ObjectNode request = mapper.createObjectNode();
         request.put("ResourceArn", permissionSet.arn());
         request.put("InstanceArn", service.getInstanceArn());
-        var page = service.listTagsForResource(request);
+        PaginatedResult<Map.Entry<String, String>> page = service.listTagsForResource(request);
         assertEquals(2, page.items().size());
         assertEquals("Environment", page.items().get(0).getKey());
         assertEquals("test", page.items().get(0).getValue());
@@ -1335,13 +1337,13 @@ class SsoAdminServiceTest {
         tag.putArray("Tags")
                 .addObject().put("Key", "Environment").put("Value", "prod");
         service.tagResource(tag);
-        var updated = service.listTagsForResource(request);
+        PaginatedResult<Map.Entry<String, String>> updated = service.listTagsForResource(request);
         assertEquals(2, updated.items().size());
         assertEquals("prod", updated.items().get(0).getValue());
 
         ObjectNode fillToQuota = mapper.createObjectNode();
         fillToQuota.put("ResourceArn", permissionSet.arn());
-        var quotaTags = fillToQuota.putArray("Tags");
+        ArrayNode quotaTags = fillToQuota.putArray("Tags");
         for (int i = 0; i < 73; i++) {
             quotaTags.addObject().put("Key", "K" + i).put("Value", "v");
         }
@@ -1488,7 +1490,7 @@ class SsoAdminServiceTest {
 
         ObjectNode firstRequest = managedPoliciesRequest(permissionSet.arn());
         firstRequest.put("MaxResults", 1);
-        var first = service.listManagedPolicies(firstRequest);
+        PaginatedResult<Map.Entry<String, String>> first = service.listManagedPolicies(firstRequest);
 
         assertEquals(1, first.items().size());
         assertNotNull(first.nextToken());
@@ -1496,7 +1498,7 @@ class SsoAdminServiceTest {
         ObjectNode secondRequest = managedPoliciesRequest(permissionSet.arn());
         secondRequest.put("MaxResults", 1);
         secondRequest.put("NextToken", first.nextToken());
-        var second = service.listManagedPolicies(secondRequest);
+        PaginatedResult<Map.Entry<String, String>> second = service.listManagedPolicies(secondRequest);
 
         assertEquals(1, second.items().size());
         assertNotNull(second.nextToken());
@@ -1556,12 +1558,12 @@ class SsoAdminServiceTest {
         request.put("PrincipalType", "GROUP");
         request.put("MaxResults", 1);
 
-        var firstPage = service.listAssignmentsForPrincipal(request, ACCOUNT_ID);
+        PaginatedResult<Assignment> firstPage = service.listAssignmentsForPrincipal(request, ACCOUNT_ID);
         assertEquals(1, firstPage.items().size());
         assertNotNull(firstPage.nextToken());
 
         request.put("NextToken", firstPage.nextToken());
-        var secondPage = service.listAssignmentsForPrincipal(request, ACCOUNT_ID);
+        PaginatedResult<Assignment> secondPage = service.listAssignmentsForPrincipal(request, ACCOUNT_ID);
         assertEquals(1, secondPage.items().size());
         assertTrue(secondPage.nextToken() == null);
 
@@ -1616,7 +1618,7 @@ class SsoAdminServiceTest {
         listStatus.put("InstanceArn", service.getInstanceArn());
         listStatus.put("MaxResults", 1);
         listStatus.putObject("Filter").put("Status", "SUCCEEDED");
-        var statusPage = service.listPermissionSetProvisioningStatus(listStatus);
+        PaginatedResult<PermissionSetProvisioningOperation> statusPage = service.listPermissionSetProvisioningStatus(listStatus);
         assertEquals(1, statusPage.items().size());
         assertNotNull(statusPage.nextToken());
         listStatus.putObject("Filter").put("Status", "INVALID");
@@ -1654,7 +1656,7 @@ class SsoAdminServiceTest {
         request.put("InstanceArn", service.getInstanceArn());
         request.put("AccountId", ACCOUNT_ID);
         request.put("MaxResults", 1);
-        var firstPage = service.listPermissionSetsProvisionedToAccount(request);
+        PaginatedResult<String> firstPage = service.listPermissionSetsProvisionedToAccount(request);
         assertEquals(1, firstPage.items().size());
         assertNotNull(firstPage.nextToken());
 
@@ -1693,7 +1695,7 @@ class SsoAdminServiceTest {
         request.put("InstanceArn", service.getInstanceArn());
         request.put("PermissionSetArn", permissionSet.arn());
         request.put("MaxResults", 1);
-        var firstPage = service.listAccountsForProvisionedPermissionSet(request);
+        PaginatedResult<String> firstPage = service.listAccountsForProvisionedPermissionSet(request);
         assertEquals(1, firstPage.items().size());
         assertNotNull(firstPage.nextToken());
 
@@ -1727,7 +1729,7 @@ class SsoAdminServiceTest {
         ObjectNode listStatus = mapper.createObjectNode();
         listStatus.put("InstanceArn", service.getInstanceArn());
         listStatus.putObject("Filter").put("Status", "SUCCEEDED");
-        var statusPage = service.listAccountAssignmentCreationStatus(listStatus);
+        PaginatedResult<AssignmentOperation> statusPage = service.listAccountAssignmentCreationStatus(listStatus);
         assertEquals(1, statusPage.items().size());
         assertEquals(created.requestId(), statusPage.items().get(0).requestId());
         listStatus.putObject("Filter");
@@ -1758,7 +1760,7 @@ class SsoAdminServiceTest {
         ObjectNode listStatus = mapper.createObjectNode();
         listStatus.put("InstanceArn", service.getInstanceArn());
         listStatus.putObject("Filter").put("Status", "SUCCEEDED");
-        var statusPage = service.listAccountAssignmentDeletionStatus(listStatus);
+        PaginatedResult<AssignmentDeletionOperation> statusPage = service.listAccountAssignmentDeletionStatus(listStatus);
         assertEquals(1, statusPage.items().size());
         assertEquals(deleted.requestId(), statusPage.items().get(0).requestId());
         listStatus.putObject("Filter").put("Status", "INVALID");
