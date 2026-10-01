@@ -83,6 +83,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
                 } catch (RuntimeException cleanupFailure) {
                     if (!ctx.isUpdate()) {
                         resource.setPhysicalId(identityName);
+                        resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
                     }
                     ReplacementCleanup.recordOrphan(resource, identityName, TYPE, ctx.region());
                     failure.addSuppressed(cleanupFailure);

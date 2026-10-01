@@ -209,6 +209,7 @@ class SesCfnProvisionerTest {
 
         assertEquals(1, failure.getSuppressed().length);
         assertEquals("example.com", resource.getPhysicalId());
+        assertEquals("true", resource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
         provisioner.delete(resource, "us-east-1");
         verify(ses, times(2)).deleteIdentity("example.com", "us-east-1");
     }

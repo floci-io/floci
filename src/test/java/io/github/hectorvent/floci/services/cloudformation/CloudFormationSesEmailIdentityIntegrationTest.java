@@ -2,9 +2,12 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
@@ -19,6 +22,10 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 @QuarkusTest
 class CloudFormationSesEmailIdentityIntegrationTest {
@@ -29,6 +36,9 @@ class CloudFormationSesEmailIdentityIntegrationTest {
     private static final String SES_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20261001/us-east-1/ses/aws4_request";
     private String stack;
+
+    @InjectSpy
+    SesService sesService;
 
     @BeforeAll
     static void configureContentTypes() {
@@ -90,6 +100,31 @@ class CloudFormationSesEmailIdentityIntegrationTest {
     }
 
     @Test
+    void emailAddressIdentityHasNoDomainDkimRecordsAndDeletesWithStack() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String address = "ses-" + suffix + "@unregistered-" + suffix + ".example.com";
+        stack = "cfn-ses-" + suffix;
+        cfn("CreateStack", template(address, false)).then().statusCode(200);
+        String created = awaitStatus("CREATE_COMPLETE");
+        Map<String, String> outputs = XmlParser.extractPairs(created, "Outputs", "OutputKey", "OutputValue");
+        assertEquals(address, outputs.get("IdentityRef"));
+        for (int index = 1; index <= 3; index++) {
+            assertEquals("", outputs.get("DkimName" + index));
+            assertEquals("", outputs.get("DkimValue" + index));
+        }
+
+        Response identity = sesIdentity(address);
+        assertEquals(200, identity.statusCode(), identity.asString());
+        assertEquals("EMAIL_ADDRESS", identity.jsonPath().getString("IdentityType"));
+        assertEquals(List.of(), identity.jsonPath().getList("DkimAttributes.Tokens", String.class));
+
+        cfn("DeleteStack", null).then().statusCode(200);
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                assertEquals(404, sesIdentity(address).statusCode()));
+        stack = null;
+    }
+
+    @Test
     void changingIdentityReplacesBackingSesResource() throws Exception {
         String first = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
         String second = "other-" + first;
@@ -134,6 +169,33 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         String restored = cfn("DescribeStacks", null).then().statusCode(200).extract().asString();
         assertEquals(originalTokens.getFirst() + ".dkim.amazonses.com",
                 XmlParser.extractPairs(restored, "Outputs", "OutputKey", "OutputValue").get("DkimValue1"));
+    }
+
+    @Test
+    void failedPostCreateCleanupIsRetriedByStackRollback() throws Exception {
+        String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        String mailFromDomain = "mail." + identityName;
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        ObjectNode attempted = (ObjectNode) MAPPER.readTree(template(identityName, false));
+        attempted.withObject("/Resources/Identity/Properties").set("MailFromAttributes",
+                MAPPER.valueToTree(Map.of("MailFromDomain", mailFromDomain)));
+        doThrow(new AwsException("BadRequestException", "MAIL FROM rejected", 400))
+                .when(sesService).setEmailIdentityMailFromAttributes(identityName, mailFromDomain,
+                        "UseDefaultValue", "us-east-1");
+        doThrow(new AwsException("ServiceUnavailableException", "temporary delete failure", 503))
+                .doCallRealMethod().when(sesService).deleteIdentity(identityName, "us-east-1");
+
+        try {
+            cfn("CreateStack", attempted.toString()).then().statusCode(200);
+            awaitStatus("ROLLBACK_COMPLETE");
+            assertEquals(404, sesIdentity(identityName).statusCode(),
+                    "Stack rollback must delete an identity left by failed post-create cleanup");
+            verify(sesService, times(2)).deleteIdentity(identityName, "us-east-1");
+        } finally {
+            doCallRealMethod().when(sesService).setEmailIdentityMailFromAttributes(identityName, mailFromDomain,
+                    "UseDefaultValue", "us-east-1");
+            doCallRealMethod().when(sesService).deleteIdentity(identityName, "us-east-1");
+        }
     }
 
     private String awaitStatus(String expected) {
