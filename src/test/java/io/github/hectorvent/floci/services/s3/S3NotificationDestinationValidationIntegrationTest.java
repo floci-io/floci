@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -26,6 +27,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 @QuarkusTest
 class S3NotificationDestinationValidationIntegrationTest {
@@ -34,7 +40,7 @@ class S3NotificationDestinationValidationIntegrationTest {
     private static final String OTHER_ACCOUNT = "000000000002";
 
     @Inject SqsService sqsService;
-    @Inject SnsService snsService;
+    @InjectSpy SnsService snsService;
     @Inject RegionResolver regionResolver;
     @Inject ObjectMapper objectMapper;
 
@@ -244,6 +250,42 @@ class S3NotificationDestinationValidationIntegrationTest {
         } finally {
             given().header("Authorization", auth).contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "DeleteQueue").formParam("QueueUrl", queueUrl)
+                    .when().post("/").then().statusCode(200);
+        }
+    }
+
+    @Test
+    void crossAccountTopicIsValidatedWithoutTestPublishByDefault() {
+        String topicName = "notification-cross-account-" + UUID.randomUUID().toString().substring(0, 8);
+        String authorization = "AWS4-HMAC-SHA256 Credential=" + OTHER_ACCOUNT
+                + "/20261001/us-east-1/sns/aws4_request, SignedHeaders=host, Signature=abc";
+        String topicArn = given().header("Authorization", authorization)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateTopic").formParam("Name", topicName)
+                .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+        try {
+            assertTrue(snsService.topicExists(topicArn, REGION));
+            putNotification(notificationConfiguration(topicConfiguration(topicArn)), false).statusCode(200);
+            verify(snsService, never()).publish(eq(topicArn), isNull(), anyString(),
+                    eq("Amazon S3 Notification"), eq(REGION));
+            given().when().get("/" + bucket + "?notification")
+                    .then().statusCode(200).body(containsString(topicArn));
+
+            String missingArn = "arn:aws:sns:" + REGION + ":" + OTHER_ACCOUNT + ":notification-missing-"
+                    + UUID.randomUUID();
+            putNotification(notificationConfiguration(topicConfiguration(missingArn)), false)
+                    .statusCode(400).body(containsString("The destination topic does not exist"));
+            given().when().get("/" + bucket + "?notification")
+                    .then().statusCode(200).body(containsString(topicArn)).body(not(containsString(missingArn)));
+
+            String ownTopicArn = createTopic("same-account");
+            putNotification(notificationConfiguration(topicConfiguration(ownTopicArn)), false).statusCode(200);
+            verify(snsService).publish(eq(ownTopicArn), isNull(), anyString(),
+                    eq("Amazon S3 Notification"), eq(REGION));
+        } finally {
+            given().header("Authorization", authorization).contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DeleteTopic").formParam("TopicArn", topicArn)
                     .when().post("/").then().statusCode(200);
         }
     }

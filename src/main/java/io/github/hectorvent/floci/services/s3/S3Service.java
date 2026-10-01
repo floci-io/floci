@@ -3659,8 +3659,10 @@ public class S3Service implements Resettable, ResourceProvider {
             String testEvent = s3TestEvent(bucketName);
             for (NotificationDestination destination : destinations) {
                 try {
-                    if (enforceIam && !destination.accountId().equals(ownerId())
-                            && ("sqs".equals(destination.service()) || "sns".equals(destination.service()))) {
+                    if (!destination.accountId().equals(ownerId())
+                            && ("sns".equals(destination.service())
+                                    || enforceIam && "sqs".equals(destination.service()))) {
+                        // SNS publish still resolves topics in the caller's account.
                         continue;
                     }
                     if ("sqs".equals(destination.service())) {
@@ -3760,6 +3762,8 @@ public class S3Service implements Resettable, ResourceProvider {
             LambdaFunction function = service.getFunction(destination.region(), destination.arn(), null);
             return destination.accountId().equals(AwsArnUtils.accountOrDefault(function.getFunctionArn(), null));
         } catch (AwsException e) {
+            LOG.debugv("Lambda notification destination {0} is unavailable: {1} ({2})",
+                    destination.arn(), e.getErrorCode(), e.getMessage());
             return false;
         }
     }
