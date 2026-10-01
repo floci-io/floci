@@ -19,9 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -212,9 +212,9 @@ class TransferCfnProvisionerTest {
 
     @Test
     void deleteToleratesOnlyMissingServer() {
-        org.mockito.Mockito.doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
+        doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
                 .when(transfer).deleteServer("s-123");
-        org.mockito.Mockito.doThrow(new AwsException("ConflictException", "busy", 409))
+        doThrow(new AwsException("ConflictException", "busy", 409))
                 .when(transfer).deleteServer("s-456");
 
         provisioner.delete("AWS::Transfer::Server", "s-123", "us-east-1");

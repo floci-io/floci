@@ -60,7 +60,9 @@ class CloudFormationTransferServerIntegrationTest {
     private static final String ROLLBACK_TEMPLATE = """
             {
               "Resources": {
-                "Server": {"Type":"AWS::Transfer::Server", "Properties":{"LoggingRole":"%s"}}%s
+                "Server": {"Type":"AWS::Transfer::Server", "Properties":{
+                  "LoggingRole":"%s", "Tags":[{"Key":"stage","Value":"%s"}]
+                }}%s
               },
               "Outputs": {"ServerRef":{"Value":{"Ref":"Server"}}}
             }
@@ -120,8 +122,10 @@ class CloudFormationTransferServerIntegrationTest {
 
     @Test
     void laterResourceFailureRestoresServerSettings() {
-        cloudFormation(ROLLBACK_STACK, "CreateStack", ROLLBACK_TEMPLATE.formatted("original-role", ""));
+        cloudFormation(ROLLBACK_STACK, "CreateStack",
+                ROLLBACK_TEMPLATE.formatted("original-role", "original", ""));
         String serverId = outputs(ROLLBACK_STACK, "CREATE_COMPLETE").get("ServerRef");
+        describeServer(serverId).body("Server.Tags.find { it.Key == 'stage' }.Value", equalTo("original"));
         String failingResource = """
                 , "BadServer": {
                     "Type":"AWS::Transfer::Server", "DependsOn":"Server",
@@ -130,9 +134,11 @@ class CloudFormationTransferServerIntegrationTest {
                 """;
 
         cloudFormation(ROLLBACK_STACK, "UpdateStack",
-                ROLLBACK_TEMPLATE.formatted("changed-role", failingResource));
+                ROLLBACK_TEMPLATE.formatted("changed-role", "changed", failingResource));
         assertEquals(serverId, outputs(ROLLBACK_STACK, "UPDATE_ROLLBACK_COMPLETE").get("ServerRef"));
-        describeServer(serverId).body("Server.LoggingRole", equalTo("original-role"));
+        describeServer(serverId)
+                .body("Server.LoggingRole", equalTo("original-role"))
+                .body("Server.Tags.find { it.Key == 'stage' }.Value", equalTo("original"));
 
         cloudFormation(ROLLBACK_STACK, "DeleteStack", null);
         CfnStackWaits.awaitStackDeleted(ROLLBACK_STACK);
