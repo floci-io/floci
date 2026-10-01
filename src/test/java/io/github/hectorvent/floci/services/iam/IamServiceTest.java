@@ -70,6 +70,17 @@ class IamServiceTest {
         );
     }
 
+    private static IamService iamServiceWithCredentialReports(
+            StorageBackend<String, CredentialReport> credentialReports) {
+        return new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), credentialReports,
+                new RegionResolver("us-east-1", "000000000000"), false, null);
+    }
+
     /** The STS global endpoint, and so the token version it reports, exists only in the commercial partition. */
     @Test
     void accountSummaryReportsTheGlobalEndpointTokenVersionOnlyWhereStsHasAGlobalHost() {
@@ -2237,6 +2248,21 @@ class IamServiceTest {
         iamService.updateLoginProfile("cred-report-unchanged-user", null, true);
 
         assertEquals(createdAt, iamService.getLoginProfile("cred-report-unchanged-user").getPasswordLastChanged());
+    }
+
+    @Test
+    void getCredentialReportMigratesTheLegacyCommercialPartitionKey() {
+        StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
+        CredentialReport legacyReport = new CredentialReport("dGVzdA==", Instant.now());
+        credentialReports.put("credential-report", legacyReport);
+        IamService withLegacyReport = iamServiceWithCredentialReports(credentialReports);
+
+        IamService.CredentialReportContent content = withLegacyReport.getCredentialReport();
+
+        assertEquals(legacyReport.getBase64Content(), content.base64Content());
+        assertEquals(legacyReport, credentialReports.get("credential-report/aws").orElseThrow());
+        assertTrue(credentialReports.get("credential-report").isEmpty());
+        assertEquals("COMPLETE", withLegacyReport.generateCredentialReport().state());
     }
 
     @Test
