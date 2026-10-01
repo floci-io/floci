@@ -3659,10 +3659,11 @@ public class S3Service implements Resettable, ResourceProvider {
             String testEvent = s3TestEvent(bucketName);
             for (NotificationDestination destination : destinations) {
                 try {
+                    if (enforceIam && !destination.accountId().equals(ownerId())
+                            && ("sqs".equals(destination.service()) || "sns".equals(destination.service()))) {
+                        continue;
+                    }
                     if ("sqs".equals(destination.service())) {
-                        if (enforceIam && !destination.accountId().equals(ownerId())) {
-                            continue;
-                        }
                         sqsService.sendMessage(sqsUrlFromArn(destination.arn()), testEvent, 0,
                                 destination.region());
                     } else if ("sns".equals(destination.service())) {
