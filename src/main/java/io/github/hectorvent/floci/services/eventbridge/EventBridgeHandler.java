@@ -457,7 +457,8 @@ public class EventBridgeHandler {
         String archiveName = request.path("ArchiveName").asText(null);
         String description = request.path("Description").asText(null);
         String eventPattern = request.path("EventPattern").asText(null);
-        int retentionDays = request.path("RetentionDays").asInt(0);
+        Integer retentionDays = request.hasNonNull("RetentionDays")
+                ? request.get("RetentionDays").asInt() : null;
         Archive archive = eventBridgeService.updateArchive(
                 archiveName, description, eventPattern, retentionDays, region);
         ObjectNode response = objectMapper.createObjectNode();

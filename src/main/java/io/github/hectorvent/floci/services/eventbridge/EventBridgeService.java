@@ -1216,17 +1216,25 @@ public class EventBridgeService implements ResourceProvider {
                         "Archive not found: " + archiveName, 400));
     }
 
+    /**
+     * A partial update, as on AWS: a null argument leaves the stored value alone, and an empty
+     * description or event pattern clears it.
+     */
     public Archive updateArchive(String archiveName, String description,
-                                 String eventPattern, int retentionDays, String region) {
+                                 String eventPattern, Integer retentionDays, String region) {
         String key = archiveKey(region, archiveName);
         Archive archive = archiveStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Archive not found: " + archiveName, 400));
         if (description != null) {
-            archive.setDescription(description);
+            archive.setDescription(description.isEmpty() ? null : description);
         }
-        archive.setEventPattern(eventPattern);
-        archive.setRetentionDays(retentionDays);
+        if (eventPattern != null) {
+            archive.setEventPattern(eventPattern.isEmpty() ? null : eventPattern);
+        }
+        if (retentionDays != null) {
+            archive.setRetentionDays(retentionDays);
+        }
         archiveStore.put(key, archive);
         return archive;
     }
