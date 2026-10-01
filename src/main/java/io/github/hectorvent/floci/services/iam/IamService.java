@@ -172,6 +172,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * one partition is never handed to a caller in another.
      */
     private final StorageBackend<String, CredentialReport> credentialReports;
+    /** Serializes migration of the pre-partition credential report key. */
+    private final Object credentialReportMigrationLock = new Object();
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
     private final String seededAccountAlias;
@@ -3134,12 +3136,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return currentReport;
         }
 
-        Optional<CredentialReport> legacyReport = credentialReports.get(CREDENTIAL_REPORT_KEY);
-        legacyReport.ifPresent(report -> {
-            credentialReports.put(currentKey, report);
-            credentialReports.delete(CREDENTIAL_REPORT_KEY);
-        });
-        return legacyReport;
+        synchronized (credentialReportMigrationLock) {
+            currentReport = credentialReports.get(currentKey);
+            if (currentReport.isPresent()) {
+                return currentReport;
+            }
+
+            Optional<CredentialReport> legacyReport = credentialReports.get(CREDENTIAL_REPORT_KEY);
+            legacyReport.ifPresent(report -> {
+                credentialReports.put(currentKey, report);
+                credentialReports.delete(CREDENTIAL_REPORT_KEY);
+            });
+            return legacyReport;
+        }
     }
 
     public CredentialReportContent getCredentialReport() {
