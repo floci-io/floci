@@ -386,7 +386,8 @@ public class SnsService implements Resettable, ResourceProvider {
     public boolean topicExists(String topicArn, String region) {
         if (topicStore instanceof AccountAwareStorageBackend<Topic> aware) {
             String accountId = AwsArnUtils.accountOrDefault(topicArn, regionResolver.getAccountId());
-            return aware.getForAccount(accountId, topicKey(region, topicArn)).isPresent();
+            return aware.getForAccountMigratingLegacy(accountId, topicKey(region, topicArn),
+                    topic -> topicArn.equals(topic.getTopicArn())).isPresent();
         }
         return topicStore.get(topicKey(region, topicArn)).isPresent();
     }
