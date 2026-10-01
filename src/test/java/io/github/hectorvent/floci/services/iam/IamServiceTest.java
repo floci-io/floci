@@ -36,6 +36,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -2295,10 +2296,14 @@ class IamServiceTest {
             assertTrue(credentialReports.awaitSecondCurrentLookup(), "concurrent request did not read the current key");
             boolean concurrentRequestReadLegacy = credentialReports.awaitSecondLegacyRead();
 
+            if (concurrentRequestReadLegacy) {
+                assertEquals("STARTED", generationRequest.get(5, TimeUnit.SECONDS).state());
+            }
             credentialReports.releaseMigrationWrite();
-            credentialReports.releaseSecondLegacyRead();
             migratingRequest.get(5, TimeUnit.SECONDS);
-            assertEquals("STARTED", generationRequest.get(5, TimeUnit.SECONDS).state());
+            if (!concurrentRequestReadLegacy) {
+                assertEquals("STARTED", generationRequest.get(5, TimeUnit.SECONDS).state());
+            }
 
             assertFalse(concurrentRequestReadLegacy,
                     "concurrent request read the legacy report while its migration was in progress");
@@ -2307,7 +2312,6 @@ class IamServiceTest {
             assertNotEquals(legacyReport.getBase64Content(), storedReport.getBase64Content());
         } finally {
             credentialReports.releaseMigrationWrite();
-            credentialReports.releaseSecondLegacyRead();
             executor.shutdownNow();
         }
     }
@@ -2316,23 +2320,20 @@ class IamServiceTest {
 
         private final CountDownLatch migrationWriteStarted = new CountDownLatch(1);
         private final CountDownLatch releaseMigrationWrite = new CountDownLatch(1);
-        private final CountDownLatch generationRequestStarted = new CountDownLatch(1);
         private final CountDownLatch secondCurrentLookup = new CountDownLatch(1);
         private final CountDownLatch secondLegacyRead = new CountDownLatch(1);
-        private final CountDownLatch releaseSecondLegacyRead = new CountDownLatch(1);
-        private final AtomicInteger currentKeyReads = new AtomicInteger();
+        private final AtomicReference<Thread> generationThread = new AtomicReference<>();
         private final AtomicInteger legacyKeyReads = new AtomicInteger();
         private volatile boolean pauseMigrationWrite;
 
         @Override
         public Optional<CredentialReport> get(String key) {
-            if ("credential-report/aws".equals(key) && currentKeyReads.incrementAndGet() == 2) {
+            Optional<CredentialReport> report = super.get(key);
+            if ("credential-report/aws".equals(key) && Thread.currentThread() == generationThread.get()) {
                 secondCurrentLookup.countDown();
             }
-            Optional<CredentialReport> report = super.get(key);
             if ("credential-report".equals(key) && legacyKeyReads.incrementAndGet() == 2) {
                 secondLegacyRead.countDown();
-                await(releaseSecondLegacyRead);
             }
             return report;
         }
@@ -2352,7 +2353,7 @@ class IamServiceTest {
         }
 
         void markGenerationRequestStarted() {
-            generationRequestStarted.countDown();
+            generationThread.set(Thread.currentThread());
         }
 
         boolean awaitMigrationWrite() throws InterruptedException {
@@ -2360,7 +2361,6 @@ class IamServiceTest {
         }
 
         boolean awaitSecondCurrentLookup() throws InterruptedException {
-            assertTrue(generationRequestStarted.await(5, TimeUnit.SECONDS), "generation request did not start");
             return secondCurrentLookup.await(5, TimeUnit.SECONDS);
         }
 
@@ -2370,10 +2370,6 @@ class IamServiceTest {
 
         void releaseMigrationWrite() {
             releaseMigrationWrite.countDown();
-        }
-
-        void releaseSecondLegacyRead() {
-            releaseSecondLegacyRead.countDown();
         }
 
         private static void await(CountDownLatch latch) {
