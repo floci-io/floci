@@ -172,6 +172,7 @@ public class StsQueryHandler {
         String callerArn = iamService.resolveCallerArn(
                         auth == null ? null : accountResolver.extractAccessKeyId(auth))
                 .orElse(AwsArnUtils.Arn.global(regionResolver.getPartition(), "iam", callerAccount, "root").toString());
+        callerAccount = AwsArnUtils.accountOrDefault(callerArn, callerAccount);
         String accessKeyId = auth == null ? null : accountResolver.extractAccessKeyId(auth);
         String principalArn = iamService.resolvePrincipalArn(accessKeyId).orElse(callerArn);
         Map<String, List<String>> requestContext = IamConditionContextResolver.withGlobalContext(
