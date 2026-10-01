@@ -196,6 +196,32 @@ public class SesService {
                 configurationSetExistsCheck);
     }
 
+    public Identity getEmailIdentity(String emailIdentity, String region) {
+        return identityService.getIdentityVerificationAttributes(emailIdentity, region);
+    }
+
+    public void restoreEmailIdentity(Identity identity, String region) {
+        identityService.save(identity, region);
+    }
+
+    public void setEmailIdentityDkimAttributes(String emailIdentity, boolean signingEnabled, String region) {
+        identityService.setDkimAttributes(emailIdentity, signingEnabled, region);
+    }
+
+    public void setEmailIdentityDkimSigningAttributes(String emailIdentity, String nextKeyLength,
+                                                      String region) {
+        identityService.putDkimSigningAttributes(emailIdentity, "AWS_SES", null, nextKeyLength, region);
+    }
+
+    public void setEmailIdentityMailFromAttributes(String emailIdentity, String mailFromDomain,
+                                                   String behaviorOnMxFailure, String region) {
+        identityService.setMailFromDomain(emailIdentity, mailFromDomain, behaviorOnMxFailure, region);
+    }
+
+    public void setEmailIdentityFeedbackAttributes(String emailIdentity, boolean enabled, String region) {
+        identityService.setFeedbackForwardingEnabled(emailIdentity, enabled, region);
+    }
+
     public void deleteIdentity(String identityValue, String region) {
         if (identityValue == null || identityValue.isBlank()) {
             return;

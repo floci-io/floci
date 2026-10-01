@@ -106,6 +106,19 @@ class CfnSchemaCoverageTest {
         }
     }
 
+    @Test
+    void sesDkimDnsAttributesAreVisibleToTheCoverageScan() {
+        Set<String> expected = Set.of("DkimDNSTokenName1", "DkimDNSTokenName2", "DkimDNSTokenName3",
+                "DkimDNSTokenValue1", "DkimDNSTokenValue2", "DkimDNSTokenValue3");
+        Set<String> actual = scanProvisioners().get("SesCfnProvisioner")
+                .attributesFor("AWS::SES::EmailIdentity");
+        Set<String> missing = new HashSet<>(expected);
+        missing.removeAll(actual);
+        if (!missing.isEmpty()) {
+            throw new AssertionError("SES DKIM DNS attributes are invisible to schema coverage: " + missing);
+        }
+    }
+
     /** "AWS::SNS::Topic\tTopicArn" -> reason. */
     private static Map<String, String> recordedGaps() {
         Map<String, String> gaps = new TreeMap<>();
