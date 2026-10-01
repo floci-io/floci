@@ -648,6 +648,33 @@ class Route53CfnProvisionerTest {
     }
 
     @Test
+    void deletingPrefersTheCopyNamedAsThePhysicalIdWhenAnEarlierVersionStoredBoth() {
+        Route53Service service = mock(Route53Service.class);
+        // An earlier version compared names literally, so another owner's undotted record and this
+        // stack's dotted one can both be stored. The listing sorts the undotted one first.
+        ResourceRecordSet otherOwners = new ResourceRecordSet();
+        otherOwners.setName("www.example.com");
+        otherOwners.setType("A");
+        ResourceRecordSet own = new ResourceRecordSet();
+        own.setName("www.example.com.");
+        own.setType("A");
+        when(service.listResourceRecordSets("Z1", null, null, 0)).thenReturn(List.of(otherOwners, own));
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Www");
+        resource.setResourceType("AWS::Route53::RecordSet");
+        resource.setPhysicalId("www.example.com.");
+        resource.getAttributes().put("__FlociRoute53RecordZoneId", "Z1");
+        resource.getAttributes().put("__FlociRoute53RecordType", "A");
+
+        new Route53CfnProvisioner(service).delete(resource, "us-east-1");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(service).changeResourceRecordSets(eq("Z1"), captor.capture(), any());
+        assertSame(own, captor.getValue().get(0).get("rrs"));
+    }
+
+    @Test
     void deletingARecordSetToleratesAZoneAlreadyGone() {
         Route53Service service = mock(Route53Service.class);
         when(service.listResourceRecordSets("Z123456789", null, null, 0))

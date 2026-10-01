@@ -392,19 +392,21 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * The physical id keeps the name as the template wrote it, so the lookup matches by Route 53's
-     * record identity, which ignores the trailing dot.
+     * record identity, which ignores the trailing dot. An earlier version stored that name as written
+     * and could leave another owner's copy in the other form beside it, so prefer the exact name.
      */
     private ResourceRecordSet findRecord(String zoneId, String name, String type, String setIdentifier) {
         ResourceRecordSet wanted = new ResourceRecordSet();
         wanted.setName(name);
         wanted.setType(type);
         wanted.setSetIdentifier(setIdentifier);
-        for (ResourceRecordSet rrs : route53Service.listResourceRecordSets(zoneId, null, null, 0)) {
-            if (Route53Service.sameRecord(rrs, wanted)) {
-                return rrs;
-            }
-        }
-        return null;
+        List<ResourceRecordSet> matches = route53Service.listResourceRecordSets(zoneId, null, null, 0).stream()
+                .filter(rrs -> Route53Service.sameRecord(rrs, wanted))
+                .toList();
+        return matches.stream()
+                .filter(rrs -> rrs.getName().equals(name))
+                .findFirst()
+                .orElse(matches.isEmpty() ? null : matches.get(0));
     }
 
     private List<VpcAssociation> parseVpcs(JsonNode node) {
