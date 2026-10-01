@@ -84,11 +84,22 @@ public class CodePipelineService {
     private static final long MAX_UNCOMPRESSED_BYTES = 128L << 20;
     private static final int MAX_ARCHIVE_ENTRIES = 100_000;
 
-    // Instance-level so tests can use tiny caps instead of building 1 GiB archives.
-    long maxArchiveBytes = MAX_ARCHIVE_BYTES;
-    long maxUncompressedBytes = MAX_UNCOMPRESSED_BYTES;
-    int maxEntries = MAX_ARCHIVE_ENTRIES;
-    String githubArchiveBaseUrl = "https://codeload.github.com";
+    // Overridable accessors so tests can use tiny caps and a local server instead of 1 GiB archives.
+    protected long maxArchiveBytes() {
+        return MAX_ARCHIVE_BYTES;
+    }
+
+    protected long maxUncompressedBytes() {
+        return MAX_UNCOMPRESSED_BYTES;
+    }
+
+    protected int maxEntries() {
+        return MAX_ARCHIVE_ENTRIES;
+    }
+
+    protected String githubArchiveBaseUrl() {
+        return "https://codeload.github.com";
+    }
 
     private final AccountAwareStorageBackend<CodePipelinePipeline> pipelineStore;
     private final AccountAwareStorageBackend<CodePipelineExecution> executionStore;
@@ -1450,9 +1461,9 @@ public class CodePipelineService {
                             + "and Branch must be non-empty with no leading '/', '..' or whitespace", 400);
         }
         byte[] archive = fetchGitHubArchive(URI.create(
-                githubArchiveBaseUrl + "/" + repoOwner + "/" + repo
+                githubArchiveBaseUrl() + "/" + repoOwner + "/" + repo
                         + "/zip/refs/heads/" + encodeRefPath(branch)));
-        if (archive.length > maxArchiveBytes) {
+        if (archive.length > maxArchiveBytes()) {
             throw archiveDownloadTooLarge();
         }
         String commitSha = archiveCommitSha(archive);
@@ -1545,7 +1556,7 @@ public class CodePipelineService {
                             "GitHub source download returned HTTP " + response.statusCode()
                                     + " for " + uri, 400);
                 }
-                if (response.headers().firstValueAsLong("Content-Length").orElse(0L) > maxArchiveBytes) {
+                if (response.headers().firstValueAsLong("Content-Length").orElse(0L) > maxArchiveBytes()) {
                     throw archiveDownloadTooLarge();
                 }
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
@@ -1554,7 +1565,7 @@ public class CodePipelineService {
                 int n;
                 while ((n = body.read(chunk)) >= 0) {
                     total += n;
-                    if (total > maxArchiveBytes) {
+                    if (total > maxArchiveBytes()) {
                         throw archiveDownloadTooLarge();
                     }
                     buffer.write(chunk, 0, n);
@@ -1572,7 +1583,7 @@ public class CodePipelineService {
     private AwsException archiveDownloadTooLarge() {
         return new AwsException("ActionExecutionFailed",
                 "GitHub source archive exceeds the maximum archive download size of "
-                        + maxArchiveBytes + " bytes", 400);
+                        + maxArchiveBytes() + " bytes", 400);
     }
 
     /**
@@ -1590,10 +1601,14 @@ public class CodePipelineService {
                 long uncompressedTotal = 0;
                 while (entries.hasMoreElements()) {
                     ZipArchiveEntry entry = entries.nextElement();
-                    if (++entryCount > maxEntries) {
+                    if (++entryCount > maxEntries()) {
                         throw new AwsException("ActionExecutionFailed",
                                 "GitHub source archive has more than the maximum of "
-                                        + maxEntries + " entries", 400);
+                                        + maxEntries() + " entries", 400);
+                    }
+                    if (entry.getName().startsWith("/")) {
+                        throw new AwsException("ActionExecutionFailed",
+                                "GitHub source archive contains an escaping entry: " + entry.getName(), 400);
                     }
                     int slash = entry.getName().indexOf('/');
                     if (slash < 0 || slash == entry.getName().length() - 1) {
@@ -1625,10 +1640,10 @@ public class CodePipelineService {
                         int n;
                         while ((n = in.read(chunk)) >= 0) {
                             uncompressedTotal += n;
-                            if (uncompressedTotal > maxUncompressedBytes) {
+                            if (uncompressedTotal > maxUncompressedBytes()) {
                                 throw new AwsException("ActionExecutionFailed",
                                         "GitHub source archive exceeds the maximum uncompressed size of "
-                                                + maxUncompressedBytes + " bytes", 400);
+                                                + maxUncompressedBytes() + " bytes", 400);
                             }
                             crc.update(chunk, 0, n);
                             if (symlink) {

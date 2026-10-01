@@ -59,6 +59,9 @@ class CodePipelineGitHubSourceServiceTest {
     private final S3Service s3Service = mock(S3Service.class);
     private final List<String> fetched = new ArrayList<>();
     private final List<String> requestedPaths = new CopyOnWriteArrayList<>();
+    private static final long DEFAULT_CAP = 128L << 20;
+    private static final int DEFAULT_ENTRIES = 100_000;
+
     private CodePipelineService service;
     private HttpServer server;
     private static final String SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -180,8 +183,7 @@ class CodePipelineGitHubSourceServiceTest {
     void failsWhenTheDownloadedArchiveExceedsTheSizeCap() throws Exception {
         // Catches: an oversized archive accepted and repackaged in memory instead of failing the action
         byte[] archive = zip(zos -> file(zos, "repo-main/big.bin", "x".repeat(4096), 0, ZipEntry.STORED));
-        service = serviceServing(archive);
-        service.maxArchiveBytes = 100;
+        service = serviceServing(archive, 100, DEFAULT_CAP, DEFAULT_ENTRIES);
         createPipeline("github-big-download", "awslabs", "lza", "main");
 
         awaitStatus("github-big-download", start("github-big-download"), "Failed");
@@ -197,8 +199,7 @@ class CodePipelineGitHubSourceServiceTest {
             file(zos, "repo-main/a.txt", "a".repeat(600), 0, ZipEntry.DEFLATED);
             file(zos, "repo-main/b.txt", "b".repeat(600), 0, ZipEntry.DEFLATED);
         });
-        service = serviceServing(archive);
-        service.maxUncompressedBytes = 1000;
+        service = serviceServing(archive, DEFAULT_CAP, 1000, DEFAULT_ENTRIES);
         createPipeline("github-bomb", "awslabs", "lza", "main");
 
         awaitStatus("github-bomb", start("github-bomb"), "Failed");
@@ -215,13 +216,28 @@ class CodePipelineGitHubSourceServiceTest {
             file(zos, "repo-main/2.txt", "2", 0, ZipEntry.DEFLATED);
             file(zos, "repo-main/3.txt", "3", 0, ZipEntry.DEFLATED);
         });
-        service = serviceServing(archive);
-        service.maxEntries = 2;
+        service = serviceServing(archive, DEFAULT_CAP, DEFAULT_CAP, 2);
         createPipeline("github-many", "awslabs", "lza", "main");
 
         awaitStatus("github-many", start("github-many"), "Failed");
 
         assertFailureMessage("github-many", "maximum of 2 entries");
+        verifyNoInteractions(s3Service);
+    }
+
+    @Test
+    void rejectsAbsoluteEntryNames() throws Exception {
+        // Catches: a leading-slash entry whose slash is eaten as the top-level separator and so slips past validation
+        byte[] archive = zip(zos -> {
+            file(zos, "repo-main/ok.txt", "ok", 0, ZipEntry.DEFLATED);
+            file(zos, "/repo-main/evil.txt", "evil", 0, ZipEntry.DEFLATED);
+        });
+        service = serviceServing(archive);
+        createPipeline("github-absolute", "awslabs", "lza", "main");
+
+        awaitStatus("github-absolute", start("github-absolute"), "Failed");
+
+        assertFailureMessage("github-absolute", "escaping entry");
         verifyNoInteractions(s3Service);
     }
 
@@ -320,7 +336,7 @@ class CodePipelineGitHubSourceServiceTest {
     void encodesBranchCharactersThatAreSpecialInAUri() throws Exception {
         // Catches: a '#' branch turned into a URI fragment (downloading the wrong ref) or '%' breaking the URI
         byte[] archive = zip(zos -> file(zos, "repo-main/a.txt", "a", 0, ZipEntry.DEFLATED));
-        startArchiveServer(archive, false);
+        startArchiveServer(archive, false, DEFAULT_CAP);
         createPipeline("github-hash", "awslabs", "lza", "feat#1/x%y");
 
         awaitStatus("github-hash", start("github-hash"), "Succeeded");
@@ -332,8 +348,7 @@ class CodePipelineGitHubSourceServiceTest {
     void abortsAChunkedDownloadThatExceedsTheCapWhileItIsRead() throws Exception {
         // Catches: a response without Content-Length buffered in full before the size cap is applied
         byte[] archive = zip(zos -> file(zos, "repo-main/big.bin", "x".repeat(4096), 0, ZipEntry.STORED));
-        startArchiveServer(archive, true);
-        service.maxArchiveBytes = 100;
+        startArchiveServer(archive, true, 100);
         createPipeline("github-chunked", "awslabs", "lza", "main");
 
         awaitStatus("github-chunked", start("github-chunked"), "Failed");
@@ -357,7 +372,7 @@ class CodePipelineGitHubSourceServiceTest {
         verifyNoInteractions(s3Service);
     }
 
-    private void startArchiveServer(byte[] archive, boolean chunked) throws Exception {
+    private void startArchiveServer(byte[] archive, boolean chunked, long archiveCap) throws Exception {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
             requestedPaths.add(exchange.getRequestURI().getRawPath());
@@ -369,9 +384,19 @@ class CodePipelineGitHubSourceServiceTest {
             }
         });
         server.start();
+        String baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
         service = new CodePipelineService(new InMemoryStorageFactory(), mapper, mock(CodeBuildService.class),
-                mock(CodeDeployService.class), mock(LambdaService.class), s3Service);
-        service.githubArchiveBaseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
+                mock(CodeDeployService.class), mock(LambdaService.class), s3Service) {
+            @Override
+            protected String githubArchiveBaseUrl() {
+                return baseUrl;
+            }
+
+            @Override
+            protected long maxArchiveBytes() {
+                return archiveCap;
+            }
+        };
     }
 
     private void assertFailureMessage(String pipelineName, String expected) {
@@ -382,12 +407,32 @@ class CodePipelineGitHubSourceServiceTest {
     }
 
     private CodePipelineService serviceServing(byte[] archive) {
+        return serviceServing(archive, DEFAULT_CAP, DEFAULT_CAP, DEFAULT_ENTRIES);
+    }
+
+    private CodePipelineService serviceServing(byte[] archive, long archiveCap, long uncompressedCap,
+                                               int entryCap) {
         return new CodePipelineService(new InMemoryStorageFactory(), mapper, mock(CodeBuildService.class),
                 mock(CodeDeployService.class), mock(LambdaService.class), s3Service) {
             @Override
             byte[] fetchGitHubArchive(URI uri) {
                 fetched.add(uri.toString());
                 return archive;
+            }
+
+            @Override
+            protected long maxArchiveBytes() {
+                return archiveCap;
+            }
+
+            @Override
+            protected long maxUncompressedBytes() {
+                return uncompressedCap;
+            }
+
+            @Override
+            protected int maxEntries() {
+                return entryCap;
             }
         };
     }
