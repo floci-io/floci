@@ -105,6 +105,13 @@ class AslExecutorParallelCutTest {
               "Done":{"Type":"Pass","End":true},
               "Nest":{"Type":"Task","Resource":"arn:aws:states:::states:startExecution.sync:2",
                 "Parameters":{"StateMachineArn":"%s"},"End":true}}}}""".formatted(CHILD_SM_ARN);
+    /**
+     * The same Map with the "fail" item's Fail swapped for a Choice nothing matches, so that item
+     * ends in States.Runtime, and only after its Pause, where the sleeper holds it.
+     */
+    private static final String MAP_WITH_A_RUNTIME_FAILING_ITERATION = MAP_WITH_A_FAILING_ITERATION.replace(
+            "\"Boom\":{\"Type\":\"Fail\",\"Error\":\"Boom\",\"Cause\":\"sibling failed\"}",
+            "\"Boom\":{\"Type\":\"Choice\",\"Choices\":[{\"Variable\":\"$.kind\",\"StringEquals\":\"never\",\"Next\":\"Done\"}]}");
     private static final String SLOW_RESULT_BRANCH = """
             {"StartAt":"Slow","States":{"Slow":{"Type":"Wait","Seconds":1,"Next":"Out"},
               "Out":{"Type":"Pass","Result":"slow","End":true}}}""";
@@ -283,9 +290,9 @@ class AslExecutorParallelCutTest {
      */
     @Test
     void aRuntimeFailureThatExceedsTheToleranceRecordsTheOnesItCutButNotItself() {
-        String map = MAP_WITH_A_FAILING_ITERATION.replace("\"Type\":\"Map\",", "\"Type\":\"Map\",\"ToleratedFailureCount\":0,")
-                .replace("\"Default\":\"Nest\",", "");
-        Execution execution = run(map, sleeper(1), 0, "[{\"kind\":\"wait\"},{\"kind\":\"nomatch\"}]");
+        String map = MAP_WITH_A_RUNTIME_FAILING_ITERATION.replace("\"Type\":\"Map\",",
+                "\"Type\":\"Map\",\"ToleratedFailureCount\":0,");
+        Execution execution = run(map, sleeper(1), 0, "[{\"kind\":\"wait\"},{\"kind\":\"fail\"}]");
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.ExceedToleratedFailureThreshold", execution.getError());
@@ -301,13 +308,16 @@ class AslExecutorParallelCutTest {
      */
     @Test
     void aRuntimeFailureThatEndsTheMapRecordsNothingForTheOnesItCut() {
-        String map = MAP_WITH_A_FAILING_ITERATION.replace("\"Default\":\"Nest\",", "");
-        Execution execution = run(map, sleeper(1), 0, "[{\"kind\":\"wait\"},{\"kind\":\"nomatch\"}]");
+        Execution execution = run(MAP_WITH_A_RUNTIME_FAILING_ITERATION, sleeper(1), 0,
+                "[{\"kind\":\"wait\"},{\"kind\":\"fail\"}]");
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.Runtime", execution.getError());
         assertTrue(types().stream().noneMatch(type -> type.contains("Aborted") || type.endsWith("Failed")
                 && !type.equals("ExecutionFailed")), types().toString());
+        // The other iteration was cut inside Long: only the failing one's Pause ever exits.
+        assertEquals(List.of("Pause"), eventsOfType("WaitStateExited").stream()
+                .map(event -> String.valueOf(event.getDetails().get("name"))).toList(), types().toString());
     }
 
     /**
