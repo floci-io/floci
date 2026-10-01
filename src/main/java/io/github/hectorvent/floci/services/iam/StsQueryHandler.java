@@ -210,7 +210,7 @@ public class StsQueryHandler {
             return role.getArn();
         }
         return regionResolver.buildGlobalArn("iam", accountId,
-                "role" + normalizeRolePath(role.getPath()) + roleName);
+                "role" + IamService.normalizePath(role.getPath()) + roleName);
     }
 
     static boolean roleArnMatches(String requestedRoleArn, IamRole role) {
@@ -229,16 +229,8 @@ public class StsQueryHandler {
                     && requested.region().equals(stored.region())
                     && requested.resource().equals(stored.resource());
         }
-        String expectedResource = "role" + normalizeRolePath(role.getPath()) + role.getRoleName();
+        String expectedResource = "role" + IamService.normalizePath(role.getPath()) + role.getRoleName();
         return requested.region().isEmpty() && requested.resource().equals(expectedResource);
-    }
-
-    private static String normalizeRolePath(String path) {
-        if (path == null || path.isEmpty()) {
-            return "/";
-        }
-        String normalizedPath = path.startsWith("/") ? path : "/" + path;
-        return normalizedPath.endsWith("/") ? normalizedPath : normalizedPath + "/";
     }
 
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
