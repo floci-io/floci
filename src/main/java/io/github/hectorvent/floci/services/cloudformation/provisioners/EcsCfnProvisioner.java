@@ -168,7 +168,9 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
      * create time is read back from the {@code Name} attribute rather than the prior id. An update
      * that keeps the name and the cluster updates the service in place; a changed name or a
      * changed cluster (both create-only) is a replacement: the new service is created and the
-     * displaced one deleted once the stack update commits, through the replacement cleanup.
+     * displaced one deleted once the stack update commits, through the replacement cleanup. Either
+     * way the resource completes only once the service is stable, as CloudFormation's does; an
+     * in-place update that does not stabilize is put back on the prior configuration.
      */
     private void provisionService(StackResource r, JsonNode props, ProvisionContext ctx) {
         String clusterRef = ctx.resolveOptional(props, "Cluster");
@@ -190,8 +192,14 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         }
 
         EcsServiceModel svc;
-        if (ctx.isUpdate() && serviceName.equals(priorName)
-                && clusterName(clusterRef).equals(clusterOfServiceArn(ctx.priorPhysicalId()))) {
+        boolean inPlace = ctx.isUpdate() && serviceName.equals(priorName)
+                && clusterName(clusterRef).equals(clusterOfServiceArn(ctx.priorPhysicalId()));
+        // Read before updateService, which changes this same model in place.
+        EcsServiceModel prior = inPlace ? ecsService.serviceByArn(ctx.priorPhysicalId()) : null;
+        String priorTaskDefinition = prior != null ? prior.getTaskDefinition() : null;
+        Integer priorDesiredCount = prior != null ? prior.getDesiredCount() : null;
+        NetworkConfiguration priorNetworkConfiguration = prior != null ? prior.getNetworkConfiguration() : null;
+        if (inPlace) {
             svc = ecsService.updateService(clusterRef, serviceName, taskDefinition,
                     desiredCount, networkConfiguration, ctx.region());
         } else {
@@ -202,6 +210,73 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(svc.getServiceArn());
         r.getAttributes().put("Name", svc.getServiceName());
         r.getAttributes().put("ServiceArn", svc.getServiceArn());
+        if (inPlace) {
+            try {
+                ecsService.awaitServiceStable(svc);
+            } catch (RuntimeException failure) {
+                restoreInPlace(r, failure, () -> ecsService.awaitServiceStable(ecsService.updateService(clusterRef,
+                        svc.getServiceName(), priorTaskDefinition, priorDesiredCount, priorNetworkConfiguration,
+                        ctx.region())));
+                throw failure;
+            }
+        } else {
+            awaitCreatedServiceStable(r, svc, ctx);
+        }
+    }
+
+    /**
+     * Puts a service updated in place back on the task definition, desired count and network
+     * configuration it had, when the update does not stabilize, and waits for the restored
+     * configuration to stabilize, as CloudFormation's rollback does. CloudFormationService restores
+     * the prior resource record and reports the rollback complete unless told otherwise, so without
+     * this the stack would claim a rollback while ECS still runs the failed configuration. A
+     * restore that fails or does not stabilize is attached to the original failure and recorded as
+     * a rollback failure.
+     */
+    private void restoreInPlace(StackResource r, RuntimeException failure, Runnable restore) {
+        try {
+            restore.run();
+        } catch (RuntimeException restoreFailure) {
+            String reason = "Could not restore " + r.getPhysicalId() + " after a failed update: "
+                    + restoreFailure.getMessage();
+            LOG.warnv("{0}", reason);
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+            if (restoreFailure != failure) {
+                failure.addSuppressed(restoreFailure);
+            }
+        }
+    }
+
+    /**
+     * Waits for a service this provision created to stabilize, as CloudFormation does before it
+     * reports the resource complete. The resource is marked as owned meanwhile, so a service that
+     * never stabilizes is deleted by the create rollback. A replacement created by a stack update
+     * is removed here instead: the engine restores the prior resource and never learns the new ARN.
+     */
+    private void awaitCreatedServiceStable(StackResource r, EcsServiceModel svc, ProvisionContext ctx) {
+        r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+        try {
+            ecsService.awaitServiceStable(svc);
+        } catch (RuntimeException failure) {
+            if (ctx.isUpdate()) {
+                unwindReplacement(r, ctx.region(), failure);
+            }
+            throw failure;
+        }
+        r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+    }
+
+    private void unwindReplacement(StackResource r, String region, RuntimeException failure) {
+        try {
+            deleteService(r.getPhysicalId(), region);
+            r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+        } catch (RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+            String reason = "Could not remove " + r.getPhysicalId() + ", the replacement created for "
+                    + r.getLogicalId() + " by a failed update: " + cleanupFailure.getMessage();
+            LOG.warnv("{0}", reason);
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+        }
     }
 
     /** The cluster name a template value addresses: a name, an ARN's last segment, or the default. */
