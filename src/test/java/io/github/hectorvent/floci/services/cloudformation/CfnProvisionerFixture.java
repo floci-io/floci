@@ -43,6 +43,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScali
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BatchCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsArchiveCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AppSyncCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
@@ -385,6 +386,7 @@ final class CfnProvisionerFixture {
             }
             if (eventBridgeService != null) {
                 discovered.add(new EventsCfnProvisioner(eventBridgeService));
+                discovered.add(new EventsArchiveCfnProvisioner(eventBridgeService));
             }
             if (batchService != null) {
                 discovered.add(new BatchCfnProvisioner(batchService));

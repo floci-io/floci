@@ -153,7 +153,7 @@ cross-resource references.
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
 | Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup` |
 | ACM | `Certificate` |
-| EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
+| EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `Archive` (`KmsKeyIdentifier` is ignored) |
 | EventBridge Scheduler | `ScheduleGroup` |
 | Backup | `BackupVault` |
 | Pipes | `Pipe` |
@@ -198,6 +198,22 @@ resource replacement; Floci currently rejects that update until generic replacem
 available. `Policy` is applied when the bus is created. Changing `Description`, `Tags`, or `Policy`
 during `UpdateStack` is rejected until transactional resource rollback is available; this prevents a
 failed stack update from leaving the live bus in the rejected configuration.
+
+## EventBridge archives
+
+`AWS::Events::Archive` creates a real archive of the events sent to `SourceArn`. `ArchiveName` is
+optional; when omitted, CloudFormation generates a name and keeps it across updates. `Ref` returns
+the archive name and `Fn::GetAtt Arn` the archive ARN. A missing `RetentionDays` stores 0, and an
+`EventPattern` object reads back from `DescribeArchive` as a compact JSON string.
+`KmsKeyIdentifier` is ignored.
+
+Changing `Description`, `EventPattern`, or `RetentionDays` updates the archive in place. A property
+removed from the template is not sent, so the archive keeps its previous value, as on AWS. Changing
+`SourceArn` or `ArchiveName`, or dropping an explicit `ArchiveName`, replaces the archive: the new
+archive is created during the update and the previous one is deleted once the update commits. A
+replacement that keeps the same explicit `ArchiveName` fails with CloudFormation's custom-named
+resource error and leaves the archive unchanged. Stack deletion removes the archive and tolerates
+one that was already deleted.
 
 ## Secrets Manager Target Attachments
 
