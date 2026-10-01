@@ -146,7 +146,9 @@ class EcsContainerManagerVolumesFromTest {
         ContainerDefinition router = definition("router", "router:latest");
         router.setFirelensConfiguration(new FirelensConfiguration("fluentbit", Map.of()));
         router.setVolumesFrom(List.of(new VolumeFrom("source", false)));
+        router.setLogConfiguration(awslogs());
         ContainerDefinition source = definition("source", "sidecar:latest");
+        source.setLogConfiguration(awslogs());
 
         EcsTask ecsTask = task();
         EcsTaskHandle handle = manager.startTask(
@@ -265,6 +267,10 @@ class EcsContainerManagerVolumesFromTest {
         definition.setName(name);
         definition.setImage(image);
         return definition;
+    }
+
+    private static LogConfiguration awslogs() {
+        return new LogConfiguration("awslogs", Map.of("awslogs-group", "/ecs/volumesfrom-family"), null);
     }
 
     private static TaskDefinition taskDefinition(List<ContainerDefinition> definitions) {

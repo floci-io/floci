@@ -131,8 +131,13 @@ port `24224`, is rejected at launch. A `fluentbit` or `fluentd` FireLens
 container is acted on at launch: Floci generates the router config (unix socket input, TCP forward
 on bridge/awsvpc, ECS metadata, optional include of a `config-file-type=file` or `s3` extra
 config, and one output per `awsfirelens` container), starts that router first, and points application
-containers with `logDriver: awsfirelens` at the generated unix socket. Other log drivers,
-including `awslogs`, still stream to CloudWatch via Floci rather than the configured driver.
+containers with `logDriver: awsfirelens` at the generated unix socket. A container with
+`logDriver: awslogs` streams to CloudWatch Logs through Floci, in the `awslogs-group` log group
+and the `awslogs-region` region (the task's region when it is not set). The log stream is
+`<awslogs-stream-prefix>/<container-name>/<task-id>`, or the Docker container ID when no prefix is
+set, as on AWS. Floci creates the log group when it does not exist, even without
+`awslogs-create-group`. A container with no `logConfiguration`, or with another log driver, sends
+nothing to CloudWatch Logs.
 An `[OUTPUT]` for an AWS destination whose plugin reads a URL from `endpoint` (`s3`,
 `cloudwatch`, `firehose`) also gets `Endpoint` set to Floci's container-reachable base URL. The
 Fluent Bit AWS plugins take a custom endpoint only from their own configuration and ignore the

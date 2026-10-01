@@ -114,6 +114,8 @@ class EcsContainerManagerFirelensTest {
         router.setName("log_router");
         router.setImage("amazon/aws-for-fluent-bit:stable");
         router.setFirelensConfiguration(new FirelensConfiguration("fluentbit", Map.of()));
+        router.setLogConfiguration(new LogConfiguration("awslogs",
+                Map.of("awslogs-group", "/ecs/firelens-family", "awslogs-stream-prefix", "firelens"), null));
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
