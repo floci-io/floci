@@ -58,8 +58,9 @@ class Category:
     regex: re.Pattern
     gated: bool
     description: str
-    # "literal" runs the regex over each string literal's content; "code" over each source line
-    # with comments blanked, for a partition bug that is a call shape rather than a literal.
+    # "literal" runs the regex over each string literal's content; "code" over the whole source
+    # with comments and text blocks blanked, for a partition bug that is a call shape rather than a
+    # literal, even one split across lines.
     scope: str = "literal"
 
 
@@ -192,11 +193,12 @@ def scan_java(text: str) -> tuple[list[Literal], dict[int, str]]:
     return literals, escapes
 
 
-def code_lines(text: str) -> list[str]:
-    """The source split into lines with every comment blanked and strings kept as written.
+def code_text(text: str) -> str:
+    """The source with every comment and text block blanked, string literals kept as written.
 
-    Uses the same lexing rules as scan_java, so a `//` inside a string survives and a call
-    shape inside a comment or javadoc never counts.
+    Newlines survive, so an offset maps back to its line. Uses the same lexing rules as
+    scan_java: a `//` inside a string is not a comment, a call shape inside a comment, javadoc or
+    text block never counts, and a call split across lines is still one match.
     """
     out: list[str] = []
     i = 0
@@ -207,17 +209,13 @@ def code_lines(text: str) -> list[str]:
             end = n if end < 0 else end
             out.append(" " * (end - i))
             i = end
-        elif text.startswith("/*", i):
-            end = text.find("*/", i + 2)
-            end = n if end < 0 else end + 2
+        elif text.startswith("/*", i) or text.startswith('"""', i):
+            closer = "*/" if text[i + 1] == "*" else '"""'
+            j = i + len(closer)
+            while j < n and not text.startswith(closer, j):
+                j += 2 if closer == '"""' and text[j] == "\\" else 1
+            end = min(j + len(closer), n)
             out.append("".join(c if c == "\n" else " " for c in text[i:end]))
-            i = end
-        elif text.startswith('"""', i):
-            j = i + 3
-            while j < n and not text.startswith('"""', j):
-                j += 2 if text[j] == "\\" else 1
-            end = min(j + 3, n)
-            out.append(text[i:end])
             i = end
         elif text[i] in "\"'":
             quote = text[i]
@@ -230,7 +228,7 @@ def code_lines(text: str) -> list[str]:
         else:
             out.append(text[i])
             i += 1
-    return "".join(out).split("\n")
+    return "".join(out)
 
 
 @dataclass(frozen=True)
@@ -272,23 +270,22 @@ def collect_findings(source_root: Path, rules: list[AllowRule]) -> list[Finding]
         text = java.read_text(encoding="utf-8")
         lines = text.split("\n")
         literals, escapes = scan_java(text)
-        scanned = [(literal.line, literal.text, "literal") for literal in literals]
-        scanned += [(number, code, "code") for number, code in enumerate(code_lines(text), start=1)]
-        for line_number, content, scope in scanned:
-            source_line = lines[line_number - 1] if line_number - 1 < len(lines) else ""
+        hits: list[tuple[str, int]] = []
+        for literal in literals:
             for category in CATEGORIES:
-                if category.scope != scope:
-                    continue
-                hits = len(category.regex.findall(content))
-                if hits == 0:
-                    continue
-                excuse = excuse_for(rel_path, source_line, rules)
-                if excuse is None and line_number in escapes:
-                    excuse = f"escape: {escapes[line_number]}"
-                findings.extend(
-                    Finding(category.name, rel_path, line_number, source_line.strip(), excuse)
-                    for _ in range(hits)
-                )
+                if category.scope == "literal":
+                    hits += [(category.name, literal.line)] * len(category.regex.findall(literal.text))
+        code = code_text(text)
+        for category in CATEGORIES:
+            if category.scope == "code":
+                hits += [(category.name, code.count("\n", 0, match.start()) + 1)
+                         for match in category.regex.finditer(code)]
+        for name, line_number in hits:
+            source_line = lines[line_number - 1] if line_number - 1 < len(lines) else ""
+            excuse = excuse_for(rel_path, source_line, rules)
+            if excuse is None and line_number in escapes:
+                excuse = f"escape: {escapes[line_number]}"
+            findings.append(Finding(name, rel_path, line_number, source_line.strip(), excuse))
     return findings
 
 
