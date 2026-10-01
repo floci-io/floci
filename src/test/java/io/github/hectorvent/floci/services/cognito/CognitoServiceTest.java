@@ -2753,17 +2753,59 @@ class CognitoServiceTest {
         assertEquals("InvalidParameterException", ex.getErrorCode());
     }
 
+    /** A preferred challenge the user has not set up gets the choice of those they have, as AWS answers it. */
     @Test
-    void initiateAuthWithUserAuthRejectsAnUnavailablePreferredChallenge() {
-        // alice has neither a password nor an SRP verifier at this point: not confirmed yet.
+    void initiateAuthWithUserAuthOffersTheChoiceForAPreferredChallengeTheUserHasNotSetUp() {
+        // alice has a temporary password, and this service sends no codes, so EMAIL_OTP is not hers to take.
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
         service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "TempPass1!");
 
-        AwsException ex = assertThrows(AwsException.class, () -> service.initiateAuth(
-                client.getClientId(), "USER_AUTH",
-                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "EMAIL_OTP")));
-        assertEquals("InvalidParameterException", ex.getErrorCode());
+        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "EMAIL_OTP"));
+
+        assertEquals("SELECT_CHALLENGE", result.get("ChallengeName"));
+        assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), result.get("AvailableChallenges"));
+    }
+
+    /** A PREFERRED_CHALLENGE naming no challenge Cognito supports is refused with AWS's message, for any username. */
+    @Test
+    void initiateAuthWithUserAuthRefusesAPreferredChallengeCognitoDoesNotSupport() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        service.describeUserPoolClient(client.getClientId()).setPreventUserExistenceErrors("ENABLED");
+
+        for (String username : List.of("alice", "nobody")) {
+            AwsException ex = assertThrows(AwsException.class, () -> service.initiateAuth(client.getClientId(),
+                    "USER_AUTH", Map.of("USERNAME", username, "PREFERRED_CHALLENGE", "BOGUS")));
+            assertEquals("InvalidParameterException", ex.getErrorCode(), username);
+            assertEquals("The preferred challenge must be one of the supported challenges. "
+                    + "[PASSWORD, PASSWORD_SRP, SMS_OTP, EMAIL_OTP, WEB_AUTHN]", ex.getMessage(), username);
+        }
+    }
+
+    /**
+     * With user existence errors prevented, an unknown user's PREFERRED_CHALLENGE is answered as a known
+     * user's would be: with that challenge when the sign-in policy allows it, and with the choice of the
+     * policy's factors when it does not.
+     */
+    @Test
+    void initiateAuthWithUserAuthAnswersAnUnknownUsersPreferredChallengeAsAKnownUsers() {
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "TestPool",
+                "Policies", Map.of("SignInPolicy", Map.of(
+                        "AllowedFirstAuthFactors", List.of("PASSWORD", "SMS_OTP")))), "us-east-1");
+        UserPoolClient client = openClient(service, pool.getId(), "c", false);
+        service.describeUserPoolClient(client.getClientId()).setPreventUserExistenceErrors("ENABLED");
+
+        Map<String, Object> allowed = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "nobody", "PREFERRED_CHALLENGE", "SMS_OTP"));
+        Map<String, Object> disallowed = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "nobody", "PREFERRED_CHALLENGE", "EMAIL_OTP"));
+
+        assertEquals("SMS_OTP", allowed.get("ChallengeName"));
+        assertEquals("SELECT_CHALLENGE", disallowed.get("ChallengeName"));
+        assertEquals(List.of("PASSWORD", "SMS_OTP"), disallowed.get("AvailableChallenges"));
     }
 
     @Test
@@ -3391,22 +3433,39 @@ class CognitoServiceTest {
         assertEquals(List.of("EMAIL_OTP"), result.get("AvailableChallenges"));
     }
 
-    /** A factor outside the policy is refused as one the user does not have is: the same InvalidParameterException. */
+    /**
+     * AWS answers a PREFERRED_CHALLENGE the user cannot take, because the sign-in policy leaves it out or the
+     * user has not set it up, as it answers InitiateAuth without one: SELECT_CHALLENGE and the challenges
+     * they can take. Nothing is sent meanwhile.
+     */
+    @ParameterizedTest
+    @CsvSource({"PASSWORD", "SMS_OTP", "WEB_AUTHN"})
+    void initiateAuthWithUserAuthOffersTheChoiceForAPreferredChallengeTheUserCannotTake(String preferred) {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoService serviceWithVerification = serviceWithVerification(verificationCodeService);
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP", "SMS_OTP");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, "Perm1234!");
+
+        Map<String, Object> result = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", preferred));
+
+        assertEquals("SELECT_CHALLENGE", result.get("ChallengeName"));
+        assertEquals(List.of("EMAIL_OTP"), result.get("AvailableChallenges"));
+        assertNotNull(result.get("Session"));
+        verify(verificationCodeService, never()).issue(any(), any(), any(), any());
+    }
+
+    /** Only PREFERRED_CHALLENGE falls back: an answer to SELECT_CHALLENGE outside the choice offered is refused. */
     @Test
-    void initiateAuthWithUserAuthRefusesAPreferredChallengeOrAnswerThePolicyDisallows() {
+    void respondToSelectChallengeRefusesAnAnswerThePolicyDisallows() {
         CognitoService serviceWithVerification = serviceWithEmailOtpCode("654321");
         UserPool pool = poolWithFirstFactors(serviceWithVerification, "EMAIL_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         createUserWithVerifiedEmail(serviceWithVerification, pool, "Perm1234!");
-
-        AwsException preferred = assertThrows(AwsException.class, () -> serviceWithVerification.initiateAuth(
-                client.getClientId(), "USER_AUTH",
-                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD", "PASSWORD", "Perm1234!")));
-        assertEquals("InvalidParameterException", preferred.getErrorCode());
-        assertEquals("PASSWORD is not an available challenge for this user", preferred.getMessage());
-
         String session = (String) serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "alice")).get("Session");
+
         AwsException answer = assertThrows(AwsException.class, () -> serviceWithVerification.respondToAuthChallenge(
                 client.getClientId(), "SELECT_CHALLENGE", session,
                 Map.of("USERNAME", "alice", "ANSWER", "PASSWORD_SRP", "SRP_A", "ABCDEF1234567890")));

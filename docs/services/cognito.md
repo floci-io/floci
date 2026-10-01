@@ -250,8 +250,10 @@ configured (`PASSWORD`, `PASSWORD_SRP`, `EMAIL_OTP`, `SMS_OTP`); with one, it go
 challenge. When the pool's `Policies.SignInPolicy.AllowedFirstAuthFactors` names first factors, the
 list keeps only those it allows: its `PASSWORD` covers both `PASSWORD` and `PASSWORD_SRP`, so a pool
 that allows only `EMAIL_OTP` offers `["EMAIL_OTP"]`, and a user with no password is never offered a
-password challenge. A `PREFERRED_CHALLENGE` or `SELECT_CHALLENGE` answer outside the list fails with
-`InvalidParameterException`, where AWS documents falling back to `AvailableChallenges`. A pool with no
+password challenge. A `PREFERRED_CHALLENGE` outside the list, because the policy leaves it out or the
+user has not set it up, gets `SELECT_CHALLENGE` and the list, as on AWS; one that names no challenge
+Cognito supports fails with `InvalidParameterException`. A `SELECT_CHALLENGE` answer outside the list
+fails with `InvalidParameterException`. A pool with no
 `SignInPolicy` is not narrowed, where AWS defaults it to `PASSWORD` alone. It requires the user pool's
 tier to be Essentials or higher. `WEB_AUTHN` and the `ConfirmSignUp` session as a first-factor
 shortcut are not implemented yet.
