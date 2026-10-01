@@ -152,6 +152,7 @@ class EcsContainerManagerFirelensTest {
 
         verify(logStreamer).attach(eq("router-id"), anyString(), anyString(), anyString(), anyString());
         verify(logStreamer, never()).attach(eq("app-id"), anyString(), anyString(), anyString(), anyString());
+        verify(logStreamer, never()).attachConsoleOnly(eq("app-id"), anyString());
         assertTrue(handle.getFirelensVolumeName().contains("firelens"));
 
         verify(copyCmd).withRemotePath("/fluent-bit/etc");

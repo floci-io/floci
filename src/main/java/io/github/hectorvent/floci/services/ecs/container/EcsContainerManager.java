@@ -508,12 +508,15 @@ public class EcsContainerManager {
                 runtimeContainers.add(container);
                 containerIds.put(def.getName(), dockerId);
 
-                // Only awslogs containers go to CloudWatch Logs; awsfirelens ones are shipped to Fluent Bit by Docker.
-                AwsLogsDestination awsLogs = awsLogsDestination(def, taskId, dockerId, region);
-                if (awsLogs != null) {
-                    Closeable logHandle = logStreamer.attach(
-                            dockerId, awsLogs.group(), awsLogs.stream(), awsLogs.region(),
-                            "ecs:" + taskDef.getFamily() + ":" + def.getName());
+                // awsfirelens containers are shipped to Fluent Bit by Docker; don't also scrape json-file.
+                // Only awslogs containers go to CloudWatch Logs; the others stay on the console.
+                if (!awsFirelens) {
+                    String logPrefix = "ecs:" + taskDef.getFamily() + ":" + def.getName();
+                    AwsLogsDestination awsLogs = awsLogsDestination(def, taskId, dockerId, region);
+                    Closeable logHandle = awsLogs == null
+                            ? logStreamer.attachConsoleOnly(dockerId, logPrefix)
+                            : logStreamer.attach(
+                                    dockerId, awsLogs.group(), awsLogs.stream(), awsLogs.region(), logPrefix);
                     if (logHandle != null) {
                         logStreamsByContainerId.put(dockerId, logHandle);
                     }

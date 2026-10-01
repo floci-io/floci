@@ -137,7 +137,7 @@ and the `awslogs-region` region (the task's region when it is not set). The log 
 `<awslogs-stream-prefix>/<container-name>/<task-id>`, or the Docker container ID when no prefix is
 set, as on AWS. Floci creates the log group when it does not exist, even without
 `awslogs-create-group`. A container with no `logConfiguration`, or with another log driver, sends
-nothing to CloudWatch Logs.
+nothing to CloudWatch Logs; its output still appears in Floci's own log.
 An `[OUTPUT]` for an AWS destination whose plugin reads a URL from `endpoint` (`s3`,
 `cloudwatch`, `firehose`) also gets `Endpoint` set to Floci's container-reachable base URL. The
 Fluent Bit AWS plugins take a custom endpoint only from their own configuration and ignore the

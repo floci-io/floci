@@ -35,7 +35,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * A container's output reaches CloudWatch Logs only through the {@code awslogs} driver, in the
- * group and stream its log configuration names. Docker is mocked, so no daemon is needed.
+ * group and stream its log configuration names. Other non-FireLens containers stay on the console.
+ * Docker is mocked, so no daemon is needed.
  */
 class EcsContainerManagerLogConfigurationTest {
 
@@ -97,23 +98,26 @@ class EcsContainerManagerLogConfigurationTest {
     }
 
     @Test
-    void containerWithoutLogConfigurationSendsNothingToCloudWatchLogs() {
+    void containerWithoutLogConfigurationOnlyStreamsToTheConsole() {
         startTask(null);
 
+        verify(logStreamer).attachConsoleOnly("docker-id", "ecs:logs-family:main");
         verify(logStreamer, never()).attach(any(), any(), any(), any(), any());
     }
 
     @Test
-    void otherLogDriverSendsNothingToCloudWatchLogs() {
+    void otherLogDriverOnlyStreamsToTheConsole() {
         startTask(new LogConfiguration("splunk", Map.of("splunk-url", "https://splunk.example.com"), null));
 
+        verify(logStreamer).attachConsoleOnly("docker-id", "ecs:logs-family:main");
         verify(logStreamer, never()).attach(any(), any(), any(), any(), any());
     }
 
     @Test
-    void awslogsWithoutGroupSendsNothingToCloudWatchLogs() {
+    void awslogsWithoutGroupOnlyStreamsToTheConsole() {
         startTask(new LogConfiguration("awslogs", Map.of("awslogs-stream-prefix", "web"), null));
 
+        verify(logStreamer).attachConsoleOnly("docker-id", "ecs:logs-family:main");
         verify(logStreamer, never()).attach(any(), any(), any(), any(), any());
     }
 
