@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.organizations;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.organizations.model.CreateAccountStatus;
 import io.github.hectorvent.floci.services.organizations.model.Handshake;
@@ -33,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class OrganizationsServiceTest {
 
     private static final String MANAGEMENT_ACCOUNT = "100000000001";
+    private static final RegionResolver REGION_RESOLVER = new RegionResolver("us-east-1", MANAGEMENT_ACCOUNT);
     private static final String OUTSIDER_ACCOUNT = "100000000009";
 
     private OrganizationsService service;
@@ -43,6 +45,7 @@ class OrganizationsServiceTest {
         handshakes = AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT);
         service = new OrganizationsService(
                 new ObjectMapper(),
+                REGION_RESOLVER,
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
@@ -72,6 +75,23 @@ class OrganizationsServiceTest {
                 service.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, false);
         assertTrue(status.getId().matches("car-[a-z0-9]{8}"), status.getId());
         assertTrue(status.getAccountId().matches("\\d{12}"), status.getAccountId());
+    }
+
+    @Test
+    void organizationsArnsTakeTheRequestsPartition() {
+        OrganizationsService china = new OrganizationsService(
+                new ObjectMapper(),
+                new RegionResolver("cn-north-1", MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT));
+        Organization organization = china.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        assertEquals("arn:aws-cn:organizations::" + MANAGEMENT_ACCOUNT + ":organization/" + organization.getId(),
+                organization.getArn());
     }
 
     @Test
@@ -348,6 +368,7 @@ class OrganizationsServiceTest {
     void effectiveScpLevelsAreNullWhenEnforcementDisabled() {
         OrganizationsService disabled = new OrganizationsService(
                 new ObjectMapper(),
+                REGION_RESOLVER,
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
@@ -372,6 +393,7 @@ class OrganizationsServiceTest {
     void managementAccountEmailOverrideIsUsedForOrganizationAndAccount() {
         OrganizationsService configured = new OrganizationsService(
                 new ObjectMapper(),
+                REGION_RESOLVER,
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
@@ -393,6 +415,7 @@ class OrganizationsServiceTest {
     void malformedManagementAccountEmailOverrideIsRejected() {
         assertThrows(IllegalArgumentException.class, () -> new OrganizationsService(
                 new ObjectMapper(),
+                REGION_RESOLVER,
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),

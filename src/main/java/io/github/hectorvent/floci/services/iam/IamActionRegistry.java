@@ -5,6 +5,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.util.List;
@@ -84,6 +85,134 @@ public class IamActionRegistry {
         rule("apigateway", "DELETE", ".*/restapis/.+",                      "apigateway:DELETE"),
         rule("apigateway", "POST",   ".*/restapis/.+",                      "apigateway:POST"),
 
+        // ── SES v2 ─────────────────────────────────────────────────────────────
+        // SES v1 is a Query API and resolves from its Action like any other; v2 is REST-JSON under
+        // /v2/email, so every operation needs its own rule. One rule per operation in the SES v2
+        // model, each mapped to the IAM action AWS's service reference lists for it: always
+        // ses:<Operation>, in the ses namespace SES v2 shares with v1. SendEmail has no entry there;
+        // the Service Authorization Reference's SES v2 page defines ses:SendEmail as v2's only send
+        // action whatever the content (ses:SendRawEmail belongs to v1), so it takes its name too.
+        // ListConfigurationSets and ListEmailIdentities keep their GET routes next to the POST ones
+        // the model moved them to, since older SDKs, and Floci's own routes, still use them.
+        rule("ses", "GET",   "^/v2/email/account/?$",                                                "ses:GetAccount"),
+        rule("ses", "PUT",   "^/v2/email/account/dedicated-ips/warmup/?$",                           "ses:PutAccountDedicatedIpWarmupAttributes"),
+        rule("ses", "POST",  "^/v2/email/account/details/?$",                                        "ses:PutAccountDetails"),
+        rule("ses", "PUT",   "^/v2/email/account/pricing-attributes/?$",                             "ses:PutAccountPricingAttributes"),
+        rule("ses", "PUT",   "^/v2/email/account/sending/?$",                                        "ses:PutAccountSendingAttributes"),
+        rule("ses", "PUT",   "^/v2/email/account/suppression/?$",                                    "ses:PutAccountSuppressionAttributes"),
+        rule("ses", "PUT",   "^/v2/email/account/vdm/?$",                                            "ses:PutAccountVdmAttributes"),
+        rule("ses", "GET",   "^/v2/email/configuration-sets/?$",                                     "ses:ListConfigurationSets"),
+        rule("ses", "POST",  "^/v2/email/configuration-sets/?$",                                     "ses:CreateConfigurationSet"),
+        rule("ses", "DELETE","^/v2/email/configuration-sets/[^/]+/?$",                               "ses:DeleteConfigurationSet"),
+        rule("ses", "GET",   "^/v2/email/configuration-sets/[^/]+/?$",                               "ses:GetConfigurationSet"),
+        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/archiving-options/?$",             "ses:PutConfigurationSetArchivingOptions"),
+        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/delivery-options/?$",              "ses:PutConfigurationSetDeliveryOptions"),
+        rule("ses", "GET",   "^/v2/email/configuration-sets/[^/]+/event-destinations/?$",            "ses:GetConfigurationSetEventDestinations"),
+        rule("ses", "POST",  "^/v2/email/configuration-sets/[^/]+/event-destinations/?$",            "ses:CreateConfigurationSetEventDestination"),
+        rule("ses", "DELETE","^/v2/email/configuration-sets/[^/]+/event-destinations/[^/]+/?$",      "ses:DeleteConfigurationSetEventDestination"),
+        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/event-destinations/[^/]+/?$",      "ses:UpdateConfigurationSetEventDestination"),
+        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/reputation-options/?$",            "ses:PutConfigurationSetReputationOptions"),
+        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/sending/?$",                       "ses:PutConfigurationSetSendingOptions"),
+        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/suppression-options/?$",           "ses:PutConfigurationSetSuppressionOptions"),
+        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/tracking-options/?$",              "ses:PutConfigurationSetTrackingOptions"),
+        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/vdm-options/?$",                   "ses:PutConfigurationSetVdmOptions"),
+        rule("ses", "GET",   "^/v2/email/contact-lists/?$",                                          "ses:ListContactLists"),
+        rule("ses", "POST",  "^/v2/email/contact-lists/?$",                                          "ses:CreateContactList"),
+        rule("ses", "DELETE","^/v2/email/contact-lists/[^/]+/?$",                                    "ses:DeleteContactList"),
+        rule("ses", "GET",   "^/v2/email/contact-lists/[^/]+/?$",                                    "ses:GetContactList"),
+        rule("ses", "PUT",   "^/v2/email/contact-lists/[^/]+/?$",                                    "ses:UpdateContactList"),
+        rule("ses", "POST",  "^/v2/email/contact-lists/[^/]+/contacts/?$",                           "ses:CreateContact"),
+        rule("ses", "POST",  "^/v2/email/contact-lists/[^/]+/contacts/list/?$",                      "ses:ListContacts"),
+        rule("ses", "DELETE","^/v2/email/contact-lists/[^/]+/contacts/[^/]+/?$",                     "ses:DeleteContact"),
+        rule("ses", "GET",   "^/v2/email/contact-lists/[^/]+/contacts/[^/]+/?$",                     "ses:GetContact"),
+        rule("ses", "PUT",   "^/v2/email/contact-lists/[^/]+/contacts/[^/]+/?$",                     "ses:UpdateContact"),
+        rule("ses", "GET",   "^/v2/email/custom-verification-email-templates/?$",                    "ses:ListCustomVerificationEmailTemplates"),
+        rule("ses", "POST",  "^/v2/email/custom-verification-email-templates/?$",                    "ses:CreateCustomVerificationEmailTemplate"),
+        rule("ses", "DELETE","^/v2/email/custom-verification-email-templates/[^/]+/?$",              "ses:DeleteCustomVerificationEmailTemplate"),
+        rule("ses", "GET",   "^/v2/email/custom-verification-email-templates/[^/]+/?$",              "ses:GetCustomVerificationEmailTemplate"),
+        rule("ses", "PUT",   "^/v2/email/custom-verification-email-templates/[^/]+/?$",              "ses:UpdateCustomVerificationEmailTemplate"),
+        rule("ses", "GET",   "^/v2/email/dedicated-ip-pools/?$",                                     "ses:ListDedicatedIpPools"),
+        rule("ses", "POST",  "^/v2/email/dedicated-ip-pools/?$",                                     "ses:CreateDedicatedIpPool"),
+        rule("ses", "DELETE","^/v2/email/dedicated-ip-pools/[^/]+/?$",                               "ses:DeleteDedicatedIpPool"),
+        rule("ses", "GET",   "^/v2/email/dedicated-ip-pools/[^/]+/?$",                               "ses:GetDedicatedIpPool"),
+        rule("ses", "PUT",   "^/v2/email/dedicated-ip-pools/[^/]+/scaling/?$",                       "ses:PutDedicatedIpPoolScalingAttributes"),
+        rule("ses", "GET",   "^/v2/email/dedicated-ips/?$",                                          "ses:GetDedicatedIps"),
+        rule("ses", "GET",   "^/v2/email/dedicated-ips/[^/]+/?$",                                    "ses:GetDedicatedIp"),
+        rule("ses", "PUT",   "^/v2/email/dedicated-ips/[^/]+/pool/?$",                               "ses:PutDedicatedIpInPool"),
+        rule("ses", "PUT",   "^/v2/email/dedicated-ips/[^/]+/warmup/?$",                             "ses:PutDedicatedIpWarmupAttributes"),
+        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/?$",                               "ses:GetDeliverabilityDashboardOptions"),
+        rule("ses", "PUT",   "^/v2/email/deliverability-dashboard/?$",                               "ses:PutDeliverabilityDashboardOption"),
+        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/blacklist-report/?$",              "ses:GetBlacklistReports"),
+        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/campaigns/[^/]+/?$",               "ses:GetDomainDeliverabilityCampaign"),
+        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/domains/[^/]+/campaigns/?$",       "ses:ListDomainDeliverabilityCampaigns"),
+        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/statistics-report/[^/]+/?$",       "ses:GetDomainStatisticsReport"),
+        rule("ses", "POST",  "^/v2/email/deliverability-dashboard/test/?$",                          "ses:CreateDeliverabilityTestReport"),
+        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/test-reports/?$",                  "ses:ListDeliverabilityTestReports"),
+        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/test-reports/[^/]+/?$",            "ses:GetDeliverabilityTestReport"),
+        rule("ses", "POST",  "^/v2/email/email-address-insights/?$",                                 "ses:GetEmailAddressInsights"),
+        rule("ses", "POST",  "^/v2/email/export-jobs/?$",                                            "ses:CreateExportJob"),
+        rule("ses", "GET",   "^/v2/email/export-jobs/[^/]+/?$",                                      "ses:GetExportJob"),
+        rule("ses", "PUT",   "^/v2/email/export-jobs/[^/]+/cancel/?$",                               "ses:CancelExportJob"),
+        rule("ses", "GET",   "^/v2/email/identities/?$",                                             "ses:ListEmailIdentities"),
+        rule("ses", "POST",  "^/v2/email/identities/?$",                                             "ses:CreateEmailIdentity"),
+        rule("ses", "DELETE","^/v2/email/identities/[^/]+/?$",                                       "ses:DeleteEmailIdentity"),
+        rule("ses", "GET",   "^/v2/email/identities/[^/]+/?$",                                       "ses:GetEmailIdentity"),
+        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/configuration-set/?$",                     "ses:PutEmailIdentityConfigurationSetAttributes"),
+        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/dkim/?$",                                  "ses:PutEmailIdentityDkimAttributes"),
+        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/dkim/signing/?$",                          "ses:PutEmailIdentityDkimSigningAttributes"),
+        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/feedback/?$",                              "ses:PutEmailIdentityFeedbackAttributes"),
+        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/mail-from/?$",                             "ses:PutEmailIdentityMailFromAttributes"),
+        rule("ses", "GET",   "^/v2/email/identities/[^/]+/policies/?$",                              "ses:GetEmailIdentityPolicies"),
+        rule("ses", "DELETE","^/v2/email/identities/[^/]+/policies/[^/]+/?$",                        "ses:DeleteEmailIdentityPolicy"),
+        rule("ses", "POST",  "^/v2/email/identities/[^/]+/policies/[^/]+/?$",                        "ses:CreateEmailIdentityPolicy"),
+        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/policies/[^/]+/?$",                        "ses:UpdateEmailIdentityPolicy"),
+        rule("ses", "POST",  "^/v2/email/identity/certificates/?$",                                  "ses:AssociateEmailIdentityCertificate"),
+        rule("ses", "POST",  "^/v2/email/identity/certificates/delete/?$",                           "ses:DisassociateEmailIdentityCertificate"),
+        rule("ses", "POST",  "^/v2/email/identity/certificates/list/?$",                             "ses:ListEmailIdentityCertificates"),
+        rule("ses", "POST",  "^/v2/email/import-jobs/?$",                                            "ses:CreateImportJob"),
+        rule("ses", "POST",  "^/v2/email/import-jobs/list/?$",                                       "ses:ListImportJobs"),
+        rule("ses", "GET",   "^/v2/email/import-jobs/[^/]+/?$",                                      "ses:GetImportJob"),
+        rule("ses", "GET",   "^/v2/email/insights/[^/]+/?$",                                         "ses:GetMessageInsights"),
+        rule("ses", "POST",  "^/v2/email/list-configuration-sets/?$",                                "ses:ListConfigurationSets"),
+        rule("ses", "POST",  "^/v2/email/list-export-jobs/?$",                                       "ses:ListExportJobs"),
+        rule("ses", "POST",  "^/v2/email/list-identities/?$",                                        "ses:ListEmailIdentities"),
+        rule("ses", "POST",  "^/v2/email/metrics/batch/?$",                                          "ses:BatchGetMetricData"),
+        rule("ses", "GET",   "^/v2/email/multi-region-endpoints/?$",                                 "ses:ListMultiRegionEndpoints"),
+        rule("ses", "POST",  "^/v2/email/multi-region-endpoints/?$",                                 "ses:CreateMultiRegionEndpoint"),
+        rule("ses", "DELETE","^/v2/email/multi-region-endpoints/[^/]+/?$",                           "ses:DeleteMultiRegionEndpoint"),
+        rule("ses", "GET",   "^/v2/email/multi-region-endpoints/[^/]+/?$",                           "ses:GetMultiRegionEndpoint"),
+        rule("ses", "POST",  "^/v2/email/outbound-bulk-emails/?$",                                   "ses:SendBulkEmail"),
+        rule("ses", "POST",  "^/v2/email/outbound-custom-verification-emails/?$",                    "ses:SendCustomVerificationEmail"),
+        rule("ses", "POST",  "^/v2/email/outbound-emails/?$",                                        "ses:SendEmail"),
+        rule("ses", "POST",  "^/v2/email/reputation/entities/?$",                                    "ses:ListReputationEntities"),
+        rule("ses", "GET",   "^/v2/email/reputation/entities/[^/]+/[^/]+/?$",                        "ses:GetReputationEntity"),
+        rule("ses", "PUT",   "^/v2/email/reputation/entities/[^/]+/[^/]+/customer-managed-status/?$","ses:UpdateReputationEntityCustomerManagedStatus"),
+        rule("ses", "PUT",   "^/v2/email/reputation/entities/[^/]+/[^/]+/policy/?$",                 "ses:UpdateReputationEntityPolicy"),
+        rule("ses", "POST",  "^/v2/email/resources/tenants/list/?$",                                 "ses:ListResourceTenants"),
+        rule("ses", "GET",   "^/v2/email/suppression/addresses/?$",                                  "ses:ListSuppressedDestinations"),
+        rule("ses", "PUT",   "^/v2/email/suppression/addresses/?$",                                  "ses:PutSuppressedDestination"),
+        rule("ses", "DELETE","^/v2/email/suppression/addresses/[^/]+/?$",                            "ses:DeleteSuppressedDestination"),
+        rule("ses", "GET",   "^/v2/email/suppression/addresses/[^/]+/?$",                            "ses:GetSuppressedDestination"),
+        rule("ses", "DELETE","^/v2/email/tags/?$",                                                   "ses:UntagResource"),
+        rule("ses", "GET",   "^/v2/email/tags/?$",                                                   "ses:ListTagsForResource"),
+        rule("ses", "POST",  "^/v2/email/tags/?$",                                                   "ses:TagResource"),
+        rule("ses", "GET",   "^/v2/email/templates/?$",                                              "ses:ListEmailTemplates"),
+        rule("ses", "POST",  "^/v2/email/templates/?$",                                              "ses:CreateEmailTemplate"),
+        rule("ses", "DELETE","^/v2/email/templates/[^/]+/?$",                                        "ses:DeleteEmailTemplate"),
+        rule("ses", "GET",   "^/v2/email/templates/[^/]+/?$",                                        "ses:GetEmailTemplate"),
+        rule("ses", "PUT",   "^/v2/email/templates/[^/]+/?$",                                        "ses:UpdateEmailTemplate"),
+        rule("ses", "POST",  "^/v2/email/templates/[^/]+/render/?$",                                 "ses:TestRenderEmailTemplate"),
+        rule("ses", "POST",  "^/v2/email/tenant/suppression/?$",                                     "ses:PutTenantSuppressionAttributes"),
+        rule("ses", "POST",  "^/v2/email/tenants/?$",                                                "ses:CreateTenant"),
+        rule("ses", "POST",  "^/v2/email/tenants/delete/?$",                                         "ses:DeleteTenant"),
+        rule("ses", "POST",  "^/v2/email/tenants/get/?$",                                            "ses:GetTenant"),
+        rule("ses", "POST",  "^/v2/email/tenants/list/?$",                                           "ses:ListTenants"),
+        rule("ses", "POST",  "^/v2/email/tenants/resources/?$",                                      "ses:CreateTenantResourceAssociation"),
+        rule("ses", "POST",  "^/v2/email/tenants/resources/delete/?$",                               "ses:DeleteTenantResourceAssociation"),
+        rule("ses", "POST",  "^/v2/email/tenants/resources/list/?$",                                 "ses:ListTenantResources"),
+        rule("ses", "POST",  "^/v2/email/update-configuration-sets/?$",                              "ses:UpdateConfigurationSet"),
+        rule("ses", "POST",  "^/v2/email/vdm/recommendations/?$",                                    "ses:ListRecommendations"),
+
         // ── Kinesis ────────────────────────────────────────────────────────────
         rule("kinesis", "POST", ".*", "kinesis:*")
     );
@@ -122,10 +251,23 @@ public class IamActionRegistry {
             return credentialScope + ":" + operationName;
         }
 
-        // REST-JSON: match against rule table
+        return resolveRoute(credentialScope, ctx);
+    }
+
+    /**
+     * The action of a REST request, from its method and path alone. A REST request is the operation
+     * whose route it reached, so neither an {@code X-Amz-Target} header nor a Query {@code Action}
+     * field may name another one: a caller could attach either to have the call checked as an
+     * action they hold. The path is matched as sent, still percent-encoded, which is the form the
+     * router matched: decoded, an encoded {@code /} inside a parameter splits it into two segments,
+     * so the route's rule would not match and the call would pass as an unknown action. It is read
+     * from the request URI because RESTEasy Reactive does not serve {@code UriInfo.getPath(false)}.
+     *
+     * <p>Returns {@code null} when no rule matches (caller treats this as ALLOW).
+     */
+    public String resolveRoute(String credentialScope, ContainerRequestContext ctx) {
         String method = ctx.getMethod().toUpperCase();
-        String path = ctx.getUriInfo().getPath();
-        if (!path.startsWith("/")) path = "/" + path;
+        String path = rawPath(ctx.getUriInfo());
 
         // S3 sub-resource override: the URL path alone doesn't distinguish
         // s3:GetObjectAcl / s3:PutObjectAcl from s3:GetObject / s3:PutObject
@@ -149,6 +291,19 @@ public class IamActionRegistry {
 
         LOG.debugv("No action mapping for {0} {1} {2} — defaulting to ALLOW", credentialScope, method, path);
         return null;
+    }
+
+    /**
+     * The request path relative to the application root, as {@link UriInfo#getPath()} gives it, but
+     * still percent-encoded.
+     */
+    private static String rawPath(UriInfo uriInfo) {
+        String path = uriInfo.getRequestUri().getRawPath();
+        String base = uriInfo.getBaseUri().getRawPath();
+        if (base != null && base.length() > 1 && path.startsWith(base)) {
+            path = path.substring(base.length() - 1);
+        }
+        return path.startsWith("/") ? path : "/" + path;
     }
 
     /**

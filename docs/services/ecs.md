@@ -131,8 +131,13 @@ port `24224`, is rejected at launch. A `fluentbit` or `fluentd` FireLens
 container is acted on at launch: Floci generates the router config (unix socket input, TCP forward
 on bridge/awsvpc, ECS metadata, optional include of a `config-file-type=file` or `s3` extra
 config, and one output per `awsfirelens` container), starts that router first, and points application
-containers with `logDriver: awsfirelens` at the generated unix socket. Other log drivers,
-including `awslogs`, still stream to CloudWatch via Floci rather than the configured driver.
+containers with `logDriver: awsfirelens` at the generated unix socket. A container with
+`logDriver: awslogs` streams to CloudWatch Logs through Floci, in the `awslogs-group` log group
+and the `awslogs-region` region (the task's region when it is not set). The log stream is
+`<awslogs-stream-prefix>/<container-name>/<task-id>`, or the Docker container ID when no prefix is
+set, as on AWS. Floci creates the log group when it does not exist, even without
+`awslogs-create-group`. A container with no `logConfiguration`, or with another log driver, sends
+nothing to CloudWatch Logs; its output still appears in Floci's own log.
 An `[OUTPUT]` for an AWS destination whose plugin reads a URL from `endpoint` (`s3`,
 `cloudwatch`, `firehose`) also gets `Endpoint` set to Floci's container-reachable base URL. The
 Fluent Bit AWS plugins take a custom endpoint only from their own configuration and ignore the
@@ -758,10 +763,39 @@ Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_
 | `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | *(unset)* | Approved parent directories for host volume bind mounts (`volumes[].host.sourcePath`) |
 | `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES` | `false` | Allow any host path, bypassing the `HOST_VOLUME_ROOTS` allowlist; traversal, the bare root, and the Docker socket are still always rejected |
 | `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | On startup, in Docker mode, remove the ECS containers a previous run of this Floci left on the daemon before the scheduler starts replacement tasks (see [Restarts](#restarts)) |
+| `FLOCI_SERVICES_ECS_IMAGE_PULL_BEHAVIOR` | `default` | How task images are pulled at launch, as the ECS agent's `ECS_IMAGE_PULL_BEHAVIOR`: `default`, `always`, `once` or `prefer-cached` (see [Image pulls](#image-pulls)) |
 | `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED` | `false` | Vend real task IAM role credentials to task containers |
 | `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_TTL_SECONDS` | `21600` | Lifetime of the vended credentials |
 | `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT` | `51679` | Floci-side port serving the credentials endpoint |
 | `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PROXY_IMAGE` | `floci/network-helper:local` | Image for the per-network credentials proxy |
+
+### Image pulls
+
+Floci pulls a task's container images when the task starts, before it creates any of its
+containers, the way the ECS agent does. `FLOCI_SERVICES_ECS_IMAGE_PULL_BEHAVIOR` takes the values
+of the agent's `ECS_IMAGE_PULL_BEHAVIOR`:
+
+| Value | Behavior |
+|---|---|
+| `default` | Pull on every launch. When the pull fails, run the cached image if there is one, otherwise the task fails. |
+| `always` | Pull on every launch. When the pull fails, the task fails. |
+| `once` | Pull when Floci has not pulled the image since it started, or the cached image is gone. Otherwise run the cached image. |
+| `prefer-cached` | Pull only when there is no cached image. |
+
+Under `default` and `always`, a tag moved in its registry (a rebuilt `:latest`) is what the next
+task runs, so `UpdateService --force-new-deployment` picks it up. `default` also keeps a locally
+built image that was never pushed anywhere working: its pull fails and the cached image runs,
+with a warning in the log. Whichever behavior applies, the cached image is the one the local tag
+names at launch, so a `docker pull` or `docker build` on the Docker host is also picked up.
+
+Each container reports the digest of the manifest it runs as `imageDigest` in `DescribeTasks`
+(and `ImageID` in the task metadata endpoint): the digest the registry reported when the task's
+launch pulled the tag, or, for a launch that runs the cached image, the image's digest for that
+repository. An image that has never been pulled from or pushed to the repository its reference
+names, such as one built locally, has no manifest digest and reports none, as does a cached image
+holding several digests for the repository when nothing local says which one the tag names. A task definition
+image given as a bare image id (`sha256:...`) runs that local image without a pull. Floci does not pin a service's digests across the tasks of one deployment, so a tag
+moved while a service is scaling can put tasks of the same deployment on different images.
 
 ### Task IAM role credentials
 

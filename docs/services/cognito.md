@@ -190,6 +190,7 @@ further divergences, both deliberate:
 | SignUp | Creates a self-service user for an app client. |
 | ConfirmSignUp | Confirms a pending self-service signup. |
 | GetUser | Returns attributes for the authenticated access-token user. |
+| GetUserAuthFactors | Returns the authenticated access-token user's sign-in factors: `PASSWORD` when the user has a password, `EMAIL_OTP` and `SMS_OTP` when the email or phone number is verified, whatever the pool's `AllowedFirstAuthFactors` allows, as on AWS, and `SOFTWARE_TOKEN` once `VerifySoftwareToken` has confirmed an authenticator. The access token must carry the `aws.cognito.signin.user.admin` scope. `UserMFASettingList` and `PreferredMfaSetting` report the email MFA preference set with `SetUserMFAPreference`. `WEB_AUTHN` and SMS or software-token MFA settings are not reported. |
 | GetUserAttributeVerificationCode | Issues a verification code for the authenticated user's email or phone_number attribute. |
 | VerifyUserAttribute | Verifies an email or phone_number attribute with its issued verification code. |
 | UpdateUserAttributes | Updates attributes for the authenticated access-token user. |

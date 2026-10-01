@@ -30,6 +30,9 @@ public final class TestImages {
     /** The same image AWS publishes at {@code public.ecr.aws/aws-observability/aws-for-fluent-bit:3}. */
     public static final String FLUENT_BIT = "amazon/aws-for-fluent-bit:3";
 
+    /** The tag {@code floci.services.ecr.registry-image} ships with. */
+    public static final String REGISTRY = "registry:2";
+
     private TestImages() {
     }
 }

@@ -1003,12 +1003,19 @@ public class CodeArtifactService implements Resettable {
                 digest.update(buffer, 0, read);
             }
             return expectedSha256.equalsIgnoreCase(SigV4RequestValidator.hexEncode(digest.digest()));
-        } catch (NoSuchFileException e) {
+        } catch (NoSuchFileException expected) {
+            // Routine, not diagnostically interesting: the metadata already confirmed this asset
+            // exists (the only way this method gets called), so a missing file here means something
+            // touched the asset store directly without going through Floci, e.g. a partial restore
+            // that skipped it. That is exactly the case this method's caller repairs, not a real
+            // failure worth a log line.
             return false;
         } catch (IOException e) {
-            // Any I/O error reading the existing file (not just a clean "not found") reads the
-            // same as "can't confirm it's intact": a repair write is the safe response, not a
-            // thrown exception that would turn an otherwise-successful idempotent retry into one.
+            // Unlike a missing file, any other I/O error reading an existing file is unexpected and
+            // worth keeping a record of, even though the safe response is still the same: a repair
+            // write, not a thrown exception that would turn an otherwise-successful idempotent
+            // retry into one.
+            LOG.warnv(e, "Could not verify existing CodeArtifact asset file {0}: {1}", filePath, e.getMessage());
             return false;
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("JVM does not support SHA-256", e);

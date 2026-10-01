@@ -141,7 +141,8 @@ class RuleSchedulerTest {
     }
 
     private static RuleScheduler newScheduler(Vertx vertx, EventBridgeInvoker invoker) {
-        return new RuleScheduler(vertx, testConfig(), new ObjectMapper(), invoker,
+        TargetDispatcher dispatcher = new TargetDispatcher(invoker, null, "http://localhost:4566", Clock.systemUTC(), null);
+        return new RuleScheduler(vertx, testConfig(), new ObjectMapper(), dispatcher,
                 Clock.fixed(JUST_BEFORE_MINUTE_BOUNDARY, ZoneOffset.UTC));
     }
 

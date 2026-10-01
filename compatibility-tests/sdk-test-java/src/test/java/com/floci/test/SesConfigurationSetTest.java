@@ -108,7 +108,8 @@ class SesConfigurationSetTest {
     @Order(4)
     void v2ListConfigurationSetsIncludesCreated() {
         software.amazon.awssdk.services.sesv2.model.ListConfigurationSetsResponse response =
-                sesV2.listConfigurationSets(software.amazon.awssdk.services.sesv2.model.ListConfigurationSetsRequest.builder().build());
+                sesV2.listConfigurationSets(software.amazon.awssdk.services.sesv2.model.ListConfigurationSetsRequest.builder()
+                        .pageSize(1000).build());
         assertThat(response.configurationSets()).contains(v2Name);
     }
 
@@ -169,7 +170,7 @@ class SesConfigurationSetTest {
     @Order(13)
     void v1ListConfigurationSetsIncludesCreated() {
         ListConfigurationSetsResponse response = sesV1.listConfigurationSets(
-                ListConfigurationSetsRequest.builder().build());
+                ListConfigurationSetsRequest.builder().maxItems(1000).build());
         assertThat(response.configurationSets())
                 .anyMatch(cs -> v1Name.equals(cs.name()));
     }

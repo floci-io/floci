@@ -13,6 +13,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -161,14 +162,14 @@ class EcsServiceSteadyStateWaiterIntegrationTest {
      * {@code ServiceDeployment} shape and neither of which floci used to write at all, so a
      * client asking when a stopped deployment ended, or why, got nothing.
      *
-     * <p>The deployment has to still be in flight when the delete arrives, and a test cannot
-     * promise that: the 5-second reconciler runs on its own thread, and a tick that lands between
-     * CreateService and DeleteService starts the task, so the delete correctly settles the
+     * <p>The deployment has to still be in flight when the update supersedes it, and a test
+     * cannot promise that: the 5-second reconciler runs on its own thread, and a tick that lands
+     * between CreateService and UpdateService starts the task, so the update correctly settles the
      * deployment SUCCESSFUL instead. That is a lost race, not a failure, so the test tries again
      * on a fresh service, a few times; the window is milliseconds against a 5000ms period. It
      * fails only if no attempt produced a stopped deployment, or one did and its fields are wrong.
      * The behaviour itself is pinned without any timing in
-     * {@code EcsServiceDeploymentStatusTest.deletingAServiceStopsTheDeploymentItLeavesUnfinished};
+     * {@code EcsServiceDeploymentStatusTest.supersedingAnUnconvergedDeploymentStopsIt};
      * what only this test can show is that the two fields reach the wire.
      */
     @Test
@@ -176,31 +177,30 @@ class EcsServiceSteadyStateWaiterIntegrationTest {
         for (int attempt = 1; attempt <= 5; attempt++) {
             String service = seedUnconvergedService("waiter-stop-svc-" + attempt);
 
-            call("DeleteService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"" + service
-                    + "\",\"force\":true}");
+            call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"" + service
+                    + "\",\"forceNewDeployment\":true}");
 
-            // Identified after the delete: the service was created once and never updated, so it
-            // has exactly one deployment, and a terminal record cannot change under a read.
-            Response listed = call("ListServiceDeployments", "{\"cluster\":\"" + CLUSTER
-                    + "\",\"service\":\"" + service + "\"}");
-            listed.then().body("serviceDeployments", hasSize(1));
-            String deploymentArn = listed.jsonPath()
-                    .getString("serviceDeployments[0].serviceDeploymentArn");
-            assertNotNull(deploymentArn, "the deleted service's deployment is still describable");
-
-            Response described = call("DescribeServiceDeployments",
-                    "{\"serviceDeploymentArns\":[\"" + deploymentArn + "\"]}");
-            if ("SUCCESSFUL".equals(described.jsonPath().getString("serviceDeployments[0].status"))) {
+            // A terminal record cannot change under a read, so filter for it rather than race.
+            Response stopped = call("ListServiceDeployments", "{\"cluster\":\"" + CLUSTER
+                    + "\",\"service\":\"" + service + "\",\"status\":[\"STOPPED\"]}");
+            if (stopped.jsonPath().getList("serviceDeployments").isEmpty()) {
                 continue;
             }
-            described.then()
+            stopped.then().body("serviceDeployments", hasSize(1));
+            String deploymentArn = stopped.jsonPath()
+                    .getString("serviceDeployments[0].serviceDeploymentArn");
+
+            call("DescribeServiceDeployments",
+                    "{\"serviceDeploymentArns\":[\"" + deploymentArn + "\"]}")
+                    .then()
                     .body("serviceDeployments", hasSize(1))
                     .body("serviceDeployments[0].status", equalTo("STOPPED"))
                     .body("serviceDeployments[0].stoppedAt", notNullValue())
                     .body("serviceDeployments[0].finishedAt", notNullValue())
-                    .body("serviceDeployments[0].statusReason", equalTo("The service was deleted."));
+                    .body("serviceDeployments[0].statusReason",
+                            startsWith("Superseded by service deployment "));
             return;
         }
-        fail("the reconciler converged the service before every one of five deletes");
+        fail("the reconciler converged the service before every one of five updates");
     }
 }

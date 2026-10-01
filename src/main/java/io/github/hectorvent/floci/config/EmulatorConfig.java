@@ -1309,6 +1309,9 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean clearFifoDeduplicationCacheOnPurge();
+
+        @WithDefault("local-emulator-secret")
+        String receiptHandleSecret();
     }
 
     interface S3ServiceConfig {
@@ -2119,7 +2122,30 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean reconcileContainersOnStartup();
 
+        /**
+         * How a task's container images are pulled when the task starts, with the values and
+         * semantics of the ECS agent's {@code ECS_IMAGE_PULL_BEHAVIOR}. The default pulls on every
+         * launch, so a tag moved in its registry (a rebuilt {@code :latest}) is what the next task
+         * runs.
+         */
+        @WithDefault("default")
+        ImagePullBehavior imagePullBehavior();
+
         EcsTaskRoleCredentialsConfig taskRoleCredentials();
+
+        enum ImagePullBehavior {
+            /** Pull on every launch; when the pull fails, run the cached image if there is one. */
+            DEFAULT,
+            /** Pull on every launch; when the pull fails, the task fails. */
+            ALWAYS,
+            /**
+             * Pull when Floci has not pulled the image since it started or the cached image is
+             * gone; otherwise run the cached image.
+             */
+            ONCE,
+            /** Pull only when there is no cached image. */
+            PREFER_CACHED
+        }
     }
 
     interface EcsTaskRoleCredentialsConfig {
@@ -2706,6 +2732,13 @@ public interface EmulatorConfig {
 
         @WithDefault("1000")
         long pollIntervalMs();
+
+        /**
+         * Seconds before the first retry of a failed asynchronous invocation. Retry n waits n times
+         * this, so the default of 60 matches AWS: one minute, then two. Zero retries back to back.
+         */
+        @WithDefault("60")
+        int asyncRetryDelaySeconds();
 
         @WithDefault("false")
         boolean ephemeral();

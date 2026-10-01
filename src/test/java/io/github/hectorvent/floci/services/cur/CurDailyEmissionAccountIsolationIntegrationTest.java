@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.cur;
 
-import io.github.hectorvent.floci.testing.FixedPortNoEmissionProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -31,7 +31,7 @@ import static org.hamcrest.Matchers.equalTo;
  * {@code NoSuchBucket}.
  */
 @QuarkusTest
-@TestProfile(FixedPortNoEmissionProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 @EnabledIfEnvironmentVariable(named = "FLOCI_DUCK_CROSS_CONTAINER_TEST", matches = "1|true|yes")
 class CurDailyEmissionAccountIsolationIntegrationTest {
 

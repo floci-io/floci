@@ -53,12 +53,15 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -68,6 +71,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Stream;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
@@ -881,7 +885,7 @@ public class S3Controller {
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
             String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
             s3Service.authorizePutObject(bucket, key, authorization);
-            S3Object obj = s3Service.putObject(bucket, key, data, contentType, extractUserMetadata(httpHeaders),
+            S3Object obj = s3Service.putObject(bucket, key, data, contentType, extractUserMetadata(httpHeaders, uriInfo),
                     new PutObjectOptions()
                             .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                             .withContentEncoding(persistedEncoding)
@@ -1481,7 +1485,7 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "uploads")) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 MultipartUpload upload = s3Service.initiateMultipartUpload(bucket, key, contentType,
-                        extractUserMetadata(httpHeaders),
+                        extractUserMetadata(httpHeaders, uriInfo),
                         httpHeaders.getHeaderString("x-amz-storage-class"),
                         httpHeaders.getHeaderString("Content-Disposition"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption"),
@@ -2359,7 +2363,6 @@ public class S3Controller {
             String algorithmHeader = getChecksumAlgorithm(httpHeaders, uriInfo);
             ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(algorithmHeader);
             validateChecksumHeaders(httpHeaders, uriInfo, payload, algorithmHeader);
-            validateContentMd5(httpHeaders, payload);
             ObjectAnnotation annotation = s3Service.putObjectAnnotation(bucket, key, annotationName,
                     versionId, payload, httpHeaders.getHeaderString("x-amz-object-if-match"), algorithm);
             Response.ResponseBuilder response = Response.ok(putObjectAnnotationXml(annotation))
@@ -2507,21 +2510,6 @@ public class S3Controller {
     private void appendAnnotationSseHeader(Response.ResponseBuilder response, ObjectAnnotation annotation) {
         if (annotation.getServerSideEncryption() != null) {
             response.header("x-amz-server-side-encryption", annotation.getServerSideEncryption());
-        }
-    }
-
-    private void validateContentMd5(HttpHeaders httpHeaders, byte[] body) {
-        String contentMd5 = httpHeaders.getHeaderString("Content-MD5");
-        if (contentMd5 == null) {
-            return;
-        }
-        try {
-            byte[] digest = java.security.MessageDigest.getInstance("MD5").digest(body);
-            if (!contentMd5.equals(java.util.Base64.getEncoder().encodeToString(digest))) {
-                throw new AwsException("BadDigest", "The Content-MD5 you specified did not match the payload.", 400);
-            }
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException("MD5 algorithm is not available", e);
         }
     }
 
@@ -2781,7 +2769,7 @@ public class S3Controller {
                 sourceObject.versionId(),
                 new CopyObjectOptions()
                         .withMetadataDirective(httpHeaders.getHeaderString("x-amz-metadata-directive"))
-                        .withReplacementMetadata(extractUserMetadata(httpHeaders))
+                        .withReplacementMetadata(extractUserMetadata(httpHeaders, uriInfo))
                         .withTaggingDirective(taggingDirective)
                         .withReplacementTagging(replacementTagging)
                         .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
@@ -2985,19 +2973,31 @@ public class S3Controller {
         }
     }
 
-    private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders) {
+    /**
+     * Reads {@code x-amz-meta-*} user metadata from the request headers and, for presigned URLs
+     * whose SDK hoisted them there, from the query string. A query parameter wins over a header
+     * with the same key, because the presigned URL signature covers the query value.
+     */
+    private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders, UriInfo uriInfo) {
         Map<String, String> metadata = new LinkedHashMap<>();
-        for (Map.Entry<String, List<String>> entry : httpHeaders.getRequestHeaders().entrySet()) {
-            String headerName = entry.getKey().toLowerCase(Locale.ROOT);
-            if (!headerName.startsWith("x-amz-meta-")) {
+        if (uriInfo != null) {
+            addUserMetadata(metadata, uriInfo.getQueryParameters());
+        }
+        addUserMetadata(metadata, httpHeaders.getRequestHeaders());
+        return metadata;
+    }
+
+    private static void addUserMetadata(Map<String, String> metadata, Map<String, List<String>> source) {
+        for (Map.Entry<String, List<String>> entry : source.entrySet()) {
+            String name = entry.getKey().toLowerCase(Locale.ROOT);
+            if (!name.startsWith("x-amz-meta-")) {
                 continue;
             }
-            String key = headerName.substring("x-amz-meta-".length());
+            String key = name.substring("x-amz-meta-".length());
             if (!key.isBlank() && !entry.getValue().isEmpty()) {
-                metadata.put(key, entry.getValue().get(0));
+                metadata.putIfAbsent(key, entry.getValue().get(0));
             }
         }
-        return metadata;
     }
 
     static String resolveHeaderOrQueryParam(HttpHeaders httpHeaders, UriInfo uriInfo, String name) {
@@ -3057,6 +3057,8 @@ public class S3Controller {
     }
 
     private void validateChecksumHeaders(HttpHeaders httpHeaders, UriInfo uriInfo, byte[] data, String algorithm) {
+        validateContentMd5(httpHeaders.getHeaderString("Content-MD5"), data);
+
         String sha1 = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-sha1");
         if (sha1 != null && !sha1.equals(S3Checksum.sha1Base64(data))) {
             throw new AwsException("BadDigest", "The SHA1 checksum you specified did not match the payload.", 400);
@@ -3080,6 +3082,32 @@ public class S3Controller {
         String crc64nvme = resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-checksum-crc64nvme");
         if (crc64nvme != null && !crc64nvme.equals(S3Checksum.crc64NvmeBase64(data))) {
             throw new AwsException("BadDigest", "The CRC64NVME checksum you specified did not match the payload.", 400);
+        }
+    }
+
+    // S3 answers InvalidDigest for a Content-MD5 that is not the base64 of a 16-byte digest, and
+    // BadDigest for a well-formed one that does not match the payload.
+    private static void validateContentMd5(String contentMd5, byte[] data) {
+        if (contentMd5 == null) {
+            return;
+        }
+        byte[] expected;
+        try {
+            expected = Base64.getDecoder().decode(contentMd5.trim());
+        } catch (IllegalArgumentException e) {
+            expected = null;
+        }
+        if (expected == null || expected.length != 16) {
+            throw new AwsException("InvalidDigest", "The Content-MD5 you specified is not valid.", 400);
+        }
+        byte[] actual;
+        try {
+            actual = MessageDigest.getInstance("MD5").digest(data);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("MD5 algorithm is not available", e);
+        }
+        if (!MessageDigest.isEqual(expected, actual)) {
+            throw new AwsException("BadDigest", "The Content-MD5 you specified did not match what we received.", 400);
         }
     }
 
@@ -3475,7 +3503,7 @@ public class S3Controller {
                     S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key));
         }
 
-        if (s3Service.isAuthEnforced()) {
+        if (s3Service.isAuthEnforced() || (config.auth().validateSignatures() && isSignedPost(lcFields))) {
             validatePresignedPostAuth(lcFields, bucket, key, fileData.length);
         } else {
             // Validate policy conditions if present
@@ -3545,6 +3573,17 @@ public class S3Controller {
     }
 
     /**
+     * Whether a browser POST carries any SigV4 form field. Under {@code floci.auth.validate-signatures}
+     * such a POST must verify, while one with none of them is anonymous and is left to
+     * {@code enforce-auth}, which decides anonymous access from the bucket policy and ACL.
+     */
+    private static boolean isSignedPost(Map<String, String> fields) {
+        return Stream.of("x-amz-algorithm", "x-amz-credential", "x-amz-signature")
+                .map(fields::get)
+                .anyMatch(value -> value != null && !value.isEmpty());
+    }
+
+    /**
      * Enforces real S3 presigned-POST auth: a {@code policy} field must be present and
      * SigV4-signed by a known secret key referenced through {@code x-amz-credential}, matching
      * real S3's behavior of rejecting fabricated or absent credentials with 403 AccessDenied.
@@ -3593,7 +3632,7 @@ public class S3Controller {
 
     private void validatePolicyExpiration(String policyBase64) {
         try {
-            byte[] decoded = java.util.Base64.getDecoder().decode(policyBase64);
+            byte[] decoded = Base64.getDecoder().decode(policyBase64);
             JsonNode policy = OBJECT_MAPPER.readTree(decoded);
             JsonNode expirationNode = policy.get("expiration");
             if (expirationNode == null || expirationNode.isNull()) {
@@ -3616,7 +3655,7 @@ public class S3Controller {
     private void validatePolicyConditions(String policyBase64, String bucket,
                                            Map<String, String> fields, int contentLength) {
         try {
-            byte[] decoded = java.util.Base64.getDecoder().decode(policyBase64);
+            byte[] decoded = Base64.getDecoder().decode(policyBase64);
             JsonNode policy = OBJECT_MAPPER.readTree(decoded);
             JsonNode conditions = policy.get("conditions");
             if (conditions == null || !conditions.isArray()) {

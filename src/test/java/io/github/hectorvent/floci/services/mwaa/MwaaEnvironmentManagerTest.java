@@ -558,10 +558,41 @@ class MwaaEnvironmentManagerTest {
         void shellSyntaxInACliCommandReachesAirflowAsPlainArguments() throws Exception {
             List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, AIRFLOW_ID, 0, "", "");
 
-            manager.runAirflowCli(AIRFLOW_ID, "dags list; touch /tmp/pwned $(id) `id` | cat > /tmp/out");
+            manager.runAirflowCli(AIRFLOW_ID, "dags list ; touch /tmp/pwned $(id) `id` | cat > /tmp/out");
 
-            assertEquals(List.of(List.of("airflow", "dags", "list;", "touch", "/tmp/pwned", "$(id)", "`id`",
+            assertEquals(List.of(List.of("airflow", "dags", "list", ";", "touch", "/tmp/pwned", "$(id)", "`id`",
                     "|", "cat", ">", "/tmp/out")), commands);
+        }
+
+        @Test
+        void unsupportedCommandsNeverReachTheAirflowContainer() throws Exception {
+            List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, AIRFLOW_ID, 0, "", "");
+
+            for (String command : List.of("users list", "users create", "db shell", "config get-value",
+                    "webserver", "scheduler", "celery worker", "dags unknown", "dags", "")) {
+                ContainerExec.Result result = manager.runAirflowCli(AIRFLOW_ID, command);
+                assertEquals(1, result.exitCode(), command);
+                assertTrue(result.stderr().contains("not supported"), command);
+            }
+            assertEquals(List.of(), commands);
+        }
+
+        @Test
+        void allowsEverySupportedMwaaCliCommand() {
+            for (String command : List.of(
+                    "cheat-sheet", "version", "connections add", "connections delete",
+                    "dags backfill", "dags delete", "dags list", "dags list-import-errors",
+                    "dags list-jobs", "dags list-runs", "dags next-execution", "dags pause",
+                    "dags report", "dags reserialize", "dags show", "dags state", "dags test",
+                    "dags trigger", "dags unpause", "db clean", "providers behaviours",
+                    "providers get", "providers hooks", "providers links", "providers list",
+                    "providers notifications", "providers secrets", "providers triggerer",
+                    "providers widgets", "roles add-perms", "roles create", "roles del-perms",
+                    "roles list", "tasks clear", "tasks failed-deps", "tasks list", "tasks render",
+                    "tasks run", "tasks state", "tasks states-for-dag-run", "tasks test",
+                    "variables delete", "variables get", "variables list", "variables set")) {
+                assertTrue(MwaaEnvironmentManager.isSupportedCliCommand(List.of(command.split(" "))), command);
+            }
         }
 
         @Test

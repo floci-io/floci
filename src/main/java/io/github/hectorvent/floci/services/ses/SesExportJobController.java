@@ -107,10 +107,8 @@ public class SesExportJobController {
         String jobStatus = stringMemberOrAbsent(request, "JobStatus");
         Integer pageSize = intMemberOrAbsent(request, "PageSize");
         String nextToken = stringMemberOrAbsent(request, "NextToken");
-        PaginatedResult<ExportJob> page = SesListPaging.V2_LIST_EXPORT_JOBS.page(
-                exportJobService.listExportJobs(region, sourceType, jobStatus),
-                job -> SesListPaging.newestFirst(job.getCreatedTimestamp(), job.getJobId()),
-                pageSize, nextToken);
+        PaginatedResult<ExportJob> page = exportJobService.listExportJobs(region, sourceType, jobStatus,
+                SesListPaging.V2_LIST_EXPORT_JOBS, pageSize, nextToken);
 
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode jobs = result.putArray("ExportJobs");

@@ -150,6 +150,7 @@ floci:
       docker-flags: ""
       honour-architectures: false
       zip-max-entries: 100000
+      async-retry-delay-seconds: 1
       # aws-config-path:
       hot-reload:
         enabled: true
@@ -317,6 +318,7 @@ floci:
       mock: true
       host-volume-roots: []
       allow-unsafe-host-volumes: false
+      image-pull-behavior: prefer-cached
     appconfig:
       enabled: true
     appconfigdata:

@@ -2,8 +2,8 @@ package io.github.hectorvent.floci.services.cloudfront;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -120,6 +120,7 @@ public class CloudFrontService {
     private final StorageBackend<String, FieldLevelEncryptionProfile> fleProfileStore;
     private final StorageBackend<String, MonitoringSubscription> monitoringStore;
     private final String accountId;
+    private final RegionResolver regionResolver;
     private final String domainSuffix;
     /**
      * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
@@ -133,7 +134,7 @@ public class CloudFrontService {
     private final List<String> localDeliverySuffixes;
 
     @Inject
-    public CloudFrontService(StorageFactory factory, EmulatorConfig config) {
+    public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver) {
         this.distStore = factory.create("cloudfront", "cloudfront-distributions.json",
                 new TypeReference<Map<String, Distribution>>() {});
         this.invalidationStore = factory.create("cloudfront", "cloudfront-invalidations.json",
@@ -169,6 +170,7 @@ public class CloudFrontService {
         this.monitoringStore = factory.create("cloudfront", "cloudfront-monitoring-subscriptions.json",
                 new TypeReference<Map<String, MonitoringSubscription>>() {});
         this.accountId = config.defaultAccountId();
+        this.regionResolver = regionResolver;
         this.domainSuffix = config.services().cloudfront().domainSuffix();
         this.localDeliverySuffixes = localDeliverySuffixes(config);
     }
@@ -182,7 +184,7 @@ public class CloudFrontService {
         validateTrustedKeyGroups(dist.getConfig());
         String id = generateDistributionId();
         dist.setId(id);
-        dist.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "distribution/" + id).toString());
+        dist.setArn(arn("distribution/" + id));
         dist.setDomainName(domainNameFor(id));
         dist.setStatus("Deployed");
         dist.setLastModifiedTime(Instant.now());
@@ -1757,7 +1759,7 @@ public class CloudFrontService {
     // ── Realtime Log Configs ──────────────────────────────────────────────────
 
     public synchronized RealtimeLogConfig createRealtimeLogConfig(RealtimeLogConfig cfg) {
-        String arn = AwsArnUtils.Arn.of("cloudfront", "", accountId, "realtime-log-config/" + cfg.getName()).toString();
+        String arn = arn("realtime-log-config/" + cfg.getName());
         cfg.setArn(arn);
         realtimeLogConfigStore.put(cfg.getName(), cfg);
         return cfg;
@@ -1777,7 +1779,7 @@ public class CloudFrontService {
 
     public synchronized RealtimeLogConfig updateRealtimeLogConfig(RealtimeLogConfig updated) {
         getRealtimeLogConfig(updated.getName());
-        String arn = AwsArnUtils.Arn.of("cloudfront", "", accountId, "realtime-log-config/" + updated.getName()).toString();
+        String arn = arn("realtime-log-config/" + updated.getName());
         updated.setArn(arn);
         realtimeLogConfigStore.put(updated.getName(), updated);
         return updated;
@@ -1800,7 +1802,7 @@ public class CloudFrontService {
     public synchronized StreamingDistribution createStreamingDistribution(StreamingDistribution sd) {
         String id = generateDistributionId();
         sd.setId(id);
-        sd.setArn(AwsArnUtils.Arn.of("cloudfront", "", accountId, "streaming-distribution/" + id).toString());
+        sd.setArn(arn("streaming-distribution/" + id));
         sd.setDomainName(domainNameFor(id));
         sd.setStatus("Deployed");
         sd.setLastModifiedTime(Instant.now());
@@ -1960,8 +1962,9 @@ public class CloudFrontService {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    public String getAccountId() {
-        return accountId;
+    /** A CloudFront ARN: global, so it carries no region and takes the request's partition. */
+    public String arn(String resource) {
+        return regionResolver.buildGlobalArn("cloudfront", accountId, resource);
     }
 
     private static String generateDistributionId() {

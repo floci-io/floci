@@ -146,6 +146,58 @@ def test_region_literal_matches_region_and_zone_ids(text, expected):
     assert ("region-literal" in categories_of(text)) is expected
 
 
+def test_code_text_blanks_comments_and_text_blocks_and_keeps_strings():
+    text = (
+        'a = Arn.of("iam", "", x, "r"); // Arn.of("s3", "", y\n'
+        '/* Arn.of("x", "", z */ s = "// not a comment";\n'
+        'String doc = """\n    Arn.of("iam", "", account, "root")\n    """;\n'
+    )
+    code = p.code_text(text)
+    lines = code.split("\n")
+    assert len(lines) == len(text.split("\n"))
+    assert lines[0].startswith('a = Arn.of("iam", "", x, "r");')
+    assert "s3" not in lines[0]
+    assert "Arn.of" not in lines[1]
+    assert '"// not a comment"' in lines[1]
+    assert "Arn.of" not in "\n".join(lines[2:])
+
+
+@pytest.mark.parametrize("code, expected", [
+    ('Arn.of("iam", "", account, "root")', True),
+    ('AwsArnUtils.Arn.of( "s3" , null, "", bucket)', True),
+    ('Arn.of("sqs", region, account, name)', False),
+    ('Arn.global(partition, "iam", account, "root")', False),
+    ('Arn.of("lambda", "us-east-1", account, name)', False),
+])
+def test_blank_region_arn_matches_a_blank_or_null_region_only(code, expected):
+    category = p.CATEGORY_BY_NAME["blank-region-arn"]
+    assert (category.regex.search(code) is not None) is expected
+
+
+def test_blank_region_arn_matches_a_call_split_across_lines(tmp_path):
+    write_java(tmp_path, "a/A.java", (
+        'class A {\n'
+        '    String arn = AwsArnUtils.Arn.of(\n'
+        '            "iam", "", account, "root").toString();\n'
+        '}\n'
+    ))
+    findings = p.collect_findings(tmp_path, [])
+    assert p.count(findings) == Counter({("blank-region-arn", "a/A.java"): 1})
+    assert [f.line for f in findings] == [2]
+
+
+def test_blank_region_arn_is_a_code_category_and_never_matches_literals(tmp_path):
+    write_java(tmp_path, "a/A.java", (
+        'class A {\n'
+        '    String arn = AwsArnUtils.Arn.of("iam", "", account, "root").toString();\n'
+        '    // AwsArnUtils.Arn.of("iam", "", account, "root")\n'
+        '    String doc = "Arn.of(\\"iam\\", \\"\\", a, b)";\n'
+        '}\n'
+    ))
+    counted = p.count(p.collect_findings(tmp_path, []))
+    assert counted == Counter({("blank-region-arn", "a/A.java"): 1})
+
+
 def test_every_category_is_gated():
     assert {c.name for c in p.CATEGORIES if c.gated} == {c.name for c in p.CATEGORIES}
 

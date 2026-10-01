@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.rds.proxy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -118,8 +119,8 @@ public class RdsSigV4Validator {
         if (caller == null) {
             return true;
         }
-        String resource = "arn:aws:rds-db:" + binding.region() + ":" + binding.accountId()
-                + ":dbuser:" + binding.resourceId() + "/" + dbUser;
+        String resource = AwsArnUtils.Arn.of("rds-db", binding.region(), binding.accountId(),
+                "dbuser:" + binding.resourceId() + "/" + dbUser).toString();
         IamPolicyEvaluator.SimulationDecision decision =
                 POLICY_EVALUATOR.simulatePrincipalPolicy(caller, "rds-db:connect", resource, Map.of());
         if (decision != IamPolicyEvaluator.SimulationDecision.ALLOWED) {

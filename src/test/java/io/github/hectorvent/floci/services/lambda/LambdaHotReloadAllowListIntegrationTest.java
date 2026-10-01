@@ -1,13 +1,11 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import io.github.hectorvent.floci.testing.LambdaCodeSourcesProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -17,7 +15,7 @@ import static org.hamcrest.Matchers.equalTo;
  * {@code ..}, or that merely shares its prefix, must be refused over the wire.
  */
 @QuarkusTest
-@TestProfile(LambdaHotReloadAllowListIntegrationTest.HotReloadAllowListProfile.class)
+@TestProfile(LambdaCodeSourcesProfile.class)
 class LambdaHotReloadAllowListIntegrationTest {
 
     private static int counter;
@@ -57,16 +55,5 @@ class LambdaHotReloadAllowListIntegrationTest {
     @ValueSource(strings = {"/home/ci/code", "/home/ci/code/app"})
     void createFunctionAcceptsTheAllowedDirectoryAndItsChildren(String s3Key) {
         createFunction(s3Key).statusCode(201);
-    }
-
-    public static final class HotReloadAllowListProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.lambda.hot-reload.allowed-paths", "/home/ci/code",
-                    "quarkus.http.test-port", "4589",
-                    "floci.port", "4589",
-                    "floci.base-url", "http://localhost:4589");
-        }
     }
 }

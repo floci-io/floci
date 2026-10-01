@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.batch.BatchService;
@@ -26,6 +28,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -230,12 +233,13 @@ public class EventBridgeInvoker {
                         : targetAccount;
                 BUS_TO_BUS_DEPTH.set(depth + 1);
                 try {
-                    var result = eventBridgeService.putEvents(List.of(entry), targetRegion, forwardAccount);
+                    EventBridgeService.PutEventsResult result =
+                            eventBridgeService.putEvents(List.of(entry), targetRegion, forwardAccount);
                     if (result.failedCount() > 0) {
-                        LOG.warnv("EventBridge event-bus target {0} rejected event: {1}", arn, result.entries());
-                    } else {
-                        LOG.debugv("EventBridge delivered to EventBus: {0}", arn);
+                        Map<String, String> rejection = result.entries().getFirst();
+                        throw new AwsException(rejection.get("ErrorCode"), rejection.get("ErrorMessage"), 400);
                     }
+                    LOG.debugv("EventBridge delivered to EventBus: {0}", arn);
                 } finally {
                     if (depth == 0) {
                         BUS_TO_BUS_DEPTH.remove();
@@ -246,8 +250,8 @@ public class EventBridgeInvoker {
             } else {
                 LOG.warnv("EventBridge: unsupported target ARN type: {0}", arn);
             }
-        } catch (Exception e) {
-            LOG.warnv("EventBridge failed to deliver to target {0}: {1}", arn, e.getMessage());
+        } catch (JsonProcessingException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
