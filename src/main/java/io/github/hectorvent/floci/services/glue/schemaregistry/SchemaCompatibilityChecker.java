@@ -35,9 +35,18 @@ import java.util.stream.Collectors;
 public final class SchemaCompatibilityChecker {
 
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final Set<String> AVRO_SCHEMA_PROPERTIES = Set.of(
-            "type", "name", "namespace", "doc", "aliases", "fields", "symbols", "default",
-            "order", "items", "values", "size", "logicalType", "precision", "scale");
+    private static final Set<String> AVRO_RECORD_PROPERTIES = Set.of(
+            "type", "name", "namespace", "doc", "aliases", "fields", "logicalType", "precision", "scale");
+    private static final Set<String> AVRO_ENUM_PROPERTIES = Set.of(
+            "type", "name", "namespace", "doc", "aliases", "symbols", "default",
+            "logicalType", "precision", "scale");
+    private static final Set<String> AVRO_FIXED_PROPERTIES = Set.of(
+            "type", "name", "namespace", "doc", "aliases", "size", "logicalType", "precision", "scale");
+    private static final Set<String> AVRO_ARRAY_PROPERTIES = Set.of(
+            "type", "items", "default", "logicalType", "precision", "scale");
+    private static final Set<String> AVRO_MAP_PROPERTIES = Set.of(
+            "type", "values", "default", "logicalType", "precision", "scale");
+    private static final Set<String> AVRO_PRIMITIVE_PROPERTIES = Set.of("type", "logicalType", "precision", "scale");
     private static final Set<String> AVRO_FIELD_PROPERTIES = Set.of(
             "name", "type", "doc", "default", "order", "aliases");
 
@@ -102,7 +111,15 @@ public final class SchemaCompatibilityChecker {
                 stripAvroCustomAttributes(branch);
             }
         } else if (schema instanceof ObjectNode object) {
-            object.retain(AVRO_SCHEMA_PROPERTIES);
+            Set<String> properties = switch (object.path("type").asText()) {
+                case "record", "error" -> AVRO_RECORD_PROPERTIES;
+                case "enum" -> AVRO_ENUM_PROPERTIES;
+                case "fixed" -> AVRO_FIXED_PROPERTIES;
+                case "array" -> AVRO_ARRAY_PROPERTIES;
+                case "map" -> AVRO_MAP_PROPERTIES;
+                default -> AVRO_PRIMITIVE_PROPERTIES;
+            };
+            object.retain(properties);
             stripAvroCustomAttributes(object.get("type"));
             stripAvroCustomAttributes(object.get("items"));
             stripAvroCustomAttributes(object.get("values"));

@@ -391,6 +391,24 @@ class GlueSchemaRegistryServiceTest {
     }
 
     @Test
+    void recordLevelCustomAttributesReuseExistingVersionAndRemainDiscoverable() {
+        preCreateRegistry();
+        SchemaVersion first = service.createSchema(new RegistryId("reg", null),
+                "users", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION).firstVersion();
+        SchemaId schemaId = new SchemaId("reg", "users", null);
+
+        for (String attribute : List.of("\"order\":\"descending\"", "\"default\":\"unused\"",
+                "\"symbols\":[\"IGNORED\"]", "\"size\":8")) {
+            String definition = AVRO_V1.replace("\"fields\"", attribute + ",\"fields\"");
+            assertEquals(first.getSchemaVersionId(),
+                    service.registerSchemaVersion(schemaId, definition, REGION).getSchemaVersionId(), attribute);
+            assertEquals(first.getSchemaVersionId(),
+                    service.getSchemaByDefinition(schemaId, definition, REGION).getSchemaVersionId(), attribute);
+        }
+        assertEquals(1, service.listSchemaVersions(schemaId, REGION).size());
+    }
+
+    @Test
     void legacyAvroDuplicatesPreferEarliestVersionAndSurviveDeletion() {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
         InMemoryStorage<String, Registry> registryStore = new InMemoryStorage<>();
