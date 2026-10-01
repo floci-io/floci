@@ -32,12 +32,12 @@ class SesImportJobPagingIntegrationTest {
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + REGION + "/ses/aws4_request";
     private static final String BUCKET = "ses-import-job-paging-it";
-    private static final String PAGE_SIZE_BELOW_ONE = "1 validation error detected: Value '0' at 'pageSize' "
-            + "failed to satisfy constraint: Member must have value greater than or equal to 1";
-    private static final String PAGE_SIZE_ABOVE_BOUND = "1 validation error detected: Value '101' at 'pageSize' "
-            + "failed to satisfy constraint: Member must have value less than or equal to 100";
-    private static final String EMPTY_TOKEN = "1 validation error detected: Value '' at 'nextToken' "
-            + "failed to satisfy constraint: Member must have length greater than or equal to 1";
+    private static final String PAGE_SIZE_BELOW_ONE = "Value '0' at 'pageSize' failed to satisfy constraint: "
+            + "Member must have value greater than or equal to 1";
+    private static final String PAGE_SIZE_ABOVE_BOUND = "Value '101' at 'pageSize' failed to satisfy constraint: "
+            + "Member must have value less than or equal to 100";
+    private static final String EMPTY_TOKEN = "Value '' at 'nextToken' failed to satisfy constraint: "
+            + "Member must have length greater than or equal to 1";
 
     private static final List<String> created = new ArrayList<>();
 
@@ -83,20 +83,37 @@ class SesImportJobPagingIntegrationTest {
         v2().body("{\"PageSize\":0}")
         .when().post("/v2/email/import-jobs/list").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
-                .body("message", equalTo(PAGE_SIZE_BELOW_ONE));
+                .body("message", equalTo("1 validation error detected: " + PAGE_SIZE_BELOW_ONE));
         v2().body("{\"PageSize\":101}")
         .when().post("/v2/email/import-jobs/list").then().statusCode(400)
-                .body("message", equalTo(PAGE_SIZE_ABOVE_BOUND));
+                .body("message", equalTo("1 validation error detected: " + PAGE_SIZE_ABOVE_BOUND));
         v2().body("{\"NextToken\":\"garbage\"}")
         .when().post("/v2/email/import-jobs/list").then().statusCode(400)
                 .body("message", equalTo("Invalid Next Token"));
         v2().body("{\"NextToken\":\"\"}")
         .when().post("/v2/email/import-jobs/list").then().statusCode(400)
-                .body("message", equalTo(EMPTY_TOKEN));
+                .body("message", equalTo("1 validation error detected: " + EMPTY_TOKEN));
+        v2().body("{\"PageSize\":0,\"NextToken\":\"\"}")
+        .when().post("/v2/email/import-jobs/list").then().statusCode(400)
+                .body("message", equalTo("2 validation errors detected: " + EMPTY_TOKEN + "; " + PAGE_SIZE_BELOW_ONE));
     }
 
     @Test
     @Order(4)
+    void aTokenIsBoundToItsFilter() {
+        String token = v2().body("{\"ImportDestinationType\":\"SUPPRESSION_LIST\",\"PageSize\":1}")
+        .when().post("/v2/email/import-jobs/list").then().statusCode(200).extract().path("NextToken");
+
+        v2().body("{\"ImportDestinationType\":\"SUPPRESSION_LIST\",\"NextToken\":\"" + token + "\"}")
+        .when().post("/v2/email/import-jobs/list").then().statusCode(200)
+                .body("ImportJobs.JobId", contains(created.get(1), created.get(2)));
+        v2().body("{\"NextToken\":\"" + token + "\"}")
+        .when().post("/v2/email/import-jobs/list").then().statusCode(400)
+                .body("message", equalTo("Invalid Next Token"));
+    }
+
+    @Test
+    @Order(5)
     void theFilterIsValidatedBeforeThePage() {
         v2().body("{\"ImportDestinationType\":\"EXPORT\",\"PageSize\":0}")
         .when().post("/v2/email/import-jobs/list").then().statusCode(400)
@@ -106,7 +123,7 @@ class SesImportJobPagingIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void cleanup() {
         given().when().delete("/" + BUCKET + "/delete.csv").then().statusCode(204);
         given().when().delete("/" + BUCKET).then().statusCode(204);

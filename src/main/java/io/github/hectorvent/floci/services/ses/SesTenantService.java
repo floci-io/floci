@@ -421,8 +421,9 @@ public class SesTenantService {
     public PaginatedResult<TenantResourceAssociation> listTenantResources(Tenant tenant, String typeFilter,
                                                                           String region, SesListPaging paging,
                                                                           Integer pageSize, String nextToken) {
-        return paging.page(region, listTenantResources(tenant, typeFilter, region),
-                TenantResourceAssociation::resourceArn, pageSize, nextToken);
+        return paging.page(region, "/" + tenant.tenantId() + "/" + typeFilter,
+                listTenantResources(tenant, typeFilter, region), TenantResourceAssociation::resourceArn,
+                pageSize, nextToken);
     }
 
     /** AWS returns the tenant's resources ordered by ARN; the paged list resumes on the same order. */
@@ -443,8 +444,8 @@ public class SesTenantService {
     public PaginatedResult<TenantResourceAssociation> listResourceTenants(AssociationResource ref, String region,
                                                                           SesListPaging paging, Integer pageSize,
                                                                           String nextToken) {
-        return paging.page(region, listResourceTenants(ref, region), SesTenantService::associationCursor,
-                pageSize, nextToken);
+        return paging.page(region, "/" + ref.arn(), listResourceTenants(ref, region),
+                SesTenantService::associationCursor, pageSize, nextToken);
     }
 
     /** AWS returns a resource's tenants ordered by association time; the paged list resumes on the same order. */

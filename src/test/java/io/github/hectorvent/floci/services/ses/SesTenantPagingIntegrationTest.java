@@ -21,10 +21,11 @@ import static org.hamcrest.Matchers.nullValue;
 
 /**
  * Paging of the v2 {@code ListTenants}, {@code ListTenantResources} and {@code ListResourceTenants}
- * lists: the probe-confirmed orders (tenants by name, a tenant's resources by ARN, a resource's
- * tenants in association order), the Smithy validation messages, the empty-token error and its
- * precedence over the tenant lookup. Runs in its own region so the tenants created here are the
- * whole list; the test-scope ticking clock separates the association stamps.
+ * lists as probed on real SES: the orders (tenants by name, a tenant's resources by ARN, a resource's
+ * tenants in association order), the Smithy validation messages, the lookup and filter coming before
+ * the page validation, and a token bound to the request it came from. Runs in its own region so the
+ * tenants created here are the whole list; the test-scope ticking clock separates the association
+ * stamps.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -36,12 +37,12 @@ class SesTenantPagingIntegrationTest {
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + REGION + "/ses/aws4_request";
     private static final String ARN_PREFIX = "arn:aws:ses:" + REGION + ":000000000000:";
-    private static final String PAGE_SIZE_BELOW_ONE = "1 validation error detected: Value '0' at 'pageSize' "
-            + "failed to satisfy constraint: Member must have value greater than or equal to 1";
-    private static final String PAGE_SIZE_ABOVE_BOUND = "1 validation error detected: Value '101' at 'pageSize' "
-            + "failed to satisfy constraint: Member must have value less than or equal to 100";
-    private static final String EMPTY_TOKEN = "1 validation error detected: Value '' at 'nextToken' "
-            + "failed to satisfy constraint: Member must have length greater than or equal to 1";
+    private static final String PAGE_SIZE_BELOW_ONE = "Value '0' at 'pageSize' failed to satisfy constraint: "
+            + "Member must have value greater than or equal to 1";
+    private static final String PAGE_SIZE_ABOVE_BOUND = "Value '101' at 'pageSize' failed to satisfy constraint: "
+            + "Member must have value less than or equal to 100";
+    private static final String EMPTY_TOKEN = "Value '' at 'nextToken' failed to satisfy constraint: "
+            + "Member must have length greater than or equal to 1";
 
     private static RequestSpecification v2() {
         return given().contentType("application/json").header("Authorization", AUTH);
@@ -160,16 +161,19 @@ class SesTenantPagingIntegrationTest {
         v2().body("{" + subject + "\"PageSize\":0}")
         .when().post(path).then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
-                .body("message", equalTo(PAGE_SIZE_BELOW_ONE));
+                .body("message", equalTo("1 validation error detected: " + PAGE_SIZE_BELOW_ONE));
         v2().body("{" + subject + "\"PageSize\":101}")
         .when().post(path).then().statusCode(400)
-                .body("message", equalTo(PAGE_SIZE_ABOVE_BOUND));
+                .body("message", equalTo("1 validation error detected: " + PAGE_SIZE_ABOVE_BOUND));
         v2().body("{" + subject + "\"NextToken\":\"garbage\"}")
         .when().post(path).then().statusCode(400)
                 .body("message", equalTo("Invalid Next Token"));
         v2().body("{" + subject + "\"NextToken\":\"\"}")
         .when().post(path).then().statusCode(400)
-                .body("message", equalTo(EMPTY_TOKEN));
+                .body("message", equalTo("1 validation error detected: " + EMPTY_TOKEN));
+        v2().body("{" + subject + "\"PageSize\":0,\"NextToken\":\"\"}")
+        .when().post(path).then().statusCode(400)
+                .body("message", equalTo("2 validation errors detected: " + EMPTY_TOKEN + "; " + PAGE_SIZE_BELOW_ONE));
     }
 
     private static Stream<Arguments> lists() {
@@ -183,23 +187,42 @@ class SesTenantPagingIntegrationTest {
 
     @Test
     @Order(8)
-    void pageValidationPrecedesTheTenantAndResourceLookup() {
-        v2().body("{\"TenantName\":\"ghost-tenant\",\"PageSize\":0}")
-        .when().post("/v2/email/tenants/resources/list").then().statusCode(400)
-                .body("message", equalTo(PAGE_SIZE_BELOW_ONE));
-        v2().body("{\"TenantName\":\"ghost-tenant\",\"NextToken\":\"\"}")
-        .when().post("/v2/email/tenants/resources/list").then().statusCode(400)
-                .body("message", equalTo(EMPTY_TOKEN));
-        v2().body("{\"TenantName\":\"ghost-tenant\"}")
+    void theLookupAndTheFilterPrecedeThePageValidation() {
+        v2().body("{\"TenantName\":\"ghost-tenant\",\"PageSize\":0,\"NextToken\":\"\"}")
         .when().post("/v2/email/tenants/resources/list").then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"));
+        v2().body("{\"TenantName\":\"ghost-tenant\",\"Filter\":{\"RESOURCE_TYPE\":\"NOPE\"}}")
+        .when().post("/v2/email/tenants/resources/list").then().statusCode(404)
+                .body("__type", equalTo("NotFoundException"));
+        v2().body("{\"TenantName\":\"page-a\",\"Filter\":{\"RESOURCE_TYPE\":\"NOPE\"},\"PageSize\":0}")
+        .when().post("/v2/email/tenants/resources/list").then().statusCode(400)
+                .body("message", equalTo("Invalid resource type NOPE specified."));
 
         v2().body("{\"ResourceArn\":\"" + ARN_PREFIX + "identity/ghost.page.test\",\"PageSize\":0}")
-        .when().post("/v2/email/resources/tenants/list").then().statusCode(400)
-                .body("message", equalTo(PAGE_SIZE_BELOW_ONE));
-        v2().body("{\"ResourceArn\":\"" + ARN_PREFIX + "identity/ghost.page.test\"}")
         .when().post("/v2/email/resources/tenants/list").then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"));
+    }
+
+    @Test
+    @Order(9)
+    void aTokenIsBoundToItsTenantFilterAndResource() {
+        String resourceToken = v2().body("{\"TenantName\":\"page-a\",\"PageSize\":1}")
+        .when().post("/v2/email/tenants/resources/list").then().statusCode(200).extract().path("NextToken");
+        v2().body("{\"TenantName\":\"page-b\",\"NextToken\":\"" + resourceToken + "\"}")
+        .when().post("/v2/email/tenants/resources/list").then().statusCode(400)
+                .body("message", equalTo("Invalid Next Token"));
+        v2().body("{\"TenantName\":\"page-a\",\"Filter\":{\"RESOURCE_TYPE\":\"identity\"},\"NextToken\":\""
+                + resourceToken + "\"}")
+        .when().post("/v2/email/tenants/resources/list").then().statusCode(400)
+                .body("message", equalTo("Invalid Next Token"));
+
+        String tenantToken = v2().body("{\"ResourceArn\":\"" + ARN_PREFIX
+                + "identity/shared.page.test\",\"PageSize\":1}")
+        .when().post("/v2/email/resources/tenants/list").then().statusCode(200).extract().path("NextToken");
+        v2().body("{\"ResourceArn\":\"" + ARN_PREFIX + "identity/a.page.test\",\"NextToken\":\""
+                + tenantToken + "\"}")
+        .when().post("/v2/email/resources/tenants/list").then().statusCode(400)
+                .body("message", equalTo("Invalid Next Token"));
     }
 
     private static void associate(String tenant, String arn) {

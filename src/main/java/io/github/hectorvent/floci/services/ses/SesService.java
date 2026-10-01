@@ -925,24 +925,21 @@ public class SesService {
         tenantService.disassociate(tenant, ref, region);
     }
 
-    // Probe-confirmed precedence on both lists: an out-of-range PageSize or an empty NextToken is
-    // refused before the tenant or resource is looked up, so a bad page on a missing tenant is the
-    // validation error, not the 404.
+    // Probe-confirmed order on both lists: the tenant or resource is resolved first and the filter is
+    // checked next, so a bad page on a missing tenant is the 404; the page size and token come last.
     public PaginatedResult<TenantResourceAssociation> listTenantResources(String tenantName,
                                                                           String resourceTypeFilter,
                                                                           SesListPaging paging,
                                                                           Integer pageSize, String nextToken,
                                                                           String region) {
-        paging.validate(pageSize, nextToken);
-        SesTenantService.validateResourceTypeFilter(resourceTypeFilter);
         Tenant tenant = tenantService.tenantForAssociation(tenantName, region);
+        SesTenantService.validateResourceTypeFilter(resourceTypeFilter);
         return tenantService.listTenantResources(tenant, resourceTypeFilter, region, paging, pageSize, nextToken);
     }
 
     public PaginatedResult<TenantResourceAssociation> listResourceTenants(String resourceArn, SesListPaging paging,
                                                                           Integer pageSize, String nextToken,
                                                                           String accountId, String region) {
-        paging.validate(pageSize, nextToken);
         SesTenantService.AssociationResource ref =
                 SesTenantService.parseResourceArn(resourceArn, accountId, region);
         requireTenantResourceExists(ref, region);

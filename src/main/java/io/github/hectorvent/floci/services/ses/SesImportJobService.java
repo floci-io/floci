@@ -367,11 +367,11 @@ public class SesImportJobService implements Resettable {
                         "Import job " + jobId + " does not exist.", 404));
     }
 
-    /** Floci validates the filter before the page size and token, as it does for export jobs. */
+    /** The filter is checked before the page size and token, and a token is bound to it, as on the tenant lists. */
     public PaginatedResult<ImportJob> listImportJobs(String region, String destinationType,
                                                      SesListPaging paging, Integer pageSize, String nextToken) {
-        return paging.page(region, listImportJobs(region, destinationType), SesImportJobService::cursor,
-                pageSize, nextToken);
+        return paging.page(region, "/" + destinationType, listImportJobs(region, destinationType),
+                SesImportJobService::cursor, pageSize, nextToken);
     }
 
     /** Oldest first, Floci's own order since SES's could not be observed; the paged list resumes on it. */
