@@ -37,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -92,6 +93,26 @@ class LambdaExecutorServiceTest {
         assertEquals(202, result.getStatusCode());
         assertNotNull(result.getRequestId());
         verify(concurrencyLimiter, never()).acquire(any());
+        verify(warmPool, never()).acquire(any());
+    }
+
+    @Test
+    void aVersionTakesItsPermitAgainstTheFunctionsReservation() {
+        // A version's snapshot carries no reservation; reserved concurrency is function-wide.
+        fn.setReservedConcurrentExecutions(0);
+        LambdaFunction version = new LambdaFunction();
+        version.setFunctionName("test-fn");
+        version.setVersion("1");
+        version.setFunctionArn(fn.getFunctionArn() + ":1");
+        LambdaService lambdaService = mock(LambdaService.class);
+        when(lambdaService.findLatest(version)).thenReturn(Optional.of(fn));
+        LambdaExecutorService versionExecutor = new LambdaExecutorService(warmPool, new ObjectMapper(),
+                new LambdaConcurrencyLimiter(), null, lambdaService);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> versionExecutor.invoke(version, "{}".getBytes(), InvocationType.RequestResponse));
+
+        assertEquals("TooManyRequestsException", ex.getErrorCode());
         verify(warmPool, never()).acquire(any());
     }
 

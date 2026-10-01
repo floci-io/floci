@@ -1044,12 +1044,17 @@ public class LambdaService implements ResourceProvider {
     }
 
     /**
-     * Whether the function {@code fn} belongs to is still in the store, whichever version
-     * {@code fn} is. Looked up in the account and region of its ARN rather than the caller's.
+     * The {@code $LATEST} record of the function {@code fn} belongs to, whichever version {@code fn} is.
+     * Looked up in the account and region of its ARN rather than the caller's.
      */
-    boolean isLive(LambdaFunction fn) {
+    Optional<LambdaFunction> findLatest(LambdaFunction fn) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.getFunctionArn());
-        return functionStore.getForAccount(arn.accountId(), arn.region(), fn.getFunctionName()).isPresent();
+        return functionStore.getForAccount(arn.accountId(), arn.region(), fn.getFunctionName());
+    }
+
+    /** Whether the function {@code fn} belongs to is still in the store, whichever version {@code fn} is. */
+    boolean isLive(LambdaFunction fn) {
+        return findLatest(fn).isPresent();
     }
 
     /**

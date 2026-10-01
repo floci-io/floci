@@ -135,6 +135,33 @@ class LambdaInvokeQualifierIntegrationTest {
     }
 
     @Test
+    void aZeroReservationThrottlesQualifiedInvokes() throws Exception {
+        String fn = createFunction("v1");
+        publishVersion(fn, "1");
+        given()
+            .contentType("application/json")
+            .body("{\"Name\": \"live\", \"FunctionVersion\": \"1\"}")
+        .when()
+            .post("/2015-03-31/functions/" + fn + "/aliases")
+        .then()
+            .statusCode(201);
+        given()
+            .contentType("application/json")
+            .body("{\"ReservedConcurrentExecutions\": 0}")
+        .when()
+            .put("/2017-10-31/functions/" + fn + "/concurrency")
+        .then()
+            .statusCode(200);
+
+        for (String target : new String[] {fn + "/invocations?Qualifier=1", fn + "/invocations?Qualifier=live",
+                fn + ":1/invocations", fn + ":live/invocations"}) {
+            given().header("X-Amz-Invocation-Type", "Event").body("{}")
+            .when().post("/2015-03-31/functions/" + target)
+            .then().statusCode(429).body("__type", equalTo("TooManyRequestsException"));
+        }
+    }
+
+    @Test
     void anEmptyQualifierQueryParameterIsRejected() throws Exception {
         String fn = createFunction("v1");
 

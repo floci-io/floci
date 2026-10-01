@@ -175,10 +175,10 @@ public class LambdaExecutorService implements Resettable {
             return new InvokeResult(202, null, new byte[0], null, requestId);
         }
 
-        LambdaConcurrencyLimiter.Permit permit = concurrencyLimiter.acquire(fn);
+        LambdaService lambdaService = resolveLambdaService();
+        LambdaConcurrencyLimiter.Permit permit = acquire(lambdaService, fn);
 
         if (type == InvocationType.Event) {
-            LambdaService lambdaService = resolveLambdaService();
             FunctionEventInvokeConfig eventInvokeConfig = null;
             if (lambdaService != null) {
                 try {
@@ -232,6 +232,15 @@ public class LambdaExecutorService implements Resettable {
     }
 
     /**
+     * Reserved concurrency is function-wide, so the permit is taken against the function's {@code $LATEST}
+     * record, which holds the reservation, rather than a version's snapshot, which has none.
+     */
+    private LambdaConcurrencyLimiter.Permit acquire(LambdaService lambdaService, LambdaFunction fn) {
+        LambdaFunction function = lambdaService != null ? lambdaService.findLatest(fn).orElse(fn) : fn;
+        return concurrencyLimiter.acquire(function);
+    }
+
+    /**
      * Runs one attempt of an asynchronous event and either routes the outcome or schedules the next
      * attempt. Retry n waits n times the configured delay, never past the event's maximum age, and
      * the pending event of a function deleted meanwhile is dropped, whether it was waiting to retry
@@ -252,7 +261,7 @@ public class LambdaExecutorService implements Resettable {
             permit = held;
         } else {
             try {
-                permit = concurrencyLimiter.acquire(event.fn());
+                permit = acquire(resolveLambdaService(), event.fn());
             } catch (AwsException throttled) {
                 // ponytail: AWS backs a throttled retry off exponentially, up to five minutes; one
                 // fixed poll is enough locally, and the event still expires on time.

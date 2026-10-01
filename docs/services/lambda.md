@@ -257,14 +257,16 @@ disabled fails with Lambda's error as the resource status reason.
 | Path on host required | No | Yes |
 
 !!! note "Concurrency enforcement"
-    Reserved concurrency is enforced: invocations beyond the reserved value
-    return `TooManyRequestsException` (HTTP 429). Functions without a reserved
-    value share a **per-region** pool. AWS Lambda's "account-level" limit is
-    in fact a per-account-per-region quota, and Floci mirrors that by
-    partitioning counters on the ARN's region segment. The pool size (default
-    1000) is configurable via `floci.services.lambda.region-concurrency-limit`
-    and applies independently to each region. `PutFunctionConcurrency`
-    validates that the requested value leaves at least
+    Reserved concurrency is enforced function-wide: invocations of every
+    version and alias count against the function's reservation, and
+    invocations beyond the reserved value return `TooManyRequestsException`
+    (HTTP 429). Functions without a reserved value share a **per-region**
+    pool. AWS Lambda's "account-level" limit is in fact a
+    per-account-per-region quota, and Floci mirrors that by partitioning
+    counters on the ARN's region segment. The pool size (default 1000) is
+    configurable via `floci.services.lambda.region-concurrency-limit` and
+    applies independently to each region. `PutFunctionConcurrency` validates
+    that the requested value leaves at least
     `floci.services.lambda.unreserved-concurrency-min` (default 100) available
     for unreserved functions in that region. `PutProvisionedConcurrencyConfig`
     and related provisioned-concurrency operations remain unimplemented.
