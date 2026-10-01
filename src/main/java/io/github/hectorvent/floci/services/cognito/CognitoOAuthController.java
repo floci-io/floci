@@ -106,10 +106,11 @@ public class CognitoOAuthController {
         if (check.error() != null) {
             return check.error();
         }
+        List<String> requestedScopes = splitScopes(scope);
         try {
             String location = federationService.beginAuthorization(check.client().getUserPoolId(), clientId,
-                    redirectUri, CognitoService.grantedScopes(check.client(), splitScopes(scope)), trimToNull(nonce),
-                    providerName, relyingPartyState, trimToNull(codeChallenge));
+                    redirectUri, requestedScopes, CognitoService.grantedScopes(check.client(), requestedScopes),
+                    trimToNull(nonce), providerName, relyingPartyState, trimToNull(codeChallenge));
             return Response.status(Response.Status.FOUND).location(URI.create(location)).build();
         } catch (AwsException e) {
             return oauthError("invalid_request", e.getMessage());

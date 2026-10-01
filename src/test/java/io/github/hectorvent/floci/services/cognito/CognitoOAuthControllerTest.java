@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationCod
 import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationTransaction;
 import io.github.hectorvent.floci.services.cognito.model.CognitoManagedLoginSession;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
+import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -18,6 +19,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
+import java.net.URI;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -66,8 +69,8 @@ class CognitoOAuthControllerTest {
 
     @Test
     void authorizeRedirectsToConfiguredIdentityProvider() {
-        when(federationService.beginAuthorization(POOL_ID, CLIENT_ID, CALLBACK_URI, List.of("openid"), "nonce", "ExampleOidc",
-                " relying-party-state ", RFC_7636_CHALLENGE))
+        when(federationService.beginAuthorization(POOL_ID, CLIENT_ID, CALLBACK_URI, List.of("openid"), List.of("openid"),
+                "nonce", "ExampleOidc", " relying-party-state ", RFC_7636_CHALLENGE))
                 .thenReturn("https://provider.example.test/authorize?state=provider-state");
 
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid", "nonce",
@@ -172,22 +175,45 @@ class CognitoOAuthControllerTest {
                 "aws.cognito.signin.user.admin", null, null, null, null, null, null);
         assertEquals(CALLBACK_URI + "?error_description=invalid_scope&error=invalid_request",
                 withoutState.getHeaderString("Location"));
-        verify(federationService, never()).beginAuthorization(any(), any(), any(), any(), any(), any(), any(), any());
+        verify(federationService, never()).beginAuthorization(any(), any(), any(), any(), any(), any(), any(), any(),
+                any());
     }
 
-    /** The grant is resolved at authorize, so federation carries every allowed scope for a request without one. */
+    /**
+     * Federation asks the provider for what the request named, its {@code authorize_scopes} aside, as
+     * before; the grant governs only Cognito's own code. A request without a scope therefore asks the
+     * provider for none, while its code is granted every scope the client allows.
+     */
     @Test
-    void authorizeWithoutAScopeHandsTheFederationEveryScopeTheClientAllows() {
-        when(federationService.beginAuthorization(POOL_ID, CLIENT_ID, CALLBACK_URI, List.of("openid", "email"), null,
-                "ExampleOidc", null, null))
-                .thenReturn("https://provider.example.test/authorize?state=provider-state");
+    void authorizeWithoutAScopeAsksTheProviderForNoneWhileTheCodeGetsEveryAllowedScope() throws Exception {
+        IdentityProvider provider = new IdentityProvider();
+        provider.setUserPoolId(POOL_ID);
+        provider.setProviderName("ExampleOidc");
+        provider.setProviderType("OIDC");
+        provider.setProviderDetails(Map.of("authorize_url", "https://provider.example.test/authorize",
+                "client_id", "provider-client"));
+        when(cognitoService.describeIdentityProvider(POOL_ID, "ExampleOidc")).thenReturn(provider);
+        when(cognitoService.getIdentityProviderCallbackEndpoint(POOL_ID))
+                .thenReturn("http://localhost:4566/cognito-idp/oauth2/idpresponse");
+        when(cognitoService.provisionFederatedUser(eq(POOL_ID), eq(provider), eq("provider-subject"), any(), any()))
+                .thenReturn(user());
+        CognitoOidcClient oidcClient = mock(CognitoOidcClient.class);
+        when(oidcClient.exchangeCode(eq(provider), eq("provider-code"), any()))
+                .thenReturn(objectMapper.readTree("{\"access_token\":\"provider-access-token\"}"));
+        when(oidcClient.fetchClaims(provider, "provider-access-token"))
+                .thenReturn(objectMapper.readTree("{\"sub\":\"provider-subject\"}"));
+        CognitoOAuthController federating = new CognitoOAuthController(cognitoService, objectMapper,
+                new CognitoFederationService(cognitoService, stateStore, oidcClient, CLOCK), stateStore,
+                new CognitoManagedLoginService(cognitoService, stateStore, CLOCK));
 
-        Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
-                "ExampleOidc", null, null, null, null);
+        String toProvider = federating.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
+                "ExampleOidc", "s1", null, null, null).getHeaderString("Location");
+        String toCallback = federating.idpResponse(requestContext(null), queryParameter(toProvider, "state"),
+                "provider-code", null, null).getHeaderString("Location");
 
-        assertEquals(302, response.getStatus());
-        verify(federationService).beginAuthorization(POOL_ID, CLIENT_ID, CALLBACK_URI, List.of("openid", "email"), null,
-                "ExampleOidc", null, null);
+        assertTrue(toProvider.startsWith("https://provider.example.test/authorize?"), toProvider);
+        assertEquals("", queryParameter(toProvider, "scope"));
+        assertEquals(List.of("openid", "email"), storedCode(toCallback).scopes());
     }
 
     @Test
@@ -575,8 +601,18 @@ class CognitoOAuthControllerTest {
     /** The code a redirect to the callback carries, as the state store holds it. */
     private CognitoAuthorizationCode storedCode(String location) {
         assertTrue(location.startsWith(CALLBACK_URI + "?code="), location);
-        String code = location.substring((CALLBACK_URI + "?code=").length());
-        return stateStore.findAuthorizationCode(code).orElseThrow();
+        return stateStore.findAuthorizationCode(queryParameter(location, "code")).orElseThrow();
+    }
+
+    /** A query parameter of {@code location}, decoded, or null when it has none of that name. */
+    private static String queryParameter(String location, String name) {
+        for (String pair : URI.create(location).getRawQuery().split("&")) {
+            String[] parts = pair.split("=", 2);
+            if (parts[0].equals(name)) {
+                return parts.length == 2 ? URLDecoder.decode(parts[1], StandardCharsets.UTF_8) : "";
+            }
+        }
+        return null;
     }
 
     private static List<String> fieldNames(JsonNode body) {
