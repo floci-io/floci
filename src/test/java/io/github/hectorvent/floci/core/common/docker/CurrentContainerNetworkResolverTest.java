@@ -17,6 +17,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CurrentContainerNetworkResolverTest {
@@ -88,24 +90,83 @@ class CurrentContainerNetworkResolverTest {
         InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class);
         InspectContainerResponse inspect = mock(InspectContainerResponse.class, RETURNS_DEEP_STUBS);
         Ports ports = new Ports();
-        ports.getBindings().put(ExposedPort.tcp(7000), new Ports.Binding[] {null});
+        ports.getBindings().put(ExposedPort.tcp(7000), new Ports.Binding[] {
+                null,
+                Ports.Binding.bindPort(49173)
+        });
         when(dockerClient.inspectContainerCmd("floci-container")).thenReturn(inspectCmd);
-        when(inspectCmd.exec()).thenReturn(inspect);
+        when(inspectCmd.exec()).thenThrow(new RuntimeException("Docker daemon unreachable")).thenReturn(inspect);
         when(inspect.getNetworkSettings().getPorts()).thenReturn(ports);
 
         CurrentContainerNetworkResolver resolver =
                 new TestResolver(dockerClient, containerDetector, "floci-container");
 
         assertTrue(resolver.resolvePublishedPort(7000).isEmpty());
-
-        ports.getBindings().put(ExposedPort.tcp(7000), new Ports.Binding[] {
-                null,
-                Ports.Binding.bindPort(49173)
-        });
         assertEquals(OptionalInt.of(49173), resolver.resolvePublishedPort(7000));
 
         ports.getBindings().put(ExposedPort.tcp(7000), new Ports.Binding[] {Ports.Binding.bindPort(49174)});
         assertEquals(OptionalInt.of(49173), resolver.resolvePublishedPort(7000));
+    }
+
+    @Test
+    void resolvePublishedPort_publishedBinding_inspectsOnce() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        Ports ports = new Ports();
+        ports.getBindings().put(ExposedPort.tcp(4566), new Ports.Binding[] {Ports.Binding.bindPort(54321)});
+        InspectContainerCmd inspectCmd = inspectReturning(dockerClient, ports);
+
+        CurrentContainerNetworkResolver resolver =
+                new TestResolver(dockerClient, containerDetector, "floci-container");
+
+        assertEquals(OptionalInt.of(54321), resolver.resolvePublishedPort(4566));
+        assertEquals(OptionalInt.of(54321), resolver.resolvePublishedPort(4566));
+        verify(inspectCmd, times(1)).exec();
+    }
+
+    @Test
+    void resolvePublishedPort_portNotPublished_cachesTheEmptyResult() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        // EXPOSE 4566 without -p: the port is listed with no host binding.
+        Ports ports = new Ports();
+        ports.getBindings().put(ExposedPort.tcp(4566), null);
+        InspectContainerCmd inspectCmd = inspectReturning(dockerClient, ports);
+
+        CurrentContainerNetworkResolver resolver =
+                new TestResolver(dockerClient, containerDetector, "floci-container");
+
+        assertTrue(resolver.resolvePublishedPort(4566).isEmpty());
+        assertTrue(resolver.resolvePublishedPort(4566).isEmpty());
+        verify(inspectCmd, times(1)).exec();
+    }
+
+    @Test
+    void resolvePublishedPort_inspectFails_retriesOnTheNextCall() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class);
+        when(dockerClient.inspectContainerCmd("floci-container")).thenReturn(inspectCmd);
+        when(inspectCmd.exec()).thenThrow(new RuntimeException("Docker daemon unreachable"));
+
+        CurrentContainerNetworkResolver resolver =
+                new TestResolver(dockerClient, containerDetector, "floci-container");
+
+        assertTrue(resolver.resolvePublishedPort(4566).isEmpty());
+        assertTrue(resolver.resolvePublishedPort(4566).isEmpty());
+        verify(inspectCmd, times(2)).exec();
+    }
+
+    private static InspectContainerCmd inspectReturning(DockerClient dockerClient, Ports ports) {
+        InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class);
+        InspectContainerResponse inspect = mock(InspectContainerResponse.class, RETURNS_DEEP_STUBS);
+        when(dockerClient.inspectContainerCmd("floci-container")).thenReturn(inspectCmd);
+        when(inspectCmd.exec()).thenReturn(inspect);
+        when(inspect.getNetworkSettings().getPorts()).thenReturn(ports);
+        return inspectCmd;
     }
 
     private static Map<String, ContainerNetwork> networks(String firstName, String firstIp,
