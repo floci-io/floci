@@ -26,7 +26,8 @@ import jakarta.ws.rs.core.Response;
 /**
  * REST-JSON routes for AWS IoT custom authorizers: CreateAuthorizer, DescribeAuthorizer,
  * UpdateAuthorizer, DeleteAuthorizer, ListAuthorizers, SetDefaultAuthorizer,
- * DescribeDefaultAuthorizer and ClearDefaultAuthorizer, on the paths and shapes the AWS SDKs use.
+ * DescribeDefaultAuthorizer, ClearDefaultAuthorizer and TestInvokeAuthorizer, on the paths and
+ * shapes the AWS SDKs use.
  */
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
@@ -34,13 +35,15 @@ import jakarta.ws.rs.core.Response;
 public class IotAuthorizerController {
 
     private final IotAuthorizerService authorizerService;
+    private final IotCustomAuthorizer customAuthorizer;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public IotAuthorizerController(IotAuthorizerService authorizerService, RegionResolver regionResolver,
-                                   ObjectMapper objectMapper) {
+    public IotAuthorizerController(IotAuthorizerService authorizerService, IotCustomAuthorizer customAuthorizer,
+                                   RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.authorizerService = authorizerService;
+        this.customAuthorizer = customAuthorizer;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -73,6 +76,14 @@ public class IotAuthorizerController {
     public Response deleteAuthorizer(@Context HttpHeaders headers, @PathParam("authorizerName") String authorizerName) {
         authorizerService.deleteAuthorizer(authorizerName, regionResolver.resolveRegion(headers));
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/authorizer/{authorizerName}/test")
+    public Response testInvokeAuthorizer(@Context HttpHeaders headers, @PathParam("authorizerName") String authorizerName,
+                                         String body) {
+        return Response.ok(customAuthorizer.testInvoke(authorizerName, readJson(body), regionResolver.resolveRegion(headers)))
+                .build();
     }
 
     @GET

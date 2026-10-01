@@ -161,7 +161,7 @@ class IotMqttBrokerServiceTest {
         when(config.tls().enabled()).thenReturn(true);
         when(registry.getDefault()).thenReturn(Optional.of(tls));
         when(tls.getKeyStoreOptions()).thenReturn(pem(bootLeaf));
-        broker = new IotMqttBrokerService(config, vertx, iotService, registry);
+        broker = new IotMqttBrokerService(config, vertx, iotService, mock(IotCustomAuthorizer.class), registry);
     }
 
     @AfterEach

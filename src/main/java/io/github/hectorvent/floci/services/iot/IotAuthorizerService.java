@@ -29,8 +29,8 @@ import java.util.regex.Pattern;
 
 /**
  * AWS IoT Core custom authorizers: the records CreateAuthorizer and its peers manage, and the
- * account's default authorizer. The function ARN is checked for ARN syntax only, as on AWS; nothing
- * here invokes the function or gates a connection.
+ * account's default authorizer. The function ARN is checked for ARN syntax only, as on AWS;
+ * {@link IotCustomAuthorizer} invokes the function.
  */
 @ApplicationScoped
 public class IotAuthorizerService {
@@ -317,9 +317,7 @@ public class IotAuthorizerService {
         }
         RSAPublicKey key;
         try {
-            byte[] der = Base64.getMimeDecoder().decode(
-                    pem.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", ""));
-            key = (RSAPublicKey) KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(der));
+            key = rsaPublicKey(pem);
         } catch (GeneralSecurityException | IllegalArgumentException e) {
             throw invalid("Authorizer " + name + " public key for key name " + keyName + " not a valid RSA key");
         }
@@ -328,6 +326,12 @@ public class IotAuthorizerService {
             throw invalid("Authorizer " + name + " public key for key name " + keyName
                     + " invalid: Key must be 2048 bits but was " + bits + " bits");
         }
+    }
+
+    static RSAPublicKey rsaPublicKey(String pem) throws GeneralSecurityException {
+        byte[] der = Base64.getMimeDecoder().decode(
+                pem.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", ""));
+        return (RSAPublicKey) KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(der));
     }
 
     private static void requireFunctionArn(String name, String functionArn) {
@@ -355,11 +359,11 @@ public class IotAuthorizerService {
                 Map.of("resourceId", authorizer.getAuthorizerName(), "resourceArn", authorizer.getAuthorizerArn()));
     }
 
-    private static AwsException constraint(String field, String constraint) {
+    static AwsException constraint(String field, String constraint) {
         return invalid("1 validation error detected: Value at '" + field + "' failed to satisfy constraint: " + constraint);
     }
 
-    private static AwsException invalid(String message) {
+    static AwsException invalid(String message) {
         return new AwsException("InvalidRequestException", message, 400);
     }
 
