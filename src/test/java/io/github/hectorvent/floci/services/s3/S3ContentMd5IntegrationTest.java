@@ -16,7 +16,7 @@ import static org.hamcrest.Matchers.not;
 @QuarkusTest
 class S3ContentMd5IntegrationTest {
 
-    private static final String INVALID_DIGEST_MESSAGE = "The Content-MD5 you specified was invalid.";
+    private static final String INVALID_DIGEST_MESSAGE = "The Content-MD5 you specified is not valid.";
     private static final String BAD_DIGEST_MESSAGE = "The Content-MD5 you specified did not match what we received.";
 
     @Test

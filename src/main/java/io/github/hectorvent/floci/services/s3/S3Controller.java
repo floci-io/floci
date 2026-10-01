@@ -3010,7 +3010,7 @@ public class S3Controller {
             expected = null;
         }
         if (expected == null || expected.length != 16) {
-            throw new AwsException("InvalidDigest", "The Content-MD5 you specified was invalid.", 400);
+            throw new AwsException("InvalidDigest", "The Content-MD5 you specified is not valid.", 400);
         }
         byte[] actual;
         try {
