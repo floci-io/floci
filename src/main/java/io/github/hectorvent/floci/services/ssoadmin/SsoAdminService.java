@@ -45,6 +45,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -253,10 +254,22 @@ public class SsoAdminService implements Resettable {
         if (instanceDeletionMarkers.get(ownerAccountId).orElse(false)) {
             return;
         }
-        if (instances.get(ownerAccountId).isEmpty()) {
+        Optional<SsoInstance> stored = instances.get(ownerAccountId);
+        if (stored.isEmpty()) {
             instances.put(ownerAccountId, new SsoInstance(bootstrapInstanceArn, IDENTITY_STORE_ID,
                     "floci-identity-center", ownerAccountId, region, System.currentTimeMillis(), "ACTIVE",
                     null, false, new LinkedHashMap<>()));
+            return;
+        }
+        // Before the seeded instance took its partition it was stored as arn:aws: in every
+        // deployment, while permission sets were already minted in the instance's own partition,
+        // so a persisted outside-aws instance is moved to the ARN those permission sets name.
+        SsoInstance instance = stored.get();
+        String expectedArn = globalArn("sso", instance.primaryRegion(), "", BOOTSTRAP_INSTANCE);
+        if (instance.instanceArn().endsWith(":" + BOOTSTRAP_INSTANCE) && !instance.instanceArn().equals(expectedArn)) {
+            instances.put(ownerAccountId, new SsoInstance(expectedArn, instance.identityStoreId(), instance.name(),
+                    instance.ownerAccountId(), instance.primaryRegion(), instance.createdDateEpochMillis(),
+                    instance.status(), instance.statusReason(), instance.accountInstance(), instance.tags()));
         }
     }
 
