@@ -349,13 +349,16 @@ public class SchedulerService {
         }
         if (req.getScheduleExpression().length() > 256) {
             throw new AwsException("ValidationException",
-                    "ScheduleExpression must be 256 characters or fewer.", 400);
+                    "1 validation error detected: Value '" + req.getScheduleExpression()
+                            + "' at 'scheduleExpression' failed to satisfy constraint: Member must have length less than or equal to 256", 400);
         }
         try {
             SchedulerExpressionParser.validate(req.getScheduleExpression(), req.getScheduleExpressionTimezone());
         } catch (IllegalArgumentException | DateTimeException | ArithmeticException e) {
             throw new AwsException("ValidationException",
-                    "Invalid ScheduleExpression: " + e.getMessage(), 400);
+                    "1 validation error detected: Value '" + req.getScheduleExpression()
+                            + "' at 'scheduleExpression' failed to satisfy constraint: Member must be a valid schedule expression: "
+                            + e.getMessage(), 400);
         }
         if (req.getFlexibleTimeWindow() == null) {
             throw new AwsException("ValidationException",
@@ -393,10 +396,16 @@ public class SchedulerService {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value null at 'target.roleArn' failed to satisfy constraint: Member must not be null", 400);
         }
-        if (req.getTarget().getRoleArn().length() > 1600
-                || !ROLE_ARN_PATTERN.matcher(req.getTarget().getRoleArn()).matches()) {
+        if (req.getTarget().getRoleArn().length() > 1600) {
             throw new AwsException("ValidationException",
-                    "Target.RoleArn must be an IAM role ARN.", 400);
+                    "1 validation error detected: Value '" + req.getTarget().getRoleArn()
+                            + "' at 'target.roleArn' failed to satisfy constraint: Member must have length less than or equal to 1600", 400);
+        }
+        if (!ROLE_ARN_PATTERN.matcher(req.getTarget().getRoleArn()).matches()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + req.getTarget().getRoleArn()
+                            + "' at 'target.roleArn' failed to satisfy constraint: Member must satisfy regular expression pattern: "
+                            + ROLE_ARN_PATTERN.pattern(), 400);
         }
         if (req.getTarget().getDeadLetterConfig() != null
                 && (req.getTarget().getDeadLetterConfig().getArn() == null

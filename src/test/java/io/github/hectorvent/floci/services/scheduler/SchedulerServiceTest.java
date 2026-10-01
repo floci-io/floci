@@ -215,21 +215,26 @@ class SchedulerServiceTest {
         Target target = new Target("arn:t", "arn:aws:iam::000000000000:role/r", null, null);
         FlexibleTimeWindow window = new FlexibleTimeWindow("OFF", null);
         for (String expression : List.of("cron(invalid)", "cron(0 10 * * *)",
-                "rate(0 minutes)", "rate(1 week)", "at(2026-02-30T10:00:00)")) {
+                "rate(0 minutes)", "rate(1 week)", "rate(1 hours)", "rate(5 hour)",
+                "rate(1 minutes)", "rate(5 minute)", "rate(1 days)", "rate(5 day)",
+                "at(2026-02-30T10:00:00)")) {
             ScheduleRequest invalid = newRequest("invalid", null, expression, window, target);
             AwsException createError = assertThrows(AwsException.class,
                     () -> service.createSchedule(invalid, REGION), expression);
             assertEquals("ValidationException", createError.getErrorCode());
             assertEquals(400, createError.getHttpStatus());
+            assertTrue(createError.getMessage().startsWith("1 validation error detected: Value '" + expression
+                    + "' at 'scheduleExpression' failed to satisfy constraint: "));
         }
 
         ScheduleRequest valid = newRequest("existing", null, "rate(1 hour)", window, target);
         service.createSchedule(valid, REGION);
-        for (String expression : List.of("cron(invalid)", "rate(1 week)")) {
+        for (String expression : List.of("cron(invalid)", "rate(1 week)", "rate(1 hours)", "rate(5 hour)")) {
             ScheduleRequest invalidUpdate = newRequest("existing", null, expression, window, target);
             AwsException updateError = assertThrows(AwsException.class,
                     () -> service.updateSchedule(invalidUpdate, REGION), expression);
             assertEquals("ValidationException", updateError.getErrorCode());
+            assertTrue(updateError.getMessage().contains("at 'scheduleExpression' failed to satisfy constraint:"));
             assertEquals("rate(1 hour)", service.getSchedule("existing", null, REGION).getScheduleExpression());
         }
     }
@@ -245,6 +250,9 @@ class SchedulerServiceTest {
                     () -> service.createSchedule(invalid, REGION), roleArn);
             assertEquals("ValidationException", error.getErrorCode());
             assertEquals(400, error.getHttpStatus());
+            assertTrue(error.getMessage().startsWith("1 validation error detected: Value '" + roleArn
+                    + "' at 'target.roleArn' failed to satisfy constraint: Member must satisfy regular expression pattern: "));
+            assertTrue(error.getMessage().contains(":iam::\\d{12}:role/"));
         }
 
         Target validTarget = new Target("arn:t", "arn:aws-us-gov:iam::000000000000:role/path/r", null, null);

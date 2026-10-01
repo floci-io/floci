@@ -71,10 +71,17 @@ public final class SchedulerExpressionParser {
         switch (classify(expression)) {
             case AT -> parseAt(expression, timezone);
             case RATE -> {
-                if (!AWS_RATE_PATTERN.matcher(expression.trim()).matches()) {
+                Matcher rate = AWS_RATE_PATTERN.matcher(expression.trim());
+                if (!rate.matches()) {
                     throw new IllegalArgumentException("Week-based rates are not supported by Scheduler");
                 }
                 parseRateMillis(expression);
+                long value = Long.parseLong(rate.group(1));
+                String unit = rate.group(2);
+                boolean plural = unit.endsWith("s") || unit.endsWith("S");
+                if ((value == 1) == plural) {
+                    throw new IllegalArgumentException("Rate unit must be singular for 1 and plural for values greater than 1");
+                }
             }
             case CRON -> {
                 parseCron(expression);
