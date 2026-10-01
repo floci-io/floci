@@ -7,15 +7,24 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.elasticbeanstalk.ElasticBeanstalkClient;
 import software.amazon.awssdk.services.elasticbeanstalk.model.ConfigurationOptionSetting;
 import software.amazon.awssdk.services.elasticbeanstalk.model.CreateApplicationRequest;
+import software.amazon.awssdk.services.elasticbeanstalk.model.CreateApplicationResponse;
 import software.amazon.awssdk.services.elasticbeanstalk.model.CreateApplicationVersionRequest;
+import software.amazon.awssdk.services.elasticbeanstalk.model.CreateApplicationVersionResponse;
 import software.amazon.awssdk.services.elasticbeanstalk.model.CreateEnvironmentRequest;
+import software.amazon.awssdk.services.elasticbeanstalk.model.CreateEnvironmentResponse;
+import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeApplicationVersionsResponse;
 import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeApplicationsRequest;
 import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeApplicationVersionsRequest;
+import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeApplicationsResponse;
 import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeConfigurationSettingsRequest;
+import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeConfigurationSettingsResponse;
 import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeEnvironmentsRequest;
+import software.amazon.awssdk.services.elasticbeanstalk.model.DescribeEnvironmentsResponse;
 import software.amazon.awssdk.services.elasticbeanstalk.model.S3Location;
 import software.amazon.awssdk.services.elasticbeanstalk.model.TerminateEnvironmentRequest;
+import software.amazon.awssdk.services.elasticbeanstalk.model.TerminateEnvironmentResponse;
 import software.amazon.awssdk.services.elasticbeanstalk.model.UpdateEnvironmentRequest;
+import software.amazon.awssdk.services.elasticbeanstalk.model.UpdateEnvironmentResponse;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -52,7 +61,7 @@ class ElasticBeanstalkTest {
         String versionLabel = "v1";
         String cnamePrefix = TestFixtures.uniqueName("sdk-eb-cname");
 
-        var application = elasticBeanstalk.createApplication(CreateApplicationRequest.builder()
+        CreateApplicationResponse application = elasticBeanstalk.createApplication(CreateApplicationRequest.builder()
                 .applicationName(applicationName)
                 .description("Elastic Beanstalk SDK compatibility app")
                 .build());
@@ -62,7 +71,7 @@ class ElasticBeanstalkTest {
                 .endsWith(":application/" + applicationName);
         assertThat(application.application().configurationTemplates()).contains("default");
 
-        var version = elasticBeanstalk.createApplicationVersion(CreateApplicationVersionRequest.builder()
+        CreateApplicationVersionResponse version = elasticBeanstalk.createApplicationVersion(CreateApplicationVersionRequest.builder()
                 .applicationName(applicationName)
                 .versionLabel(versionLabel)
                 .description("Initial SDK version")
@@ -76,7 +85,7 @@ class ElasticBeanstalkTest {
         assertThat(version.applicationVersion().versionLabel()).isEqualTo(versionLabel);
         assertThat(version.applicationVersion().sourceBundle().s3Bucket()).isEqualTo("source-bucket");
 
-        var environment = elasticBeanstalk.createEnvironment(CreateEnvironmentRequest.builder()
+        CreateEnvironmentResponse environment = elasticBeanstalk.createEnvironment(CreateEnvironmentRequest.builder()
                 .applicationName(applicationName)
                 .environmentName(environmentName)
                 .versionLabel(versionLabel)
@@ -95,7 +104,7 @@ class ElasticBeanstalkTest {
         assertThat(environment.healthAsString()).isEqualTo("Green");
         assertThat(environment.cname()).isEqualTo(cnamePrefix + ".elasticbeanstalk.local");
 
-        var applications = elasticBeanstalk.describeApplications(DescribeApplicationsRequest.builder()
+        DescribeApplicationsResponse applications = elasticBeanstalk.describeApplications(DescribeApplicationsRequest.builder()
                 .applicationNames(applicationName)
                 .build());
         assertThat(applications.applications()).singleElement().satisfies(app -> {
@@ -104,7 +113,7 @@ class ElasticBeanstalkTest {
             assertThat(app.versions()).contains(versionLabel);
         });
 
-        var versions = elasticBeanstalk.describeApplicationVersions(DescribeApplicationVersionsRequest.builder()
+        DescribeApplicationVersionsResponse versions = elasticBeanstalk.describeApplicationVersions(DescribeApplicationVersionsRequest.builder()
                 .applicationName(applicationName)
                 .versionLabels(versionLabel)
                 .build());
@@ -114,7 +123,7 @@ class ElasticBeanstalkTest {
             assertThat(appVersion.sourceBundle().s3Key()).isEqualTo("app-v1.zip");
         });
 
-        var described = elasticBeanstalk.describeEnvironments(DescribeEnvironmentsRequest.builder()
+        DescribeEnvironmentsResponse described = elasticBeanstalk.describeEnvironments(DescribeEnvironmentsRequest.builder()
                 .applicationName(applicationName)
                 .environmentNames(environmentName)
                 .build());
@@ -124,7 +133,7 @@ class ElasticBeanstalkTest {
             assertThat(env.endpointURL()).startsWith("awseb-");
         });
 
-        var updated = elasticBeanstalk.updateEnvironment(UpdateEnvironmentRequest.builder()
+        UpdateEnvironmentResponse updated = elasticBeanstalk.updateEnvironment(UpdateEnvironmentRequest.builder()
                 .environmentName(environmentName)
                 .description("Updated SDK environment")
                 .optionSettings(ConfigurationOptionSetting.builder()
@@ -137,7 +146,7 @@ class ElasticBeanstalkTest {
         assertThat(updated.environmentName()).isEqualTo(environmentName);
         assertThat(updated.description()).isEqualTo("Updated SDK environment");
 
-        var settings = elasticBeanstalk.describeConfigurationSettings(DescribeConfigurationSettingsRequest.builder()
+        DescribeConfigurationSettingsResponse settings = elasticBeanstalk.describeConfigurationSettings(DescribeConfigurationSettingsRequest.builder()
                 .applicationName(applicationName)
                 .environmentName(environmentName)
                 .build());
@@ -148,13 +157,13 @@ class ElasticBeanstalkTest {
                             assertThat(option.value()).isEqualTo("prod");
                         }));
 
-        var terminated = elasticBeanstalk.terminateEnvironment(TerminateEnvironmentRequest.builder()
+        TerminateEnvironmentResponse terminated = elasticBeanstalk.terminateEnvironment(TerminateEnvironmentRequest.builder()
                 .environmentName(environmentName)
                 .build());
         assertThat(terminated.environmentName()).isEqualTo(environmentName);
         assertThat(terminated.statusAsString()).isEqualTo("Terminated");
 
-        var deletedEnvironments = elasticBeanstalk.describeEnvironments(DescribeEnvironmentsRequest.builder()
+        DescribeEnvironmentsResponse deletedEnvironments = elasticBeanstalk.describeEnvironments(DescribeEnvironmentsRequest.builder()
                 .applicationName(applicationName)
                 .environmentNames(environmentName)
                 .includeDeleted(true)

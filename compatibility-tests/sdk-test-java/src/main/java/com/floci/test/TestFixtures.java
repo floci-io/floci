@@ -17,6 +17,7 @@ import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityPr
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.resourceexplorer2.ResourceExplorer2ClientBuilder;
 import software.amazon.awssdk.services.servicediscovery.ServiceDiscoveryClient;
 import software.amazon.awssdk.services.emr.EmrClient;
 import software.amazon.awssdk.services.emrserverless.EmrServerlessClient;
@@ -1404,7 +1405,7 @@ public final class TestFixtures {
      * to exercise a real create against a region that starts with no index.
      */
     public static ResourceExplorer2Client resourceExplorer2Client(Region region) {
-        var builder = ResourceExplorer2Client.builder().region(region);
+        ResourceExplorer2ClientBuilder builder = ResourceExplorer2Client.builder().region(region);
         if (!isRealAws()) {
             builder.endpointOverride(ENDPOINT).credentialsProvider(CREDENTIALS);
         }

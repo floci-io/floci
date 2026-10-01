@@ -1,6 +1,8 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import software.amazon.awssdk.core.ResponseBytes;
+import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.BucketLocationConstraint;
@@ -20,6 +22,7 @@ import software.amazon.awssdk.services.s3.model.GetBucketLocationResponse;
 import software.amazon.awssdk.services.s3.model.GetBucketTaggingRequest;
 import software.amazon.awssdk.services.s3.model.GetBucketTaggingResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectTaggingRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectTaggingResponse;
 import software.amazon.awssdk.services.s3.model.HeadBucketRequest;
@@ -33,6 +36,7 @@ import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutBucketTaggingRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectTaggingRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.Tagging;
@@ -131,7 +135,7 @@ class S3Test {
     @Test
     @Order(7)
     void getObject() throws Exception {
-        var response = s3.getObject(GetObjectRequest.builder()
+        ResponseInputStream<GetObjectResponse> response = s3.getObject(GetObjectRequest.builder()
                 .bucket(BUCKET).key(KEY).build());
         byte[] data = response.readAllBytes();
         String downloaded = new String(data, StandardCharsets.UTF_8);
@@ -280,7 +284,7 @@ class S3Test {
             assertThat(response.copyObjectResult().eTag()).isNotNull();
 
             // Verify copied content
-            var getResponse = s3.getObject(GetObjectRequest.builder()
+            ResponseInputStream<GetObjectResponse> getResponse = s3.getObject(GetObjectRequest.builder()
                     .bucket(destBucket).key(destKey).build());
             String downloaded = new String(getResponse.readAllBytes(), StandardCharsets.UTF_8);
             assertThat(downloaded).isEqualTo(CONTENT);
@@ -317,7 +321,7 @@ class S3Test {
             assertThat(response.copyObjectResult().eTag()).isNotNull();
 
             // Verify copied content
-            var getResponse = s3.getObject(GetObjectRequest.builder()
+            ResponseInputStream<GetObjectResponse> getResponse = s3.getObject(GetObjectRequest.builder()
                     .bucket(dstBucket).key(dstKey).build());
             String downloaded = new String(getResponse.readAllBytes(), StandardCharsets.UTF_8);
             assertThat(downloaded).isEqualTo("non-ascii content");
@@ -405,7 +409,7 @@ class S3Test {
         }
         s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
         try {
-            var putResponse = s3.putObject(PutObjectRequest.builder()
+            PutObjectResponse putResponse = s3.putObject(PutObjectRequest.builder()
                             .bucket(bucket).key(key)
                             .contentEncoding("gzip")
                             .contentType("application/json")
@@ -512,7 +516,7 @@ class S3Test {
                             .bucket(bucket).key(key).build(),
                     RequestBody.fromString(CONTENT));
 
-            var response = s3.getObjectAsBytes(GetObjectRequest.builder()
+            ResponseBytes<GetObjectResponse> response = s3.getObjectAsBytes(GetObjectRequest.builder()
                     .bucket(bucket)
                     .key(key)
                     .range("bytes=6-13")

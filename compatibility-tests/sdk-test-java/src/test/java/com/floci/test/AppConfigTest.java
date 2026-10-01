@@ -134,7 +134,7 @@ class AppConfigTest {
     @Test
     @Order(7)
     void startConfigurationSession() {
-        var response = appConfigData.startConfigurationSession(StartConfigurationSessionRequest.builder()
+        StartConfigurationSessionResponse response = appConfigData.startConfigurationSession(StartConfigurationSessionRequest.builder()
                 .applicationIdentifier(applicationId)
                 .environmentIdentifier(environmentId)
                 .configurationProfileIdentifier(configurationProfileId)
@@ -226,7 +226,7 @@ class AppConfigTest {
     @Order(13)
     @DisplayName("Poll interval: requested minimum is returned to the client")
     void requiredMinimumPollIntervalIsReturned() {
-        var sessionResponse = appConfigData.startConfigurationSession(StartConfigurationSessionRequest.builder()
+        StartConfigurationSessionResponse sessionResponse = appConfigData.startConfigurationSession(StartConfigurationSessionRequest.builder()
                 .applicationIdentifier(applicationId)
                 .environmentIdentifier(environmentId)
                 .configurationProfileIdentifier(configurationProfileId)

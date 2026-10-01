@@ -4,77 +4,10 @@
         "https://checkstyle.org/dtds/suppressions_1_2.dtd">
 <suppressions>
     <!-- Files that still use var. Remove an entry once its file is clean. -->
-    <suppress id="NoVar" files="/com/floci/test/AbstractKinesisAnalyticsV2LifecycleTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/AccessAnalyzerTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/AccountAlternateContactTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/AcmTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/AmazonMqTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/ApiGatewayV2ManagementTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/ApiGatewayV2WebSocketAndExtendedOpsTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/ApiGatewayV2WebSocketDataPlaneTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/AppConfigTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/BcmPricingCalculatorTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/BedrockAgentCoreCredentialProviderTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/BedrockAgentCoreResourcePolicyTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/BedrockGuardrailTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/CWWireDebugTest\.java$"/>
     <suppress id="NoVar" files="/com/floci/test/CloudFormationEventSourceMappingTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/CloudFrontOriginCustomHeadersTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/CloudFrontResponseHeadersPolicyTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/CloudFrontTrustedKeyGroupsTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/CloudWatchLogsCrossAccountPolicyTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/CodeDeployEcsTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/CodeDeployTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/ControlCatalogTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/DetectiveOrganizationAdministrationTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/DynamoDbAccessPathValidationTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/DynamoDbImportTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/Ec2DescribeSpotPriceHistoryTest\.java$"/>
     <suppress id="NoVar" files="/com/floci/test/ElastiCacheTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/ElasticBeanstalkTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/FisTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/GlueCatalogTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/GlueSchemaRegistryTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/IamTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/IdentityStoreTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/Inspector2OrganizationConfigurationTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/IotTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/KinesisEfoTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/KinesisTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/KmsFeaturesTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/KmsSm2Test\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/KmsTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/LightsailTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/MarketplaceAgreementTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/MarketplaceCatalogTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/MarketplaceDeploymentTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/MarketplaceDiscoveryTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/MarketplaceEntitlementTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/MarketplaceMeteringTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/MarketplaceReportingTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/NeptuneTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/OamTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/RdsControlPlaneTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/RdsIamTokenCompatTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/RedshiftOperationsTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/ResourceExplorer2Test\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/S3AnnotationsTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/S3PresignedUrlSigV4VerificationTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/S3Test\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/S3VirtualHostStyleTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/SecurityHubOrganizationConfigurationTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/SesEventPublishingTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/SesReceiptRuleSetTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/SnsTest\.java$"/>
     <suppress id="NoVar" files="/com/floci/test/SqsMd5Test\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/SsoAdminAccountAssignmentTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/SsoOidcTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/SsoPortalTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/StepFunctionsExecutionHistoryTest\.java$"/>
     <suppress id="NoVar" files="/com/floci/test/StsTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/SwfRegionPaginationTest\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/TestFixtures\.java$"/>
-    <suppress id="NoVar" files="/com/floci/test/VerifiedPermissionsTest\.java$"/>
     <suppress id="NoVar" files="/floci/core/common/IamEnforcementFilter\.java$"/>
     <suppress id="NoVar" files="/floci/core/common/docker/ContainerLifecycleManager\.java$"/>
     <suppress id="NoVar" files="/floci/core/common/docker/ContainerLogStreamer\.java$"/>

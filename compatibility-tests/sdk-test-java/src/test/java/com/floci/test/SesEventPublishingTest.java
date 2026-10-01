@@ -673,7 +673,8 @@ class SesEventPublishingTest {
             if (r.messages().isEmpty()) {
                 continue;
             }
-            for (var m : r.messages()) {
+            // Message is imported from sesv2.
+            for (software.amazon.awssdk.services.sqs.model.Message m : r.messages()) {
                 events.add(MAPPER.readTree(m.body()));
             }
             List<DeleteMessageBatchRequestEntry> entries = new ArrayList<>();
@@ -765,7 +766,7 @@ class SesEventPublishingTest {
             if (r.messages().isEmpty()) {
                 continue;
             }
-            for (var m : r.messages()) {
+            for (software.amazon.awssdk.services.sqs.model.Message m : r.messages()) {
                 JsonNode wrapper = MAPPER.readTree(m.body());
                 JsonNode event = MAPPER.readTree(wrapper.path("Message").asText());
                 events.add(event);
