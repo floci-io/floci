@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentSkipListSet;
 
@@ -87,6 +88,22 @@ public class PortAllocator {
         if (reserved.remove(port)) {
             LOG.debugv("Released port {0}", String.valueOf(port));
         }
+    }
+
+    /**
+     * Whether Docker refused to publish a host port because something already holds it.
+     * {@link #allocate} cannot rule this out: its probe races Docker binding the port, and from
+     * inside a container it cannot see a host process holding one.
+     */
+    public static boolean isHostPortCollision(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            String message = cause.getMessage();
+            if (message != null && (message.toLowerCase(Locale.ROOT).contains("port is already allocated")
+                    || message.toLowerCase(Locale.ROOT).contains("address already in use"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

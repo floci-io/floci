@@ -303,54 +303,69 @@ public class EcrRegistryManager {
         }
         this.activeContainerName = name;
 
-        // Allocate port
-        int chosenPort = portAllocator.allocate(
-                config.services().ecr().registryBasePort(),
-                config.services().ecr().registryMaxPort());
-
+        int basePort = config.services().ecr().registryBasePort();
+        int maxPort = config.services().ecr().registryMaxPort();
+        // Ports Docker refused stay reserved so allocate() moves past them, bounding the retries by the range.
+        List<Integer> portsInUse = new ArrayList<>();
         try {
-            String image = config.services().ecr().registryImage();
+            while (!started) {
+                int chosenPort;
+                try {
+                    chosenPort = portAllocator.allocate(basePort, maxPort);
+                } catch (RuntimeException e) {
+                    if (portsInUse.isEmpty()) {
+                        throw e;
+                    }
+                    throw new RuntimeException("Failed to start ECR backing registry container: Docker reports host ports "
+                            + portsInUse + " already in use and no other port in " + basePort + "-" + maxPort
+                            + " is free", e);
+                }
+                try {
+                    ContainerInfo info = lifecycleManager.createAndStart(registryContainerSpec(name, chosenPort));
+                    this.containerId = info.containerId();
+                    this.hostPort = chosenPort;
+                    this.started = true;
+                    LOG.infov("Started ECR backing registry {0} on host port {1}", name, String.valueOf(chosenPort));
 
-            // Build environment variables
-            List<String> env = new ArrayList<>(List.of(
-                    "REGISTRY_STORAGE_DELETE_ENABLED=true",
-                    "REGISTRY_HTTP_ADDR=0.0.0.0:" + CONTAINER_INTERNAL_PORT,
-                    "REGISTRY_HTTP_RELATIVEURLS=true"
-            ));
-
-            // Build container spec
-            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
-                    .withName(name)
-                    .withEnv(env)
-                    .withLoopbackPortBinding(CONTAINER_INTERNAL_PORT, chosenPort)
-                    .withDockerNetwork(resolveRegistryDockerNetwork())
-                    .withLogRotation()
-                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                            "ecr", null, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
-
-            // Handle persistence mounting based on storage configuration
-            addPersistenceMounts(specBuilder, env);
-
-            ContainerSpec spec = specBuilder.build();
-
-            ContainerInfo info = lifecycleManager.createAndStart(spec);
-            this.containerId = info.containerId();
-            this.hostPort = chosenPort;
-            this.started = true;
-            LOG.infov("Started ECR backing registry {0} on host port {1}", name, String.valueOf(chosenPort));
-
-            // Attach log streaming (new feature)
-            attachLogStream(false);
-        } catch (Exception e) {
-            // Release the reserved port unless the container actually started, so a
-            // failed start (e.g. Docker unreachable) does not permanently exhaust the
-            // registry port pool across retries.
-            if (!started) {
-                portAllocator.release(chosenPort);
+                    attachLogStream(false);
+                } catch (Exception e) {
+                    if (!started && PortAllocator.isHostPortCollision(e)) {
+                        portsInUse.add(chosenPort);
+                        LOG.warnv("ECR backing registry could not use host port {0}: Docker reports it in use; "
+                                + "trying another port", String.valueOf(chosenPort));
+                        continue;
+                    }
+                    // Release the reserved port unless the container actually started, so a
+                    // failed start (e.g. Docker unreachable) does not permanently exhaust the
+                    // registry port pool across retries.
+                    if (!started) {
+                        portAllocator.release(chosenPort);
+                    }
+                    throw new RuntimeException("Failed to start ECR backing registry container: " + e.getMessage(), e);
+                }
             }
-            throw new RuntimeException("Failed to start ECR backing registry container: " + e.getMessage(), e);
+        } finally {
+            portsInUse.forEach(portAllocator::release);
         }
         runReconcileOnce();
+    }
+
+    private ContainerSpec registryContainerSpec(String name, int port) {
+        List<String> env = new ArrayList<>(List.of(
+                "REGISTRY_STORAGE_DELETE_ENABLED=true",
+                "REGISTRY_HTTP_ADDR=0.0.0.0:" + CONTAINER_INTERNAL_PORT,
+                "REGISTRY_HTTP_RELATIVEURLS=true"
+        ));
+        ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(config.services().ecr().registryImage())
+                .withName(name)
+                .withEnv(env)
+                .withLoopbackPortBinding(CONTAINER_INTERNAL_PORT, port)
+                .withDockerNetwork(resolveRegistryDockerNetwork())
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "ecr", null, regionResolver.getAccountId(), regionResolver.getDefaultRegion()));
+        addPersistenceMounts(specBuilder, env);
+        return specBuilder.build();
     }
 
     private String registryContainerName() {
