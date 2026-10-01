@@ -1,6 +1,7 @@
-# Every SES v2 operation: a sample of its path from the SES v2 model (botocore 1.43.62,
-# sesv2/2019-09-27) and the IAM action AWS's service reference lists for it
-# (https://servicereference.us-east-1.amazonaws.com/v1/ses/ses.json, read 2026-09-30).
+# Every SES v2 operation: a sample of its path from the SES v2 model (botocore develop at
+# 9931e9741, 2026-09-29, sesv2/2019-09-27) and the IAM action AWS's service reference lists for it
+# (https://servicereference.us-east-1.amazonaws.com/v1/ses/ses.json, read 2026-10-01).
+# ListConfigurationSets and ListEmailIdentities also keep the GET routes earlier models gave them.
 # SendEmail has no entry there; the Service Authorization Reference's SES v2 page defines
 # ses:SendEmail as v2's only send action (ses:SendRawEmail belongs to v1).
 GetAccount,GET,/v2/email/account,ses:GetAccount
@@ -75,11 +76,16 @@ GetEmailIdentityPolicies,GET,/v2/email/identities/sample-emailidentity/policies,
 DeleteEmailIdentityPolicy,DELETE,/v2/email/identities/sample-emailidentity/policies/sample-policyname,ses:DeleteEmailIdentityPolicy
 CreateEmailIdentityPolicy,POST,/v2/email/identities/sample-emailidentity/policies/sample-policyname,ses:CreateEmailIdentityPolicy
 UpdateEmailIdentityPolicy,PUT,/v2/email/identities/sample-emailidentity/policies/sample-policyname,ses:UpdateEmailIdentityPolicy
+AssociateEmailIdentityCertificate,POST,/v2/email/identity/certificates,ses:AssociateEmailIdentityCertificate
+DisassociateEmailIdentityCertificate,POST,/v2/email/identity/certificates/delete,ses:DisassociateEmailIdentityCertificate
+ListEmailIdentityCertificates,POST,/v2/email/identity/certificates/list,ses:ListEmailIdentityCertificates
 CreateImportJob,POST,/v2/email/import-jobs,ses:CreateImportJob
 ListImportJobs,POST,/v2/email/import-jobs/list,ses:ListImportJobs
 GetImportJob,GET,/v2/email/import-jobs/sample-jobid,ses:GetImportJob
 GetMessageInsights,GET,/v2/email/insights/sample-messageid/,ses:GetMessageInsights
+ListConfigurationSets,POST,/v2/email/list-configuration-sets,ses:ListConfigurationSets
 ListExportJobs,POST,/v2/email/list-export-jobs,ses:ListExportJobs
+ListEmailIdentities,POST,/v2/email/list-identities,ses:ListEmailIdentities
 BatchGetMetricData,POST,/v2/email/metrics/batch,ses:BatchGetMetricData
 ListMultiRegionEndpoints,GET,/v2/email/multi-region-endpoints,ses:ListMultiRegionEndpoints
 CreateMultiRegionEndpoint,POST,/v2/email/multi-region-endpoints,ses:CreateMultiRegionEndpoint
@@ -114,4 +120,5 @@ ListTenants,POST,/v2/email/tenants/list,ses:ListTenants
 CreateTenantResourceAssociation,POST,/v2/email/tenants/resources,ses:CreateTenantResourceAssociation
 DeleteTenantResourceAssociation,POST,/v2/email/tenants/resources/delete,ses:DeleteTenantResourceAssociation
 ListTenantResources,POST,/v2/email/tenants/resources/list,ses:ListTenantResources
+UpdateConfigurationSet,POST,/v2/email/update-configuration-sets,ses:UpdateConfigurationSet
 ListRecommendations,POST,/v2/email/vdm/recommendations,ses:ListRecommendations
