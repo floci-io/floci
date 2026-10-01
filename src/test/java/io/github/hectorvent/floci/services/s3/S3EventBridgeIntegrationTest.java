@@ -17,6 +17,7 @@ class S3EventBridgeIntegrationTest {
 
     private static final String EB_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String EB_TARGET = "AWSEvents.";
+    private static final String VERSIONED_BUCKET = "eb-s3-versioned-test-bucket";
 
     private static String ruleArn;
     private static String queueUrl;
@@ -178,6 +179,8 @@ class S3EventBridgeIntegrationTest {
         assert messageBody != null : "Expected a message in the queue after S3 delete";
         assert messageBody.contains("aws.s3") : "Expected source aws.s3 in: " + messageBody;
         assert messageBody.contains("Object Deleted") : "Expected detail-type 'Object Deleted' in: " + messageBody;
+        assert messageBody.contains("\"deletion-type\":\"Permanently Deleted\"")
+                : "Expected deletion-type 'Permanently Deleted' in: " + messageBody;
     }
 
     @Test
@@ -231,8 +234,98 @@ class S3EventBridgeIntegrationTest {
     }
 
     @Test
+    @Order(9)
+    void deleteObjectVersion_eventBridgeDetailCarriesTheDeletedVersionId() {
+        given().when().put("/" + VERSIONED_BUCKET).then().statusCode(200);
+        given()
+            .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+            .put("/" + VERSIONED_BUCKET + "?versioning")
+        .then()
+            .statusCode(200);
+
+        String olderVersionId = given()
+            .contentType("text/plain")
+            .body("v1")
+        .when()
+            .put("/" + VERSIONED_BUCKET + "/k.txt")
+        .then()
+            .statusCode(200)
+            .extract().header("x-amz-version-id");
+        given().contentType("text/plain").body("v2").when().put("/" + VERSIONED_BUCKET + "/k.txt")
+            .then().statusCode(200);
+
+        // Enabled after the writes, so the version delete is the only event on the queue.
+        given()
+            .contentType("application/xml")
+            .body("""
+                <NotificationConfiguration>
+                    <EventBridgeConfiguration/>
+                </NotificationConfiguration>
+                """)
+        .when()
+            .put("/" + VERSIONED_BUCKET + "?notification")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .delete("/" + VERSIONED_BUCKET + "/k.txt?versionId=" + olderVersionId)
+        .then()
+            .statusCode(204);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", allOf(
+                containsString("Object Deleted"),
+                containsString("\"version-id\":\"" + olderVersionId + "\""),
+                containsString("\"deletion-type\":\"Permanently Deleted\"")));
+    }
+
+    @Test
+    @Order(10)
+    void deleteObjectOnVersionedBucket_eventBridgeDetailSaysDeleteMarkerCreated() {
+        String markerVersionId = given()
+        .when()
+            .delete("/" + VERSIONED_BUCKET + "/k.txt")
+        .then()
+            .statusCode(204)
+            .header("x-amz-delete-marker", "true")
+            .extract().header("x-amz-version-id");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", allOf(
+                containsString("Object Deleted"),
+                containsString("\"version-id\":\"" + markerVersionId + "\""),
+                containsString("\"deletion-type\":\"Delete Marker Created\"")));
+    }
+
+    @Test
     @Order(100)
     void cleanup() {
+        given()
+            .contentType("application/xml")
+            .body("<NotificationConfiguration/>")
+        .when()
+            .put("/" + VERSIONED_BUCKET + "?notification");
+
         given()
             .contentType(EB_CONTENT_TYPE)
             .header("X-Amz-Target", EB_TARGET + "RemoveTargets")

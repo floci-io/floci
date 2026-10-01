@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cognito;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1363,9 +1364,21 @@ final class CognitoAuthFlowHandler {
                 return TriggerResult.error(TriggerErrorKind.USER_VALIDATION, errorMessage);
             }
             if (result.getPayload() == null || result.getPayload().length == 0) {
-                return TriggerResult.success(Map.of());
+                return TriggerResult.error(TriggerErrorKind.INVALID_RESPONSE,
+                        triggerKey + " trigger returned an empty response");
             }
-            Map<String, Object> parsed = MAPPER.readValue(result.getPayload(), new TypeReference<>() {});
+            Map<String, Object> parsed;
+            try {
+                parsed = MAPPER.readValue(result.getPayload(), new TypeReference<>() {});
+            } catch (JsonProcessingException e) {
+                LOG.debugv(e, "Cognito trigger {0} returned malformed JSON", triggerKey);
+                return TriggerResult.error(TriggerErrorKind.INVALID_RESPONSE,
+                        triggerKey + " trigger returned malformed JSON");
+            }
+            if (parsed == null) {
+                return TriggerResult.error(TriggerErrorKind.INVALID_RESPONSE,
+                        triggerKey + " trigger returned a non-object response");
+            }
             Object response = parsed.get("response");
             if (response != null && !(response instanceof Map<?, ?>)) {
                 return TriggerResult.error(TriggerErrorKind.INVALID_RESPONSE,
@@ -1404,20 +1417,23 @@ final class CognitoAuthFlowHandler {
                     triggerName + " trigger is not configured");
         }
         if (result.errored()) {
-            if (result.errorKind() == TriggerErrorKind.USER_VALIDATION) {
-                throw customAuthTriggerFailure("UserLambdaValidationException",
-                        triggerName + " failed with error " + result.errorMessage());
-            }
-            String errorCode = result.errorKind() == TriggerErrorKind.INVALID_RESPONSE
-                    ? "InvalidLambdaResponseException"
-                    : "UnexpectedLambdaException";
-            throw customAuthTriggerFailure(errorCode, triggerName + " trigger failed: " + result.errorMessage());
+            throw triggerFailure(result, triggerName);
         }
         if (result.response() == null) {
             throw customAuthTriggerFailure("InvalidLambdaResponseException",
                     triggerName + " trigger returned no response");
         }
         return result.response();
+    }
+
+    private AwsException triggerFailure(TriggerResult result, String triggerName) {
+        if (result.errorKind() == TriggerErrorKind.USER_VALIDATION) {
+            return customAuthTriggerFailure("UserLambdaValidationException",
+                    triggerName + " failed with error " + result.errorMessage());
+        }
+        String errorCode = result.errorKind() == TriggerErrorKind.INVALID_RESPONSE
+                ? "InvalidLambdaResponseException" : "UnexpectedLambdaException";
+        return customAuthTriggerFailure(errorCode, triggerName + " trigger failed: " + result.errorMessage());
     }
 
     private AwsException customAuthTriggerFailure(String errorCode, String message) {
@@ -1446,7 +1462,11 @@ final class CognitoAuthFlowHandler {
         Map<String, Object> req = new HashMap<>();
         req.put("newDeviceUsed", newDeviceUsed);
         req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
-        invokeTrigger(pool, client, user, "PostAuthentication", "PostAuthentication_Authentication", req);
+        TriggerResult result = invokeTrigger(pool, client, user,
+                "PostAuthentication", "PostAuthentication_Authentication", req);
+        if (result.errored()) {
+            throw triggerFailure(result, "PostAuthentication");
+        }
     }
 
     void firePostConfirmation(UserPool pool, UserPoolClient client, CognitoUser user,
@@ -1486,7 +1506,7 @@ final class CognitoAuthFlowHandler {
      * Fires the CustomMessage trigger, if configured, so the function can override the
      * subject/body Cognito would otherwise deliver. Non-blocking: an unconfigured or
      * failing trigger falls back to the pool's default templated message, mirroring how
-     * {@link #firePostAuthentication} and {@link #firePostConfirmation} tolerate errors.
+     * {@link #firePostConfirmation} tolerates errors.
      */
     Map<String, Object> fireCustomMessage(UserPool pool, UserPoolClient client, CognitoUser user,
                                            String triggerSource) {
@@ -1515,7 +1535,10 @@ final class CognitoAuthFlowHandler {
         // the others pass an empty list, which is what the request carries there.
         req.put("scopes", scopes == null ? List.of() : List.copyOf(scopes));
         TriggerResult result = invokeTrigger(pool, client, user, "PreTokenGeneration", triggerSource, req);
-        if (!result.configured() || result.errored()) return null;
+        if (!result.configured()) return null;
+        if (result.errored()) {
+            throw triggerFailure(result, "PreTokenGeneration");
+        }
 
         Map<String, Object> response = result.response();
         if (response == null) return null;

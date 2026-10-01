@@ -74,14 +74,21 @@ public class EcsCredentialsProxy implements ContainerTeardown {
      * SecurityGroupFirewallManager} uses: several Floci processes can share one Docker daemon, and
      * a label match alone would let one instance's restart tear down another's still-running,
      * still-in-use proxy.
+     *
+     * <p>Skipped with {@code reconcile-containers-on-startup} off, like the task container sweep:
+     * that is the setting for instances sharing one owner identity, where a proxy carrying this
+     * owner label may still serve another instance's running tasks.
      */
     @PostConstruct
     void reapSurvivingProxies() {
+        if (!config.services().ecs().reconcileContainersOnStartup()) {
+            return;
+        }
         try {
             dockerClient.listContainersCmd().withShowAll(true)
                     .withLabelFilter(Map.of(OWNS_NETWORK_LABEL, "true"))
                     .exec().stream()
-                    .filter(container -> owner().equals(container.getLabels().get("floci_owner_port")))
+                    .filter(container -> owner().equals(container.getLabels().get(ContainerStorageHelper.OWNER_LABEL)))
                     .forEach(container -> lifecycleManager.removeIfExists(container.getId()));
         } catch (Exception e) {
             LOG.warnv("Could not reap surviving ECS credentials proxy containers: {0}", e.getMessage());
@@ -90,8 +97,7 @@ public class EcsCredentialsProxy implements ContainerTeardown {
 
     /** Identifies this Floci process among others that may share the same Docker daemon. */
     String owner() {
-        String namespace = config.docker().resourceNamespace().orElse("");
-        return namespace.isBlank() ? String.valueOf(config.port()) : namespace + "/" + config.port();
+        return ContainerStorageHelper.ownerIdentity(config);
     }
 
     /**
@@ -148,7 +154,7 @@ public class EcsCredentialsProxy implements ContainerTeardown {
                 .withCmd(List.of(
                         "TCP-LISTEN:80,bind=" + CREDENTIALS_ADDRESS + ",fork,reuseaddr",
                         "TCP:" + flociHost + ":" + port))
-                .withLabels(Map.of(OWNS_NETWORK_LABEL, "true", "floci_owner_port", owner()))
+                .withLabels(Map.of(OWNS_NETWORK_LABEL, "true", ContainerStorageHelper.OWNER_LABEL, owner()))
                 .build();
 
         String proxyId = null;
@@ -198,7 +204,7 @@ public class EcsCredentialsProxy implements ContainerTeardown {
                 }
                 Map<String, String> labels = candidate.getLabels();
                 boolean isOurProxy = labels != null && "true".equals(labels.get(OWNS_NETWORK_LABEL));
-                String candidateOwner = labels == null ? null : labels.get("floci_owner_port");
+                String candidateOwner = labels == null ? null : labels.get(ContainerStorageHelper.OWNER_LABEL);
                 if (isOurProxy && (candidateOwner == null || owner().equals(candidateOwner))) {
                     lifecycleManager.removeIfExists(candidate.getId());
                 }

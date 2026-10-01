@@ -36,6 +36,12 @@ call `LeaveOrganization`. An account in no organization gets
 - The AWS-managed `p-FullAWSAccess` SCP is created with the organization and attached to the
   root, every new OU and every new account. Detaching the last service control policy from a
   target is rejected with `ConstraintViolationException`, as on AWS.
+- A new root has no policy types enabled, whatever the feature set; `ListRoots` reports an
+  empty `PolicyTypes` until `EnablePolicyType` is called, and `CreatePolicy` / `AttachPolicy`
+  for a type that is not enabled fail with `PolicyTypeNotEnabledException`. SCPs only apply to
+  member accounts once `SERVICE_CONTROL_POLICY` is enabled. The deprecated
+  `AvailablePolicyTypes` on `DescribeOrganization` lists only `SERVICE_CONTROL_POLICY`, for an
+  `ALL` organization, as on AWS.
 - A `CONSOLIDATED_BILLING` organization has no available policy types. `EnableAllFeatures`
   promotes it to `ALL`; with no member accounts the handshake completes immediately. With member
   accounts it stays `REQUESTED` until one of them calls `AcceptHandshake` — AWS requires *every*

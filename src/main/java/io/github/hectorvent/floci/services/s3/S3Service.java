@@ -1732,6 +1732,9 @@ public class S3Service implements Resettable, ResourceProvider {
                     }
                 }
             });
+            if (toDelete != null) {
+                fireNotifications(bucketName, key, "ObjectRemoved:Delete", toDelete);
+            }
             return toDelete;
         } else {
             S3Object existing = objectStore.get(objectKey(bucketName, key)).orElse(null);
@@ -4594,14 +4597,29 @@ public class S3Service implements Resettable, ResourceProvider {
             objectNode.put("key", key);
             objectNode.put("size", size);
             objectNode.put("etag", eTag);
+            if (obj != null && obj.getVersionId() != null) {
+                objectNode.put("version-id", obj.getVersionId());
+            }
             detail.put("request-id", UUID.randomUUID().toString());
             detail.put("requester", "aws:emulator");
             detail.put("source-ip-address", "127.0.0.1");
             detail.put("reason", eventName);
+            String deletionType = eventBridgeDeletionType(eventName);
+            if (deletionType != null) {
+                detail.put("deletion-type", deletionType);
+            }
             return objectMapper.writeValueAsString(detail);
         } catch (Exception e) {
             return "{}";
         }
+    }
+
+    private static String eventBridgeDeletionType(String eventName) {
+        return switch (eventName) {
+            case "ObjectRemoved:Delete" -> "Permanently Deleted";
+            case "ObjectRemoved:DeleteMarkerCreated" -> "Delete Marker Created";
+            default -> null;
+        };
     }
 
     private boolean matchesEvent(String pattern, String eventName) {

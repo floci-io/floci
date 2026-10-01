@@ -274,9 +274,9 @@ public class OrganizationsService implements ScpProvider {
         root.setId(rootId);
         root.setArn(arn(callerAccountId, "root/" + organizationId + "/" + rootId));
         root.setName("Root");
-        if (FEATURE_SET_ALL.equals(resolvedFeatureSet)) {
-            root.getPolicyTypes().add(new PolicyTypeSummary(SERVICE_CONTROL_POLICY, "ENABLED"));
-        }
+        // A new root has no policy types enabled, whatever the feature set: callers enable SCPs with
+        // EnablePolicyType, and Terraform's enabled_policy_types does exactly that right after
+        // CreateOrganization, so a pre-enabled root fails it with PolicyTypeAlreadyEnabledException.
         organization.setRoot(root);
 
         organizations.putForAccount(callerAccountId, organizationId, organization);
@@ -1727,9 +1727,6 @@ public class OrganizationsService implements ScpProvider {
 
     private void applyEnableAllFeatures(Organization organization) {
         organization.setFeatureSet(FEATURE_SET_ALL);
-        if (findPolicyType(organization.getRoot(), SERVICE_CONTROL_POLICY).isEmpty()) {
-            organization.getRoot().getPolicyTypes().add(new PolicyTypeSummary(SERVICE_CONTROL_POLICY, "ENABLED"));
-        }
         organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
     }
 

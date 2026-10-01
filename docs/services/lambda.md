@@ -56,6 +56,10 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `DeleteFunctionEventInvokeConfig` | Remove the asynchronous invocation settings |
 | `ListFunctionEventInvokeConfigs` | List the asynchronous invocation settings of every version and alias of a function |
 
+`UpdateFunctionConfiguration` validates `MemorySize` and `Timeout` as whole numbers in their
+supported ranges before changing any stored settings. A rejected value returns
+`InvalidParameterValueException` and leaves the function configuration unchanged.
+
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
 provisions it from a stack. Asynchronous invocations apply its retry, event age, destination settings,
 and dead-letter queue configurations (`DeadLetterConfig`).

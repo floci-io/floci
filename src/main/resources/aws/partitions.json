@@ -6,6 +6,173 @@
     "endpointsJsonVersion": 3,
     "regionFlags": "aws-cdk region-info/lib/aws-entities.ts rules"
   },
+  "signingNames": {
+    "IoTSecuredTunneling": [
+      "api.tunneling.iot"
+    ],
+    "agent-registry": [
+      "agent-registry-control"
+    ],
+    "appconfig": [
+      "appconfigdata"
+    ],
+    "appstream": [
+      "appstream2"
+    ],
+    "aws-marketplace": [
+      "agreement-marketplace",
+      "catalog.marketplace",
+      "deployment-marketplace",
+      "discovery-marketplace",
+      "entitlement.marketplace",
+      "metering.marketplace",
+      "reporting-marketplace"
+    ],
+    "awsssoportal": [
+      "portal.sso"
+    ],
+    "bedrock": [
+      "bedrock-agent",
+      "bedrock-agent-runtime",
+      "bedrock-data-automation",
+      "bedrock-data-automation-runtime",
+      "bedrock-runtime"
+    ],
+    "bedrock-agentcore": [
+      "bedrock-agentcore-control"
+    ],
+    "cassandra": [
+      "cassandra-streams"
+    ],
+    "chime": [
+      "identity-chime",
+      "media-pipelines-chime",
+      "meetings-chime",
+      "messaging-chime",
+      "voice-chime"
+    ],
+    "cloudhsm": [
+      "cloudhsmv2"
+    ],
+    "cloudsearch": [
+      "cloudsearchdomain"
+    ],
+    "connect": [
+      "contact-lens"
+    ],
+    "detective": [
+      "api.detective"
+    ],
+    "dynamodb": [
+      "streams.dynamodb"
+    ],
+    "ecr": [
+      "api.ecr"
+    ],
+    "ecr-public": [
+      "api.ecr-public"
+    ],
+    "execute-api": [
+      "participant.connect"
+    ],
+    "forecast": [
+      "forecastquery"
+    ],
+    "iam": [
+      "iam-toolbox"
+    ],
+    "iot-jobs-data": [
+      "data.jobs.iot"
+    ],
+    "iotdata": [
+      "data-ats.iot"
+    ],
+    "iotdeviceadvisor": [
+      "api.iotdeviceadvisor"
+    ],
+    "iotmanagedintegrations": [
+      "api.iotmanagedintegrations"
+    ],
+    "iotwireless": [
+      "api.iotwireless"
+    ],
+    "ivs": [
+      "ivsrealtime"
+    ],
+    "lex": [
+      "models-v2-lex",
+      "models.lex",
+      "runtime-v2-lex",
+      "runtime.lex"
+    ],
+    "mediastore": [
+      "data.mediastore"
+    ],
+    "mediatailor": [
+      "api.mediatailor"
+    ],
+    "memorydb": [
+      "memory-db"
+    ],
+    "mgh": [
+      "migrationhub-config"
+    ],
+    "mobiletargeting": [
+      "pinpoint"
+    ],
+    "partnercentral": [
+      "partnercentral-prm"
+    ],
+    "payment-cryptography": [
+      "controlplane.payment-cryptography",
+      "dataplane.payment-cryptography"
+    ],
+    "personalize": [
+      "personalize-events",
+      "personalize-runtime"
+    ],
+    "pricing": [
+      "api.pricing"
+    ],
+    "qapps": [
+      "data.qapps"
+    ],
+    "s3": [
+      "s3-control"
+    ],
+    "sagemaker": [
+      "a2i-runtime.sagemaker",
+      "api.sagemaker",
+      "edge.sagemaker",
+      "featurestore-runtime.sagemaker",
+      "job-runtime.sagemaker",
+      "metrics.sagemaker",
+      "runtime.sagemaker"
+    ],
+    "servicecatalog": [
+      "servicecatalog-appregistry"
+    ],
+    "ses": [
+      "email",
+      "mail-manager"
+    ],
+    "signer": [
+      "data-signer"
+    ],
+    "sms-voice": [
+      "sms-voice.pinpoint"
+    ],
+    "sso-oauth": [
+      "oidc"
+    ],
+    "timestream": [
+      "ingest.timestream",
+      "query.timestream"
+    ],
+    "wickr": [
+      "admin.wickr"
+    ]
+  },
   "partitions": [
     {
       "id": "aws",

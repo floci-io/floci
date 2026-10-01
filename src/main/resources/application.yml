@@ -141,6 +141,8 @@ floci:
   partitions:
     # id: aws  # Partition served (aws, aws-cn, aws-us-gov, aws-iso, aws-iso-b, aws-iso-e, aws-iso-f, aws-eusc).
                # Derived from default-region when unset. Env: FLOCI_PARTITIONS_ID
+    strict: false  # true rejects requests signed for a service AWS does not publish in the request's
+                   # partition (CloudFront in aws-us-gov, IAM in aws-eusc). Env: FLOCI_PARTITIONS_STRICT
     allow-unknown-regions: false  # true accepts a SigV4 scope region no partition publishes or admits by its
                                   # region pattern, giving it its own namespace. Env: FLOCI_PARTITIONS_ALLOW_UNKNOWN_REGIONS
   # Shared mock-response config for Textract/Comprehend/Rekognition/Translate. See AiMockConfigLoader.
@@ -251,6 +253,18 @@ floci:
     container-fallback-servers:                   # FLOCI_DNS_CONTAINER_FALLBACK_SERVERS=1.1.1.1,1.0.0.1
       - 8.8.8.8
       - 8.8.4.4
+
+    # Transparent endpoint injection: answer A queries for every AWS partition's DNS and
+    # dual-stack suffix (and every subdomain) with Floci's container IP inside spawned
+    # containers, so SDK clients constructed with explicit real-AWS endpoints, which override
+    # AWS_ENDPOINT_URL, land on the emulator. Suffixes: amazonaws.com, api.aws,
+    # amazonaws.com.cn, api.amazonwebservices.com.cn, amazonaws.eu, api.amazonwebservices.eu,
+    # c2s.ic.gov, api.aws.ic.gov, sc2s.sgov.gov, api.aws.scloud, cloud.adc-e.uk,
+    # api.cloud-aws.adc-e.uk, csp.hci.ic.gov, api.aws.hci.ic.gov. Live suffixes like api.aws and
+    # amazonaws.eu resolve to Floci while this is on.
+    # Combine with tls.enabled so clients that hardcode https:// are served on port 443
+    # with a certificate covering those suffixes and their regional wildcards.
+    spoof-aws-endpoints: false                    # FLOCI_DNS_SPOOF_AWS_ENDPOINTS
 
   auth:
     validate-signatures: false
@@ -588,6 +602,9 @@ floci:
       publish-awsvpc-ports-to-host: false
       host-volume-roots: []
       allow-unsafe-host-volumes: false
+      # Remove the ECS containers a previous run of this deployment left on the daemon before
+      # the service scheduler starts replacements. Scoped to this deployment's own containers.
+      reconcile-containers-on-startup: true
       task-role-credentials:
         enabled: false
         ttl-seconds: 21600

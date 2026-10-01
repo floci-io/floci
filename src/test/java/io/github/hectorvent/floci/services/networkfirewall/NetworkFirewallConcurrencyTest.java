@@ -185,6 +185,70 @@ class NetworkFirewallConcurrencyTest {
     }
 
     /**
+     * UpdateRuleGroup reads the stored rule group, checks the token and writes the replacement back.
+     * Concurrent updates carrying the same current token must not all apply: exactly one validates
+     * and rotates it, and the rest are stale.
+     */
+    @Test
+    void concurrentUpdateRuleGroup_onlyOneCallerWithTheSameTokenSucceeds() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        NetworkFirewallService service = new NetworkFirewallService(mapper,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+
+        ObjectNode create = mapper.createObjectNode();
+        create.put("RuleGroupName", "ConcurrentUpdateRuleGroup");
+        create.put("Type", "STATEFUL");
+        create.put("Capacity", 100);
+        create.putObject("RuleGroup").putObject("RulesSource").put("RulesString", "pass ip any any");
+        ObjectNode created = service.createRuleGroup(create, REGION, ACCOUNT);
+        String ruleGroupArn = created.path("RuleGroupResponse").path("RuleGroupArn").asText();
+        String currentToken = created.path("UpdateToken").asText();
+
+        ExecutorService pool = Executors.newFixedThreadPool(CALLERS);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<ObjectNode>> submitted = new ArrayList<>();
+        try {
+            for (int caller = 0; caller < CALLERS; caller++) {
+                int callerIndex = caller;
+                submitted.add(pool.submit(() -> {
+                    ObjectNode request = mapper.createObjectNode();
+                    request.put("RuleGroupArn", ruleGroupArn);
+                    request.put("UpdateToken", currentToken);
+                    request.putObject("RuleGroup").putObject("RulesSource")
+                            .put("RulesString", "drop ip any any # caller " + callerIndex);
+                    start.await();
+                    return service.updateRuleGroup(request);
+                }));
+            }
+            start.countDown();
+
+            AtomicInteger succeeded = new AtomicInteger();
+            AtomicInteger rejected = new AtomicInteger();
+            for (Future<ObjectNode> future : submitted) {
+                try {
+                    future.get(30, TimeUnit.SECONDS);
+                    succeeded.incrementAndGet();
+                } catch (ExecutionException e) {
+                    if (e.getCause() instanceof AwsException awsException
+                            && "InvalidTokenException".equals(awsException.getErrorCode())) {
+                        rejected.incrementAndGet();
+                    } else {
+                        throw e;
+                    }
+                }
+            }
+
+            assertEquals(1, succeeded.get(),
+                    "exactly one caller may validate and rotate the shared current token; without "
+                            + "the service lock more than one update passes the check and applies");
+            assertEquals(CALLERS - 1, rejected.get());
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
      * A firewall persisted before UpdateToken support existed has no token field.
      * DescribeFirewall must backfill a real token rather than reporting the empty
      * string {@code JsonNode.asText()} defaults to, since a caller submitting that

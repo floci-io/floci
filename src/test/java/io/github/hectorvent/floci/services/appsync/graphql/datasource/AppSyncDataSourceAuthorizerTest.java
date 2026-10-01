@@ -39,11 +39,12 @@ class AppSyncDataSourceAuthorizerTest {
     private final IamService iam = mock(IamService.class);
     private final RegionResolver regionResolver = mock(RegionResolver.class);
     private final ObjectMapper mapper = new ObjectMapper();
+    private final IamPolicyEvaluator policyEvaluator = new IamPolicyEvaluator(mapper);
     private final EmulatorConfig config = mock(EmulatorConfig.class);
     private final EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
     private final EmulatorConfig.IamServiceConfig iamConfig = mock(EmulatorConfig.IamServiceConfig.class);
     private final AppSyncDataSourceAuthorizer authorizer = new AppSyncDataSourceAuthorizer(
-            iam, new AssumeRolePolicyEvaluator(mapper), new IamPolicyEvaluator(mapper),
+            iam, new AssumeRolePolicyEvaluator(mapper, policyEvaluator), policyEvaluator,
             regionResolver, mapper, config);
 
     @BeforeEach

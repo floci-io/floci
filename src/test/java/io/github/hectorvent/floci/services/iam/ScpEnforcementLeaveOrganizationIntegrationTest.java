@@ -45,9 +45,12 @@ class ScpEnforcementLeaveOrganizationIntegrationTest {
         // --- management sets up the organization -----------------------------------------------
         org(MGMT, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}").then().statusCode(200);
 
-        // FeatureSet=ALL already enables the SERVICE_CONTROL_POLICY type on the root and seeds
-        // FullAWSAccess, so no explicit EnablePolicyType is needed for SCPs to participate.
+        // A new root has no policy types enabled; SCPs only participate once EnablePolicyType
+        // turns them on. FullAWSAccess is already attached, so enabling them denies nothing alone.
         String rootId = JsonPath.from(org(MGMT, "ListRoots", "{}").asString()).getString("Roots[0].Id");
+        org(MGMT, "EnablePolicyType",
+                "{\"RootId\":\"" + rootId + "\",\"PolicyType\":\"SERVICE_CONTROL_POLICY\"}")
+                .then().statusCode(200);
 
         String policyId = JsonPath.from(org(MGMT, "CreatePolicy",
                 "{\"Name\":\"deny-leave-" + suffix + "\",\"Type\":\"SERVICE_CONTROL_POLICY\","

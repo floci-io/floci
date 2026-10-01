@@ -121,6 +121,14 @@ The CSV header row is addressed by name, not position. AWS's own column set is
 column defaults to `true`. Duplicate key values are reported in the `warnings` array, and
 `failonwarnings=true` turns those warnings into a `BadRequestException`.
 
+#### `enabled` defaults to `false`
+
+`CreateApiKey` creates the key disabled when the request body has no `enabled` field, matching
+AWS. AWS SDKs that model `enabled` as a plain boolean, such as the AWS SDK for Go v2, leave the field
+out of the request when it is `false`, so a client that wants a usable key must send
+`enabled: true`. An `AWS::ApiGateway::ApiKey` CloudFormation resource that omits `Enabled` is
+likewise created, or updated, as disabled.
+
 #### `generateDistinctId`
 
 API key identifiers are generated independently from their secret values when `generateDistinctId`

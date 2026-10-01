@@ -63,6 +63,7 @@ class OrganizationsServiceTest {
                 service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, organization.getRoot().getId(), "Unit", null);
         assertTrue(unit.getId().matches("ou-" + rootSuffix + "-[a-z0-9]{8}"), unit.getId());
 
+        service.enablePolicyType(MANAGEMENT_ACCOUNT, organization.getRoot().getId(), "SERVICE_CONTROL_POLICY");
         OrganizationPolicy policy = service.createPolicy(MANAGEMENT_ACCOUNT, "{}", null, "Policy",
                 "SERVICE_CONTROL_POLICY", null);
         assertTrue(policy.getId().matches("p-[a-z0-9]{8}"), policy.getId());
@@ -216,6 +217,7 @@ class OrganizationsServiceTest {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         String rootId = organization.getRoot().getId();
         OrganizationalUnit unit = service.createOrganizationalUnit(MANAGEMENT_ACCOUNT, rootId, "Unit", null);
+        service.enablePolicyType(MANAGEMENT_ACCOUNT, rootId, "SERVICE_CONTROL_POLICY");
         OrganizationPolicy policy = service.createPolicy(MANAGEMENT_ACCOUNT, "{}", null, "Policy",
                 "SERVICE_CONTROL_POLICY", null);
 
@@ -293,6 +295,7 @@ class OrganizationsServiceTest {
         String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
                 .getAccountId();
         service.moveAccount(MANAGEMENT_ACCOUNT, member, rootId, ouId);
+        service.enablePolicyType(MANAGEMENT_ACCOUNT, rootId, "SERVICE_CONTROL_POLICY");
 
         // FullAWSAccess sits on root, OU, and account: three levels.
         List<List<String>> levels = service.effectiveScpLevels(member);
@@ -309,7 +312,8 @@ class OrganizationsServiceTest {
 
     @Test
     void theManagementAccountIsExemptFromScps() {
-        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        service.enablePolicyType(MANAGEMENT_ACCOUNT, organization.getRoot().getId(), "SERVICE_CONTROL_POLICY");
         String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
                 .getAccountId();
 
@@ -326,10 +330,14 @@ class OrganizationsServiceTest {
     }
 
     @Test
-    void disablingTheScpPolicyTypeOnTheRootRemovesTheCeiling() {
+    void scpsBindOnlyWhileTheirPolicyTypeIsEnabledOnTheRoot() {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         String member = service.createAccount(MANAGEMENT_ACCOUNT, "member@example.com", "Member", null, false)
                 .getAccountId();
+        // A new root has no policy types enabled, so there is no ceiling until SCPs are turned on.
+        assertNull(service.effectiveScpLevels(member));
+
+        service.enablePolicyType(MANAGEMENT_ACCOUNT, organization.getRoot().getId(), "SERVICE_CONTROL_POLICY");
         assertNotNull(service.effectiveScpLevels(member));
 
         service.disablePolicyType(MANAGEMENT_ACCOUNT, organization.getRoot().getId(), "SERVICE_CONTROL_POLICY");

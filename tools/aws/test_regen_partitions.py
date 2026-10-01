@@ -4,6 +4,7 @@ Run with: pytest tools/aws -q  (or: make aws-data-test)
 """
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
@@ -225,6 +226,47 @@ def test_build_without_cdk_carries_flags_from_the_previous_file():
 def test_build_without_cdk_refuses_a_region_it_cannot_carry():
     with pytest.raises(ValueError, match="no aws-cdk checkout"):
         r.build(PARTITIONS, ENDPOINTS, None, {"partitions": []}, "test")
+
+
+def test_build_emits_the_signing_names_it_is_given_or_carries_the_previous_ones():
+    fresh = r.build(PARTITIONS, ENDPOINTS, r.parse_cdk_entities(ENTITIES), None, "test",
+                    {"ecr": ["api.ecr"]})
+    assert fresh["signingNames"] == {"ecr": ["api.ecr"]}
+    carried = r.build(PARTITIONS, ENDPOINTS, r.parse_cdk_entities(ENTITIES), fresh, "test")
+    assert carried["signingNames"] == {"ecr": ["api.ecr"]}
+    assert r.build(PARTITIONS, ENDPOINTS, r.parse_cdk_entities(ENTITIES), None, "test")["signingNames"] == {}
+
+
+def test_collect_signing_names_keeps_only_the_services_whose_signing_name_differs(tmp_path):
+    def model(service, version, endpoint_prefix, signing_name=None):
+        metadata = {"endpointPrefix": endpoint_prefix}
+        if signing_name:
+            metadata["signingName"] = signing_name
+        target = tmp_path / service / version / "service-2.json"
+        target.parent.mkdir(parents=True)
+        target.write_text(json.dumps({"metadata": metadata}))
+
+    model("ecr", "2015-09-21", "api.ecr", "ecr")
+    model("bedrock-runtime", "2023-09-30", "bedrock-runtime", "bedrock")
+    model("bedrock-agent", "2023-06-05", "bedrock-agent", "bedrock")
+    model("sqs", "2012-11-05", "sqs", "sqs")
+    model("ssm", "2014-11-06", "ssm")
+    model("old-ecr", "2014-01-01", "api.ecr", "legacy")
+    model("old-ecr", "2015-09-21", "api.ecr", "ecr")
+    (tmp_path / "partitions.json").write_text("{}")
+
+    assert r.collect_signing_names(tmp_path) == {"bedrock": ["bedrock-agent", "bedrock-runtime"], "ecr": ["api.ecr"]}
+
+
+def test_collect_signing_names_reads_the_gzipped_models_the_botocore_wheel_ships(tmp_path):
+    # The pip package ships service-2.json.gz; the checkout ships it plain. Both must agree, or
+    # aws-data-check fails in CI, which resolves botocore to the installed package.
+    target = tmp_path / "ecr" / "2015-09-21" / "service-2.json.gz"
+    target.parent.mkdir(parents=True)
+    with gzip.open(target, "wt", encoding="utf-8") as handle:
+        json.dump({"metadata": {"endpointPrefix": "api.ecr", "signingName": "ecr"}}, handle)
+
+    assert r.collect_signing_names(tmp_path) == {"ecr": ["api.ecr"]}
 
 
 def test_build_refuses_a_partition_missing_from_endpoints_json():

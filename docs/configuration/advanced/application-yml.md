@@ -42,6 +42,7 @@ floci:
   default-account-id: "000000000000"
   partitions:
     # id: aws                         # Pin the partition explicitly; derived from default-region when unset
+    strict: false                     # true rejects services AWS does not publish in the request's partition
     allow-unknown-regions: false      # true serves a scope region no partition publishes or matches by pattern
 
   storage:
@@ -91,6 +92,16 @@ floci:
     # Via env var (comma-separated): FLOCI_DNS_EXTRA_SUFFIXES=localhost.localstack.cloud,other.internal
     # extra-suffixes:
     #   - localhost.localstack.cloud
+
+    # Transparent endpoint injection: resolve every AWS partition's DNS and dual-stack
+    # suffix (amazonaws.com, api.aws, amazonaws.eu, amazonaws.com.cn and the rest; see
+    # environment-variables.md for the full list) and every subdomain to Floci's
+    # container IP inside spawned containers, so SDK clients built with explicit
+    # real-AWS endpoints (which override AWS_ENDPOINT_URL) land on the emulator.
+    # Live suffixes like api.aws and amazonaws.eu resolve to Floci while this is on.
+    # Combine with tls.enabled for clients that hardcode https://.
+    # Via env var: FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true
+    spoof-aws-endpoints: false
 
   auth:
     validate-signatures: false               # Set to true to verify S3 presigned URL signatures
@@ -327,6 +338,7 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS`             | `256`            | Default CPU units when task definition omits it               |
 | `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS`             | *(unset)*        | Comma-separated allowlist of parent directories for host volume bind mounts; by default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
 | `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES`     | `false`          | Allow any host path, bypassing the host-volume-roots allowlist (traversal, bare root, and the Docker socket or an ancestor directory of it are still always rejected) |
+| `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP` | `true`         | Remove the ECS containers a previous run of this Floci left on the daemon before replacement tasks start |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`           | `false`          | Enforce IAM identity-based policies on every request when `true` |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK`                   | `false`          | Skip Docker; domains appear active immediately (useful for CI)   |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false`        | Leave OpenSearch containers running after Floci stops            |

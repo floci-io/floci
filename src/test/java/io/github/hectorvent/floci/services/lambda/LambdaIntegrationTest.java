@@ -8,6 +8,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.ByteArrayOutputStream;
 import java.util.Base64;
+import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -210,6 +211,77 @@ class LambdaIntegrationTest {
             .put(BASE_PATH + "/functions/nonexistent-function/configuration")
         .then()
             .statusCode(404);
+    }
+
+    @Test
+    @Order(12)
+    void invalidMemoryUpdateDoesNotChangeConfiguration() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"FunctionName":"invalid-memory-update","Runtime":"nodejs20.x",
+                 "Role":"arn:aws:iam::000000000000:role/lambda-role","Handler":"index.handler"}
+                """)
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(201);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {"Description":"half-applied","MemorySize":"abc"}
+                """)
+        .when()
+            .put(BASE_PATH + "/functions/invalid-memory-update/configuration")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("InvalidParameterValueException"));
+
+        given()
+        .when()
+            .get(BASE_PATH + "/functions/invalid-memory-update/configuration")
+        .then()
+            .statusCode(200)
+            .body("Description", anyOf(nullValue(), equalTo("")))
+            .body("MemorySize", equalTo(128));
+    }
+
+    @Test
+    @Order(12)
+    void invalidArnTypesDoNotChangeConfiguration() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"FunctionName":"invalid-arn-update","Runtime":"nodejs20.x",
+                 "Role":"arn:aws:iam::000000000000:role/lambda-role","Handler":"index.handler"}
+                """)
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(201);
+
+        for (String request : List.of(
+                "{\"Description\":\"half-applied\",\"KMSKeyArn\":123}",
+                "{\"Description\":\"half-applied\",\"DeadLetterConfig\":{\"TargetArn\":123}}")) {
+            given()
+                .contentType("application/json")
+                .body(request)
+            .when()
+                .put(BASE_PATH + "/functions/invalid-arn-update/configuration")
+            .then()
+                .statusCode(400)
+                .body("__type", containsString("InvalidParameterValueException"));
+
+            given()
+            .when()
+                .get(BASE_PATH + "/functions/invalid-arn-update/configuration")
+            .then()
+                .statusCode(200)
+                .body("Description", anyOf(nullValue(), equalTo("")))
+                .body("KMSKeyArn", anyOf(nullValue(), equalTo("")))
+                .body("DeadLetterConfig.TargetArn", anyOf(nullValue(), equalTo("")));
+        }
     }
 
     @Test

@@ -91,6 +91,23 @@ public record AwsPartition(
         return service != null && services.contains(service);
     }
 
+    /**
+     * True when a request whose SigV4 credential scope names {@code signingName} targets a
+     * service this partition publishes: the signing name itself, or any of the endpoint
+     * prefixes it covers ({@code ecr} for {@code api.ecr}).
+     */
+    public boolean offersSigningName(String signingName) {
+        if (offers(signingName)) {
+            return true;
+        }
+        for (String endpointPrefix : AwsPartitions.endpointPrefixes(signingName)) {
+            if (services.contains(endpointPrefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public Optional<GlobalEndpoint> globalEndpoint(String service) {
         return Optional.ofNullable(service == null ? null : globalServices.get(service));
     }
