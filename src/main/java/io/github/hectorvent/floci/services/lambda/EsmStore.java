@@ -67,7 +67,7 @@ public class EsmStore {
 
     public List<EventSourceMapping> listByFunction(String functionKey) {
         return backend.scan(k -> {
-            var esm = backend.get(k).orElse(null);
+            EventSourceMapping esm = backend.get(k).orElse(null);
             if (esm == null) return false;
             // Match by full ARN or by short function name
             return functionKey.equals(esm.getFunctionArn()) || functionKey.equals(esm.getFunctionName());

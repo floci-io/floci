@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.verifiedpermissions.model.PolicyTempl
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -97,7 +98,7 @@ public class CedarAuthorizationEvaluator {
             return true;
         }
         if (value.isObject()) {
-            var iterator = value.elements();
+            Iterator<JsonNode> iterator = value.elements();
             while (iterator.hasNext()) {
                 if (!claimCanBeCedar(iterator.next())) {
                     return false;

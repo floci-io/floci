@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.config;
 
 import io.quarkus.runtime.Startup;
+import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import io.vertx.core.net.NetClient;
@@ -119,7 +120,7 @@ public class TlsProxyServer {
             NetServer server = vertx.createNetServer(options);
             server.connectHandler(connectHandler);
             proxyServers.add(server);
-            var bind = server.listen();
+            Future<NetServer> bind = server.listen();
             bind.onComplete(ar -> {
                 if (ar.succeeded()) {
                     failedPorts.remove(port);

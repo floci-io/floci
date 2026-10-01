@@ -104,8 +104,8 @@ public final class InlineZipPackager {
         String module = handler.contains(".") ? handler.substring(0, handler.lastIndexOf('.')) : "index";
         String ext = runtime.startsWith("python") ? ".py" : ".js";
         try {
-            var baos = new ByteArrayOutputStream();
-            try (var zos = new ZipOutputStream(baos)) {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
                 zos.putNextEntry(new ZipEntry(module + ext));
                 zos.write(source.getBytes(StandardCharsets.UTF_8));
                 zos.closeEntry();

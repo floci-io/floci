@@ -8,7 +8,9 @@ import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 @ApplicationScoped
 public class PipesFilterMatcher {
@@ -70,9 +72,9 @@ public class PipesFilterMatcher {
         if (!pattern.isObject()) {
             return false;
         }
-        var fields = pattern.fields();
+        Iterator<Map.Entry<String, JsonNode>> fields = pattern.fields();
         while (fields.hasNext()) {
-            var field = fields.next();
+            Map.Entry<String, JsonNode> field = fields.next();
             String key = field.getKey();
             JsonNode patternValue = field.getValue();
             JsonNode actualValue = actual.path(key);

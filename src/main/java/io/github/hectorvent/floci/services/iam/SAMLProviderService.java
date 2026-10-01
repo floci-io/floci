@@ -9,12 +9,14 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.w3c.dom.Document;
 
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** Minimal IAM SAML provider registry used by STS assertion verification. */
@@ -76,7 +78,7 @@ public class SAMLProviderService {
     }
 
     public Optional<SAMLProvider> find(String arn) {
-        var matcher = ARN.matcher(arn == null ? "" : arn);
+        Matcher matcher = ARN.matcher(arn == null ? "" : arn);
         if (matcher.matches()) {
             return findForAccount(matcher.group(1), arn);
         }
@@ -84,7 +86,7 @@ public class SAMLProviderService {
     }
 
     public Optional<SAMLProvider> findForAccount(String accountId, String arn) {
-        var matcher = ARN.matcher(arn == null ? "" : arn);
+        Matcher matcher = ARN.matcher(arn == null ? "" : arn);
         if (!matcher.matches() || !matcher.group(1).equals(accountId)) {
             return Optional.empty();
         }
@@ -213,9 +215,9 @@ public class SAMLProviderService {
         record Parsed(String entityId, String certificateBase64) {}
 
         static Parsed parse(String metadata) throws Exception {
-            var doc = SAMLXml.document(metadata);
-            var entity = doc.getDocumentElement().getAttribute("entityID");
-            var cert = SAMLXml.text(doc, "X509Certificate");
+            Document doc = SAMLXml.document(metadata);
+            String entity = doc.getDocumentElement().getAttribute("entityID");
+            String cert = SAMLXml.text(doc, "X509Certificate");
             if (entity == null || entity.isBlank() || cert == null || cert.isBlank()) {
                 throw new Exception();
             }

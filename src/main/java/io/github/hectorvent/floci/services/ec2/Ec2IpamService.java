@@ -756,12 +756,12 @@ public class Ec2IpamService {
             Optional<AccountAwareStorageBackend.OwnedEntry<Ipam>> exact =
                     accountAware.findAnyAccountEntry(key(region, ipamId));
             if (exact.isPresent()) {
-                var entry = exact.get();
+                AccountAwareStorageBackend.OwnedEntry<Ipam> entry = exact.get();
                 return new OwnedIpam(entry.account(), entry.value());
             }
             for (Ipam ipam : accountAware.scanAllAccounts()) {
                 if (ipam.getIpamId().equals(ipamId)) {
-                    var entry = accountAware.findAnyAccountEntry(
+                    AccountAwareStorageBackend.OwnedEntry<Ipam> entry = accountAware.findAnyAccountEntry(
                             key(ipam.getRegion(), ipam.getIpamId())).orElseThrow();
                     return new OwnedIpam(entry.account(), entry.value());
                 }
@@ -846,12 +846,12 @@ public class Ec2IpamService {
             Optional<AccountAwareStorageBackend.OwnedEntry<IpamPool>> exact =
                     accountAware.findAnyAccountEntry(key(region, ipamPoolId));
             if (exact.isPresent()) {
-                var entry = exact.get();
+                AccountAwareStorageBackend.OwnedEntry<IpamPool> entry = exact.get();
                 return new OwnedPool(entry.account(), entry.value());
             }
             for (IpamPool pool : accountAware.scanAllAccounts()) {
                 if (pool.getIpamPoolId().equals(ipamPoolId)) {
-                    var entry = accountAware.findAnyAccountEntry(
+                    AccountAwareStorageBackend.OwnedEntry<IpamPool> entry = accountAware.findAnyAccountEntry(
                             key(pool.getRegion(), pool.getIpamPoolId())).orElseThrow();
                     return new OwnedPool(entry.account(), entry.value());
                 }

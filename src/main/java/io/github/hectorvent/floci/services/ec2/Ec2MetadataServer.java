@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
@@ -258,7 +260,7 @@ public class Ec2MetadataServer {
             return;
         }
         StringBuilder sb = new StringBuilder();
-        for (var sg : inst.getSecurityGroups()) {
+        for (GroupIdentifier sg : inst.getSecurityGroups()) {
             if (!sb.isEmpty()) {
                 sb.append("\n");
             }
@@ -469,7 +471,7 @@ public class Ec2MetadataServer {
         if (instance == null || instance.getTags() == null) {
             return "";
         }
-        for (var tag : instance.getTags()) {
+        for (Tag tag : instance.getTags()) {
             if (tag.getKey() == null || tag.getKey().isBlank()) {
                 continue;
             }
@@ -485,7 +487,7 @@ public class Ec2MetadataServer {
         if (instance == null || instance.getTags() == null || key == null) {
             return Optional.empty();
         }
-        for (var tag : instance.getTags()) {
+        for (Tag tag : instance.getTags()) {
             if (key.equals(tag.getKey())) {
                 return Optional.of(nvl(tag.getValue()));
             }

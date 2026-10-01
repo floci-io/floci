@@ -32,6 +32,7 @@ import jakarta.ws.rs.core.UriInfo;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -738,7 +739,7 @@ public class ScimController {
         ArrayNode targetArray = target.putArray(targetField);
         for (JsonNode item : array) {
             ObjectNode targetItem = targetArray.addObject();
-            for (var field : fields.entrySet()) {
+            for (Map.Entry<String, String> field : fields.entrySet()) {
                 JsonNode value = item.get(field.getKey());
                 if (value != null && !value.isNull()) {
                     targetItem.set(field.getValue(), value.deepCopy());
@@ -756,7 +757,7 @@ public class ScimController {
         ArrayNode targetArray = target.putArray(targetField);
         for (JsonNode item : array) {
             ObjectNode targetItem = targetArray.addObject();
-            for (var field : fields.entrySet()) {
+            for (Map.Entry<String, String> field : fields.entrySet()) {
                 JsonNode value = item.get(field.getKey());
                 if (value != null && !value.isNull()) {
                     targetItem.set(field.getValue(), value.deepCopy());
@@ -805,9 +806,9 @@ public class ScimController {
                 if (!value.isObject() || value.isEmpty()) {
                     throw validation("A patch operation without path must provide an object value.");
                 }
-                var fields = value.fields();
+                Iterator<Map.Entry<String, JsonNode>> fields = value.fields();
                 while (fields.hasNext()) {
-                    var entry = fields.next();
+                    Map.Entry<String, JsonNode> entry = fields.next();
                     validatePatchUserAttribute(identityStoreId, userId, op, entry.getKey(), entry.getValue());
                     if ("userName".equals(entry.getKey())) {
                         userNameChanges++;
@@ -914,9 +915,9 @@ public class ScimController {
             String path = optionalText(operation, "path");
             JsonNode value = operation.get("value");
             if (path == null) {
-                var fields = value.fields();
+                Iterator<Map.Entry<String, JsonNode>> fields = value.fields();
                 while (fields.hasNext()) {
-                    var entry = fields.next();
+                    Map.Entry<String, JsonNode> entry = fields.next();
                     applyPatchUserAttribute(identityStoreId, userId, op, entry.getKey(), entry.getValue());
                 }
             } else {

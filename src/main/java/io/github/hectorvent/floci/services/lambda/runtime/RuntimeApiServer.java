@@ -420,7 +420,7 @@ public class RuntimeApiServer {
                 return;
             }
             List<String> events = List.of("INVOKE", "SHUTDOWN");
-            var body = ctx.body().asJsonObject();
+            JsonObject body = ctx.body().asJsonObject();
             if (body != null && body.getJsonArray("events") != null) {
                 events = body.getJsonArray("events").stream().map(String::valueOf).toList();
             }

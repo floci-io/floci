@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iot;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -76,7 +77,7 @@ public class IotDataController {
     public Response listNamedShadowsForThing(@Context HttpHeaders headers,
                                              @PathParam("thingName") String thingName) {
         ObjectNode response = objectMapper.createObjectNode();
-        var results = response.putArray("results");
+        ArrayNode results = response.putArray("results");
         iotService.listNamedShadowsForThing(thingName, regionResolver.resolveRegion(headers)).forEach(results::add);
         return Response.ok(response).build();
     }
@@ -112,7 +113,7 @@ public class IotDataController {
                                       @QueryParam("nextToken") String nextToken) {
         IotService.Page<String> page = iotService.listSubscriptions(clientId, maxResults, nextToken);
         ObjectNode response = objectMapper.createObjectNode();
-        var subscriptions = response.putArray("subscriptions");
+        ArrayNode subscriptions = response.putArray("subscriptions");
         for (String topicFilter : page.items()) {
             ObjectNode subscription = subscriptions.addObject();
             subscription.put("topicFilter", topicFilter);
@@ -172,7 +173,7 @@ public class IotDataController {
                                          @QueryParam("nextToken") String nextToken) {
         IotService.Page<IotRetainedMessage> page = iotService.listRetainedMessages(maxResults, nextToken);
         ObjectNode response = objectMapper.createObjectNode();
-        var topics = response.putArray("retainedTopics");
+        ArrayNode topics = response.putArray("retainedTopics");
         for (IotRetainedMessage retained : page.items()) {
             ObjectNode item = topics.addObject();
             item.put("topic", retained.getTopic());

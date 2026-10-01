@@ -362,7 +362,7 @@ public class ServiceCatalogJsonHandler {
 
     private Response batchDisassociateServiceActionFromProvisioningArtifact(JsonNode request) {
         ObjectNode response = objectMapper.createObjectNode();
-        var failures = service.batchDisassociateServiceActionFromProvisioningArtifact(request);
+        List<ObjectNode> failures = service.batchDisassociateServiceActionFromProvisioningArtifact(request);
         if (!failures.isEmpty()) {
             ArrayNode failed = response.putArray("FailedServiceActionAssociations");
             failures.forEach(failed::add);
@@ -640,8 +640,8 @@ public class ServiceCatalogJsonHandler {
             }
         }
 
-        var all = service.listProvisionedProductPlans(provisionProductId);
-        var page = all.stream().skip(offset).limit(pageSize).toList();
+        List<ObjectNode> all = service.listProvisionedProductPlans(provisionProductId);
+        List<ObjectNode> page = all.stream().skip(offset).limit(pageSize).toList();
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode plans = response.putArray("ProvisionedProductPlans");
@@ -698,7 +698,7 @@ public class ServiceCatalogJsonHandler {
 
     private Response listServiceActions() {
         ObjectNode response = objectMapper.createObjectNode();
-        var summaries = response.putArray("ServiceActionSummaries");
+        ArrayNode summaries = response.putArray("ServiceActionSummaries");
         service.listServiceActions().forEach(action -> {
             ObjectNode summary = objectMapper.createObjectNode();
             summary.put("Id", action.path("Id").asText());

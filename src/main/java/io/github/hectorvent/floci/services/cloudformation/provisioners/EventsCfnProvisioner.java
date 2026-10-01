@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
+import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.SqsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
@@ -137,7 +138,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         String stateStr = ctx.resolveOptional(props, "State");
         RuleState state = "DISABLED".equals(stateStr) ? RuleState.DISABLED : RuleState.ENABLED;
 
-        var rule = eventBridgeService.putRule(ruleName, busName, eventPattern, scheduleExpression,
+        Rule rule = eventBridgeService.putRule(ruleName, busName, eventPattern, scheduleExpression,
                 state, description, roleArn, Map.of(), ctx.region());
         r.setPhysicalId(ruleName);
         r.getAttributes().put("Arn", rule.getArn());
@@ -580,7 +581,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private void deleteEventBridgeRuleSafe(String ruleName, String busName, String region) {
         try {
             // Remove all targets before deleting the rule (busName scopes the lookup to the rule's bus).
-            var targets = eventBridgeService.listTargetsByRule(ruleName, busName, region);
+            List<Target> targets = eventBridgeService.listTargetsByRule(ruleName, busName, region);
             if (!targets.isEmpty()) {
                 List<String> targetIds = targets.stream().map(Target::getId).toList();
                 eventBridgeService.removeTargets(ruleName, busName, targetIds, region);

@@ -11,7 +11,9 @@ import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
+import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -613,7 +615,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 "REQUIRED".equalsIgnoreCase(a.getIamAuth())
                         || "ENABLED".equalsIgnoreCase(a.getIamAuth()));
         Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
-        var proxy = r.getPhysicalId() == null
+        DbProxy proxy = r.getPhysicalId() == null
                 ? rdsService.createDbProxy(name, engineFamily, requireTls, iamAuth,
                 defaultAuthScheme, roleArn, subnetIds, sgIds, auth, idleClientTimeout,
                 debugLogging, tags, region, endpointNetworkType, targetConnectionNetworkType)
@@ -634,7 +636,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             List<String> subnetIds, List<String> securityGroupIds, List<DbProxyAuth> auth,
             Map<String, String> tags, String region, String endpointNetworkType,
             String targetConnectionNetworkType) {
-        var existing = rdsService.getDbProxy(resource.getPhysicalId(), region);
+        DbProxy existing = rdsService.getDbProxy(resource.getPhysicalId(), region);
         // ModifyDBProxy has no EndpointNetworkType/TargetConnectionNetworkType parameters; AWS
         // documents both as requiring CloudFormation replacement, same as DBProxyName, EngineFamily,
         // and VpcSubnetIds.
@@ -692,7 +694,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     400);
         }
         if (r.getPhysicalId() != null) {
-            var existing = rdsService.getDbProxyTargetGroupByArn(r.getPhysicalId(), region);
+            DbProxyTargetGroup existing = rdsService.getDbProxyTargetGroupByArn(r.getPhysicalId(), region);
             if (!Objects.equals(existing.getDbProxyName(), dbProxyName)
                     || !Objects.equals(existing.getTargetGroupName(), targetGroupName)) {
                 throw new AwsException("UnsupportedOperation",
@@ -700,12 +702,12 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                         400);
             }
         }
-        var proxy = rdsService.getDbProxy(dbProxyName, region);
+        DbProxy proxy = rdsService.getDbProxy(dbProxyName, region);
         int effectiveMaxConnections = maxConn != null ? maxConn
                 : ("SQLSERVER".equals(proxy.getEngineFamily()) ? 10 : 100);
         int effectiveMaxIdle = maxIdle != null ? maxIdle : effectiveMaxConnections / 2;
         int effectiveBorrowTimeout = connectionBorrowTimeout != null ? connectionBorrowTimeout : 120;
-        var tg = rdsService.reconcileDbProxyTargetGroup(
+        DbProxyTargetGroup tg = rdsService.reconcileDbProxyTargetGroup(
                 dbProxyName, targetGroupName, clusterIds, instanceIds,
                 effectiveMaxConnections, effectiveMaxIdle, effectiveBorrowTimeout,
                 initQuery, sessionPinningFilters, region);
