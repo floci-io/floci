@@ -944,7 +944,7 @@ public class Route53Service implements Resettable {
     private void applyChange(String action, ResourceRecordSet rrs, List<ResourceRecordSet> current) {
         switch (action) {
             case "CREATE" -> current.add(rrs);
-            case "DELETE" -> current.removeIf(r -> recordSetsMatch(r, rrs));
+            case "DELETE" -> current.remove(deleteTarget(current, rrs));
             case "UPSERT" -> {
                 current.removeIf(r -> sameRecord(r, rrs));
                 current.add(rrs);
@@ -966,6 +966,15 @@ public class Route53Service implements Resettable {
 
     private static String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value;
+    }
+
+    /**
+     * One DELETE removes one record. An earlier version could store the same record both undotted and
+     * dotted, possibly for two owners, so prefer the copy named exactly as the request names it.
+     */
+    private static ResourceRecordSet deleteTarget(List<ResourceRecordSet> current, ResourceRecordSet rrs) {
+        List<ResourceRecordSet> matches = current.stream().filter(r -> recordSetsMatch(r, rrs)).toList();
+        return matches.stream().filter(r -> r.getName().equals(rrs.getName())).findFirst().orElse(matches.get(0));
     }
 
     private static String deleteTargetDescription(ResourceRecordSet rrs) {
