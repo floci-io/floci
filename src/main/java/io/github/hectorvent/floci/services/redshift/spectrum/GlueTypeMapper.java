@@ -16,6 +16,18 @@ public final class GlueTypeMapper {
     /** Rewrites Redshift type aliases to the Hive type names that Glue stores; other types pass through lowercased. */
     public static String canonicalGlueType(String type) {
         String normalized = normalize(type);
+        if (isTypeOrSized(normalized, "charactervarying")) {
+            return "varchar" + normalized.substring("charactervarying".length());
+        }
+        if (isTypeOrSized(normalized, "character")) {
+            return "char" + normalized.substring("character".length());
+        }
+        if (isTypeOrSized(normalized, "numeric")) {
+            return "decimal" + normalized.substring("numeric".length());
+        }
+        if (isBinary(normalized)) {
+            return "binary";
+        }
         return switch (normalized) {
             case "doubleprecision", "float8" -> "double";
             case "real", "float4" -> "float";
@@ -23,13 +35,12 @@ public final class GlueTypeMapper {
             case "int4" -> "int";
             case "int8" -> "bigint";
             case "bool" -> "boolean";
-            default -> normalized.startsWith("charactervarying(") ? "varchar" + normalized.substring("charactervarying".length())
-                    : normalized;
+            default -> normalized;
         };
     }
 
     public static String toPostgres(String glueType) {
-        String type = normalize(glueType);
+        String type = canonicalGlueType(glueType);
         Matcher sized = SIZED_STRING.matcher(type);
         if (sized.matches()) {
             return "varchar(" + sized.group(1) + ")";
@@ -66,10 +77,21 @@ public final class GlueTypeMapper {
 
     public static String duckProjection(String columnName, String glueType) {
         String column = quote(columnName);
-        String type = normalize(glueType);
+        String type = canonicalGlueType(glueType);
         String expression = isNested(type) ? "to_json(" + column + ")"
                 : "binary".equals(type) ? "'\\x' || hex(" + column + ")" : column;
         return "COALESCE(CAST(" + expression + " AS VARCHAR), " + NULL_MARKER + ") AS " + column;
+    }
+
+    private static boolean isTypeOrSized(String type, String base) {
+        return type.equals(base) || type.startsWith(base + "(");
+    }
+
+    private static boolean isBinary(String type) {
+        return isTypeOrSized(type, "varbyte")
+                || isTypeOrSized(type, "varbinary")
+                || isTypeOrSized(type, "binaryvarying")
+                || isTypeOrSized(type, "binary");
     }
 
     private static String normalize(String glueType) {

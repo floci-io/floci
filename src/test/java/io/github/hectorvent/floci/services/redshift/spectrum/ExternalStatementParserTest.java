@@ -84,6 +84,19 @@ class ExternalStatementParserTest {
     }
 
     @Test
+    void parsesCreateTableWithCharacterAndVarbyteColumns() {
+        ExternalStatement.CreateTable table = (ExternalStatement.CreateTable) parser.parse(
+                "CREATE EXTERNAL TABLE analytics.events (code CHARACTER(10), payload VARBYTE, memo CHARACTER) "
+                        + "STORED AS PARQUET LOCATION 's3://bucket/events/'").orElseThrow();
+        assertThat(table.columns().get(0).name(), equalTo("code"));
+        assertThat(table.columns().get(0).type(), equalTo("char(10)"));
+        assertThat(table.columns().get(1).name(), equalTo("payload"));
+        assertThat(table.columns().get(1).type(), equalTo("binary"));
+        assertThat(table.columns().get(2).name(), equalTo("memo"));
+        assertThat(table.columns().get(2).type(), equalTo("char"));
+    }
+
+    @Test
     void createDatabaseOptionSurvivesLineBreaksAndExtraWhitespace() {
         ExternalStatement.CreateSchema schema = (ExternalStatement.CreateSchema) parser.parse(
                 "CREATE EXTERNAL SCHEMA a FROM DATA CATALOG DATABASE 'lake' IAM_ROLE 'arn:aws:iam::000000000000:role/R'\n"
