@@ -57,9 +57,11 @@ public class CognitoManagedLoginService {
      * Issues an authorization code to the user of the browser's session, or nothing when there is
      * no session for the client's pool. Every pool's session travels in the same cookie on Floci's
      * own host, so a session of one pool must never sign its user in to another.
+     *
+     * @param grantedScopes the scopes the authorization request was granted, which the code keeps
      */
     public Optional<String> issueAuthorizationCode(String sessionId, UserPoolClient client, String redirectUri,
-                                                   List<String> scopes, String nonce, String codeChallenge) {
+                                                   List<String> grantedScopes, String nonce, String codeChallenge) {
         Optional<CognitoManagedLoginSession> session = stateStore.findSession(sessionId)
                 .filter(candidate -> candidate.userPoolId().equals(client.getUserPoolId()));
         if (session.isEmpty()) {
@@ -70,7 +72,7 @@ public class CognitoManagedLoginService {
             return Optional.empty();
         }
         CognitoAuthorizationCode code = new CognitoAuthorizationCode(client.getUserPoolId(), client.getClientId(),
-                session.get().username(), redirectUri, scopes, nonce, codeChallenge,
+                session.get().username(), redirectUri, grantedScopes, nonce, codeChallenge,
                 clock.instant().plus(AUTHORIZATION_CODE_LIFETIME));
         return Optional.of(stateStore.putAuthorizationCode(code));
     }

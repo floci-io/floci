@@ -3542,31 +3542,26 @@ public class CognitoService implements ResourceProvider {
      * AWS likewise refuses to let this trigger override {@code nonce} and the other reserved claims.
      * Passing {@code null} for either side leaves the other's claims untouched.
      *
-     * <p>{@code requestedScopes} are the scopes the authorization request asked for. The access token
-     * carries the scopes they grant (see {@link #grantedScopes}) rather than the
-     * {@code aws.cognito.signin.user.admin} of an API sign-in, and the ID token is minted only when
-     * the grant includes {@code openid}, as on AWS. The trigger is told the grant, and a V2 trigger's
-     * scope changes apply on top of it.
+     * <p>{@code grantedScopes} are the scopes the authorization code was granted at authorize (see
+     * {@link #grantedScopes}). The access token carries them, narrowed to the ones the client still
+     * allows, rather than the {@code aws.cognito.signin.user.admin} of an API sign-in, and the ID
+     * token is minted only when they include {@code openid}, as on AWS. The trigger is told the same
+     * scopes, and a V2 trigger's scope changes apply on top of them.
      */
     Map<String, Object> generateAuthResultForHostedAuth(CognitoUser user, UserPool pool, UserPoolClient client,
-                                                        ClaimsOverride protocolClaims, List<String> requestedScopes) {
-        List<String> grantedScopes = grantedScopes(client, requestedScopes);
-        ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user, grantedScopes);
+                                                        ClaimsOverride protocolClaims, List<String> grantedScopes) {
+        List<String> scopes = scopesStillAllowed(client, grantedScopes);
+        ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user, scopes);
         return generateAuthResult(user, pool, client, mergeUnderProtocolClaims(trigger, protocolClaims),
-                UUID.randomUUID().toString(), grantedScopes, grantedScopes.contains("openid"));
+                UUID.randomUUID().toString(), scopes, scopes.contains("openid"));
     }
 
     /**
-     * The scopes an authorization request is granted: every scope the client allows when it asked for
-     * none, as on AWS, and otherwise the requested scopes the client allows, in the order requested
-     * and without duplicates.
-     *
-     * <p>The authorize endpoint refuses a scope the client is not allowed, but the client's
-     * AllowedOAuthScopes can change before the code is redeemed. A V2 trigger is free to grant claims
-     * or add scopes based on what it is told was requested, so it is told only what the client is
-     * entitled to now, and a scope the client no longer allows is dropped.
+     * The scopes an authorization request is granted at authorize, where the authorization code is
+     * bound to them: every scope the client allows when it asked for none, as on AWS, and otherwise
+     * the requested scopes the client allows, in the order requested and without duplicates.
      */
-    private static List<String> grantedScopes(UserPoolClient client, List<String> requestedScopes) {
+    static List<String> grantedScopes(UserPoolClient client, List<String> requestedScopes) {
         List<String> allowed = client.getAllowedOAuthScopes();
         if (allowed == null || allowed.isEmpty()) {
             return List.of();
@@ -3574,8 +3569,22 @@ public class CognitoService implements ResourceProvider {
         if (requestedScopes == null || requestedScopes.isEmpty()) {
             return List.copyOf(new LinkedHashSet<>(allowed));
         }
+        return scopesStillAllowed(client, requestedScopes);
+    }
+
+    /**
+     * The code's granted scopes that the client still allows, in their order and without duplicates.
+     * The client's AllowedOAuthScopes can change between authorize and redemption: a scope removed in
+     * between is dropped, and one added in between is never granted. A V2 trigger is free to grant
+     * claims or add scopes based on what it is told was granted, so it is told only these.
+     */
+    private static List<String> scopesStillAllowed(UserPoolClient client, List<String> grantedScopes) {
+        List<String> allowed = client.getAllowedOAuthScopes();
+        if (allowed == null || grantedScopes == null) {
+            return List.of();
+        }
         List<String> kept = new ArrayList<>();
-        for (String scope : requestedScopes) {
+        for (String scope : grantedScopes) {
             if (allowed.contains(scope) && !kept.contains(scope)) {
                 kept.add(scope);
             }

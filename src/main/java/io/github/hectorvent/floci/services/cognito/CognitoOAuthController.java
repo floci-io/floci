@@ -108,8 +108,8 @@ public class CognitoOAuthController {
         }
         try {
             String location = federationService.beginAuthorization(check.client().getUserPoolId(), clientId,
-                    redirectUri, splitScopes(scope), trimToNull(nonce), providerName, relyingPartyState,
-                    trimToNull(codeChallenge));
+                    redirectUri, CognitoService.grantedScopes(check.client(), splitScopes(scope)), trimToNull(nonce),
+                    providerName, relyingPartyState, trimToNull(codeChallenge));
             return Response.status(Response.Status.FOUND).location(URI.create(location)).build();
         } catch (AwsException e) {
             return oauthError("invalid_request", e.getMessage());
@@ -462,10 +462,12 @@ public class CognitoOAuthController {
         return redirect(request.redirectUri(), parameters);
     }
 
+    /** Binds the code to the scopes the request is granted now; redemption never widens them. */
     private Optional<String> issueAuthorizationCode(String sessionId, UserPoolClient client,
                                                     AuthorizationRequest request) {
         return managedLoginService.issueAuthorizationCode(sessionId, client, request.redirectUri(),
-                splitScopes(request.scope()), trimToNull(request.nonce()), trimToNull(request.codeChallenge()));
+                CognitoService.grantedScopes(client, splitScopes(request.scope())), trimToNull(request.nonce()),
+                trimToNull(request.codeChallenge()));
     }
 
     /**

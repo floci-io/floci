@@ -46,6 +46,9 @@ public class CognitoFederationService {
     }
 
     /**
+     * @param scopes        the scopes the authorization request was granted, which the transaction and
+     *                      then the authorization code keep. Without {@code authorize_scopes} they are
+     *                      also what the provider is asked for.
      * @param codeChallenge the relying party's S256 PKCE challenge, or null. It stays with Cognito:
      *                      the relying party proves it at Cognito's token endpoint, not the provider's.
      */

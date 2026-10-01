@@ -393,8 +393,9 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
    sign-in, so a pool that customises its claims gets the same tokens here as from
    `InitiateAuth`. The access token's `scope` is the scopes the request asked for, or every
    scope in the client's `AllowedOAuthScopes` when it asked for none, as on AWS, and the
-   trigger is told the same scopes. A V2 trigger's `scopesToAdd` and `scopesToSuppress` apply
-   on top of them. The ID token is issued only when the scopes include `openid`, and it carries
+   trigger is told the same scopes. The code keeps the scopes granted when it was issued: a
+   scope the client is allowed only afterwards is not added, and one it no longer allows is
+   dropped. A V2 trigger's `scopesToAdd` and `scopesToSuppress` apply on top of them. The ID token is issued only when the scopes include `openid`, and it carries
    the request's `nonce`, which the trigger cannot override.
 5. `GET /cognito-idp/logout?client_id=...&logout_uri=...` ends the session and redirects to
    `logout_uri`, which must be one of the client's `LogoutURLs`. With `redirect_uri` and

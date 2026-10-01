@@ -175,6 +175,36 @@ class CognitoOAuthControllerTest {
         verify(federationService, never()).beginAuthorization(any(), any(), any(), any(), any(), any(), any(), any());
     }
 
+    /** The grant is resolved at authorize, so federation carries every allowed scope for a request without one. */
+    @Test
+    void authorizeWithoutAScopeHandsTheFederationEveryScopeTheClientAllows() {
+        when(federationService.beginAuthorization(POOL_ID, CLIENT_ID, CALLBACK_URI, List.of("openid", "email"), null,
+                "ExampleOidc", null, null))
+                .thenReturn("https://provider.example.test/authorize?state=provider-state");
+
+        Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
+                "ExampleOidc", null, null, null, null);
+
+        assertEquals(302, response.getStatus());
+        verify(federationService).beginAuthorization(POOL_ID, CLIENT_ID, CALLBACK_URI, List.of("openid", "email"), null,
+                "ExampleOidc", null, null);
+    }
+
+    @Test
+    void authorizeWithASessionBindsTheCodeToTheScopesGrantedThen() {
+        when(cognitoService.adminGetUser(POOL_ID, "session-user")).thenReturn(user("session-user"));
+        String sessionId = stateStore.putSession(new CognitoManagedLoginSession(POOL_ID, "session-user",
+                CLOCK.instant().plusSeconds(60)));
+
+        String withoutScope = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", null, null,
+                null, null, null, null, sessionId).getHeaderString("Location");
+        String withScope = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "email email",
+                null, null, null, null, null, sessionId).getHeaderString("Location");
+
+        assertEquals(List.of("openid", "email"), storedCode(withoutScope).scopes());
+        assertEquals(List.of("email"), storedCode(withScope).scopes());
+    }
+
     @Test
     void authorizeWithASessionOfThePoolRedirectsWithACodeCarryingTheNonceAndChallenge() {
         when(cognitoService.adminGetUser(POOL_ID, "session-user")).thenReturn(user("session-user"));
@@ -455,7 +485,7 @@ class CognitoOAuthControllerTest {
         assertEquals(200, response.getStatus());
         verify(cognitoService).generateAuthResultForHostedAuth(any(CognitoUser.class), any(UserPool.class), eq(client),
                 any(), scopes.capture());
-        assertEquals(List.of("openid"), scopes.getValue(), "the code's requested scopes reach the trigger");
+        assertEquals(List.of("openid"), scopes.getValue(), "the code's granted scopes reach the trigger");
         verify(cognitoService, never()).generateAuthResult(any(CognitoUser.class), any(UserPool.class), any(), any());
     }
 
@@ -540,6 +570,13 @@ class CognitoOAuthControllerTest {
     private static String basicAuthorization(String clientId, String clientSecret) {
         String credentials = clientId + ":" + clientSecret;
         return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** The code a redirect to the callback carries, as the state store holds it. */
+    private CognitoAuthorizationCode storedCode(String location) {
+        assertTrue(location.startsWith(CALLBACK_URI + "?code="), location);
+        String code = location.substring((CALLBACK_URI + "?code=").length());
+        return stateStore.findAuthorizationCode(code).orElseThrow();
     }
 
     private static List<String> fieldNames(JsonNode body) {

@@ -967,7 +967,7 @@ class CognitoLambdaTriggersTest {
      */
     @Test
     @SuppressWarnings("unchecked")
-    void redemptionWithoutRequestedScopesGrantsEveryAllowedScope() {
+    void aRequestWithoutScopesIsGrantedEveryAllowedScope() {
         UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
         seedUser(pool, "alice", "Perm1234!");
         UserPoolClient client = createOAuthClient(pool, List.of("openid", "email", "aws.cognito.signin.user.admin"));
@@ -976,8 +976,10 @@ class CognitoLambdaTriggersTest {
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
                 .thenReturn(ok(Map.of()));
 
-        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of());
+        List<String> granted = CognitoService.grantedScopes(client, List.of());
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, granted);
 
+        assertEquals(List.of("openid", "email", "aws.cognito.signin.user.admin"), granted);
         Map<String, Object> event;
         Map<String, Object> accessClaims;
         try {
@@ -986,11 +988,51 @@ class CognitoLambdaTriggersTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
-        assertEquals(List.of("openid", "email", "aws.cognito.signin.user.admin"),
-                ((Map<String, Object>) event.get("request")).get("scopes"));
-        assertEquals(Set.of("openid", "email", "aws.cognito.signin.user.admin"),
-                Set.of(((String) accessClaims.get("scope")).split(" ")));
+        assertEquals(granted, ((Map<String, Object>) event.get("request")).get("scopes"));
+        assertEquals(Set.copyOf(granted), Set.of(((String) accessClaims.get("scope")).split(" ")));
         assertNotNull(auth.get("IdToken"));
+    }
+
+    /** Redemption issues the code's grant and never widens it, even when that grant is empty. */
+    @Test
+    void redemptionNeverWidensTheCodesGrant() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of());
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of());
+
+        Map<String, Object> accessClaims;
+        try {
+            accessClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("AccessToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertFalse(accessClaims.containsKey("scope"), "an empty grant stays empty: " + accessClaims);
+        assertFalse(auth.containsKey("IdToken"));
+    }
+
+    /** A V2 trigger that suppresses every scope of the grant leaves no scope claim. */
+    @Test
+    void preTokenGenerationV2SuppressingTheWholeCodeGrantRemovesTheScopeClaim() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "accessTokenGeneration", Map.of("scopesToSuppress", List.of("email"))))));
+
+        Map<String, Object> auth = service.generateAuthResultForHostedAuth(user, pool, client, null, List.of("email"));
+
+        Map<String, Object> accessClaims;
+        try {
+            accessClaims = MAPPER.readValue(decodeJwtPayload((String) auth.get("AccessToken")), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertFalse(accessClaims.containsKey("scope"), "suppressing the only granted scope leaves none: " + accessClaims);
     }
 
     /** Only a grant with {@code openid} gets an ID token, and the access token carries just the grant. */

@@ -310,6 +310,62 @@ class CognitoManagedLoginIntegrationTest {
     }
 
     /**
+     * A code carries the scopes granted when it was issued. A request without a scope is granted
+     * every scope the client allows then, so a scope the client is allowed only afterwards is not
+     * added when the code is redeemed.
+     */
+    @Test
+    void aScopeTheClientIsAllowedAfterTheCodeWasIssuedIsNotAdded() throws Exception {
+        Pool pool = newPool();
+        String code = code(signIn(null, pool, withField(authorizeRequest(pool.clientId()), "scope", null)));
+        allowScopes(pool, List.of("openid", "email", ADMIN_SCOPE));
+
+        Response tokens = redeem(null, pool.clientId(), code, VERIFIER);
+
+        tokens.then().statusCode(200);
+        assertEquals(Set.of("openid", "email"), scopes(tokens.path("access_token")));
+    }
+
+    /**
+     * A scope the client no longer allows is dropped from a code issued before the change, here
+     * one issued to a browser that was already signed in.
+     */
+    @Test
+    void aScopeTheClientNoLongerAllowsIsDroppedFromAnIssuedCode() throws Exception {
+        Pool pool = newPool(List.of("openid", "email", ADMIN_SCOPE));
+        String session = signIn(null, pool, authorizeRequest(pool.clientId())).getCookie("cognito");
+        String code = code(browserGet(null, "/cognito-idp/oauth2/authorize",
+                withField(authorizeRequest(pool.clientId()), "scope", null), session));
+        allowScopes(pool, List.of("openid", ADMIN_SCOPE));
+
+        Response tokens = redeem(null, pool.clientId(), code, VERIFIER);
+
+        tokens.then().statusCode(200);
+        assertEquals(Set.of("openid", ADMIN_SCOPE), scopes(tokens.path("access_token")));
+    }
+
+    /**
+     * Floci lets an OAuth client allow no scopes. Its code grant has no scope claim and no ID token,
+     * and none of the user's own operations accepts a token without a scope.
+     */
+    @Test
+    void aCodeGrantOfAClientThatAllowsNoScopesCannotCallTheUsersOwnOperations() throws Exception {
+        Pool pool = newPool(List.of());
+
+        Response tokens = redeem(null, pool.clientId(),
+                code(signIn(null, pool, withField(authorizeRequest(pool.clientId()), "scope", null))), VERIFIER);
+
+        tokens.then().statusCode(200);
+        assertEquals(Set.of("access_token", "refresh_token", "expires_in", "token_type"), fieldNames(tokens));
+        String accessToken = tokens.path("access_token");
+        assertFalse(jwtPayload(accessToken).has("scope"));
+        cognitoAction("GetUser", "{\"AccessToken\":\"%s\"}".formatted(accessToken))
+                .then().statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"))
+                .body("message", equalTo("Access Token does not have required scopes"));
+    }
+
+    /**
      * {@code aws.cognito.signin.user.admin} is what lets an access token call the user's own API
      * operations. A code-grant token requested without it is refused with AWS's message, and the
      * refused calls change nothing.
@@ -735,6 +791,16 @@ class CognitoManagedLoginIntegrationTest {
                  "LogoutURLs":["%s"],"SupportedIdentityProviders":["COGNITO"],"ExplicitAuthFlows":["ALLOW_REFRESH_TOKEN_AUTH"]}
                 """.formatted(poolId, MAPPER.writeValueAsString(allowedScopes), CALLBACK, SIGNED_OUT))
                 .path("UserPoolClient").path("ClientId").asText();
+    }
+
+    /** Replaces the client's AllowedOAuthScopes, sending the rest of its OAuth configuration unchanged. */
+    private static void allowScopes(Pool pool, List<String> allowedScopes) throws Exception {
+        cognitoJson("UpdateUserPoolClient", """
+                {"UserPoolId":"%s","ClientId":"%s","ClientName":"managed-login","AllowedOAuthFlowsUserPoolClient":true,
+                 "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":%s,"CallbackURLs":["%s"],
+                 "LogoutURLs":["%s"],"SupportedIdentityProviders":["COGNITO"],"ExplicitAuthFlows":["ALLOW_REFRESH_TOKEN_AUTH"]}
+                """.formatted(pool.poolId(), pool.clientId(), MAPPER.writeValueAsString(allowedScopes), CALLBACK,
+                SIGNED_OUT));
     }
 
     private static Pool withUser(String poolId, String clientId, String username) throws Exception {
