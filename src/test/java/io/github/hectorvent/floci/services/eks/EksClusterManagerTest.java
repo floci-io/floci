@@ -888,7 +888,7 @@ class EksClusterManagerTest {
             when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
 
             registryManager = Mockito.mock(EcrRegistryManager.class);
-
+            when(registryManager.advertisedPort()).thenReturn(4566);
             config = Mockito.mock(EmulatorConfig.class);
             eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
             ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
@@ -921,6 +921,22 @@ class EksClusterManagerTest {
             verify(config, never()).tls();
             String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
             assertFalse(yaml.contains("localhost.floci.io"));
+        }
+
+        @Test
+        void mirrorsTheAdvertisedRegistryPortToTheInNetworkDataPlane() throws Exception {
+            // Floci published as -p 54321:4566: pods name the advertised repository URI, while
+            // k3s still reaches Floci on its own port inside the Docker network.
+            when(registryManager.advertisedPort()).thenReturn(54321);
+
+            manager.injectEcrRegistryMirror("container-1", "demo");
+
+            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost:54321\":"));
+            assertTrue(yaml.contains("\"localhost:54321\":"));
+            assertFalse(yaml.contains("localhost:4566\":"));
+            assertTrue(yaml.contains("- \"http://floci:4566\""));
+            verify(copyCmd).exec();
         }
 
         @Test
