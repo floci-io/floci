@@ -165,7 +165,6 @@ class LogsLogStreamCfnProvisionerTest {
         assertEquals("events", resource.getPhysicalId());
         verify(logs).deleteLogStream("new-group", "events", REGION);
         verify(logs, never()).deleteLogStream("old-group", "events", REGION);
-        assertTrue(provisioner.hasPendingRollbackCleanup(resource));
         clearInvocations(logs);
         provisioner.delete(resource, REGION);
         verify(logs).deleteLogStream("old-group", "events", REGION);
@@ -223,7 +222,6 @@ class LogsLogStreamCfnProvisionerTest {
         provisioner.delete(resource, REGION);
 
         verify(logs, never()).deleteLogStream(anyString(), anyString(), anyString());
-        assertFalse(provisioner.hasPendingRollbackCleanup(resource));
     }
 
     @Test
@@ -337,7 +335,6 @@ class LogsLogStreamCfnProvisionerTest {
 
         assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(resource));
         assertEquals("events", resource.getPhysicalId());
-        assertTrue(provisioner.hasPendingRollbackCleanup(resource));
         doNothing().when(logs).deleteLogStream("new-group", "events", REGION);
         clearInvocations(logs);
 
@@ -361,9 +358,7 @@ class LogsLogStreamCfnProvisionerTest {
         assertTrue(provisioner.completeUpdate(resource).complete());
         provisioner.clearUpdate(resource);
 
-        assertTrue(provisioner.hasPendingRollbackCleanup(resource));
         provisioner.delete(resource, REGION);
-        assertFalse(provisioner.hasPendingRollbackCleanup(resource));
         verify(logs).deleteLogStream("new-group", "events", REGION);
         verify(logs).deleteLogStream("old-group", "events", REGION);
     }

@@ -91,9 +91,8 @@ public class SesTemplateController {
                                        @QueryParam("PageSize") String pageSize,
                                        @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        PaginatedResult<EmailTemplate> page = SesListPaging.V2_LIST_EMAIL_TEMPLATES.page(
-                templateService.listTemplates(region), SesListPaging::templateCursor,
-                SesListPaging.parseQueryPageSize(pageSize), nextToken);
+        PaginatedResult<EmailTemplate> page = templateService.listTemplates(region,
+                SesListPaging.V2_LIST_EMAIL_TEMPLATES, SesListPaging.parseQueryPageSize(pageSize), nextToken);
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode items = result.putArray("TemplatesMetadata");
         for (EmailTemplate t : page.items()) {

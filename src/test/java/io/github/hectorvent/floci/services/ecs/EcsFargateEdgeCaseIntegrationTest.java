@@ -1544,4 +1544,34 @@ class EcsFargateEdgeCaseIntegrationTest {
                 .body("serviceRevisions", hasSize(0))
                 .body("failures[0].reason", equalTo("MISSING"));
     }
+
+    @Test
+    void deletingAServiceDeletesItsDeploymentsAndRevisions() {
+        String family = seed("edge-deleted-td");
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"edge-deleted-svc\","
+                + "\"taskDefinition\":\"" + family + "\",\"desiredCount\":0,"
+                + "\"launchType\":\"FARGATE\"," + NETWORK + "}", 200);
+        String list = "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"edge-deleted-svc\"}";
+        Response listed = call("ListServiceDeployments", list, 200);
+        String deploymentArn = listed.jsonPath().getString("serviceDeployments[0].serviceDeploymentArn");
+        String revisionArn = listed.jsonPath().getString("serviceDeployments[0].targetServiceRevisionArn");
+
+        call("DeleteService", list, 200);
+
+        call("ListServiceDeployments", list, 200)
+                .then().body("serviceDeployments", hasSize(0));
+        call("DescribeServiceDeployments", "{\"serviceDeploymentArns\":[\"" + deploymentArn + "\"]}", 200)
+                .then()
+                .body("serviceDeployments", hasSize(0))
+                .body("failures[0].arn", equalTo(deploymentArn))
+                .body("failures[0].reason", equalTo("MISSING"));
+        call("DescribeServiceRevisions", "{\"serviceRevisionArns\":[\"" + revisionArn + "\"]}", 200)
+                .then()
+                .body("serviceRevisions", hasSize(0))
+                .body("failures[0].reason", equalTo("MISSING"));
+        call("DescribeServices", "{\"cluster\":\"" + CLUSTER + "\",\"services\":[\"edge-deleted-svc\"]}", 200)
+                .then()
+                .body("services[0].status", equalTo("INACTIVE"))
+                .body("services[0].currentServiceDeployment", nullValue());
+    }
 }

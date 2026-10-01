@@ -59,6 +59,7 @@ class IamEnforcementTest {
     // ── Resource names ─────────────────────────────────────────────────────────
     private static final String USER        = "iam-enf-test-user";
     private static final String ROLE        = "iam-enf-test-role";
+    private static final String PATH_ROLE   = "iam-enf-test-path-role";
     private static final String POLICY_NAME = "iam-enf-allow-s3list";
 
     private static final String TRUST_POLICY = """
@@ -162,6 +163,11 @@ class IamEnforcementTest {
         try { iam.deleteAccessKey(DeleteAccessKeyRequest.builder()
                 .userName(USER).accessKeyId(userAccessKeyId).build()); } catch (Exception ignored) {}
         try { iam.deleteRole(DeleteRoleRequest.builder().roleName(ROLE).build()); } catch (Exception ignored) {}
+        cleanupResource("delete principal-arn policy from role " + PATH_ROLE,
+                () -> iam.deleteRolePolicy(DeleteRolePolicyRequest.builder()
+                        .roleName(PATH_ROLE).policyName("principal-arn").build()));
+        cleanupResource("delete role " + PATH_ROLE,
+                () -> iam.deleteRole(DeleteRoleRequest.builder().roleName(PATH_ROLE).build()));
         try { iam.deletePolicy(DeletePolicyRequest.builder().policyArn(allowPolicyArn).build()); } catch (Exception ignored) {}
         try { iam.deleteUser(DeleteUserRequest.builder().userName(USER).build()); } catch (Exception ignored) {}
         iam.close();
@@ -502,6 +508,58 @@ class IamEnforcementTest {
                         assertThat(error.statusCode()).isEqualTo(403);
                         assertThat(error.awsErrorDetails().errorCode()).isEqualTo("AccessDenied");
                     });
+        }
+    }
+
+    @Test
+    @Order(13)
+    @DisplayName("a role session's aws:PrincipalArn is its role's ARN, path included")
+    void roleSessionPrincipalArnIsTheRolesArnWithItsPath() {
+        assumeEnforcementEnabled();
+        String pathRoleArn = iam.createRole(CreateRoleRequest.builder()
+                .roleName(PATH_ROLE)
+                .path("/team/")
+                .assumeRolePolicyDocument(TRUST_POLICY)
+                .build()).role().arn();
+        AssumeRoleResponse assumed = sts.assumeRole(AssumeRoleRequest.builder()
+                .roleArn(pathRoleArn)
+                .roleSessionName("principal-arn")
+                .build());
+        String sessionArn = assumed.assumedRoleUser().arn();
+        // AWS reports the role's ARN in aws:PrincipalArn, not the session's: a condition on the role
+        // matches, one on the session ARN does not, and a Deny keyed on the role fires.
+        iam.putRolePolicy(PutRolePolicyRequest.builder()
+                .roleName(PATH_ROLE)
+                .policyName("principal-arn")
+                .policyDocument("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"iam:ListUsers","Resource":"*",
+                           "Condition":{"ArnEquals":{"aws:PrincipalArn":"%1$s"}}},
+                          {"Effect":"Allow","Action":"iam:ListRoles","Resource":"*",
+                           "Condition":{"ArnEquals":{"aws:PrincipalArn":"%2$s"}}},
+                          {"Effect":"Allow","Action":"iam:ListGroups","Resource":"*"},
+                          {"Effect":"Deny","Action":"iam:ListGroups","Resource":"*",
+                           "Condition":{"ArnEquals":{"aws:PrincipalArn":"%1$s"}}}
+                        ]}""".formatted(pathRoleArn, sessionArn))
+                .build());
+
+        try (IamClient session = IamClient.builder()
+                .endpointOverride(TestFixtures.endpoint())
+                .region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsSessionCredentials.create(
+                        assumed.credentials().accessKeyId(),
+                        assumed.credentials().secretAccessKey(),
+                        assumed.credentials().sessionToken())))
+                .build()) {
+            assertThatCode(session::listUsers).doesNotThrowAnyException();
+            assertThatThrownBy(session::listRoles)
+                    .isInstanceOf(IamException.class)
+                    .extracting(e -> ((IamException) e).statusCode())
+                    .isEqualTo(403);
+            assertThatThrownBy(session::listGroups)
+                    .isInstanceOf(IamException.class)
+                    .extracting(e -> ((IamException) e).statusCode())
+                    .isEqualTo(403);
         }
     }
 

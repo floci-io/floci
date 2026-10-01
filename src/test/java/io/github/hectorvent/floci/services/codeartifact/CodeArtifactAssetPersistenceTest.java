@@ -11,23 +11,28 @@ import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.Publ
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactDomain;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
+import io.github.hectorvent.floci.testutil.LogCapture;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.LogRecord;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -211,6 +216,60 @@ class CodeArtifactAssetPersistenceTest {
         PackageVersionAssetResult fetched = service.getPackageVersionAsset(REGION, "dom", null, "repo", "generic",
                 null, "my-pkg", "1.0.0", "a.txt", null);
         assertEquals("hello world", new String(fetched.asset().getContent(), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * A backing file that exists but can't be read at all (a permission problem, not the missing-
+     * file case) must go through the same repair as a corrupted or missing one, not fail the whole
+     * publish, and must actually log the warning this behavior exists to add: a test that only
+     * checks the repair succeeded would still pass if {@code LOG.warnv} were deleted entirely, so
+     * this captures the real log record and asserts on it directly, the same way
+     * {@code PersistentPathValidatorTest} already does against the same {@code org.jboss.logging}
+     * backend. Skipped when the test runner can read regardless of permission bits (e.g. running as
+     * root), since removing read permission would not actually block the read there; the assumption
+     * keeps that a visibly skipped test, not a silently vacuous pass.
+     */
+    @Test
+    void republishingWithMatchingContentRepairsAnUnreadableBackingFileAndLogsAWarning(@TempDir Path dir)
+            throws IOException {
+        CodeArtifactService service = newService(dir);
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "hello world".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt",
+                sha256Hex(content), "true", content);
+
+        Path assetFile;
+        try (Stream<Path> paths = Files.walk(dir.resolve("codeartifact-assets"))) {
+            assetFile = paths.filter(Files::isRegularFile).findFirst().orElseThrow();
+        }
+        Assumptions.assumeTrue(assetFile.toFile().setReadable(false),
+                "test filesystem must support removing read permission");
+        Assumptions.assumeFalse(Files.isReadable(assetFile),
+                "removing read permission must actually block reads (not running as root)");
+
+        try {
+            List<LogRecord> records = LogCapture.capture(CodeArtifactService.class, () ->
+                    service.publishPackageVersion(REGION, "dom", null, "repo", "generic", null, "my-pkg", "1.0.0",
+                            "a.txt", sha256Hex(content), "true", content));
+
+            assertTrue(records.stream().anyMatch(r -> r.getMessage() != null
+                            && r.getMessage().contains("Could not verify")
+                            && r.getThrown() instanceof AccessDeniedException
+                            && r.getParameters() != null
+                            && r.getParameters().length > 0
+                            && assetFile.toString().equals(String.valueOf(r.getParameters()[0]))),
+                    "expected a warning logging the AccessDeniedException with the real file path "
+                            + "(not, say, the internal composite key) as its first parameter, got: " + records);
+
+            assertEquals("Unfinished", service.describePackageVersion(REGION, "dom", null, "repo", "generic", null,
+                    "my-pkg", "1.0.0").getStatus());
+            PackageVersionAssetResult fetched = service.getPackageVersionAsset(REGION, "dom", null, "repo",
+                    "generic", null, "my-pkg", "1.0.0", "a.txt", null);
+            assertEquals("hello world", new String(fetched.asset().getContent(), StandardCharsets.UTF_8));
+        } finally {
+            assetFile.toFile().setReadable(true);
+        }
     }
 
     /**

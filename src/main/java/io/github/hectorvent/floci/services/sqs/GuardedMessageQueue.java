@@ -6,11 +6,8 @@ import io.github.hectorvent.floci.services.sqs.model.Message;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -26,6 +23,7 @@ class GuardedMessageQueue {
     private final List<Message> messages;
     private final StorageBackend<String, List<Message>> messageStore;
     private final String storageKey;
+    private final String receiptHandleSecret;
     private volatile boolean closed;
 
     @FunctionalInterface
@@ -40,13 +38,19 @@ class GuardedMessageQueue {
     }
 
     GuardedMessageQueue(StorageBackend<String, List<Message>> messageStore, String storageKey) {
-        this(new ArrayList<>(), messageStore, storageKey);
+        this(new ArrayList<>(), messageStore, storageKey, ReceiptHandle.DEFAULT_SECRET);
     }
 
     GuardedMessageQueue(List<Message> initial, StorageBackend<String, List<Message>> messageStore, String storageKey) {
+        this(initial, messageStore, storageKey, ReceiptHandle.DEFAULT_SECRET);
+    }
+
+    GuardedMessageQueue(List<Message> initial, StorageBackend<String, List<Message>> messageStore, String storageKey,
+                        String receiptHandleSecret) {
         this.messages = new ArrayList<>(initial);
         this.messageStore = messageStore;
         this.storageKey = storageKey;
+        this.receiptHandleSecret = receiptHandleSecret;
     }
 
     record ClaimResult(List<Message> claimed, List<Message> dlqCandidates) {
@@ -117,7 +121,7 @@ class GuardedMessageQueue {
             return false;
         }
 
-        msg.setReceiptHandle(UUID.randomUUID().toString());
+        msg.setReceiptHandle(ReceiptHandle.issue(storageKey, msg.getMessageId(), receiptHandleSecret).encode());
         msg.setVisibleAt(Instant.now().plusSeconds(effectiveTimeout));
         claimed.add(msg);
         return true;
@@ -160,35 +164,57 @@ class GuardedMessageQueue {
         }
     }
 
-    Optional<Message> removeByReceiptHandle(String receiptHandle) {
+    enum HandleResult { APPLIED, MESSAGE_GONE, HANDLE_EXPIRED }
+
+    record Removal(HandleResult result, Message message) {
+    }
+
+    Removal removeByReceiptHandle(ReceiptHandle handle, boolean fifo) {
         try (Guard _ = hold()) {
-            Message removed = null;
-            for (Iterator<Message> it = messages.iterator(); it.hasNext(); ) {
-                Message m = it.next();
-                if (receiptHandle.equals(m.getReceiptHandle())) {
-                    removed = m;
-                    it.remove();
-                    break;
-                }
+            Message msg = findByMessageId(handle.messageId());
+            HandleResult result = checkHandle(msg, handle, fifo);
+            if (result != HandleResult.APPLIED) {
+                return new Removal(result, null);
             }
-            if (removed != null) {
-                persist();
-            }
-            return Optional.ofNullable(removed);
+            messages.remove(msg);
+            persist();
+            return new Removal(HandleResult.APPLIED, msg);
         }
     }
 
-    boolean changeVisibility(String receiptHandle, int visibilityTimeout) {
+    HandleResult changeVisibility(ReceiptHandle handle, int visibilityTimeout, boolean fifo) {
         try (Guard _ = hold()) {
-            for (Message msg : messages) {
-                if (receiptHandle.equals(msg.getReceiptHandle())) {
-                    msg.setVisibleAt(Instant.now().plusSeconds(visibilityTimeout));
-                    persist();
-                    return true;
-                }
+            Message msg = findByMessageId(handle.messageId());
+            HandleResult result = checkHandle(msg, handle, fifo);
+            if (result == HandleResult.APPLIED) {
+                msg.setVisibleAt(Instant.now().plusSeconds(visibilityTimeout));
+                persist();
             }
-            return false;
+            return result;
         }
+    }
+
+    private Message findByMessageId(String messageId) {
+        for (Message msg : messages) {
+            if (messageId.equals(msg.getMessageId())) {
+                return msg;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * On a standard queue an older handle of the message still works. On a FIFO queue only the
+     * handle of the receive still in flight does.
+     */
+    private static HandleResult checkHandle(Message msg, ReceiptHandle handle, boolean fifo) {
+        if (msg == null) {
+            return HandleResult.MESSAGE_GONE;
+        }
+        if (fifo && (!handle.encode().equals(msg.getReceiptHandle()) || msg.isVisible())) {
+            return HandleResult.HANDLE_EXPIRED;
+        }
+        return HandleResult.APPLIED;
     }
 
     void removeMessages(List<Message> toRemove) {

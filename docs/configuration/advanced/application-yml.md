@@ -104,7 +104,7 @@ floci:
     spoof-aws-endpoints: false
 
   auth:
-    validate-signatures: false               # Set to true to verify S3 presigned URL signatures
+    validate-signatures: false               # Set to true to verify S3 SigV4 signatures (header, presigned URL, presigned POST)
     presign-secret: local-emulator-secret    # HMAC secret for S3 pre-signed URL verification
 
   tls:
@@ -134,6 +134,7 @@ floci:
       default-visibility-timeout: 30         # Seconds
       max-message-size: 1048576              # Bytes (1 MiB, the AWS maximum)
       clear-fifo-deduplication-cache-on-purge: false  # When true, PurgeQueue clears SQS FIFO dedup and SNS FIFO topic dedup for topics subscribed to that queue
+      receipt-handle-secret: local-emulator-secret  # HMAC secret that signs receipt handles
 
     s3:
       enabled: true
@@ -162,6 +163,7 @@ floci:
       code-path: ./data/lambda-code           # Where ZIP archives are stored
       zip-max-entries: 100000                  # Maximum ZIP entries extracted per deployment package
       poll-interval-ms: 1000
+      async-retry-delay-seconds: 60           # Wait before the first retry of a failed Event invocation; the second waits twice this
       container-idle-timeout-seconds: 300     # Remove idle containers after this
       region-concurrency-limit: 1000          # Concurrent executions ceiling per region
       unreserved-concurrency-min: 100         # Minimum unreserved capacity PutFunctionConcurrency must leave
@@ -278,6 +280,7 @@ floci:
       enabled: true
       mock: false                             # true = tasks go to RUNNING without Docker (useful for CI)
       docker-network: floci-net               # required for task-role credentials; must be user-defined
+      image-pull-behavior: default            # as ECS_IMAGE_PULL_BEHAVIOR: default | always | once | prefer-cached
       task-role-credentials:
         enabled: false                        # vend real task IAM role credentials to task containers
         ttl-seconds: 21600                    # six hours, matching AWS
@@ -328,6 +331,7 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT`    | `30`             | Default visibility timeout (seconds)                          |
 | `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE`              | `1048576`        | Max message size (bytes)                                      |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | When `true`, `PurgeQueue` clears the FIFO 5-minute deduplication cache for the target queue and matching SNS FIFO topic dedup entries |
+| `FLOCI_SERVICES_SQS_RECEIPT_HANDLE_SECRET` | `local-emulator-secret` | HMAC secret that signs receipt handles, so a handle that was edited or built by hand is rejected |
 | `FLOCI_SERVICES_S3_DEFAULT_PRESIGN_EXPIRY_SECONDS` | `3600`           | Pre-signed URL expiry                                         |
 | `FLOCI_SERVICES_DOCKER_NETWORK`                    | *(unset)*        | Shared Docker network for Lambda, RDS, ElastiCache containers |
 | `FLOCI_SERVICES_RDS_DATA_ENABLED`                  | `true`           | Enable the RDS Data API service                               |
@@ -339,6 +343,7 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS`             | *(unset)*        | Comma-separated allowlist of parent directories for host volume bind mounts; by default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
 | `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES`     | `false`          | Allow any host path, bypassing the host-volume-roots allowlist (traversal, bare root, and the Docker socket or an ancestor directory of it are still always rejected) |
 | `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP` | `true`         | Remove the ECS containers a previous run of this Floci left on the daemon before replacement tasks start |
+| `FLOCI_SERVICES_ECS_IMAGE_PULL_BEHAVIOR`           | `default`        | How task images are pulled at launch, as the ECS agent's `ECS_IMAGE_PULL_BEHAVIOR`: `default`, `always`, `once` or `prefer-cached` |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`           | `false`          | Enforce IAM identity-based policies on every request when `true` |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK`                   | `false`          | Skip Docker; domains appear active immediately (useful for CI)   |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false`        | Leave OpenSearch containers running after Floci stops            |

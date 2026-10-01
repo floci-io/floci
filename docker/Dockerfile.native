@@ -4,7 +4,11 @@ USER root
 WORKDIR /app
 
 # Install Maven 3.9.x (system Maven is too old for Quarkus 3.31)
-RUN curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.12/binaries/apache-maven-3.9.12-bin.tar.gz | tar xz -C /opt \
+# The SHA-512 is Apache's published checksum for apache-maven-3.9.12-bin.tar.gz.
+RUN curl -fsSL -o /tmp/maven.tar.gz https://archive.apache.org/dist/maven/maven-3/3.9.12/binaries/apache-maven-3.9.12-bin.tar.gz \
+    && echo "0a1be79f02466533fc1a80abbef8796e4f737c46c6574ede5658b110899942a94db634477dfd3745501c80aef9aac0d4f841d38574373f7e2d24cce89d694f70  /tmp/maven.tar.gz" | sha512sum -c - \
+    && tar xzf /tmp/maven.tar.gz -C /opt \
+    && rm /tmp/maven.tar.gz \
     && ln -sf /opt/apache-maven-3.9.12/bin/mvn /usr/local/bin/mvn
 
 COPY pom.xml .
@@ -21,7 +25,7 @@ RUN mvn clean package -Dnative -DskipTests -B \
     -Dquarkus.native.additional-build-args-append=-H:-AOTSingleCallsiteInline
 
 # Stage 2: Minimal runtime. Same base and user setup as Dockerfile.native-package.
-FROM registry.access.redhat.com/ubi9-micro:9.7
+FROM registry.access.redhat.com/ubi9-micro:9.8
 
 WORKDIR /app
 RUN echo 'floci:x:1001:0:Floci:/app:/sbin/nologin' >> /etc/passwd \

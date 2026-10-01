@@ -80,6 +80,15 @@ class CloudFormationTemplateUrlTest {
     }
 
     @Test
+    void pathStyleAgainstChina_readsBucketFromThePath() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "https://s3.cn-north-1.amazonaws.com.cn/bucket/key", SUFFIX);
+
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("key"));
+    }
+
+    @Test
     void virtualHostedAgainstAws_readsBucketFromTheHost() {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "https://bucket.s3.us-east-1.amazonaws.com/nested/key.json", SUFFIX);

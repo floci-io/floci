@@ -69,12 +69,13 @@ public class Message {
         this.md5OfBody = computeMd5(body);
     }
 
-    /** A copy for delivery to another queue by StartMessageMoveTask: identity and content carry
-     *  over; per-receive state (receive count, first-receive timestamp, receipt handle, visibility)
-     *  starts over. The source instance is untouched so a failed delivery can put it back as it was. */
+    /** A copy for delivery to another queue by StartMessageMoveTask. The content carries over. AWS
+     *  gives it a new message id, and per-receive state (receive count, first-receive timestamp,
+     *  receipt handle, visibility) starts over. The source instance is untouched so a failed
+     *  delivery can put it back as it was. */
     public Message copyForRedrive() {
         Message copy = new Message();
-        copy.messageId = messageId;
+        copy.messageId = UUID.randomUUID().toString();
         copy.body = body;
         copy.messageAttributes = messageAttributes == null ? new HashMap<>() : new HashMap<>(messageAttributes);
         copy.sentTimestamp = sentTimestamp;
@@ -150,9 +151,12 @@ public class Message {
     }
 
     public void updateMd5OfMessageAttributes() {
+        this.md5OfMessageAttributes = computeMessageAttributesMd5(messageAttributes);
+    }
+
+    public static String computeMessageAttributesMd5(Map<String, MessageAttributeValue> messageAttributes) {
         if (messageAttributes == null || messageAttributes.isEmpty()) {
-            this.md5OfMessageAttributes = null;
-            return;
+            return null;
         }
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
@@ -189,10 +193,10 @@ public class Message {
             for (byte b : digest) {
                 sb.append(String.format("%02x", b));
             }
-            this.md5OfMessageAttributes = sb.toString();
+            return sb.toString();
         } catch (Exception ignored) {
             // Attribute serialization failure falls back to null MD5
-            this.md5OfMessageAttributes = null;
+            return null;
         }
     }
 

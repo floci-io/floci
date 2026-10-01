@@ -1,13 +1,12 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import io.github.hectorvent.floci.testing.LambdaCodeSourcesProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.util.Base64;
-import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -29,7 +28,7 @@ import static org.hamcrest.Matchers.hasSize;
  * such an ARN invalid outright.
  */
 @QuarkusTest
-@TestProfile(LambdaExternalLayerArnAcceptedIntegrationTest.AcceptExternalLayerArnsProfile.class)
+@TestProfile(LambdaCodeSourcesProfile.class)
 class LambdaExternalLayerArnAcceptedIntegrationTest {
 
     private static final String POWERTOOLS_ARN =
@@ -142,16 +141,5 @@ class LambdaExternalLayerArnAcceptedIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidParameterValueException"));
-    }
-
-    public static final class AcceptExternalLayerArnsProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.lambda.accept-external-layer-arns", "true",
-                    "quarkus.http.test-port", "4588",
-                    "floci.port", "4588",
-                    "floci.base-url", "http://localhost:4588");
-        }
     }
 }

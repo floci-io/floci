@@ -75,7 +75,8 @@ class SesIdentityServiceTest {
         service.verifyEmailIdentity("alice@example.com", REGION);
         service.save(new Identity("example.com", "Domain"), REGION);
         service.verifyEmailIdentity("other@example.com", "eu-west-1");
-        assertEquals(2, service.listIdentities(null, REGION).size());
+        assertEquals(List.of("alice@example.com", "example.com"),
+                service.listIdentities(null, REGION).stream().map(Identity::getIdentity).toList());
         assertEquals(List.of("example.com"),
                 service.listIdentities("Domain", REGION).stream().map(Identity::getIdentity).toList());
     }

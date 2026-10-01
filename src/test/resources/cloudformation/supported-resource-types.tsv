@@ -144,6 +144,10 @@ AWS::SSM::Parameter	SsmCfnProvisioner
 AWS::Scheduler::ScheduleGroup	SchedulerScheduleGroupCfnProvisioner
 AWS::SecretsManager::Secret	SecretsManagerCfnProvisioner
 AWS::SecretsManager::SecretTargetAttachment	SecretTargetAttachmentCfnProvisioner
+AWS::ServiceDiscovery::HttpNamespace	CloudMapCfnProvisioner
+AWS::ServiceDiscovery::PrivateDnsNamespace	CloudMapCfnProvisioner
+AWS::ServiceDiscovery::PublicDnsNamespace	CloudMapCfnProvisioner
+AWS::ServiceDiscovery::Service	CloudMapCfnProvisioner
 AWS::StepFunctions::StateMachine	StepFunctionsCfnProvisioner
 AWS::WAFv2::WebACL	WafV2CfnProvisioner
 Custom::DynamoDBReplica	DynamoDbCfnProvisioner

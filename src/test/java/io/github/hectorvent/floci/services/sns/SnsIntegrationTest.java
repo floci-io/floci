@@ -861,7 +861,7 @@ class SnsIntegrationTest {
             .formParam("Action", "ReceiveMessage")
             .formParam("QueueUrl", rawDeliveryQueueUrl)
             .formParam("MaxNumberOfMessages", "1")
-            .formParam("MessageAttributeNames.member.1", "All")
+            .formParam("MessageAttributeName.1", "All")
         .when()
             .post("/")
         .then()

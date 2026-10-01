@@ -341,16 +341,6 @@ public class LogsMetricFilterCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
-    public boolean hasPendingRollbackCleanup(StackResource resource) {
-        return resource.getAttributes().containsKey(SNAPSHOT)
-                || resource.getAttributes().containsKey(STATE_ATTR)
-                || resource.getAttributes().containsKey(UNCERTAIN_ATTR)
-                || resource.getAttributes().containsKey(GROUP_ATTR)
-                || resource.getAttributes().containsKey(NAME_MODE_ATTR)
-                || "true".equals(resource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
-    }
-
-    @Override
     public boolean retainsFailedUpdateState(StackResource resource) {
         return resource.getAttributes().containsKey(SNAPSHOT);
     }

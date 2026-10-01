@@ -73,7 +73,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             // A LaunchTemplate the stack references but that does not resolve is a real error, as on
             // AWS: let it fail the resource rather than silently launching with default config.
             LaunchTemplateData ltData = ec2Service.resolveLaunchTemplateData(region, ltId, ltName,
-                    ltRef.path("Version").asText(null));
+                    ltRef.path("Version").asText(null), false);
             if (imageId == null || imageId.isBlank()) {
                 imageId = ltData.getImageId();
             }

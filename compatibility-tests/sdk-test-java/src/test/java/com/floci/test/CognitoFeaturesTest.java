@@ -322,6 +322,27 @@ class CognitoFeaturesTest {
                 .isTrue();
     }
 
+    // ── Issue #4760: GetUserAuthFactors ──────────────────────────────────────
+
+    @Test
+    @Order(34)
+    void getUserAuthFactorsListsPasswordAndVerifiedEmail() {
+        InitiateAuthResponse resp = cognito.initiateAuth(b -> b
+                .clientId(clientId)
+                .authFlow(AuthFlowType.USER_PASSWORD_AUTH)
+                .authParameters(Map.of("USERNAME", USERNAME, "PASSWORD", PASSWORD)));
+        String accessToken = resp.authenticationResult().accessToken();
+
+        GetUserAuthFactorsResponse factors = cognito.getUserAuthFactors(b -> b.accessToken(accessToken));
+
+        assertThat(factors.username())
+                .isEqualTo(cognito.getUser(b -> b.accessToken(accessToken)).username());
+        assertThat(factors.configuredUserAuthFactors())
+                .containsExactly(AuthFactorType.PASSWORD, AuthFactorType.EMAIL_OTP);
+        assertThat(factors.preferredMfaSetting()).isNull();
+        assertThat(factors.hasUserMFASettingList()).isFalse();
+    }
+
     // ── Issue #220 — AdminGetUser accepts sub UUID and email as Username ───────
 
     @Test

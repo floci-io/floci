@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -41,19 +42,22 @@ public class CostAnomalyService implements Resettable {
     private final AccountAwareStorageBackend<ObjectNode> monitors;
     private final AccountAwareStorageBackend<ObjectNode> subscriptions;
     private final ObjectMapper mapper;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public CostAnomalyService(StorageFactory storageFactory, ObjectMapper mapper) {
+    public CostAnomalyService(StorageFactory storageFactory, ObjectMapper mapper, RegionResolver regionResolver) {
         this(storageFactory.create("ce", "anomaly-monitors.json", new TypeReference<Map<String, ObjectNode>>() {}),
                 storageFactory.create("ce", "anomaly-subscriptions.json", new TypeReference<Map<String, ObjectNode>>() {}),
-                mapper);
+                mapper, regionResolver);
     }
 
     CostAnomalyService(AccountAwareStorageBackend<ObjectNode> monitors,
-                       AccountAwareStorageBackend<ObjectNode> subscriptions, ObjectMapper mapper) {
+                       AccountAwareStorageBackend<ObjectNode> subscriptions, ObjectMapper mapper,
+                       RegionResolver regionResolver) {
         this.monitors = monitors;
         this.subscriptions = subscriptions;
         this.mapper = mapper;
+        this.regionResolver = regionResolver;
     }
 
     public synchronized ObjectNode createMonitor(JsonNode request) {
@@ -466,7 +470,7 @@ public class CostAnomalyService implements Resettable {
     }
 
     private String arn(String account, String type) {
-        return AwsArnUtils.Arn.of("ce", "", account, type + "/" + UUID.randomUUID()).toString();
+        return regionResolver.buildGlobalArn("ce", account, type + "/" + UUID.randomUUID());
     }
 
     private boolean contains(JsonNode values, String value) {

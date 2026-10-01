@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFrontCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudMapCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ConfigCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.DynamoDbCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2FlowLogCfnProvisioner;
@@ -96,6 +97,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.SsmCfnPro
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
+import io.github.hectorvent.floci.services.cloudmap.CloudMapService;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsMetricFilterService;
@@ -211,6 +213,7 @@ final class CfnProvisionerFixture {
         private WafV2Service wafV2Service;
         private BackupService backupService;
         private RedshiftService redshiftService;
+        private CloudMapService cloudMapService;
         private CloudFormationResourceRegistry resourceRegistry;
         private boolean registryChosenByTest;
         private CfnDynamicReferences dynamicReferences;
@@ -419,6 +422,9 @@ final class CfnProvisionerFixture {
             }
             if (redshiftService != null) {
                 discovered.add(new RedshiftClusterCfnProvisioner(redshiftService));
+            }
+            if (cloudMapService != null) {
+                discovered.add(new CloudMapCfnProvisioner(cloudMapService));
             }
             return discovered;
         }
@@ -670,6 +676,11 @@ final class CfnProvisionerFixture {
 
         public Builder redshift(RedshiftService s) {
             return redshiftService(s);
+        }
+
+        public Builder cloudMap(CloudMapService v) {
+            this.cloudMapService = v;
+            return this;
         }
 
         public Builder registry(CloudFormationResourceRegistry v) {

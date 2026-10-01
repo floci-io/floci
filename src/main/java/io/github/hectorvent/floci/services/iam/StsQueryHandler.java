@@ -178,9 +178,10 @@ public class StsQueryHandler {
                 uriInfo == null ? null : uriInfo.getQueryParameters());
         String callerAccount = regionResolver.getAccountId();
         String accessKeyId = auth == null ? null : accountResolver.extractAccessKeyId(auth);
-        String callerArn = iamService.resolveCallerArn(accessKeyId)
+        Optional<IamService.CallerArns> callerArns = iamService.resolveCallerArns(accessKeyId);
+        String callerArn = callerArns.map(IamService.CallerArns::callerArn)
                 .orElse(regionResolver.buildGlobalArn("iam", callerAccount, "root"));
-        String principalArn = iamService.resolvePrincipalArn(accessKeyId).orElse(callerArn);
+        String principalArn = callerArns.map(IamService.CallerArns::principalArn).orElse(callerArn);
         Map<String, List<String>> requestContext = IamConditionContextResolver.withGlobalContext(
                 null, roleArn, regionResolver.getRegion(), callerAccount, roleAccountId);
         requestContext.put("sts:RoleSessionName", List.of(getParam(params, "RoleSessionName")));

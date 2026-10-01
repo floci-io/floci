@@ -4,7 +4,9 @@ import com.fasterxml.jackson.core.JacksonException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.MissingNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -164,6 +166,12 @@ public class CloudMapService {
         return result;
     }
 
+    public void updateNamespace(String id, String description) {
+        Namespace ns = requireNamespace(id);
+        ns.setDescription(description);
+        namespaceStore.put(id, ns);
+    }
+
     public Operation deleteNamespace(String id, String region) {
         Namespace ns = requireNamespace(id);
         boolean hasServices = scan(serviceStore).stream()
@@ -246,6 +254,26 @@ public class CloudMapService {
             result.add(s);
         }
         return result;
+    }
+
+    /**
+     * Only the TTLs of the existing DNS records can change, as on AWS: any other DnsConfig change
+     * (record types or count, RoutingPolicy), or a DnsConfig for a service without one, is rejected.
+     * A null {@code dnsConfig} keeps the stored one, since AWS cannot remove it; a null description
+     * or health check config clears it, as AWS UpdateService does.
+     */
+    public void updateService(String id, String description, String dnsConfig, String healthCheckConfig) {
+        Service service = requireService(id);
+        if (dnsConfig != null) {
+            if (!withoutTtls(parseDnsConfig(dnsConfig)).equals(withoutTtls(dnsConfigNode(service)))) {
+                throw new AwsException("InvalidInput",
+                        "Only the TTLs of a service's DNS records can be updated.", 400);
+            }
+            service.setDnsConfig(dnsConfig);
+        }
+        service.setDescription(description);
+        service.setHealthCheckConfig(healthCheckConfig);
+        serviceStore.put(id, service);
     }
 
     public void deleteService(String id) {
@@ -575,6 +603,21 @@ public class CloudMapService {
             }
         }
         return config;
+    }
+
+    /** The DnsConfig as an update must keep it: record types in any order, TTLs free to change. */
+    private static JsonNode withoutTtls(JsonNode dnsConfig) {
+        JsonNode copy = dnsConfig.deepCopy();
+        if (copy instanceof ObjectNode object) {
+            List<String> types = new ArrayList<>();
+            for (JsonNode record : object.path("DnsRecords")) {
+                types.add(record.path("Type").asText());
+            }
+            types.sort(Comparator.naturalOrder());
+            ArrayNode records = object.putArray("DnsRecords");
+            types.forEach(records::add);
+        }
+        return copy;
     }
 
     /** Returns -1 when the service has no record of the requested type. */

@@ -28,6 +28,8 @@ public class EcsServiceModel {
     private String deploymentId;
     /** The deploymentId last observed to reach steady state; guards against re-emitting COMPLETED. */
     private String lastCompletedDeploymentId;
+    /** The deploymentId the circuit breaker failed; persisted so a restart does not resume it. */
+    private String failedDeploymentId;
     private String namespace;
     private String deploymentController;
     private String schedulingStrategy;
@@ -49,7 +51,7 @@ public class EcsServiceModel {
     private String propagateTags;
     private Integer healthCheckGracePeriodSeconds;
     private String roleArn;
-    /** {@code deploymentConfiguration}, kept raw: Floci reports it but runs no rollout against it. */
+    /** {@code deploymentConfiguration}, kept raw; only its {@code deploymentCircuitBreaker} is acted on. */
     private Map<String, Object> deploymentConfiguration;
     /**
      * {@code serviceRegistries}, kept raw. {@link EcsServiceDiscoveryRegistrar}
@@ -98,6 +100,9 @@ public class EcsServiceModel {
     public void setLastCompletedDeploymentId(String lastCompletedDeploymentId) {
         this.lastCompletedDeploymentId = lastCompletedDeploymentId;
     }
+
+    public String getFailedDeploymentId() { return failedDeploymentId; }
+    public void setFailedDeploymentId(String failedDeploymentId) { this.failedDeploymentId = failedDeploymentId; }
 
     public String getNamespace() { return namespace; }
     public void setNamespace(String namespace) { this.namespace = namespace; }

@@ -1014,23 +1014,55 @@ final class CognitoAuthFlowHandler {
     /** The set of USER_AUTH challenges this user currently qualifies for. */
     private List<String> availableUserAuthChallenges(CognitoUser user) {
         List<String> available = new ArrayList<>();
-        if (user.getPasswordHash() != null) {
+        if (hasPassword(user)) {
             available.add("PASSWORD");
         }
         if (user.getSrpVerifier() != null) {
             available.add("PASSWORD_SRP");
         }
-        Map<String, String> attrs = user.getAttributes();
-        if (attrs != null && service.verificationServicesConfigured()) {
-            if (Boolean.parseBoolean(attrs.getOrDefault("email_verified", "false")) && attrs.get("email") != null) {
+        if (service.verificationServicesConfigured()) {
+            if (hasVerifiedAttribute(user, "email")) {
                 available.add("EMAIL_OTP");
             }
-            if (Boolean.parseBoolean(attrs.getOrDefault("phone_number_verified", "false"))
-                    && attrs.get("phone_number") != null) {
+            if (hasVerifiedAttribute(user, "phone_number")) {
                 available.add("SMS_OTP");
             }
         }
         return available;
+    }
+
+    /**
+     * The sign-in factors {@code user} has set up, as GetUserAuthFactors reports them, in the
+     * {@code AuthFactorType} enum's order. AWS lists what the user holds, not what the pool's
+     * {@code AllowedFirstAuthFactors} permits, so neither that policy nor Floci's code-delivery
+     * wiring filters this list. {@code WEB_AUTHN} never appears: Floci stores no passkeys.
+     */
+    List<String> configuredUserAuthFactors(CognitoUser user) {
+        List<String> factors = new ArrayList<>();
+        if (hasPassword(user)) {
+            factors.add("PASSWORD");
+        }
+        if (hasVerifiedAttribute(user, "email")) {
+            factors.add("EMAIL_OTP");
+        }
+        if (hasVerifiedAttribute(user, "phone_number")) {
+            factors.add("SMS_OTP");
+        }
+        if (user.getSoftwareTokenMfaSecret() != null) {
+            factors.add("SOFTWARE_TOKEN");
+        }
+        return factors;
+    }
+
+    private static boolean hasPassword(CognitoUser user) {
+        return user.getPasswordHash() != null;
+    }
+
+    private static boolean hasVerifiedAttribute(CognitoUser user, String attributeName) {
+        Map<String, String> attrs = user.getAttributes();
+        return attrs != null
+                && Boolean.parseBoolean(attrs.getOrDefault(attributeName + "_verified", "false"))
+                && attrs.get(attributeName) != null;
     }
 
     private void requireSignInEligible(CognitoUser user) {

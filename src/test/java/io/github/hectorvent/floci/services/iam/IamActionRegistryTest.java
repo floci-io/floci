@@ -6,10 +6,13 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvFileSource;
 import org.mockito.Mockito;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -165,6 +168,56 @@ class IamActionRegistryTest {
                 mockCtx("POST", "/CommitTransaction", new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
         assertEquals("rds-data:RollbackTransaction", registry.resolve("rds-data",
                 mockCtx("POST", "/RollbackTransaction", new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
+    }
+
+    /**
+     * The table is generated from the SES v2 model and AWS's service reference, not from the rule
+     * table, so it checks the rules rather than restating them: each operation's path has to
+     * resolve to the action AWS lists for it, and to no other operation's.
+     */
+    @ParameterizedTest(name = "{0}")
+    @CsvFileSource(resources = "/iam/sesv2-operation-actions.csv")
+    void resolvesEverySesV2OperationToItsAction(String operation, String method, String path, String action) {
+        assertEquals(action, registry.resolve("ses",
+                mockCtx(method, path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
+    }
+
+    @Test
+    void sesV2RulesMatchTheWholePath() {
+        // A rule for /v2/email/configuration-sets must not also claim a path below it.
+        assertEquals("ses:ListConfigurationSets", registry.resolve("ses",
+                mockCtx("GET", "/v2/email/configuration-sets", new MultivaluedHashMap<>(),
+                        MediaType.APPLICATION_JSON_TYPE, "{}")));
+        assertEquals("ses:GetConfigurationSetEventDestinations", registry.resolve("ses",
+                mockCtx("GET", "/v2/email/configuration-sets/my-set/event-destinations/", new MultivaluedHashMap<>(),
+                        MediaType.APPLICATION_JSON_TYPE, "{}")));
+        assertNull(registry.resolve("ses",
+                mockCtx("GET", "/v2/email/configuration-sets/my-set/unknown", new MultivaluedHashMap<>(),
+                        MediaType.APPLICATION_JSON_TYPE, "{}")));
+    }
+
+    @Test
+    void aRestRouteIsNotRenamedByATargetHeader() {
+        // The route decides a REST request's action; a caller-supplied target must not name another.
+        ContainerRequestContext send = mockCtx("POST", "/v2/email/outbound-emails", new MultivaluedHashMap<>(),
+                MediaType.APPLICATION_JSON_TYPE, "{}");
+        when(send.getHeaderString("X-Amz-Target")).thenReturn("SES.GetAccount");
+        assertEquals("ses:SendEmail", registry.resolveRoute("ses", send));
+
+        ContainerRequestContext invoke = mockCtx("POST", "/2015-03-31/functions/f/invocations",
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        when(invoke.getHeaderString("X-Amz-Target")).thenReturn("AWSLambda.GetFunction");
+        assertEquals("lambda:InvokeFunction", registry.resolveRoute("lambda", invoke));
+    }
+
+    @Test
+    void anEncodedSlashStaysInsideItsPathParameter() {
+        assertEquals("ses:GetSuppressedDestination", registry.resolveRoute("ses",
+                mockCtx("GET", "/v2/email/suppression/addresses/a%2Fb@example.com", new MultivaluedHashMap<>(),
+                        MediaType.APPLICATION_JSON_TYPE, "{}")));
+        assertEquals("ses:DeleteSuppressedDestination", registry.resolveRoute("ses",
+                mockCtx("DELETE", "/v2/email/suppression/addresses/a%2Fb@example.com", new MultivaluedHashMap<>(),
+                        MediaType.APPLICATION_JSON_TYPE, "{}")));
     }
 
     @Test
@@ -440,6 +493,8 @@ class IamActionRegistryTest {
         UriInfo uriInfo = Mockito.mock(UriInfo.class);
         when(uriInfo.getQueryParameters()).thenReturn(queryParams);
         when(uriInfo.getPath()).thenReturn(path);
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost:4566" + path));
+        when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost:4566/"));
         when(ctx.getUriInfo()).thenReturn(uriInfo);
         when(ctx.getMediaType()).thenReturn(mediaType);
         when(ctx.getMethod()).thenReturn(method);

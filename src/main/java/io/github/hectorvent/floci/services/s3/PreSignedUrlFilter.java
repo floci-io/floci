@@ -150,10 +150,10 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
                         return;
                     }
 
-                    List<String> unsignedChecksumHeaders = unsignedChecksumHeaders(
+                    List<String> unsignedHeaders = unsignedHeadersRequiringSignature(
                             requestContext.getHeaders().keySet(), queryParams.getFirst("X-Amz-SignedHeaders"));
-                    if (!unsignedChecksumHeaders.isEmpty()) {
-                        requestContext.abortWith(headersNotSignedResponse(unsignedChecksumHeaders));
+                    if (!unsignedHeaders.isEmpty()) {
+                        requestContext.abortWith(headersNotSignedResponse(unsignedHeaders));
                     }
                     return;
                 }
@@ -308,7 +308,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
         return value == null ? "" : value.trim().replaceAll(" +", " ");
     }
 
-    static List<String> unsignedChecksumHeaders(Set<String> requestHeaderNames, String signedHeaders) {
+    static List<String> unsignedHeadersRequiringSignature(Set<String> requestHeaderNames, String signedHeaders) {
         Set<String> normalizedSignedHeaders = List.of(signedHeaders.split(";"))
                 .stream()
                 .map(name -> name.toLowerCase(Locale.ROOT))
@@ -316,7 +316,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
 
         return requestHeaderNames.stream()
                 .map(name -> name.toLowerCase(Locale.ROOT))
-                .filter(CHECKSUM_HEADERS_REQUIRING_SIGNATURE::contains)
+                .filter(name -> CHECKSUM_HEADERS_REQUIRING_SIGNATURE.contains(name) || name.startsWith("x-amz-meta-"))
                 .filter(name -> !normalizedSignedHeaders.contains(name))
                 .distinct()
                 .sorted()

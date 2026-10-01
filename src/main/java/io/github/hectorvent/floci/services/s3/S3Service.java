@@ -4684,7 +4684,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
             ObjectNode bucketNode = objectMapper.createObjectNode();
             bucketNode.put("name", bucketName);
-            bucketNode.put("arn", AwsArnUtils.Arn.of("s3", "", "", bucketName).toString());
+            bucketNode.put("arn", AwsArnUtils.Arn.global(bucketPartition(bucketName), "s3", "", bucketName).toString());
 
             ObjectNode objectNode = objectMapper.createObjectNode();
             objectNode.put("key", key);
