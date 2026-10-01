@@ -22,6 +22,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
@@ -563,6 +564,34 @@ class GlueSchemaRegistryServiceTest {
         assertTrue(service.checkSchemaVersionValidity("JSON", jsonDefinition).valid());
         assertFalse(jsonDefinition.equals(SchemaCompatibilityChecker.canonicalize(jsonDefinition, "JSON")));
         assertLookupFindsRecreatedSchema(AVRO_V1, jsonDefinition);
+    }
+
+    @Test
+    void lookupReportsInternalErrorWhenSchemaFormatKeepsChanging() {
+        String definition = "{\"type\":\"string\"}";
+        AtomicBoolean alternateFormat = new AtomicBoolean();
+        AtomicInteger reads = new AtomicInteger();
+        InMemoryStorage<String, Schema> schemaStore = new InMemoryStorage<>() {
+            @Override
+            public Optional<Schema> get(String key) {
+                Optional<Schema> schema = super.get(key);
+                if (alternateFormat.get() && schema.isPresent()) {
+                    schema.get().setDataFormat(reads.getAndIncrement() % 2 == 0 ? "AVRO" : "JSON");
+                }
+                return schema;
+            }
+        };
+        service = new GlueSchemaRegistryService(new InMemoryStorage<>(), schemaStore,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new RegionResolver(REGION, ACCOUNT_ID));
+        service.createRegistry("reg", null, null, REGION);
+        service.createSchema(new RegistryId("reg", null), "users", "AVRO", "NONE",
+                null, definition, null, REGION);
+
+        alternateFormat.set(true);
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.getSchemaByDefinition(new SchemaId("reg", "users", null), definition, REGION));
+        assertEquals("InternalServiceException", error.getErrorCode());
+        assertEquals(500, error.getHttpStatus());
     }
 
     private void assertLookupFindsRecreatedSchema(String oldDefinition, String replacementDefinition) throws Exception {

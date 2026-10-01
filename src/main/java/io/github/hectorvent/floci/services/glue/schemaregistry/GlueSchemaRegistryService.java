@@ -670,8 +670,8 @@ public class GlueSchemaRegistryService {
                                 "Schema version vanished: " + id, 400));
             }
         }
-        throw new AwsException("ConcurrentModificationException",
-                "Schema format changed repeatedly during definition lookup: " + schemaKey, 400);
+        throw new AwsException("InternalServiceException",
+                "Schema format changed repeatedly during definition lookup: " + schemaKey, 500);
     }
 
     // ---- Helpers ---------------------------------------------------------
