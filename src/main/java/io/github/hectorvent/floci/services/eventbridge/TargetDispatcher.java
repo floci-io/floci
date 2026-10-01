@@ -14,7 +14,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -73,6 +72,9 @@ public class TargetDispatcher implements Resettable {
         this.baseUrl = baseUrl;
         this.clock = clock;
         this.executor = executor;
+        if (executor != null) {
+            executor.scheduleWithFixedDelay(this::tick, 1, 1, TimeUnit.SECONDS);
+        }
     }
 
     @PreDestroy
@@ -100,12 +102,14 @@ public class TargetDispatcher implements Resettable {
         }
     }
 
-    // The executor may fire marginally before the wall clock reaches dueAt, so the due time is a floor.
-    void tick(Instant dueAt) {
+    public void dropPendingRetries(String ruleArn, List<String> targetIds) {
+        pending.removeIf(delivery -> delivery.ruleArn().equals(ruleArn) && targetIds.contains(delivery.targetId()));
+    }
+
+    void tick() {
         while (true) {
             Delivery delivery = pending.peek();
-            Instant clockNow = clock.instant();
-            Instant now = clockNow.isBefore(dueAt) ? dueAt : clockNow;
+            Instant now = clock.instant();
             if (delivery == null || now.isBefore(delivery.nextAttemptAt()) || !pending.remove(delivery)) {
                 return;
             }
@@ -165,11 +169,6 @@ public class TargetDispatcher implements Resettable {
                 deadLetter(failed, target, EXHAUSTED_BY_ATTEMPTS);
             } else {
                 pending.add(failed);
-                if (executor != null) {
-                    Instant retryAt = failed.nextAttemptAt();
-                    executor.schedule(() -> tick(retryAt), Duration.between(clock.instant(), retryAt).toMillis(),
-                            TimeUnit.MILLISECONDS);
-                }
             }
         }
     }

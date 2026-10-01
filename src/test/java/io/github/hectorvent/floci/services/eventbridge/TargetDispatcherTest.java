@@ -71,13 +71,13 @@ class TargetDispatcherTest {
         dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
 
-        dispatcher.tick(T0.plusMillis(999));
+        tickAt(T0.plusMillis(999));
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
 
-        dispatcher.tick(T0.plusSeconds(1));
+        tickAt(T0.plusSeconds(1));
         verify(sqsService, times(2)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
 
-        dispatcher.tick(T0.plusSeconds(3600));
+        tickAt(T0.plusSeconds(3600));
         verify(sqsService, times(2)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         verifyNoDeadLetter();
     }
@@ -105,18 +105,17 @@ class TargetDispatcherTest {
     }
 
     @Test
-    void slowFailedAttemptSchedulesItsRetryFromWhenTheAttemptStarted() {
+    void retriesRunFromOnePeriodicTickRatherThanATimerEach() {
         ScheduledExecutorService executor = mock(ScheduledExecutorService.class);
         TargetDispatcher scheduled = new TargetDispatcher(invoker, sqsService, BASE_URL, clock, executor);
-        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION)).thenAnswer(invocation -> {
-            clockNow.set(T0.plusSeconds(5));
-            throw unavailable();
-        });
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION)).thenThrow(unavailable());
         Target target = sqsTarget(null, DLQ_ARN);
 
         scheduled.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
+        scheduled.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
 
-        verify(executor).schedule(any(Runnable.class), eq(-4000L), eq(TimeUnit.MILLISECONDS));
+        verify(executor).scheduleWithFixedDelay(any(Runnable.class), eq(1L), eq(1L), eq(TimeUnit.SECONDS));
+        verifyNoMoreInteractions(executor);
     }
 
     @Test
@@ -125,9 +124,9 @@ class TargetDispatcherTest {
         Target target = sqsTarget(new Target.RetryPolicy(2, 3600), DLQ_ARN);
 
         dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
-        dispatcher.tick(T0.plusSeconds(10));
-        dispatcher.tick(T0.plusSeconds(20));
-        dispatcher.tick(T0.plusSeconds(600));
+        tickAt(T0.plusSeconds(10));
+        tickAt(T0.plusSeconds(20));
+        tickAt(T0.plusSeconds(600));
 
         verify(sqsService, times(3)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         Map<String, MessageAttributeValue> attributes = deadLetterAttributes();
@@ -145,7 +144,7 @@ class TargetDispatcherTest {
         Target target = sqsTarget(new Target.RetryPolicy(185, 60), DLQ_ARN);
 
         dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
-        dispatcher.tick(T0.plusSeconds(61));
+        tickAt(T0.plusSeconds(61));
 
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         Map<String, MessageAttributeValue> attributes = deadLetterAttributes();
@@ -168,8 +167,8 @@ class TargetDispatcherTest {
         assertAttribute(attributes, "RETRY_ATTEMPTS", "0");
         assertFalse(attributes.containsKey("EXHAUSTED_RETRY_CONDITION"));
 
-        dispatcher.tick(T0.plusSeconds(1));
-        dispatcher.tick(T0.plusSeconds(3600));
+        tickAt(T0.plusSeconds(1));
+        tickAt(T0.plusSeconds(3600));
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
     }
 
@@ -184,7 +183,7 @@ class TargetDispatcherTest {
         Target target = sqsTarget(null, DLQ_ARN);
 
         assertDoesNotThrow(() -> dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target)));
-        dispatcher.tick(T0.plusSeconds(3600));
+        tickAt(T0.plusSeconds(3600));
 
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         verify(sqsService, times(1)).sendMessage(eq(DLQ_URL), anyString(), anyInt(), any(), any(), anyMap(), anyString());
@@ -216,7 +215,7 @@ class TargetDispatcherTest {
 
         dispatcher.dispatch(RULE_ARN, original, EVENT, REGION, current::get);
         current.set(List.of(updated));
-        dispatcher.tick(T0.plusSeconds(1));
+        tickAt(T0.plusSeconds(1));
 
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         verify(sqsService).sendMessage(BASE_URL + "/000000000000/orders-v2", EVENT, 0, null, null, REGION);
@@ -230,7 +229,7 @@ class TargetDispatcherTest {
 
         dispatcher.dispatch(RULE_ARN, original, EVENT, REGION, current::get);
         current.set(List.of(sqsTarget(new Target.RetryPolicy(0, 3600), DLQ_ARN)));
-        dispatcher.tick(T0.plusSeconds(1));
+        tickAt(T0.plusSeconds(1));
 
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         Map<String, MessageAttributeValue> attributes = deadLetterAttributes();
@@ -254,7 +253,7 @@ class TargetDispatcherTest {
         dispatcher.dispatch(RULE_ARN, slow, EVENT, REGION, () -> List.of(slow, aged));
         clockNow.set(T0.plusMillis(500));
         dispatcher.dispatch(RULE_ARN, aged, EVENT, REGION, () -> List.of(slow, aged));
-        dispatcher.tick(T0.plusSeconds(2));
+        tickAt(T0.plusSeconds(2));
 
         verify(sqsService, times(2)).sendMessage(slowUrl, EVENT, 0, null, null, REGION);
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
@@ -277,10 +276,28 @@ class TargetDispatcherTest {
         dispatcher.dispatch(RULE_ARN, first, EVENT, REGION, () -> List.of(first, second));
         clockNow.set(T0.plusMillis(500));
         dispatcher.dispatch(RULE_ARN, second, EVENT, REGION, () -> List.of(first, second));
-        dispatcher.tick(T0.plusSeconds(2));
+        tickAt(T0.plusSeconds(2));
 
         verify(sqsService, times(2)).sendMessage(firstUrl, EVENT, 0, null, null, REGION);
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        verifyNoDeadLetter();
+    }
+
+    @Test
+    void removedTargetsPendingRetriesAreDroppedEvenIfItsIdReturns() {
+        String otherUrl = BASE_URL + "/000000000000/other";
+        Target removed = sqsTarget(null, DLQ_ARN);
+        Target kept = new Target("other-target", "arn:aws:sqs:us-east-1:000000000000:other", null, null);
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION)).thenThrow(unavailable());
+        when(sqsService.sendMessage(otherUrl, EVENT, 0, null, null, REGION)).thenThrow(unavailable()).thenReturn(null);
+
+        dispatcher.dispatch(RULE_ARN, removed, EVENT, REGION, () -> List.of(removed, kept));
+        dispatcher.dispatch(RULE_ARN, kept, EVENT, REGION, () -> List.of(removed, kept));
+        dispatcher.dropPendingRetries(RULE_ARN, List.of("orders-target"));
+        tickAt(T0.plusSeconds(1));
+
+        verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        verify(sqsService, times(2)).sendMessage(otherUrl, EVENT, 0, null, null, REGION);
         verifyNoDeadLetter();
     }
 
@@ -292,8 +309,8 @@ class TargetDispatcherTest {
 
         dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, current::get);
         current.set(List.of());
-        dispatcher.tick(T0.plusSeconds(1));
-        dispatcher.tick(T0.plusSeconds(3600));
+        tickAt(T0.plusSeconds(1));
+        tickAt(T0.plusSeconds(3600));
 
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         verifyNoDeadLetter();
@@ -316,7 +333,7 @@ class TargetDispatcherTest {
 
         dispatcher.dispatch(ruleA, targetA, EVENT, "us-east-1", () -> List.of(targetA));
         dispatcher.dispatch(ruleB, targetB, EVENT, "eu-west-1", () -> List.of(targetB));
-        dispatcher.tick(T0.plusSeconds(1));
+        tickAt(T0.plusSeconds(1));
 
         verify(sqsService, times(2)).sendMessage(urlA, EVENT, 0, null, null, "us-east-1");
         verify(sqsService, times(2)).sendMessage(urlB, EVENT, 0, null, null, "eu-west-1");
@@ -330,8 +347,8 @@ class TargetDispatcherTest {
         Target target = new Target("fn-target", functionArn, null, null);
 
         dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
-        dispatcher.tick(T0.plusSeconds(1));
-        dispatcher.tick(T0.plusSeconds(3600));
+        tickAt(T0.plusSeconds(1));
+        tickAt(T0.plusSeconds(3600));
 
         verify(lambdaService, times(1)).invokeArn(eq(functionArn), any(), eq(InvocationType.Event));
     }
@@ -343,7 +360,7 @@ class TargetDispatcherTest {
 
         dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
         dispatcher.clear();
-        dispatcher.tick(T0.plusSeconds(3600));
+        tickAt(T0.plusSeconds(3600));
 
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         verifyNoDeadLetter();
@@ -358,10 +375,15 @@ class TargetDispatcherTest {
         Target target = sqsTarget(null, DLQ_ARN);
 
         dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
-        dispatcher.tick(T0.plusSeconds(3600));
+        tickAt(T0.plusSeconds(3600));
 
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         verifyNoDeadLetter();
+    }
+
+    private void tickAt(Instant now) {
+        clockNow.set(now);
+        dispatcher.tick();
     }
 
     private static Target sqsTarget(Target.RetryPolicy retryPolicy, String deadLetterArn) {

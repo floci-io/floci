@@ -363,6 +363,8 @@ class EventBridgeServiceTest {
         assertEquals(1, result.successfulCount());
         assertEquals(0, result.failedCount());
         assertEquals(1, service.listTargetsByRule("my-rule", null, REGION).size());
+        verify(dispatcherMock).dropPendingRetries(
+                service.describeRule("my-rule", null, REGION).getArn(), List.of("t1"));
     }
 
     @Test

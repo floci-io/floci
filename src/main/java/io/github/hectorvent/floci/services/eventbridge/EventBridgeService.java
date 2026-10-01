@@ -466,6 +466,7 @@ public class EventBridgeService implements ResourceProvider {
             }
         }
         targetStore.put(key, existing);
+        ruleStore.get(key).ifPresent(rule -> dispatcher.dropPendingRetries(rule.getArn(), ids));
         return new RemoveTargetsResult(removed, ids.size() - removed);
     }
 
