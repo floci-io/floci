@@ -139,6 +139,24 @@ class IamServiceTest {
     }
 
     @Test
+    void aSessionsCallerAndPrincipalArnsComeFromOneLookup() {
+        IamService service = iamService(false, new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.registerSession("ASIALIVESESSION", "secret", "token",
+                "arn:aws:iam::123456789012:role/team/TestRole", Instant.now().plusSeconds(3600),
+                null, "123456789012", "s", "AROATESTROLEID:s");
+        service.registerSession("ASIAEXPIREDSESSION", "secret", "token",
+                "arn:aws:iam::123456789012:role/team/TestRole", Instant.now().minusSeconds(1),
+                null, "123456789012", "s", "AROATESTROLEID:s");
+
+        // The session ARN carries only the role's name; aws:PrincipalArn is the role's own ARN.
+        assertEquals(new IamService.CallerArns("arn:aws:sts::123456789012:assumed-role/TestRole/s",
+                        "arn:aws:iam::123456789012:role/team/TestRole"),
+                service.resolveCallerArns("ASIALIVESESSION").orElseThrow());
+        // An expired session answers for neither, never for one and not the other.
+        assertTrue(service.resolveCallerArns("ASIAEXPIREDSESSION").isEmpty());
+    }
+
+    @Test
     void ec2SessionMarkerSurvivesPersistenceAndExpiredCredentialsCannotAuthenticate() throws Exception {
         SessionCredential expired = new SessionCredential("ASIAEXPIREDEC2", "secret", "token",
                 "arn:aws:iam::123456789012:role/worker", Instant.now().minusSeconds(1), null, "123456789012");

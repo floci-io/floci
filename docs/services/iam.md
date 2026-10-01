@@ -692,9 +692,11 @@ floci populates:
   check is made without the object's tags in the context, as measured on AWS. `If-None-Match`
   needs no such permission.
 - `aws:PrincipalArn`: the caller's ARN, resolved from the signing access key. It is the
-  IAM-user ARN for a user access key, the assumed-role ARN for an STS session, and
-  `arn:aws:iam::<account>:root` for the bare account-id key (floci's account-root principal),
-  matching the ARN shape AWS itself reports for the account root. It is **absent** only for
+  IAM-user ARN for a user access key, and `arn:aws:iam::<account>:root` for the bare account-id
+  key (floci's account-root principal), matching the ARN shape AWS itself reports for the account
+  root. For an STS role session it is the ARN of the role that was assumed, path included, not the
+  `assumed-role` session ARN, as AWS reports it ("For IAM roles, the request context returns the
+  ARN of the role"); a condition naming the session ARN does not match. It is **absent** only for
   unknown keys, where nothing about the caller can be resolved.
 - `dynamodb:LeadingKeys`, `dynamodb:Attributes`, `dynamodb:Select`: from the DynamoDB request
   body, for `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `BatchGetItem` and
@@ -723,10 +725,6 @@ being bounded by SCPs (below): both forms of root enforcement now agree. A negat
 (`StringNotEquals`, `ArnNotLike`, `NotIpAddress` and the rest) is the exception, as on AWS: an
 absent key cannot equal what the policy names, so the condition holds, and a `Deny` written
 that way applies when the key is missing.
-
-**Caveat:** `resolveCallerArn` hardcodes the assumed-role session name as `floci-session`,
-so `aws:PrincipalArn` for an assumed-role caller will not match a condition that pins a
-different session name. This matches what `sts:GetCallerIdentity` already reports.
 
 **Not yet supported**: `NotPrincipal`, resource-based policies (S3 bucket policy, Lambda resource
 policy), and `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems` and the

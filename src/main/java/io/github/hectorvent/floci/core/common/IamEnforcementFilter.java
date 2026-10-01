@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.iam.IamService.PresignedScope;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
@@ -388,24 +389,26 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 conditionContextResolver.resolveRemainingTargets(credentialScope, action, ctx);
 
         // aws:PrincipalArn is populated for every principal this filter can identify — IAM users,
-        // assumed-role sessions, and now the synthesized account-root principal above, using AWS's
-        // own root ARN shape (arn:aws:iam::<account>:root). Real AWS populates this key for the
+        // assumed-role sessions (as the ARN of the role that was assumed, as AWS reports it), and now
+        // the synthesized account-root principal above, using AWS's own root ARN shape
+        // (arn:aws:iam::<account>:root). Real AWS populates this key for the
         // root user, so a DenyRootUser guardrail keyed on it must fire against floci's account-root
         // stand-in the same way it enforces SCPs against it (the account-root SCP change above);
         // leaving it absent here would have made the two forms of root enforcement inconsistent.
-        Optional<String> principalArn = accountRootPrincipal
-                ? Optional.of(AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString())
-                : iamService.resolveCallerArn(akid);
-        if (principalArn.isPresent()) {
-            caller = caller.withPrincipalArn(principalArn.get());
+        // The session ARN stays the caller's principal for matching a resource policy's Principal.
+        Optional<CallerArns> callerArns = accountRootPrincipal
+                ? Optional.of(accountRootArns(accountId))
+                : iamService.resolveCallerArns(akid);
+        if (callerArns.isPresent()) {
+            caller = caller.withPrincipalArn(callerArns.get().callerArn());
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
-            conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
+            conditionContext.put("aws:PrincipalArn", List.of(callerArns.get().principalArn()));
         }
         List<Map<String, List<String>>> targetContexts = new ArrayList<>();
         targetContexts.add(conditionContext);
         for (Map<String, List<String>> target : remainingTargets) {
             Map<String, List<String>> targetContext = new HashMap<>(target);
-            principalArn.ifPresent(arn -> targetContext.put("aws:PrincipalArn", List.of(arn)));
+            callerArns.ifPresent(arns -> targetContext.put("aws:PrincipalArn", List.of(arns.principalArn())));
             targetContexts.add(targetContext);
         }
 
@@ -505,6 +508,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     private record ResolvedAuthorization(String credentialScope, String action) {
+    }
+
+    /** Floci's account-root principal, which is both the caller and the request's aws:PrincipalArn. */
+    private CallerArns accountRootArns(String accountId) {
+        String rootArn = AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString();
+        return new CallerArns(rootArn, rootArn);
     }
 
     /**
@@ -725,13 +734,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
 
             Map<String, List<String>> conditionContext = null;
-            Optional<String> principalArn = accountRootPrincipal
-                    ? Optional.of(AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString())
-                    : iamService.resolveCallerArn(akid);
-            if (principalArn.isPresent()) {
-                caller = caller.withPrincipalArn(principalArn.get());
+            Optional<CallerArns> callerArns = accountRootPrincipal
+                    ? Optional.of(accountRootArns(accountId))
+                    : iamService.resolveCallerArns(akid);
+            if (callerArns.isPresent()) {
+                caller = caller.withPrincipalArn(callerArns.get().callerArn());
                 conditionContext = new HashMap<>();
-                conditionContext.put("aws:PrincipalArn", List.of(principalArn.get()));
+                conditionContext.put("aws:PrincipalArn", List.of(callerArns.get().principalArn()));
             }
 
             ResourcePolicyDecision effectiveDecision = resourcePolicyDecision;
