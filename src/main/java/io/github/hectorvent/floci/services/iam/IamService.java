@@ -2619,6 +2619,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public Optional<String> resolveCallerArn(String accessKeyId) {
+        return resolveCallerArns(accessKeyId).map(CallerArns::callerArn);
+    }
+
+    /**
+     * The two ARNs a caller's access key stands for, read from one lookup of the key.
+     *
+     * @param callerArn    the identity the caller acts as: the user's ARN, or for a role session its
+     *                     {@code assumed-role} session ARN, as {@link #resolveCallerArn} returns it
+     * @param principalArn the request's {@code aws:PrincipalArn}: the user's ARN, or for a role
+     *                     session the ARN of the role that was assumed, path included
+     */
+    public record CallerArns(String callerArn, String principalArn) {}
+
+    /**
+     * Both of the caller's ARNs from a single lookup, so they always describe the same credential:
+     * two lookups could straddle a session's expiry and answer for it only once.
+     */
+    public Optional<CallerArns> resolveCallerArns(String accessKeyId) {
         if (accessKeyId == null || accessKeyId.isBlank()) {
             return Optional.empty();
         }
@@ -2626,7 +2644,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
         if (akOpt.isPresent()) {
             String userName = akOpt.get().getUserName();
-            return users.get(userName).map(IamUser::getArn);
+            return users.get(userName).map(IamUser::getArn).map(arn -> new CallerArns(arn, arn));
         }
 
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
@@ -2650,8 +2668,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // The session lives in its role's partition, as AssumeRole issued it, whatever region
             // a later call is signed for.
             String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
-            return Optional.of(AwsArnUtils.Arn.global(partition, "sts", accountId,
-                    "assumed-role/" + roleName + "/" + sessionName).toString());
+            String sessionArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
+                    "assumed-role/" + roleName + "/" + sessionName).toString();
+            return Optional.of(new CallerArns(sessionArn, roleArn));
         }
 
         return Optional.empty();
@@ -2663,14 +2682,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * was assumed, path included, rather than the assumed-role session ARN, which names the role
      * without its path. That is the ARN the session recorded when it was issued, read back as is:
      * looking the role up by name would hand an old session the ARN of a same-named role created
-     * after it.
+     * after it. A caller that needs the caller ARN too reads both through {@link #resolveCallerArns}.
      */
     public Optional<String> resolvePrincipalArn(String accessKeyId) {
-        Optional<String> callerArn = resolveCallerArn(accessKeyId);
-        if (callerArn.isEmpty() || accessKeys.get(accessKeyId).isPresent()) {
-            return callerArn;
-        }
-        return findSessionForCallerContext(accessKeyId).map(SessionCredential::getRoleArn);
+        return resolveCallerArns(accessKeyId).map(CallerArns::principalArn);
     }
 
     public Optional<String> resolveCallerUserId(String accessKeyId) {

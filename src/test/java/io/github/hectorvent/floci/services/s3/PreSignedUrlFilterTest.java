@@ -156,7 +156,7 @@ class PreSignedUrlFilterTest {
                         "x-amz-checksum-sha1",
                         "x-amz-checksum-sha256",
                         "x-amz-sdk-checksum-algorithm"),
-                PreSignedUrlFilter.unsignedChecksumHeaders(
+                PreSignedUrlFilter.unsignedHeadersRequiringSignature(
                         Set.of(
                                 "Host",
                                 "X-Amz-Checksum-Algorithm",
@@ -173,7 +173,7 @@ class PreSignedUrlFilterTest {
     void acceptsChecksumHeadersIncludedInSignedHeaders() {
         assertEquals(
                 List.of(),
-                PreSignedUrlFilter.unsignedChecksumHeaders(
+                PreSignedUrlFilter.unsignedHeadersRequiringSignature(
                         Set.of("host", "x-amz-checksum-algorithm", "x-amz-checksum-crc32",
                                 "x-amz-checksum-sha256", "x-amz-sdk-checksum-algorithm"),
                         "host;x-amz-checksum-algorithm;x-amz-checksum-crc32;"
@@ -181,10 +181,19 @@ class PreSignedUrlFilterTest {
     }
 
     @Test
+    void reportsUnsignedUserMetadataHeaders() {
+        assertEquals(
+                List.of("x-amz-meta-source"),
+                PreSignedUrlFilter.unsignedHeadersRequiringSignature(
+                        Set.of("host", "X-Amz-Meta-Source", "x-amz-meta-signed"),
+                        "host;x-amz-meta-signed"));
+    }
+
+    @Test
     void ignoresHeadersOutsideChecksumFamily() {
         assertEquals(
                 List.of(),
-                PreSignedUrlFilter.unsignedChecksumHeaders(
+                PreSignedUrlFilter.unsignedHeadersRequiringSignature(
                         Set.of("content-type", "user-agent", "x-amz-content-sha256",
                                 "x-amz-user-agent", "x-amz-checksum-type"),
                         "host"));

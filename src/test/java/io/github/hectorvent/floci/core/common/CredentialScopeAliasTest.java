@@ -8,6 +8,7 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -103,6 +104,8 @@ class CredentialScopeAliasTest {
     private static ContainerRequestContext getObjectRequest() {
         UriInfo uriInfo = mock(UriInfo.class);
         when(uriInfo.getPath()).thenReturn("/my-bucket/my-key");
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost:4566/my-bucket/my-key"));
+        when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost:4566/"));
         when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
 
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);

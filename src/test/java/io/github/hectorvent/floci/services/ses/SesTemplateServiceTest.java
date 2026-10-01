@@ -20,8 +20,6 @@ import java.time.Instant;
 import java.util.List;
 import java.util.stream.Stream;
 
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -117,14 +115,17 @@ class SesTemplateServiceTest {
     }
 
     @Test
-    void list_isPerRegion() {
-        service.createTemplate(template("a"), REGION);
-        service.createTemplate(template("b"), REGION);
-        service.createTemplate(template("other"), "eu-west-1");
+    void list_isPerRegion_newestFirst() {
+        SesTemplateService ticking = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(),
+                new SecureRandom(), new MutableClock());
+        for (String name : List.of("a", "b", "c", "d", "e")) {
+            ticking.createTemplate(template(name), REGION);
+        }
+        ticking.createTemplate(template("other"), "eu-west-1");
 
-        List<String> names = service.listTemplates(REGION).stream()
+        List<String> names = ticking.listTemplates(REGION).stream()
                 .map(EmailTemplate::getTemplateName).toList();
-        assertThat(names, containsInAnyOrder("a", "b"));
+        assertEquals(List.of("e", "d", "c", "b", "a"), names);
     }
 
     @Test

@@ -151,6 +151,15 @@ names the caller's. ARNs with nothing stored
 behind them, the `root` fallback of `GetCallerIdentity` and `federated-user`, take the request's
 partition.
 
+## How it is tested
+
+Every partition-dependent rule has unit and integration tests over all eight partitions. On top
+of that, the nightly Partition Compatibility workflow runs the Java SDK compatibility suite
+against a Floci deployed with `FLOCI_DEFAULT_REGION=cn-north-1`, with the SDK clients signing for
+`cn-north-1`, so the SDK's own China partition handling has to round-trip end to end. Its known
+failures are listed in `.github/ci/compat-partition-allowlist-cn-north-1.txt`; the list only
+shrinks.
+
 ## Open questions
 
 These values have no published source Floci can cite, so it does not guess them; they keep

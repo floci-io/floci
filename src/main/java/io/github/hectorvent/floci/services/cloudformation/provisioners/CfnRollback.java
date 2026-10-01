@@ -79,6 +79,14 @@ public final class CfnRollback {
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
 
     /**
+     * Holds the name, description and endpoint configuration a REST API had before an in-place
+     * update patched them, and whether the update also re-applied an OpenAPI document, so a failed
+     * stack update can put them back. Written by {@code ApiGatewayRestApiCfnProvisioner} before its
+     * update call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String REST_API_UPDATE_SNAPSHOT_ATTR = "__FlociRestApiUpdateSnapshot";
+
+    /**
      * Holds the customer id, description, enabled flag and tags an API key carried before an
      * in-place update changed them, or the key an update created because the one the stack held
      * was gone, so a failed stack update can put the key back or delete the created one. Written

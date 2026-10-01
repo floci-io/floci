@@ -42,7 +42,7 @@ Once Airflow's unauthenticated `/health` endpoint reports both `metadatabase` an
 
 ### Web/CLI proxy
 
-Floci runs its own HTTP proxy per environment (published on a host port from the configured range) that fronts the real Airflow webserver: every request is forwarded through to Airflow as-is, **except** `POST /aws_mwaa/cli`, which the proxy intercepts itself — it validates the `Authorization: Bearer <CliToken>` from `CreateCliToken`, then runs the requested `airflow` CLI command inside the container via `docker exec` and returns the AWS-documented `{stdout, stderr}` (base64) shape. `Environment.WebserverUrl` and the URL returned by `CreateWebLoginToken` both point at this proxy, so Airflow-UI browsing and the CLI-token flow go through the same place.
+Floci runs its own HTTP proxy per environment (published on a host port from the configured range) that fronts the real Airflow webserver: every request is forwarded through to Airflow as-is, **except** `POST /aws_mwaa/cli`, which the proxy intercepts itself. It validates the `Authorization: Bearer <CliToken>` from `CreateCliToken`, then runs supported Amazon MWAA Airflow CLI commands inside the container via `docker exec` and returns the AWS-documented `{stdout, stderr}` (base64) shape. Unsupported commands return an error in `stderr` without reaching the container. The supported commands match the [Amazon MWAA Airflow v2 CLI list](https://docs.aws.amazon.com/mwaa/latest/userguide/airflow-cli-command-reference.html); every Airflow version Floci currently offers is at least 2.8.4. `Environment.WebserverUrl` and the URL returned by `CreateWebLoginToken` both point at this proxy, so Airflow-UI browsing and the CLI-token flow go through the same place.
 
 ### Startup scripts (`StartupScriptS3Path`)
 

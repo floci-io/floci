@@ -242,6 +242,15 @@ public class EventBridgeHandler {
                 if (!ecsParamsNode.isMissingNode() && ecsParamsNode.isObject()) {
                     target.setEcsParameters(objectMapper.convertValue(ecsParamsNode, EcsParameters.class));
                 }
+                JsonNode retryPolicyNode = t.path("RetryPolicy");
+                if (retryPolicyNode.isObject()) {
+                    target.setRetryPolicy(objectMapper.convertValue(retryPolicyNode, Target.RetryPolicy.class));
+                }
+                JsonNode deadLetterConfigNode = t.path("DeadLetterConfig");
+                if (deadLetterConfigNode.isObject()) {
+                    target.setDeadLetterConfig(
+                            objectMapper.convertValue(deadLetterConfigNode, Target.DeadLetterConfig.class));
+                }
                 targets.add(target);
             }
         }
@@ -304,6 +313,12 @@ public class EventBridgeHandler {
             }
             if (t.getEcsParameters() != null) {
                 node.set("EcsParameters", objectMapper.valueToTree(t.getEcsParameters()));
+            }
+            if (t.getRetryPolicy() != null) {
+                node.set("RetryPolicy", objectMapper.valueToTree(t.getRetryPolicy()));
+            }
+            if (t.getDeadLetterConfig() != null) {
+                node.set("DeadLetterConfig", objectMapper.valueToTree(t.getDeadLetterConfig()));
             }
             targetsArray.add(node);
         }

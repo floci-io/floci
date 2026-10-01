@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.EmailContent;
@@ -20,6 +21,7 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
@@ -123,9 +125,21 @@ public class SesTemplateService {
         LOG.infov("Deleted SES template: {0} in region {1}", templateName, region);
     }
 
+    public PaginatedResult<EmailTemplate> listTemplates(String region, SesListPaging paging, Integer pageSize,
+                                                        String nextToken) {
+        return paging.page(region, listTemplates(region), SesTemplateService::cursor, pageSize, nextToken);
+    }
+
+    /** Newest first, as SES lists them; the paged lists resume on the same order. */
     public List<EmailTemplate> listTemplates(String region) {
         String prefix = "template::" + region + "::";
-        return templateStore.scan(k -> k.startsWith(prefix));
+        return templateStore.scan(k -> k.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(SesTemplateService::cursor))
+                .toList();
+    }
+
+    private static String cursor(EmailTemplate template) {
+        return SesListPaging.newestFirst(template.getCreatedTimestamp(), template.getTemplateName());
     }
 
     /**

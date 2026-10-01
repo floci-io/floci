@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -26,6 +27,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -376,6 +378,14 @@ public class SesExportJobService implements Resettable {
                 PRESIGNED_URL_EXPIRY_SECONDS, job.getRegion()));
     }
 
+    /** Floci validates the filters before the page size and token. */
+    public PaginatedResult<ExportJob> listExportJobs(String region, String sourceType, String jobStatus,
+                                                     SesListPaging paging, Integer pageSize, String nextToken) {
+        return paging.page(region, listExportJobs(region, sourceType, jobStatus), SesExportJobService::cursor,
+                pageSize, nextToken);
+    }
+
+    /** Newest first, as SES lists them; the paged list resumes on the same order. */
     public List<ExportJob> listExportJobs(String region, String sourceType, String jobStatus) {
         if (sourceType != null && !SOURCE_TYPES.contains(sourceType)) {
             throw new AwsException("BadRequestException",
@@ -392,7 +402,12 @@ public class SesExportJobService implements Resettable {
         return exportJobStore.scan(k -> k.startsWith(keyPrefix(region))).stream()
                 .filter(job -> sourceType == null || sourceType.equals(job.getExportSourceType()))
                 .filter(job -> jobStatus == null || jobStatus.equals(job.getJobStatus()))
+                .sorted(Comparator.comparing(SesExportJobService::cursor))
                 .toList();
+    }
+
+    private static String cursor(ExportJob job) {
+        return SesListPaging.newestFirst(job.getCreatedTimestamp(), job.getJobId());
     }
 
     public void cancelExportJob(String region, String jobId) {

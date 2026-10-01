@@ -1026,6 +1026,11 @@ public class LambdaService implements ResourceProvider {
         LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
         functionName = fn.getFunctionName();
         String arn = fn.getFunctionArn();
+        // Before the drain and anything is deleted, so no queued or running event starts a container for,
+        // or reports on, a function being removed.
+        if (executorService != null) {
+            executorService.dropPending(fn);
+        }
         warmPool.drainFunction(functionName);
         // Take the same per-function lock used by Put/DeleteFunctionConcurrency
         // so a concurrent concurrency mutation cannot interleave with the
@@ -1040,6 +1045,10 @@ public class LambdaService implements ResourceProvider {
             }
             codeStore.delete(ownerAccount(fn), region, functionName);
             functionStore.delete(region, functionName);
+            // Again now the function is gone, for an Event invoke that read the count after the first call.
+            if (executorService != null) {
+                executorService.dropPending(fn);
+            }
             reclaimLegacyCodeDirectoryIfUnused(functionName);
             versionCounters.remove(versionCounterKey(region, fn));
             versionCounters.remove(legacyVersionCounterKey(region, functionName));
@@ -1059,6 +1068,20 @@ public class LambdaService implements ResourceProvider {
             }
         }
         LOG.infov("Deleted Lambda function: {0}", functionName);
+    }
+
+    /**
+     * The {@code $LATEST} record of the function {@code fn} belongs to, whichever version {@code fn} is.
+     * Looked up in the account and region of its ARN rather than the caller's.
+     */
+    Optional<LambdaFunction> findLatest(LambdaFunction fn) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.getFunctionArn());
+        return functionStore.getForAccount(arn.accountId(), arn.region(), fn.getFunctionName());
+    }
+
+    /** Whether the function {@code fn} belongs to is still in the store, whichever version {@code fn} is. */
+    boolean isLive(LambdaFunction fn) {
+        return findLatest(fn).isPresent();
     }
 
     /**
@@ -1105,8 +1128,16 @@ public class LambdaService implements ResourceProvider {
     }
 
     public InvokeResult invoke(String region, String functionName, byte[] payload, InvocationType type) {
-        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionName);
-        enforceRegion(region, ref);
+        return invoke(region, functionName, null, payload, type);
+    }
+
+    /**
+     * Invokes a function, reconciling a qualifier carried on the name with Invoke's {@code Qualifier} query parameter.
+     */
+    public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
+                               InvocationType type) {
+        validateInvokeQualifier(queryQualifier);
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, queryQualifier);
         String name = ref.name();
         String qualifier = ref.qualifier();
         LambdaFunction fn;
@@ -2689,6 +2720,13 @@ public class LambdaService implements ResourceProvider {
         validateNonEmpty(aliasName, "name", true);
         validateMaxLength(aliasName, "name", 128);
         validatePattern(aliasName, "name", ALIAS_NAME_PATTERN);
+    }
+
+    /** Invoke's Qualifier, when supplied: 1-128 characters matching {@link #QUALIFIER}. */
+    private static void validateInvokeQualifier(String qualifier) {
+        validateNonEmpty(qualifier, "qualifier", false);
+        validateMaxLength(qualifier, "qualifier", 128);
+        validatePattern(qualifier, "qualifier", QUALIFIER);
     }
 
     public void deleteAlias(String region, String functionName, String aliasName) {

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
@@ -128,14 +129,17 @@ public class SesConfigurationSetService {
                         "Configuration set <" + name + "> does not exist.", 400));
     }
 
+    public PaginatedResult<ConfigurationSet> list(String region, SesListPaging paging, Integer pageSize,
+                                                  String nextToken) {
+        return paging.page(region, list(region), ConfigurationSet::getName, pageSize, nextToken);
+    }
+
+    /** By name, as SES lists them; the paged lists resume on the same order. */
     public List<ConfigurationSet> list(String region) {
         String prefix = "configSet::" + region + "::";
-        List<ConfigurationSet> all = new ArrayList<>(configSetStore.scan(k -> k.startsWith(prefix)));
-        all.sort(Comparator.comparing(ConfigurationSet::getCreatedTimestamp,
-                        Comparator.nullsLast(Comparator.naturalOrder()))
-                .thenComparing(ConfigurationSet::getName,
-                        Comparator.nullsLast(Comparator.naturalOrder())));
-        return all;
+        return configSetStore.scan(k -> k.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(ConfigurationSet::getName))
+                .toList();
     }
 
     /** The raw removal; existence and the tenant delete-guard are the facade's orchestration. */

@@ -18,9 +18,9 @@ import java.util.Map;
 /**
  * Shared by every integration test that runs a real sidecar container, started by its manager
  * exactly as in production: the AppSync GraphQL sidecar, the CodeArtifact Reposilite and Verdaccio
- * sidecars, and the Verified Permissions Cedar sidecar. Quarkus builds the application once per
- * distinct profile class, so these classes share one application rather than each paying for
- * their own.
+ * sidecars, the Verified Permissions Cedar sidecar, and the floci-duck sidecar behind the CUR
+ * Parquet emitter. Quarkus builds the application once per distinct profile class, so these
+ * classes share one application rather than each paying for their own.
  *
  * <p>Namespaces the containers as {@code floci-aws-sidecar-test-<hostkey>-<pid>-<sidecar>}. Each
  * manager removes any container of its name before starting one, and the test config uses the same
@@ -36,10 +36,16 @@ import java.util.Map;
  * is built from the base URL's port, which in production is the port Floci listens on. Under
  * {@code @QuarkusTest} the application listens on the test port instead, so without this the
  * sidecar would call back to 4566 and every resolver-backed field would fail with a connection
- * error. The port is a free one chosen once when the class loads, rather than a fixed number, so
- * two runs on the same machine do not collide on it. It is released before Quarkus binds it, so
- * another process can still take it in between; the application then fails to start rather than
- * sharing anything with that process.
+ * error, and floci-duck would reach for Floci's S3 on the wrong port. The port is a free one
+ * chosen once when the class loads, rather than a fixed number, so two runs on the same machine do
+ * not collide on it. It is released before Quarkus binds it, so another process can still take it
+ * in between; the application then fails to start rather than sharing anything with that process.
+ *
+ * <p>Names both billing emitters as off, so a CUR or BCM report is only written when a test drives
+ * the emitter itself. {@code CurEmissionScheduler} acts only on {@code daily} and
+ * {@code synchronous}, so every other value leaves the emitters idle; the configured test default
+ * already resolves to one of those inert values, and spelling it out here keeps the assumption
+ * visible for the CUR classes that rely on it.
  */
 public class SidecarContainersProfile implements QuarkusTestProfile {
 
@@ -58,7 +64,9 @@ public class SidecarContainersProfile implements QuarkusTestProfile {
         return Map.of(
                 "floci.docker.resource-namespace", NAMESPACE,
                 "quarkus.http.test-port", String.valueOf(TEST_PORT),
-                "floci.base-url", "http://localhost:" + TEST_PORT);
+                "floci.base-url", "http://localhost:" + TEST_PORT,
+                "floci.services.cur.emit-mode", "off",
+                "floci.services.bcm-data-exports.emit-mode", "off");
     }
 
     /**
