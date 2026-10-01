@@ -238,9 +238,9 @@ class S3PresignedChecksumIntegrationTest {
     }
 
     @Test
-    void unsignedMetadataHeaderDoesNotOverrideMetadataSignedIntoTheQuery() throws Exception {
+    void presignedPutWithUnsignedMetadataHeaderIsRejectedAsHeadersNotSigned() throws Exception {
         createBucket();
-        String path = "/" + BUCKET + "/signed-query-metadata.txt";
+        String path = "/" + BUCKET + "/unsigned-metadata-header.txt";
         String url = presign("PUT", path, Map.of("x-amz-meta-source", "signed"), Map.of());
 
         given()
@@ -250,15 +250,16 @@ class S3PresignedChecksumIntegrationTest {
         .when()
             .put(url)
         .then()
-            .statusCode(200);
+            .statusCode(403)
+            .body(containsString("<Code>AccessDenied</Code>"))
+            .body(containsString("<HeadersNotSigned>x-amz-meta-source</HeadersNotSigned>"));
 
         given()
             .filter(LOCAL_SIGNER)
         .when()
             .head(path)
         .then()
-            .statusCode(200)
-            .header("x-amz-meta-source", equalTo("signed"));
+            .statusCode(404);
     }
 
     @Test
