@@ -111,5 +111,6 @@ aws transfer delete-server --server-id s-01234567890abcdef
 ## Notes
 
 - **Phase 1** covers the management-plane API only. Data-plane SFTP connectivity (actual file transfer) is not emulated.
+- CloudFormation provisions `AWS::Transfer::Server` through the management-plane service. `AWS::Transfer::User` is not yet provisioned. Server properties not supported by the management-plane implementation fail explicitly; changing `Domain` or `IdentityProviderType` requires replacement and is not yet supported.
 - Server `EndpointType` defaults to `PUBLIC`. The `State` field transitions between `ONLINE` and `OFFLINE` via `StartServer` / `StopServer`.
 - SSH key bodies are stored and returned as-is; no cryptographic validation is performed.

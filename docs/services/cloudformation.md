@@ -155,6 +155,7 @@ cross-resource references.
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | EventBridge Scheduler | `ScheduleGroup` |
+| Transfer Family | `Server` (management plane only; Domain and IdentityProviderType changes require replacement, which is not supported) |
 | Backup | `BackupVault` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |

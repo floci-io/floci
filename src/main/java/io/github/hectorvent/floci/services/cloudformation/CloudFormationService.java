@@ -738,7 +738,7 @@ public class CloudFormationService implements ResourceProvider {
         String templateBody = cs.getTemplateBody();
         Map<String, String> params = cs.getParameters() != null ? cs.getParameters() : Map.of();
 
-        return submitOperation(() -> runUnderAccount(accountId, () -> {
+        return submitOperation(() -> runUnderScope(accountId, region, () -> {
             executeTemplate(stack, templateBody, params, isCreate, region, accountId);
             String status = stack.getStatus();
             cs.setExecutionStatus(status != null && (status.contains("ROLLBACK") || status.endsWith("_FAILED"))
@@ -748,11 +748,10 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * Runs {@code body} under a synthetic CDI request scope whose account is {@code accountId}, so
-     * that account-aware storage in the downstream services namespaces provisioned resources under
-     * the intended account. Mirrors the pattern used by other background workers.
+     * Runs {@code body} under the stack's account and region, so downstream services resolve the
+     * same scope as the CloudFormation request that submitted this background operation.
      */
-    private void runUnderAccount(String accountId, Runnable body) {
+    private void runUnderScope(String accountId, String region, Runnable body) {
         ManagedContext requestContext = Arc.container().requestContext();
         boolean alreadyActive = requestContext.isActive();
         if (!alreadyActive) {
@@ -760,12 +759,18 @@ public class CloudFormationService implements ResourceProvider {
         }
         // Background workers normally have no active scope, so a fresh one is activated and
         // terminated below. But if we ran inside an already-active scope, restore its previous
-        // account afterwards so we never leave the overridden account ID behind on a reused thread.
+        // scope afterwards so we never leave the overridden values behind on a reused thread.
         RequestContext ctx = Arc.container().instance(RequestContext.class).get();
         String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
+        String previousRegion = alreadyActive ? ctx.getRegion() : null;
+        String previousPartition = alreadyActive ? ctx.getPartition() : null;
         try {
             if (accountId != null) {
                 ctx.setAccountId(accountId);
+            }
+            if (region != null) {
+                ctx.setRegion(region);
+                ctx.setPartition(regionResolver.partitionForRegion(region));
             }
             body.run();
         } finally {
@@ -773,6 +778,8 @@ public class CloudFormationService implements ResourceProvider {
                 requestContext.terminate();
             } else {
                 ctx.setAccountId(previousAccountId);
+                ctx.setRegion(previousRegion);
+                ctx.setPartition(previousPartition);
             }
         }
     }
@@ -836,7 +843,7 @@ public class CloudFormationService implements ResourceProvider {
                 "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
 
         try {
-            return submitOperation(() -> runUnderAccount(accountId,
+            return submitOperation(() -> runUnderScope(accountId, region,
                     () -> deleteStackResources(stack, region, accountId)));
         } catch (AwsException e) {
             if ("LimitExceededException".equals(e.getErrorCode())) {
