@@ -172,8 +172,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * one partition is never handed to a caller in another.
      */
     private final StorageBackend<String, CredentialReport> credentialReports;
-    /** Serializes migration of the pre-partition credential report key. */
-    private final Object credentialReportMigrationLock = new Object();
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
     private final String seededAccountAlias;
@@ -2929,7 +2927,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return storage.scan(key -> true).stream();
     }
 
-    static String normalizePath(String path) {
+    private static String normalizePath(String path) {
         if (path == null || path.isEmpty()) {
             return "/";
         }
@@ -3125,7 +3123,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public CredentialReportGeneration generateCredentialReport() {
         Instant now = Instant.now();
-        Optional<CredentialReport> existing = getCredentialReportForCurrentPartition();
+        Optional<CredentialReport> existing = credentialReports.get(credentialReportKey());
         if (existing.isPresent() && now.isBefore(existing.get().getGeneratedTime().plus(CREDENTIAL_REPORT_MAX_AGE))) {
             return new CredentialReportGeneration("COMPLETE",
                     "Current report has already been generated within the past 4 hours.");
@@ -3143,31 +3141,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return CREDENTIAL_REPORT_KEY + "/" + regionResolver.getPartition();
     }
 
-    private Optional<CredentialReport> getCredentialReportForCurrentPartition() {
-        String currentKey = credentialReportKey();
-        Optional<CredentialReport> currentReport = credentialReports.get(currentKey);
-        if (currentReport.isPresent()
-                || !AwsPartitions.commercial().id().equals(regionResolver.getPartition())) {
-            return currentReport;
-        }
-
-        synchronized (credentialReportMigrationLock) {
-            currentReport = credentialReports.get(currentKey);
-            if (currentReport.isPresent()) {
-                return currentReport;
-            }
-
-            Optional<CredentialReport> legacyReport = credentialReports.get(CREDENTIAL_REPORT_KEY);
-            legacyReport.ifPresent(report -> {
-                credentialReports.put(currentKey, report);
-                credentialReports.delete(CREDENTIAL_REPORT_KEY);
-            });
-            return legacyReport;
-        }
-    }
-
     public CredentialReportContent getCredentialReport() {
-        CredentialReport report = getCredentialReportForCurrentPartition()
+        CredentialReport report = credentialReports.get(credentialReportKey())
                 .orElseThrow(() -> new AwsException("ReportNotPresent",
                         "The request was rejected because the credential report does not exist. "
                                 + "To generate a credential report, use GenerateCredentialReport.", 410));

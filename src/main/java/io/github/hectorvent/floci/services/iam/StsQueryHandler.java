@@ -157,8 +157,16 @@ public class StsQueryHandler {
     }
 
     /**
-     * Resolves the target role and evaluates its trust policy when IAM enforcement is enabled.
-     * Returns the role on success or the AWS error response on denial.
+     * When IAM enforcement is enabled, denies AssumeRole if the target role's trust policy does not
+     * permit the caller. Returns {@code null} to allow when enforcement is disabled or the caller is
+     * permitted. Roles absent from Floci are always denied.
+     *
+     * <p>The caller's account is the one the request was resolved to from its credentials, signed
+     * in the header or presigned in the query, which for an IAM user or a session is the account
+     * that owns the key rather than the default one. A role session is matched as the role that
+     * issued it, whose ARN keeps the path the session ARN drops. The trust policy's conditions see
+     * the request's keys: the global keys, {@code aws:PrincipalArn}, {@code sts:RoleSessionName},
+     * and {@code sts:ExternalId} when the caller sends one.
      */
     private Response enforceTrustPolicy(String roleArn, IamRole role, String roleAccountId,
                                         MultivaluedMap<String, String> params) {
@@ -238,7 +246,7 @@ public class StsQueryHandler {
         String authorization = headers == null ? null : headers.getHeaderString("Authorization");
         String accessKeyId = authorization == null ? null : accountResolver.extractAccessKeyId(authorization);
         String arn = iamService.resolveCallerArn(accessKeyId)
-                .orElse(AwsArnUtils.Arn.global(regionResolver.getPartition(), "iam", accountId, "root").toString());
+                .orElse(regionResolver.buildGlobalArn("iam", accountId, "root"));
         String userId = iamService.resolveCallerUserId(accessKeyId).orElse(accountId);
         String result = new XmlBuilder()
                 .elem("UserId", userId)

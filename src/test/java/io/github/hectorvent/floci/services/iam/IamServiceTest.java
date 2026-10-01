@@ -29,14 +29,6 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -76,17 +68,6 @@ class IamServiceTest {
                 regionResolver,
                 seedDeployerPrincipal
         );
-    }
-
-    private static IamService iamServiceWithCredentialReports(
-            StorageBackend<String, CredentialReport> credentialReports) {
-        return new IamService(
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), credentialReports,
-                new RegionResolver("us-east-1", "000000000000"), false, null);
     }
 
     /** The STS global endpoint, and so the token version it reports, exists only in the commercial partition. */
@@ -2274,132 +2255,6 @@ class IamServiceTest {
         iamService.updateLoginProfile("cred-report-unchanged-user", null, true);
 
         assertEquals(createdAt, iamService.getLoginProfile("cred-report-unchanged-user").getPasswordLastChanged());
-    }
-
-    @Test
-    void getCredentialReportMigratesTheLegacyCommercialPartitionKey() {
-        StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
-        CredentialReport legacyReport = new CredentialReport("dGVzdA==", Instant.now());
-        credentialReports.put("credential-report", legacyReport);
-        IamService withLegacyReport = iamServiceWithCredentialReports(credentialReports);
-
-        IamService.CredentialReportContent content = withLegacyReport.getCredentialReport();
-
-        assertEquals(legacyReport.getBase64Content(), content.base64Content());
-        assertEquals(legacyReport, credentialReports.get("credential-report/aws").orElseThrow());
-        assertTrue(credentialReports.get("credential-report").isEmpty());
-        assertEquals("COMPLETE", withLegacyReport.generateCredentialReport().state());
-    }
-
-    @Test
-    void concurrentLegacyMigrationDoesNotOverwriteFreshReport() throws Exception {
-        PausingCredentialReportStorage credentialReports = new PausingCredentialReportStorage();
-        CredentialReport legacyReport = new CredentialReport("dGVzdA==",
-                Instant.now().minus(Duration.ofHours(5)));
-        credentialReports.put("credential-report", legacyReport);
-        credentialReports.pauseMigrationWrite();
-        IamService withLegacyReport = iamServiceWithCredentialReports(credentialReports);
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-
-        try {
-            Future<?> migratingRequest = executor.submit(() -> {
-                assertThrows(AwsException.class, withLegacyReport::getCredentialReport);
-            });
-            assertTrue(credentialReports.awaitMigrationWrite(), "legacy migration write did not start");
-
-            Future<IamService.CredentialReportGeneration> generationRequest = executor.submit(() -> {
-                credentialReports.markGenerationRequestStarted();
-                return withLegacyReport.generateCredentialReport();
-            });
-            assertTrue(credentialReports.awaitSecondCurrentLookup(), "concurrent request did not read the current key");
-            boolean concurrentRequestReadLegacy = credentialReports.awaitSecondLegacyRead();
-
-            if (concurrentRequestReadLegacy) {
-                assertEquals("STARTED", generationRequest.get(5, TimeUnit.SECONDS).state());
-            }
-            credentialReports.releaseMigrationWrite();
-            migratingRequest.get(5, TimeUnit.SECONDS);
-            if (!concurrentRequestReadLegacy) {
-                assertEquals("STARTED", generationRequest.get(5, TimeUnit.SECONDS).state());
-            }
-
-            assertFalse(concurrentRequestReadLegacy,
-                    "concurrent request read the legacy report while its migration was in progress");
-            CredentialReport storedReport = credentialReports.get("credential-report/aws").orElseThrow();
-            assertNotEquals(legacyReport, storedReport);
-            assertNotEquals(legacyReport.getBase64Content(), storedReport.getBase64Content());
-        } finally {
-            credentialReports.releaseMigrationWrite();
-            executor.shutdownNow();
-        }
-    }
-
-    private static final class PausingCredentialReportStorage extends InMemoryStorage<String, CredentialReport> {
-
-        private final CountDownLatch migrationWriteStarted = new CountDownLatch(1);
-        private final CountDownLatch releaseMigrationWrite = new CountDownLatch(1);
-        private final CountDownLatch secondCurrentLookup = new CountDownLatch(1);
-        private final CountDownLatch secondLegacyRead = new CountDownLatch(1);
-        private final AtomicReference<Thread> generationThread = new AtomicReference<>();
-        private final AtomicInteger legacyKeyReads = new AtomicInteger();
-        private volatile boolean pauseMigrationWrite;
-
-        @Override
-        public Optional<CredentialReport> get(String key) {
-            Optional<CredentialReport> report = super.get(key);
-            if ("credential-report/aws".equals(key) && Thread.currentThread() == generationThread.get()) {
-                secondCurrentLookup.countDown();
-            }
-            if ("credential-report".equals(key) && legacyKeyReads.incrementAndGet() == 2) {
-                secondLegacyRead.countDown();
-            }
-            return report;
-        }
-
-        @Override
-        public void put(String key, CredentialReport value) {
-            if ("credential-report/aws".equals(key) && pauseMigrationWrite) {
-                pauseMigrationWrite = false;
-                migrationWriteStarted.countDown();
-                await(releaseMigrationWrite);
-            }
-            super.put(key, value);
-        }
-
-        void pauseMigrationWrite() {
-            pauseMigrationWrite = true;
-        }
-
-        void markGenerationRequestStarted() {
-            generationThread.set(Thread.currentThread());
-        }
-
-        boolean awaitMigrationWrite() throws InterruptedException {
-            return migrationWriteStarted.await(5, TimeUnit.SECONDS);
-        }
-
-        boolean awaitSecondCurrentLookup() throws InterruptedException {
-            return secondCurrentLookup.await(5, TimeUnit.SECONDS);
-        }
-
-        boolean awaitSecondLegacyRead() throws InterruptedException {
-            return secondLegacyRead.await(1, TimeUnit.SECONDS);
-        }
-
-        void releaseMigrationWrite() {
-            releaseMigrationWrite.countDown();
-        }
-
-        private static void await(CountDownLatch latch) {
-            try {
-                if (!latch.await(5, TimeUnit.SECONDS)) {
-                    throw new IllegalStateException("timed out waiting for credential report test coordination");
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("interrupted while coordinating credential report test", e);
-            }
-        }
     }
 
     @Test
