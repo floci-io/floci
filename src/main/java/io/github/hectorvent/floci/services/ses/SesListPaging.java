@@ -3,33 +3,65 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
-import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.function.Function;
 
 /**
- * Paging rules of the SES list operations. Probe-confirmed against real SES (2026-09-25): the
- * page-size bound, both error messages and the treatment of an empty token differ per operation,
- * while the token itself belongs to the kind of resource listed, so the v1 and v2 lists of the
- * same resources accept each other's tokens and refuse any other list's. Without a page size the
- * template lists serve 10 (probed 2026-09-26); the export-job default is not documented or
- * measured and is taken to be the bound.
+ * Paging rules of the SES list operations. Probe-confirmed against real SES (2026-09-25 to
+ * 2026-09-27): the default page size, the bound, both error messages, what a v1 out-of-range
+ * value is served and the treatment of an empty token differ per operation, while the token itself
+ * belongs to the kind of resource listed, so the v1 and v2 lists of the same resources accept each
+ * other's tokens and refuse any other list's. A token is also bound to the region it was issued in:
+ * replayed in another region (probed 2026-10-01 on the identity and configuration-set lists), it
+ * is refused with the operation's unreadable-token error. Defaults nobody could measure are noted
+ * per constant.
  */
-enum SesListPaging {
+public enum SesListPaging {
 
     V2_LIST_EMAIL_TEMPLATES(Namespace.TEMPLATE, 10, 100,
             size -> badRequest("The page size must be between 1 and 100"),
             token -> badRequest("Invalid PageToken <" + token + ">."),
             false),
 
-    /** v1 serves a page of the bound for an out-of-range {@code MaxItems} instead of refusing it. */
-    V1_LIST_TEMPLATES(Namespace.TEMPLATE, 10, 100,
-            null,
+    V1_LIST_TEMPLATES(Namespace.TEMPLATE, 10, 100, 100,
             token -> invalidParameterValue("Invalid PageToken <" + token + ">."),
             false),
 
+    V2_LIST_EMAIL_IDENTITIES(Namespace.IDENTITY, 25, 1000,
+            size -> badRequest("Value " + size + " for parameter PageSize is invalid. "
+                    + "PageSize must be between 1 and 1000."),
+            token -> badRequest("Invalid NextToken <" + token + ">."),
+            false),
+
+    /** 195 identities came back whole without a MaxItems, so the default is taken to be the bound. */
+    V1_LIST_IDENTITIES(Namespace.IDENTITY, 1000, 1000,
+            size -> invalidParameterValue("Value " + size + " for parameter MaxItems is invalid. "
+                    + "MaxItems must be between 1 and 1000."),
+            token -> invalidParameterValue("Invalid NextToken <" + token + ">."),
+            false),
+
+    V2_LIST_CONFIGURATION_SETS(Namespace.CONFIGURATION_SET, 50, 1000,
+            size -> badRequest("The page size must be between 1 and 1000"),
+            token -> badRequest("invalid nextToken " + token),
+            false),
+
+    /** 1001 was served the default, so the bound is taken to be 1000; SES never refuses a value. */
+    V1_LIST_CONFIGURATION_SETS(Namespace.CONFIGURATION_SET, 50, 1000, 50,
+            token -> new AwsException("InvalidParameterValue", null, 400),
+            false),
+
+    V2_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES(Namespace.CUSTOM_VERIFICATION_EMAIL_TEMPLATE, 50, 50,
+            size -> badRequest("The page size must be between 1 and 50"),
+            token -> badRequest("Invalid nextToken <" + token + ">."),
+            false),
+
+    V1_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES(Namespace.CUSTOM_VERIFICATION_EMAIL_TEMPLATE, 50, 50, 50,
+            token -> invalidParameterValue("Invalid nextToken <" + token + ">."),
+            false),
+
+    /** AWS documents no default; it is taken to be the bound. */
     V2_LIST_EXPORT_JOBS(Namespace.EXPORT_JOB, 100, 100,
             size -> badRequest("PageSize must be between 1 and 100"),
             token -> badRequest("Failed to deserialize token. "),
@@ -37,6 +69,9 @@ enum SesListPaging {
 
     private static final class Namespace {
         static final String TEMPLATE = "template";
+        static final String IDENTITY = "identity";
+        static final String CONFIGURATION_SET = "configuration-set";
+        static final String CUSTOM_VERIFICATION_EMAIL_TEMPLATE = "custom-verification-email-template";
         static final String EXPORT_JOB = "export-job";
     }
 
@@ -44,27 +79,41 @@ enum SesListPaging {
     private final int defaultPageSize;
     private final int maxPageSize;
     private final Function<Integer, AwsException> outOfRange;
+    private final int servedWhenOutOfRange;
     private final Function<String, AwsException> invalidToken;
     private final boolean emptyTokenInvalid;
 
     SesListPaging(String namespace, int defaultPageSize, int maxPageSize,
                   Function<Integer, AwsException> outOfRange, Function<String, AwsException> invalidToken,
                   boolean emptyTokenInvalid) {
+        this(namespace, defaultPageSize, maxPageSize, outOfRange, 0, invalidToken, emptyTokenInvalid);
+    }
+
+    SesListPaging(String namespace, int defaultPageSize, int maxPageSize, int servedWhenOutOfRange,
+                  Function<String, AwsException> invalidToken, boolean emptyTokenInvalid) {
+        this(namespace, defaultPageSize, maxPageSize, null, servedWhenOutOfRange, invalidToken,
+                emptyTokenInvalid);
+    }
+
+    SesListPaging(String namespace, int defaultPageSize, int maxPageSize,
+                  Function<Integer, AwsException> outOfRange, int servedWhenOutOfRange,
+                  Function<String, AwsException> invalidToken, boolean emptyTokenInvalid) {
         this.namespace = namespace;
         this.defaultPageSize = defaultPageSize;
         this.maxPageSize = maxPageSize;
         this.outOfRange = outOfRange;
+        this.servedWhenOutOfRange = servedWhenOutOfRange;
         this.invalidToken = invalidToken;
         this.emptyTokenInvalid = emptyTokenInvalid;
     }
 
-    <T> PaginatedResult<T> page(List<T> all, Function<T, String> cursorOf, Integer pageSize,
+    <T> PaginatedResult<T> page(String region, List<T> all, Function<T, String> cursorOf, Integer pageSize,
                                 String nextToken) {
         int limit = pageSize(pageSize);
         if (nextToken != null && nextToken.isEmpty() && emptyTokenInvalid) {
             throw invalidToken.apply(nextToken);
         }
-        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace, invalidToken);
+        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace + "@" + region, invalidToken);
     }
 
     int pageSize(Integer requested) {
@@ -73,7 +122,7 @@ enum SesListPaging {
         }
         if (requested < 1 || requested > maxPageSize) {
             if (outOfRange == null) {
-                return maxPageSize;
+                return servedWhenOutOfRange;
             }
             throw outOfRange.apply(requested);
         }
@@ -84,10 +133,6 @@ enum SesListPaging {
     static String newestFirst(Instant created, String id) {
         long descending = Long.MAX_VALUE - (created == null ? 0L : created.toEpochMilli());
         return descending + "#" + id;
-    }
-
-    static String templateCursor(EmailTemplate template) {
-        return newestFirst(template.getCreatedTimestamp(), template.getTemplateName());
     }
 
     /** A REST JSON query-string page size; a value that is not an int is a serialization error. */

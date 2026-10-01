@@ -62,18 +62,16 @@ class SesConfigurationSetServiceTest {
     }
 
     @Test
-    void list_isPerRegion_sortedByCreation() {
+    void list_isPerRegion_sortedByName() {
         service.create(cs("b-cs"), REGION);
         service.create(cs("a-cs"), REGION);
         service.create(cs("other"), "eu-west-1");
-        // create() stamps Instant.now(), which can collide within one clock tick and fall back to
-        // the name tie-break; pin distinct timestamps through the escape hatch so the
-        // creation-order assertion stays deterministic.
+        // Creation time no longer decides the order, so pin b-cs as the older one and expect the
+        // name order regardless.
         stampCreated("b-cs", Instant.parse("2026-01-01T00:00:00Z"));
         stampCreated("a-cs", Instant.parse("2026-01-02T00:00:00Z"));
         List<ConfigurationSet> list = service.list(REGION);
-        assertEquals(2, list.size());
-        assertEquals("b-cs", list.get(0).getName());
+        assertEquals(List.of("a-cs", "b-cs"), list.stream().map(ConfigurationSet::getName).toList());
     }
 
     private void stampCreated(String name, Instant timestamp) {

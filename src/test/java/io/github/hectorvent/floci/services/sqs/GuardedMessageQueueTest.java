@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.sqs;
 
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sqs.GuardedMessageQueue.ClaimResult;
+import io.github.hectorvent.floci.services.sqs.GuardedMessageQueue.HandleResult;
 import io.github.hectorvent.floci.services.sqs.GuardedMessageQueue.MessageCounts;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import org.junit.jupiter.api.BeforeEach;
@@ -95,7 +96,7 @@ class GuardedMessageQueueTest {
         ClaimResult claimed = queue.claimVisibleMessages(1, 30, false, -1, null);
         String handle = claimed.claimed().get(0).getReceiptHandle();
 
-        assertTrue(queue.removeByReceiptHandle(handle).isPresent());
+        assertEquals(HandleResult.APPLIED, queue.removeByReceiptHandle(ReceiptHandle.parse(handle), false).result());
 
         // Message should be gone even with visibility timeout 0
         ClaimResult result = queue.claimVisibleMessages(1, 0, false, -1, null);
@@ -104,7 +105,7 @@ class GuardedMessageQueueTest {
 
     @Test
     void removeByReceiptHandleInvalidReturnsEmpty() {
-        assertFalse(queue.removeByReceiptHandle("nonexistent").isPresent());
+        assertEquals(HandleResult.MESSAGE_GONE, queue.removeByReceiptHandle(ReceiptHandle.issue(null, "nonexistent", ReceiptHandle.DEFAULT_SECRET), false).result());
     }
 
     @Test
@@ -115,7 +116,7 @@ class GuardedMessageQueueTest {
         String handle = claimed.claimed().get(0).getReceiptHandle();
 
         // Set visibility to 0 — message becomes visible immediately
-        assertTrue(queue.changeVisibility(handle, 0));
+        assertEquals(HandleResult.APPLIED, queue.changeVisibility(ReceiptHandle.parse(handle), 0, false));
 
         ClaimResult reClaimed = queue.claimVisibleMessages(1, 30, false, -1, null);
         assertEquals(1, reClaimed.claimed().size());
@@ -123,7 +124,7 @@ class GuardedMessageQueueTest {
 
     @Test
     void changeVisibilityInvalidReturnsFalse() {
-        assertFalse(queue.changeVisibility("nonexistent", 0));
+        assertEquals(HandleResult.MESSAGE_GONE, queue.changeVisibility(ReceiptHandle.issue(null, "nonexistent", ReceiptHandle.DEFAULT_SECRET), 0, false));
     }
 
     @Test
@@ -389,7 +390,7 @@ class GuardedMessageQueueTest {
                         ClaimResult result = queue.claimVisibleMessages(messageCount, 30, false, -1, null);
                         claimedCount.addAndGet(result.claimed().size());
                         for (Message m : result.claimed()) {
-                            queue.removeByReceiptHandle(m.getReceiptHandle());
+                            queue.removeByReceiptHandle(ReceiptHandle.parse(m.getReceiptHandle()), false);
                         }
                     } else {
                         ClaimResult result = queue.claimVisibleMessages(messageCount, 30, false, -1, null);

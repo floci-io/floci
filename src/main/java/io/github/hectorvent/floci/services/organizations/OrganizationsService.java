@@ -4,8 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -150,18 +150,20 @@ public class OrganizationsService implements ScpProvider {
     private final AccountAwareStorageBackend<OrganizationPolicy> policies;
     private final AccountAwareStorageBackend<CreateAccountStatus> createAccountStatuses;
     private final AccountAwareStorageBackend<Handshake> handshakes;
+    private final RegionResolver regionResolver;
     private final boolean scpEnforcementEnabled;
     private final String managementAccountEmail;
 
     @Inject
     public OrganizationsService(StorageFactory storageFactory, ObjectMapper objectMapper,
-                                EmulatorConfig config) {
+                                EmulatorConfig config, RegionResolver regionResolver) {
         EmulatorConfig.OrganizationsServiceConfig organizationsConfig = config.services().organizations();
         this.scpEnforcementEnabled = organizationsConfig.scpEnforcementEnabled();
         this.managementAccountEmail = organizationsConfig.managementAccountEmail()
                 .map(OrganizationsService::requireValidConfiguredEmail)
                 .orElse(null);
         this.objectMapper = objectMapper;
+        this.regionResolver = regionResolver;
         this.organizations = storageFactory.create("organizations", "organizations-organizations.json",
                 new TypeReference<Map<String, Organization>>() {});
         this.accounts = storageFactory.create("organizations", "organizations-accounts.json",
@@ -177,17 +179,19 @@ public class OrganizationsService implements ScpProvider {
     }
 
     OrganizationsService(ObjectMapper objectMapper,
+                         RegionResolver regionResolver,
                          AccountAwareStorageBackend<Organization> organizations,
                          AccountAwareStorageBackend<OrganizationAccount> accounts,
                          AccountAwareStorageBackend<OrganizationalUnit> organizationalUnits,
                          AccountAwareStorageBackend<OrganizationPolicy> policies,
                          AccountAwareStorageBackend<CreateAccountStatus> createAccountStatuses,
                          AccountAwareStorageBackend<Handshake> handshakes) {
-        this(objectMapper, organizations, accounts, organizationalUnits, policies,
+        this(objectMapper, regionResolver, organizations, accounts, organizationalUnits, policies,
                 createAccountStatuses, handshakes, true);
     }
 
     OrganizationsService(ObjectMapper objectMapper,
+                         RegionResolver regionResolver,
                          AccountAwareStorageBackend<Organization> organizations,
                          AccountAwareStorageBackend<OrganizationAccount> accounts,
                          AccountAwareStorageBackend<OrganizationalUnit> organizationalUnits,
@@ -195,11 +199,12 @@ public class OrganizationsService implements ScpProvider {
                          AccountAwareStorageBackend<CreateAccountStatus> createAccountStatuses,
                          AccountAwareStorageBackend<Handshake> handshakes,
                          boolean scpEnforcementEnabled) {
-        this(objectMapper, organizations, accounts, organizationalUnits, policies,
+        this(objectMapper, regionResolver, organizations, accounts, organizationalUnits, policies,
                 createAccountStatuses, handshakes, scpEnforcementEnabled, null);
     }
 
     OrganizationsService(ObjectMapper objectMapper,
+                         RegionResolver regionResolver,
                          AccountAwareStorageBackend<Organization> organizations,
                          AccountAwareStorageBackend<OrganizationAccount> accounts,
                          AccountAwareStorageBackend<OrganizationalUnit> organizationalUnits,
@@ -209,6 +214,7 @@ public class OrganizationsService implements ScpProvider {
                          boolean scpEnforcementEnabled,
                          String managementAccountEmail) {
         this.objectMapper = objectMapper;
+        this.regionResolver = regionResolver;
         this.organizations = organizations;
         this.accounts = accounts;
         this.organizationalUnits = organizationalUnits;
@@ -1849,9 +1855,9 @@ public class OrganizationsService implements ScpProvider {
                 "policy/" + organization.getId() + "/" + type.toLowerCase(java.util.Locale.ROOT) + "/" + policyId);
     }
 
-    /** Organizations ARNs carry no region, so the region segment is deliberately empty. */
+    /** Organizations ARNs carry no region; they take the request's partition. */
     private String arn(String accountId, String resource) {
-        return AwsArnUtils.Arn.of("organizations", "", accountId, resource).toString();
+        return regionResolver.buildGlobalArn("organizations", accountId, resource);
     }
 
     private String randomId(int length) {

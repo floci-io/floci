@@ -121,6 +121,8 @@ public class ApiGatewayService implements ResourceProvider {
     private static final String EPC_KEY = "endpointConfiguration";
     private static final String EPC_TYPES_KEY = "types";
     private static final String EPC_VPC_IDS_KEY = "vpcEndpointIds";
+    private static final String EPC_TYPES_PATH = "/endpointConfiguration/types/";
+    private static final String EPC_VPC_IDS_PATH = "/endpointConfiguration/vpcEndpointIds";
 
     ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
                       TlsCertificateManager certificateManager) {
@@ -273,15 +275,7 @@ public class ApiGatewayService implements ResourceProvider {
                         List<EndpointType> types = list.stream()
                                 .filter(String.class::isInstance)
                                 .map(String.class::cast)
-                                .map(String::toUpperCase)
-                                .map(typeStr -> {
-                                    try {
-                                        return EndpointType.valueOf(typeStr);
-                                    } catch (IllegalArgumentException e) {
-                                        throw new AwsException("BadRequestException",
-                                                "Endpoint configuration type must be REGIONAL, EDGE, or PRIVATE.", 400);
-                                    }
-                                })
+                                .map(ApiGatewayService::endpointType)
                                 .toList();
                         endpointConfiguration.setTypes(types);
                     } else if (EPC_VPC_IDS_KEY.equals(ks)) {
@@ -306,18 +300,8 @@ public class ApiGatewayService implements ResourceProvider {
                     "Endpoint configuration types must contain exactly one value.", 400);
         }
 
-        EndpointType type = endpointConfiguration.getTypes().getFirst();
-        if (EndpointType.PRIVATE.equals(type)) {
-            if (endpointConfiguration.getVpcEndpointIds().isEmpty()) {
-                throw new AwsException("BadRequestException",
-                        "At least one vpcEndpointId is required for PRIVATE APIs.", 400);
-            }
-        } else {
-            // Reject/ignore vpcEndpointIds for REGIONAL and EDGE
-            endpointConfiguration.setVpcEndpointIds(new ArrayList<>());
-        }
-
-        api.setEndpointConfiguration(endpointConfiguration);
+        api.setEndpointConfiguration(endpointConfigurationOf(endpointConfiguration.getTypes().getFirst(),
+                endpointConfiguration.getVpcEndpointIds()));
 
         // Create root resource "/"
         ApiGatewayResource root = new ApiGatewayResource();
@@ -330,6 +314,30 @@ public class ApiGatewayService implements ResourceProvider {
 
         LOG.infov("Created REST API: {0} ({1}) in {2}", name, api.getId(), region);
         return api;
+    }
+
+    /** The endpoint type {@code value} names, in any case. */
+    private static EndpointType endpointType(String value) {
+        try {
+            return EndpointType.valueOf(value.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("BadRequestException",
+                    "Endpoint configuration type must be REGIONAL, EDGE, or PRIVATE.", 400);
+        }
+    }
+
+    /** An endpoint configuration of {@code type}: a PRIVATE API needs a VPC endpoint, the other types take none. */
+    private static EndpointConfiguration endpointConfigurationOf(EndpointType type, List<String> vpcEndpointIds) {
+        EndpointConfiguration endpointConfiguration = new EndpointConfiguration();
+        endpointConfiguration.setTypes(new ArrayList<>(List.of(type)));
+        if (EndpointType.PRIVATE.equals(type)) {
+            if (vpcEndpointIds.isEmpty()) {
+                throw new AwsException("BadRequestException",
+                        "At least one vpcEndpointId is required for PRIVATE APIs.", 400);
+            }
+            endpointConfiguration.setVpcEndpointIds(new ArrayList<>(vpcEndpointIds));
+        }
+        return endpointConfiguration;
     }
 
     public RestApi getRestApi(String region, String apiId) {
@@ -2404,6 +2412,9 @@ public class ApiGatewayService implements ResourceProvider {
     public RestApi updateRestApi(String region, String apiId, List<Map<String, String>> patchOperations) {
         RestApi api = getRestApi(region, apiId);
         if (patchOperations != null) {
+            // Worked out before anything is set: the store hands back the live API, and a rejected
+            // endpoint change must leave it as it was.
+            EndpointConfiguration endpointConfiguration = patchEndpointConfiguration(api, patchOperations);
             for (Map<String, String> op : patchOperations) {
                 if (!"replace" .equals(op.get("op"))) continue;
                 String path = op.getOrDefault("path", "");
@@ -2414,9 +2425,56 @@ public class ApiGatewayService implements ResourceProvider {
                 // replacing it with an empty string.
                 else if ("/policy" .equals(path)) api.setPolicy(value == null || value.isEmpty() ? null : value);
             }
+            if (endpointConfiguration != null) {
+                api.setEndpointConfiguration(endpointConfiguration);
+            }
         }
         apiStore.put(apiKey(region, apiId), api);
         return api;
+    }
+
+    /**
+     * The endpoint configuration {@code patchOperations} leave {@code api} with, or null when none of
+     * them touches it. {@code replace /endpointConfiguration/types/<type>} changes the type: the path
+     * names the type the API has now, as for a domain name, or its index, {@code 0}, which is what
+     * Terraform sends. {@code add} and {@code remove /endpointConfiguration/vpcEndpointIds} associate
+     * and disassociate a VPC endpoint.
+     */
+    private static EndpointConfiguration patchEndpointConfiguration(RestApi api,
+                                                                    List<Map<String, String>> patchOperations) {
+        EndpointConfiguration current = api.getEndpointConfiguration();
+        // An API stored without one is REGIONAL, which is also what GetRestApi reports for it.
+        EndpointType type = current == null || current.getTypes().isEmpty()
+                ? EndpointType.REGIONAL : current.getTypes().getFirst();
+        List<String> vpcEndpointIds = new ArrayList<>(current == null ? List.of() : current.getVpcEndpointIds());
+        boolean patched = false;
+        for (Map<String, String> op : patchOperations) {
+            String operation = op.get("op");
+            String path = op.getOrDefault("path", "");
+            String value = op.get("value");
+            if ("replace".equals(operation) && path.startsWith(EPC_TYPES_PATH)) {
+                // An API has exactly one type, so its index is always 0.
+                String typeRef = path.substring(EPC_TYPES_PATH.length());
+                if (!typeRef.equals(type.name()) && !typeRef.equals("0")) {
+                    throw new AwsException("BadRequestException", "Invalid patch path " + path
+                            + ": the path must name the API's current endpoint type, " + type
+                            + ", or its index, 0", 400);
+                }
+                type = endpointType(Objects.toString(value, ""));
+                patched = true;
+            } else if (EPC_VPC_IDS_PATH.equals(path) && value != null) {
+                if ("add".equals(operation)) {
+                    if (!vpcEndpointIds.contains(value)) {
+                        vpcEndpointIds.add(value);
+                    }
+                    patched = true;
+                } else if ("remove".equals(operation)) {
+                    vpcEndpointIds.remove(value);
+                    patched = true;
+                }
+            }
+        }
+        return patched ? endpointConfigurationOf(type, vpcEndpointIds) : null;
     }
 
     public ApiGatewayResource updateResource(String region, String apiId, String resourceId, List<Map<String, String>> patchOperations) {

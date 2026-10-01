@@ -58,6 +58,40 @@ class SqsMd5Test {
     }
 
     @Test
+    void receiveMessageWithSelectedAttributePassesSdkMd5Validation() {
+        String queueUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName("md5-receive-" + UUID.randomUUID()).build()).queueUrl();
+        try {
+            sqs.sendMessage(SendMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .messageBody("filter-test")
+                    .messageAttributes(Map.of(
+                            "color.primary", MessageAttributeValue.builder()
+                                    .dataType("String").stringValue("red").build(),
+                            "color", MessageAttributeValue.builder()
+                                    .dataType("String").stringValue("blue").build(),
+                            "colorful", MessageAttributeValue.builder()
+                                    .dataType("String").stringValue("bright").build(),
+                            "secret", MessageAttributeValue.builder()
+                                    .dataType("String").stringValue("private").build()))
+                    .build());
+
+            ReceiveMessageResponse response = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .messageAttributeNames("color.*")
+                    .build());
+
+            assertThat(response.messages()).hasSize(1);
+            assertThat(response.messages().get(0).messageAttributes())
+                    .containsOnlyKeys("color", "colorful", "color.primary");
+            assertThat(response.messages().get(0).md5OfMessageAttributes())
+                    .isEqualTo("46db9885b8f221ea04082f03e3a63d14");
+        } finally {
+            sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
+        }
+    }
+
+    @Test
     void fifoQueueSendMessageWithAttributesPassesSdkMd5Validation() {
         String queueName = "md5-fifo-" + UUID.randomUUID() + ".fifo";
         String queueUrl = sqs.createQueue(CreateQueueRequest.builder()

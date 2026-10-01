@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9-micro:9.7
+FROM registry.access.redhat.com/ubi9-micro:9.8
 
 # Automatically set by Docker BuildKit to "amd64" or "arm64"
 ARG TARGETARCH

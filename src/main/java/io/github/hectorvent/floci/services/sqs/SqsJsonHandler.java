@@ -259,6 +259,7 @@ public class SqsJsonHandler {
         Set<String> requestedAttrs = new LinkedHashSet<>();
         requestedAttrs.addAll(jsonNodeToList(request.path("AttributeNames")));
         requestedAttrs.addAll(jsonNodeToList(request.path("MessageSystemAttributeNames")));
+        Set<String> requestedMessageAttrs = new LinkedHashSet<>(jsonNodeToList(request.path("MessageAttributeNames")));
 
         List<Message> messages = sqsService.receiveMessage(queueUrl, maxMessages,
                 visibilityTimeout, waitTimeSeconds, region);
@@ -273,20 +274,23 @@ public class SqsJsonHandler {
         }
         ArrayNode messagesArray = response.putArray("Messages");
         for (Message msg : messages) {
+            Map<String, MessageAttributeValue> selectedMessageAttrs = SqsMessageAttributeSelector.select(
+                    msg.getMessageAttributes(), requestedMessageAttrs);
             ObjectNode msgNode = objectMapper.createObjectNode();
             msgNode.put("MessageId", msg.getMessageId());
             msgNode.put("ReceiptHandle", msg.getReceiptHandle());
             msgNode.put("MD5OfBody", msg.getMd5OfBody());
-            if (msg.getMd5OfMessageAttributes() != null) {
-                msgNode.put("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+            String messageAttrsMd5 = Message.computeMessageAttributesMd5(selectedMessageAttrs);
+            if (messageAttrsMd5 != null) {
+                msgNode.put("MD5OfMessageAttributes", messageAttrsMd5);
             }
             msgNode.put("Body", msg.getBody());
 
             writeSystemAttributesJson(msgNode, msg, requestedAttrs, senderId);
 
-            if (msg.getMessageAttributes() != null && !msg.getMessageAttributes().isEmpty()) {
-                ObjectNode msgAttrs = msgNode.putObject("MessageAttributes");
-                for (Map.Entry<String, MessageAttributeValue> entry : msg.getMessageAttributes().entrySet()) {
+            if (!selectedMessageAttrs.isEmpty()) {
+                ObjectNode msgAttrs = objectMapper.createObjectNode();
+                for (Map.Entry<String, MessageAttributeValue> entry : selectedMessageAttrs.entrySet()) {
                     ObjectNode valNode = msgAttrs.putObject(entry.getKey());
                     valNode.put("DataType", entry.getValue().getDataType());
                     if (entry.getValue().getBinaryValue() != null) {
@@ -295,6 +299,7 @@ public class SqsJsonHandler {
                         valNode.put("StringValue", entry.getValue().getStringValue());
                     }
                 }
+                msgNode.set("MessageAttributes", msgAttrs);
             }
 
             messagesArray.add(msgNode);
@@ -329,7 +334,7 @@ public class SqsJsonHandler {
                 String id = entry.path("Id").asText();
                 String receiptHandle = entry.path("ReceiptHandle").asText(null);
                 try {
-                    sqsService.deleteMessage(queueUrl, receiptHandle, region);
+                    sqsService.deleteMessageInBatch(queueUrl, receiptHandle, region);
                     ObjectNode success = objectMapper.createObjectNode();
                     success.put("Id", id);
                     successful.add(success);

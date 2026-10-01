@@ -134,6 +134,7 @@ class S3CfnProvisionerTest {
 
         assertEquals("my-bucket.s3.eu-isoe-west-1.cloud.adc-e.uk", r.getAttributes().get("RegionalDomainName"));
         assertFalse(r.getAttributes().containsKey("DualStackDomainName"));
+        assertEquals("arn:aws-iso-e:s3:::my-bucket", r.getAttributes().get("Arn"));
     }
 
     /**

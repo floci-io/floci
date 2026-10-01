@@ -317,6 +317,7 @@ floci:
       mock: true
       host-volume-roots: []
       allow-unsafe-host-volumes: false
+      image-pull-behavior: prefer-cached
     appconfig:
       enabled: true
     appconfigdata:

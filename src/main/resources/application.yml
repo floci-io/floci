@@ -100,7 +100,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.config.TlsConfigSource
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoTotp
+      - --initialize-at-run-time=io.github.hectorvent.floci.core.common.Totp
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreEventService
@@ -328,6 +328,7 @@ floci:
       default-visibility-timeout: 30
       max-message-size: 1048576
       clear-fifo-deduplication-cache-on-purge: false
+      receipt-handle-secret: local-emulator-secret
     s3:
       enabled: true
       enforce-auth: false
@@ -605,6 +606,7 @@ floci:
       # Remove the ECS containers a previous run of this deployment left on the daemon before
       # the service scheduler starts replacements. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true
+      image-pull-behavior: default
       task-role-credentials:
         enabled: false
         ttl-seconds: 21600

@@ -66,9 +66,13 @@ BUSYBOX_IMAGE="$(test_image BUSYBOX)"
 starts ContainerHostNetworkDockerIntegrationTest EcsServiceDiscoveryDockerIntegrationTest \
        EcsContainerManagerEfsIsolationDockerIntegrationTest EcsContainerManagerFirelensDockerIntegrationTest \
        EcsContainerManagerStatsDockerIntegrationTest EcsContainerManagerVolumesFromDockerIntegrationTest \
-       EcsExecChannelDockerIntegrationTest EcsLeftoverContainersDockerIntegrationTest BatchDockerRunnerDockerIntegrationTest \
-       SageMakerDockerIntegrationTest \
+       EcsExecChannelDockerIntegrationTest EcsImagePullDockerIntegrationTest EcsLeftoverContainersDockerIntegrationTest \
+       BatchDockerRunnerDockerIntegrationTest SageMakerDockerIntegrationTest \
     && [ -n "$BUSYBOX_IMAGE" ] && pull "$BUSYBOX_IMAGE"
+# EcsImagePullDockerIntegrationTest runs its own registry to move a tag in; the /ecr/ line below
+# covers the shards that run the ECR tests.
+REGISTRY_IMAGE="$(test_image REGISTRY)"
+starts EcsImagePullDockerIntegrationTest && [ -n "$REGISTRY_IMAGE" ] && pull "$REGISTRY_IMAGE"
 PYTHON_ALPINE_IMAGE="$(test_image PYTHON_ALPINE)"
 starts ContainerCaBundleDockerIntegrationTest EcsCredentialsProxyDockerIntegrationTest SageMakerDockerIntegrationTest \
     && [ -n "$PYTHON_ALPINE_IMAGE" ] && pull "$PYTHON_ALPINE_IMAGE"

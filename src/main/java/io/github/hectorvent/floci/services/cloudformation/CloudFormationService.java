@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -2402,8 +2403,8 @@ public class CloudFormationService implements ResourceProvider {
     /**
      * Whether the host is the S3 <em>service</em> endpoint rather than a bucket-qualified one:
      * {@code s3.<suffix>} and the regional {@code s3.<region>.<suffix>}, for a local hostname as
-     * much as for {@code amazonaws.com}. A URL against the service endpoint is path-style, so its
-     * bucket is the first path segment.
+     * much as for any partition's DNS suffix ({@code amazonaws.com}, {@code amazonaws.com.cn}, ...).
+     * A URL against the service endpoint is path-style, so its bucket is the first path segment.
      *
      * <p>The first label alone does not decide it, because a bucket may legally be named
      * {@code s3}: that makes {@code s3.s3.us-east-1.amazonaws.com} and {@code s3.s3.<suffix>}
@@ -2453,7 +2454,7 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private static boolean isEndpointSuffix(String candidate, String hostnameSuffix) {
-        if (candidate.equals("amazonaws.com") || candidate.equals("localhost")) {
+        if (AwsPartitions.isDnsSuffix(candidate) || candidate.equals("localhost")) {
             return true;
         }
         return hostnameSuffix != null && !hostnameSuffix.isBlank()

@@ -125,12 +125,13 @@ public class StsQueryHandler {
         String callerAccountId = regionResolver.getAccountId();
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
-        AssumeRoleTrustOutcome trustOutcome = enforceTrustPolicy(roleArn, roleName, accountId, params);
-        if (trustOutcome.denial() != null) {
-            return trustOutcome.denial();
+        IamRole role = iamService.findRole(accountId, roleName).orElse(null);
+        Response trustDenied = enforceTrustPolicy(roleArn, role, accountId, params);
+        if (trustDenied != null) {
+            return trustDenied;
         }
 
-        String sessionRoleArn = canonicalRoleArn(trustOutcome.role(), accountId, roleName);
+        String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
@@ -159,20 +160,27 @@ public class StsQueryHandler {
      * Resolves the target role and evaluates its trust policy when IAM enforcement is enabled.
      * Returns the role on success or the AWS error response on denial.
      */
-    private AssumeRoleTrustOutcome enforceTrustPolicy(String roleArn, String roleName, String roleAccountId,
-                                                      MultivaluedMap<String, String> params) {
-        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
-        boolean enforcement = config.services().iam().enforcementEnabled();
+    private Response enforceTrustPolicy(String roleArn, IamRole role, String roleAccountId,
+                                        MultivaluedMap<String, String> params) {
         String auth = IamEnforcementFilter.requestAuthorization(
                 headers == null ? null : headers.getHeaderString("Authorization"),
                 uriInfo == null ? null : uriInfo.getQueryParameters());
-        String callerAccount = accountResolver.resolve(auth);
-        String callerArn = iamService.resolveCallerArn(
-                        auth == null ? null : accountResolver.extractAccessKeyId(auth))
-                .orElse(AwsArnUtils.Arn.global(regionResolver.getPartition(), "iam", callerAccount, "root").toString());
-        callerAccount = AwsArnUtils.accountOrDefault(callerArn, callerAccount);
+        String callerAccount = regionResolver.getAccountId();
         String accessKeyId = auth == null ? null : accountResolver.extractAccessKeyId(auth);
-        String principalArn = iamService.resolvePrincipalArn(accessKeyId).orElse(callerArn);
+        Optional<IamService.CallerArns> callerArns = iamService.resolveCallerArns(accessKeyId);
+        String callerArn = callerArns.map(IamService.CallerArns::callerArn)
+                .orElse(regionResolver.buildGlobalArn("iam", callerAccount, "root"));
+        String principalArn = callerArns.map(IamService.CallerArns::principalArn).orElse(callerArn);
+
+        if (role == null || !roleArnMatches(roleArn, role)) {
+            return AwsQueryResponse.error("AccessDenied",
+                    "User: " + callerArn + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
+                    AwsNamespaces.STS, 403);
+        }
+        if (!config.services().iam().enforcementEnabled()) {
+            return null;
+        }
+
         Map<String, List<String>> requestContext = IamConditionContextResolver.withGlobalContext(
                 null, roleArn, regionResolver.getRegion(), callerAccount, roleAccountId);
         requestContext.put("sts:RoleSessionName", List.of(getParam(params, "RoleSessionName")));
@@ -180,18 +188,13 @@ public class StsQueryHandler {
         if (externalId != null) {
             requestContext.put("sts:ExternalId", List.of(externalId));
         }
-        boolean permitted = role.isPresent()
-                && roleArnMatches(roleArn, role.get())
-                && (!enforcement
-                    || trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, principalArn,
-                            callerAccount, requestContext));
-        if (permitted) {
-            return AssumeRoleTrustOutcome.allow(role.get());
+        if (trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), callerArn, principalArn,
+                callerAccount, requestContext)) {
+            return null;
         }
-        Response denial = AwsQueryResponse.error("AccessDenied",
+        return AwsQueryResponse.error("AccessDenied",
                 "User: " + callerArn + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
                 AwsNamespaces.STS, 403);
-        return AssumeRoleTrustOutcome.deny(denial);
     }
 
     private String canonicalRoleArn(IamRole role, String accountId, String roleName) {
@@ -199,18 +202,7 @@ public class StsQueryHandler {
             return role.getArn();
         }
         return regionResolver.buildGlobalArn("iam", accountId,
-                "role" + IamService.normalizePath(role.getPath()) + roleName);
-    }
-
-    private record AssumeRoleTrustOutcome(IamRole role, Response denial) {
-
-        static AssumeRoleTrustOutcome allow(IamRole role) {
-            return new AssumeRoleTrustOutcome(role, null);
-        }
-
-        static AssumeRoleTrustOutcome deny(Response denial) {
-            return new AssumeRoleTrustOutcome(null, denial);
-        }
+                "role" + normalizeRolePath(role.getPath()) + roleName);
     }
 
     static boolean roleArnMatches(String requestedRoleArn, IamRole role) {
@@ -229,8 +221,16 @@ public class StsQueryHandler {
                     && requested.region().equals(stored.region())
                     && requested.resource().equals(stored.resource());
         }
-        String expectedResource = "role" + IamService.normalizePath(role.getPath()) + role.getRoleName();
+        String expectedResource = "role" + normalizeRolePath(role.getPath()) + role.getRoleName();
         return requested.region().isEmpty() && requested.resource().equals(expectedResource);
+    }
+
+    private static String normalizeRolePath(String path) {
+        if (path == null || path.isEmpty()) {
+            return "/";
+        }
+        String normalizedPath = path.startsWith("/") ? path : "/" + path;
+        return normalizedPath.endsWith("/") ? normalizedPath : normalizedPath + "/";
     }
 
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {

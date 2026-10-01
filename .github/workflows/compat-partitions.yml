@@ -1,0 +1,160 @@
+name: Partition Compatibility
+
+# The Java SDK suite against a Floci deployed in a non-commercial partition, so
+# the SDK's own partition logic (arn:aws-cn: ARNs, China signing scopes, the
+# LocationConstraint S3 CreateBucket sends) has to round-trip end to end. Part
+# of #4272.
+#
+# Runs after each Nightly against the image it just published, not per PR: it
+# is one more ~15 minute native suite, and the per-PR legs already queue for
+# the shared runner pools (see compatibility.yml). Known failures live in
+# .github/ci/compat-partition-allowlist-<region>.txt (a region without one has
+# none); a failure missing from it, or an entry that no longer fails, fails the
+# run, so the list only shrinks.
+
+on:
+  workflow_run:
+    workflows: [Nightly]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Floci image to test
+        default: floci/floci:nightly
+      region:
+        description: Region Floci and the SDK clients default to
+        default: cn-north-1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sdk-test-java:
+    name: sdk-test-java / ${{ inputs.region || 'cn-north-1' }}
+    if: >-
+      !github.event.repository.fork
+      && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      IMAGE: ${{ inputs.image || 'floci/floci:nightly' }}
+      REGION: ${{ inputs.region || 'cn-north-1' }}
+
+    steps:
+      # The tag is mutable, so the suite and allowlist are checked out at the commit this exact
+      # image was built from (its OCI revision label, which Nightly sets), never a guessed one.
+      - name: Pull the image and read the commit it was built from
+        id: image
+        run: |
+          docker pull "$IMAGE"
+          revision=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")
+          if [ -z "$revision" ] || [ "$revision" = "<no value>" ]; then
+            echo "::error::$IMAGE has no org.opencontainers.image.revision label to match the tests to"
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.image.outputs.revision }}
+          sparse-checkout: |
+            compatibility-tests
+            .github/ci
+
+      - name: Create Docker network
+        run: docker network create compat-net
+
+      - name: Start floci
+        run: |
+          DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+          docker run -d --name floci --network compat-net \
+            -p 4566:4566 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            --group-add "$DOCKER_GID" \
+            -e FLOCI_DEFAULT_REGION="$REGION" \
+            -e FLOCI_BASE_URL=http://floci:4566 \
+            -e FLOCI_SERVICES_DOCKER_NETWORK=compat-net \
+            -e FLOCI_HOSTNAME=floci \
+            -e FLOCI_SERVICES_IOT_MQTT_ENABLED=true \
+            -e FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true \
+            -e FLOCI_TLS_ENABLED=true \
+            -e FLOCI_SERVICES_EC2_MOCK=true \
+            -e FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST=floci \
+            -e FLOCI_SERVICES_RDS_ENDPOINT_HOST=floci \
+            -e FLOCI_SERVICES_SSOOIDC_LOCAL_PRINCIPAL_ID=11111111-2222-3333-4444-555555555555 \
+            "$IMAGE"
+
+      - name: Wait for floci to be healthy
+        run: |
+          health=starting
+          for _ in $(seq 1 60); do
+            health=$(docker inspect -f '{{.State.Health.Status}}' floci)
+            if [ "$health" = healthy ]; then
+              exit 0
+            fi
+            if [ "$health" = unhealthy ]; then
+              break
+            fi
+            sleep 1
+          done
+          echo "::error::floci did not report healthy (last status: $health)"
+          docker logs --tail 50 floci
+          exit 1
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build test image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: compatibility-tests/sdk-test-java
+          load: true
+          tags: compat-sdk-test-java
+          cache-from: type=gha,scope=sdk-test-java
+
+      # The suite's exit status is not the verdict here: the allowlist check below is.
+      - name: Run tests
+        id: tests
+        continue-on-error: true
+        run: |
+          mkdir -p test-results /tmp/floci-hot-reload
+          FLOCI_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "compat-net").IPAddress}}' floci)
+          docker run --rm --network compat-net \
+            --dns "${FLOCI_IP}" \
+            -e AWS_REGION="$REGION" \
+            -e FLOCI_ENDPOINT=http://floci:4566 \
+            -e FLOCI_S3_VHOST_ENDPOINT=http://floci:4566 \
+            -e HOT_RELOAD_BASE_DIR=/tmp/floci-hot-reload \
+            -v /tmp/floci-hot-reload:/tmp/floci-hot-reload \
+            -v "$(pwd)/test-results:/results" \
+            compat-sdk-test-java
+
+      # Maven exits non-zero for the allowlisted failures too, so its status cannot tell a
+      # finished run from an aborted one; the checker requires a report for every test class.
+      - name: Compare failures with the allowlist
+        run: >-
+          python3 .github/ci/compat-allowlist-check.py test-results
+          ".github/ci/compat-partition-allowlist-$REGION.txt"
+          --test-sources compatibility-tests/sdk-test-java/src/test/java
+
+      - name: Generate test summary
+        if: always()
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2
+        with:
+          paths: test-results/*.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-partition-results-${{ env.REGION }}
+          path: test-results/
+          if-no-files-found: warn
+
+      - name: Dump floci logs
+        if: failure() || cancelled()
+        run: docker logs --tail 300 floci

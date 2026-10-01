@@ -28,11 +28,10 @@ public final class AwsArnUtils {
          * gets {@code aws-us-gov}, and everything else gets {@code aws}. See
          * {@link AwsRegions#partitionFor}.
          *
-         * <p>Global services pass an empty region, and nothing in that argument can say which
-         * partition they belong to, so this keeps {@code aws} for them. A call site that knows the
-         * request's partition mints those through {@link #global} (or
-         * {@link RegionResolver#buildGlobalArn}); the fallback here stays only until every
-         * regionless call site has moved, after which a blank region becomes an error.
+         * <p>A blank region says nothing about the partition, so it falls back to {@code aws}.
+         * A regionless ARN is minted through {@link #global} or
+         * {@link RegionResolver#buildGlobalArn} instead; {@code make partition-check} fails a call
+         * that passes a literal blank region here.
          */
         public static Arn of(String service, String region, String accountId, String resource) {
             return new Arn(AwsRegions.partitionFor(region), service, region, accountId, resource);

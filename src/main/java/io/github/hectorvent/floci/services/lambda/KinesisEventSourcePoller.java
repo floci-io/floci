@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
@@ -214,7 +215,8 @@ public class KinesisEventSourcePoller implements Resettable {
                 record.put("eventVersion", "1.0");
                 record.put("eventID", shardId + ":" + rec.getSequenceNumber());
                 record.put("eventName", "aws:kinesis:record");
-                record.put("invokeIdentityArn", AwsArnUtils.Arn.of("iam", "", esm.getAccountId(), "role/lambda-role").toString());
+                record.put("invokeIdentityArn", AwsArnUtils.Arn.global(AwsRegions.partitionFor(esm.getRegion()), "iam",
+                        esm.getAccountId(), "role/lambda-role").toString());
                 record.put("awsRegion", esm.getRegion());
                 record.put("eventSourceARN", esm.getEventSourceArn());
                 recordsArray.add(record);

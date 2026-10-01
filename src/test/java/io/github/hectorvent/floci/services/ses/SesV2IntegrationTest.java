@@ -86,9 +86,11 @@ class SesV2IntegrationTest {
     @Test
     @Order(4)
     void listEmailIdentities() {
+        // Other classes share this region, so ask for a page large enough to hold every identity.
         given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
+            .queryParam("PageSize", 1000)
         .when()
             .get("/v2/email/identities")
         .then()
