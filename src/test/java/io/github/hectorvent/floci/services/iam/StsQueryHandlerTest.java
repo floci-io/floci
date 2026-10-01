@@ -4,15 +4,21 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.WebIdentityToken;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.testing.PartitionMatrix;
+import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.security.interfaces.RSAPublicKey;
+import java.util.List;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -22,7 +28,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class StsQueryHandlerTest {
@@ -33,6 +43,8 @@ class StsQueryHandlerTest {
     private static final Pattern SESSION_TOKEN =
             Pattern.compile("<SessionToken>([^<]+)</SessionToken>");
 
+    private static final Pattern ARN = Pattern.compile("<Arn>([^<]+)</Arn>");
+
     private static StsQueryHandler newHandler() {
         IamRole role = new IamRole();
         role.setRoleName("TestRole");
@@ -41,6 +53,14 @@ class StsQueryHandlerTest {
     }
 
     private static StsQueryHandler newHandler(IamRole role) {
+        return newHandler(role, new RegionResolver(REGION, "000000000000"));
+    }
+
+    private static StsQueryHandler newHandlerForRegion(RegionResolver regionResolver) {
+        return newHandler(null, regionResolver);
+    }
+
+    private static StsQueryHandler newHandler(IamRole role, RegionResolver regionResolver) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iam = mock(EmulatorConfig.IamServiceConfig.class);
@@ -54,7 +74,7 @@ class StsQueryHandlerTest {
         return new StsQueryHandler(
                 iamService,
                 mock(AccountResolver.class),
-                new RegionResolver(REGION, "000000000000"),
+                regionResolver,
                 config,
                 mock(AssumeRolePolicyEvaluator.class),
                 mock(WebIdentityTrustPolicyEvaluator.class),
@@ -385,6 +405,101 @@ class StsQueryHandlerTest {
         String body = (String) response.getEntity();
         assertTrue(body.contains("ValidationError"), body);
         assertTrue(body.contains("greater than or equal to 900"), body);
+    }
+
+    /** The root ARN GetCallerIdentity falls back to carries the deployment's partition, not {@code aws}. */
+    @ParameterizedTest
+    @MethodSource("io.github.hectorvent.floci.testing.PartitionMatrix#cases")
+    void getCallerIdentityMintsTheRootArnInTheDeploymentsPartition(PartitionCase partitionCase) {
+        Response response = newHandlerForRegion(PartitionMatrix.regionResolver(partitionCase))
+                .handle("GetCallerIdentity", new MultivaluedHashMap<>());
+
+        assertEquals(200, response.getStatus());
+        String arn = extract(ARN, (String) response.getEntity());
+        assertEquals("arn:" + partitionCase.partition() + ":iam::" + PartitionMatrix.ACCOUNT + ":root", arn);
+        PartitionMatrix.assertGlobalArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.github.hectorvent.floci.testing.PartitionMatrix#cases")
+    void getFederationTokenMintsTheFederatedUserArnInTheDeploymentsPartition(PartitionCase partitionCase) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Name", "bob");
+
+        Response response = newHandlerForRegion(PartitionMatrix.regionResolver(partitionCase))
+                .handle("GetFederationToken", params);
+
+        assertEquals(200, response.getStatus());
+        String arn = extract(ARN, (String) response.getEntity());
+        assertEquals("arn:" + partitionCase.partition() + ":sts::" + PartitionMatrix.ACCOUNT
+                + ":federated-user/bob", arn);
+    }
+
+    /**
+     * A role and its account's OIDC provider are IAM resources of one partition, so a trust policy
+     * naming the provider ARN CreateOpenIDConnectProvider returned keeps matching and the session
+     * lands in the stored role's partition, whatever region AssumeRoleWithWebIdentity is signed for
+     * and whichever partition its RoleArn names.
+     */
+    @Test
+    void webIdentityMatchesTheProviderAndMintsTheSessionInTheRolesPartition() throws Exception {
+        String issuer = "https://oidc.example.com/id/ABC";
+        String roleArn = "arn:aws-cn:iam::000000000000:role/web-role";
+        String requestedRoleArn = "arn:aws:iam::000000000000:role/web-role";
+        String providerArn = "arn:aws-cn:iam::000000000000:oidc-provider/oidc.example.com/id/ABC";
+
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.IamServiceConfig iam = mock(EmulatorConfig.IamServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.iam()).thenReturn(iam);
+        IamService iamService = mock(IamService.class);
+        IamRole role = new IamRole();
+        role.setArn(roleArn);
+        role.setAssumeRolePolicyDocument("{}");
+        when(iamService.findRole("000000000000", "web-role")).thenReturn(Optional.of(role));
+        WebIdentityTokenVerifier verifier = mock(WebIdentityTokenVerifier.class);
+        when(verifier.peekIssuer("jwt")).thenReturn(Optional.of(issuer));
+        when(verifier.verify(eq("jwt"), any(), eq(issuer), anyString()))
+                .thenReturn(new WebIdentityToken(issuer, "system:serviceaccount:default:app",
+                        List.of("sts.amazonaws.com")));
+        OidcIssuerKeyLookup keys = mock(OidcIssuerKeyLookup.class);
+        when(keys.findVerificationKey(issuer)).thenReturn(Optional.of(mock(RSAPublicKey.class)));
+        WebIdentityTrustPolicyEvaluator trust = mock(WebIdentityTrustPolicyEvaluator.class);
+        when(trust.allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap())).thenReturn(true);
+
+        StsQueryHandler handler = new StsQueryHandler(iamService, mock(AccountResolver.class),
+                new RegionResolver(REGION, "000000000000"), config, mock(AssumeRolePolicyEvaluator.class),
+                trust, verifier, keys, mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", requestedRoleArn);
+        params.putSingle("RoleSessionName", "app");
+        params.putSingle("WebIdentityToken", "jwt");
+
+        Response response = handler.handle("AssumeRoleWithWebIdentity", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        verify(trust).allows(eq("{}"), eq(providerArn), eq("oidc.example.com/id/ABC"), anyMap());
+        assertEquals("arn:aws-cn:sts::000000000000:assumed-role/web-role/app",
+                extract(ARN, (String) response.getEntity()));
+    }
+
+    /** A session keeps its role's partition even when AssumeRole is signed for another one. */
+    @Test
+    void assumeRoleMintsTheSessionInTheRolesPartition() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/commercial-role");
+        params.putSingle("RoleSessionName", "s");
+        IamRole role = new IamRole();
+        role.setRoleName("commercial-role");
+        role.setArn("arn:aws:iam::000000000000:role/commercial-role");
+
+        Response response = newHandler(role, new RegionResolver("cn-north-1", "000000000000"))
+                .handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus());
+        assertEquals("arn:aws:sts::000000000000:assumed-role/commercial-role/s",
+                extract(ARN, (String) response.getEntity()));
     }
 
     private static String extract(Pattern pattern, String body) {

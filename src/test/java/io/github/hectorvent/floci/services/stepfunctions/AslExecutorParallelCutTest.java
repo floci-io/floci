@@ -284,6 +284,12 @@ class AslExecutorParallelCutTest {
     @Test
     void aRuntimeFailureThatExceedsTheToleranceRecordsTheOnesItCutButNotItself() {
         String map = MAP_WITH_A_FAILING_ITERATION.replace("\"Type\":\"Map\",", "\"Type\":\"Map\",\"ToleratedFailureCount\":0,")
+                .replace("\"StartAt\":\"Route\",", "\"StartAt\":\"Gate\",")
+                .replace("\"Route\":{\"Type\":\"Choice\"",
+                        "\"Gate\":{\"Type\":\"Choice\",\"Choices\":[{\"Variable\":\"$.kind\","
+                                + "\"StringEquals\":\"nomatch\",\"Next\":\"ShortPause\"}],\"Default\":\"Route\"},"
+                                + "\"ShortPause\":{\"Type\":\"Wait\",\"Seconds\":1,\"Next\":\"Route\"},"
+                                + "\"Route\":{\"Type\":\"Choice\"")
                 .replace("\"Default\":\"Nest\",", "");
         Execution execution = run(map, sleeper(1), 0, "[{\"kind\":\"wait\"},{\"kind\":\"nomatch\"}]");
 

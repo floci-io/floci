@@ -124,8 +124,32 @@ did before.
 
 AWS publishes which services exist in each partition (CloudFront is not in GovCloud, IAM is
 not in `aws-eusc`). On AWS a request for an absent service never reaches an API: the SDK
-fails to resolve the host. Floci serves every enabled service in every partition; a strict
-mode that mirrors the SDK failure is planned as an opt-in flag.
+fails to resolve the host and reports an `UnknownHostException`. Floci serves every enabled
+service in every partition by default.
+
+Set `FLOCI_PARTITIONS_STRICT=true` (`floci.partitions.strict`) to mirror AWS instead. A request
+whose SigV4 signing name the request's partition does not publish is refused with a 404
+`UnknownOperationException` whose message names the service and the partition; Floci cannot
+fail DNS, so this is the same shape the unknown-service guard uses. The check reads the vendored
+service list, matching the signing name directly or through the endpoint prefixes it covers
+(`ecr` signs for `api.ecr`, `bedrock` for `bedrock-runtime`), so a China ECR client is served
+while a GovCloud CloudFront client is refused. Only a service the data lists in some other
+partition is refused: `endpoints.json` omits the newer services that ship an endpoint ruleset
+alone (FIS, MWAA, S3 Tables), and those are served everywhere.
+
+STS is regionalized everywhere and its global host `sts.amazonaws.com` exists only in `aws`, so
+IAM's `GetAccountSummary` reports `GlobalEndpointTokenVersion` only there.
+
+An IAM resource (user, group, role, policy, instance profile, OIDC provider) is created in the
+request's partition and keeps it: a rename signed for another partition does not move it. On AWS
+an account belongs to one partition, but one Floci process serves them all, so anything derived
+from a stored resource follows that resource. A role's sessions (`assumed-role`) and the OIDC
+provider its web-identity trust policy names take the stored role's partition, whichever partition
+the request's `RoleArn` names, so `AssumeRole` and a later `GetCallerIdentity` agree whatever region
+each call is signed for. The credential report is kept per partition, so its root row always
+names the caller's. ARNs with nothing stored
+behind them, the `root` fallback of `GetCallerIdentity` and `federated-user`, take the request's
+partition.
 
 ## Open questions
 
@@ -145,5 +169,5 @@ the commercial value or Floci's own base host until sourced:
 
 ## Related
 
-- [Environment Variables](environment-variables.md): `FLOCI_DEFAULT_REGION`, `FLOCI_PARTITIONS_ID`
+- [Environment Variables](environment-variables.md): `FLOCI_DEFAULT_REGION`, `FLOCI_PARTITIONS_ID`, `FLOCI_PARTITIONS_STRICT`
 - [Multi-Account Isolation](multi-account.md): the account half of the credential scope

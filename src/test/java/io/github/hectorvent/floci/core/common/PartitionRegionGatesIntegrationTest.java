@@ -15,6 +15,7 @@ import java.util.List;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -185,5 +186,30 @@ class PartitionRegionGatesIntegrationTest {
             .body("{}")
         .when().post("/").then().statusCode(200)
             .body("regions", hasSize(4));
+    }
+
+    /** GetCallerIdentity's root fallback and GetAccountSummary follow the request's partition. */
+    @Test
+    void stsAndIamGlobalAnswersFollowTheRequestsPartition() {
+        given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("cn-north-1", "sts"))
+            .formParam("Action", "GetCallerIdentity")
+            .formParam("Version", "2011-06-15")
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<Arn>arn:aws-cn:iam::000000000000:root</Arn>"));
+
+        given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("cn-north-1", "iam"))
+            .formParam("Action", "GetAccountSummary")
+            .formParam("Version", "2010-05-08")
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<key>Users</key>"))
+            .body(not(containsString("GlobalEndpointTokenVersion")));
+        given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", "iam"))
+            .formParam("Action", "GetAccountSummary")
+            .formParam("Version", "2010-05-08")
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<key>GlobalEndpointTokenVersion</key>"));
     }
 }

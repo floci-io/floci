@@ -32,6 +32,7 @@ class AccountContextFilterTest {
     private RequestContext requestContext;
     private Map<String, String> sessionAccounts;
     private boolean allowUnknownRegions;
+    private boolean strictPartitions;
     private AccountContextFilter filter;
 
     @BeforeEach
@@ -41,6 +42,7 @@ class AccountContextFilterTest {
         requestContext = new RequestContext();
         sessionAccounts = new java.util.HashMap<>();
         allowUnknownRegions = false;
+        strictPartitions = false;
         SessionAccountLookup sessionLookup = akid -> Optional.ofNullable(sessionAccounts.get(akid));
         filter = new AccountContextFilter(accountResolver, regionResolver, requestContext, sessionLookup,
                 this::config);
@@ -49,6 +51,7 @@ class AccountContextFilterTest {
     private EmulatorConfig config() {
         EmulatorConfig.PartitionsConfig partitions = mock(EmulatorConfig.PartitionsConfig.class);
         when(partitions.allowUnknownRegions()).thenReturn(allowUnknownRegions);
+        when(partitions.strict()).thenReturn(strictPartitions);
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.partitions()).thenReturn(partitions);
         return config;
@@ -198,6 +201,70 @@ class AccountContextFilterTest {
         filter.filter(ctx);
         verify(ctx, never()).abortWith(any());
         assertEquals("polygondwanaland-west-1", requestContext.getRegion());
+    }
+
+    /** Strict mode: a service AWS publishes nowhere in the request's partition is refused as a 404. */
+    @Test
+    void strictModeRejectsAServiceThePartitionDoesNotPublish() {
+        strictPartitions = true;
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=AKID/20260617/us-gov-west-1/cloudfront/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null);
+        filter.filter(ctx);
+        ArgumentCaptor<Response> aborted = ArgumentCaptor.forClass(Response.class);
+        verify(ctx).abortWith(aborted.capture());
+        assertEquals(404, aborted.getValue().getStatus());
+        assertEquals("UnknownOperationException", aborted.getValue().getHeaderString("X-Amzn-Errortype"));
+        String body = aborted.getValue().getEntity().toString();
+        assertTrue(body.contains("aws-us-gov"), body);
+        assertEquals("aws-us-gov", requestContext.getPartition());
+    }
+
+    /** The signing name is checked, not the endpoint key: ECR signs {@code ecr} for {@code api.ecr}. */
+    @Test
+    void strictModeAcceptsAServiceThePartitionPublishesUnderAnotherEndpointPrefix() {
+        strictPartitions = true;
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=AKID/20260617/cn-north-1/ecr/aws4_request, SignedHeaders=host, Signature=abc",
+            null);
+        filter.filter(ctx);
+        verify(ctx, never()).abortWith(any());
+        filter.filter(mockContext(null, "AKID/20260617/us-gov-west-1/iam/aws4_request"));
+    }
+
+    /** endpoints.json omits the ruleset-only services; silence there is not absence. */
+    @Test
+    void strictModeServesAServiceThePublishedDataDoesNotListAnywhere() {
+        strictPartitions = true;
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=AKID/20260617/us-gov-west-1/fis/aws4_request, "
+                    + "SignedHeaders=host, Signature=abc",
+            null);
+        filter.filter(ctx);
+        verify(ctx, never()).abortWith(any());
+    }
+
+    @Test
+    void strictModeAlsoCoversPresignedCredentials() {
+        strictPartitions = true;
+        ContainerRequestContext ctx = mockContext(null, "AKID/20260617/eusc-de-east-1/iam/aws4_request");
+        filter.filter(ctx);
+        ArgumentCaptor<Response> aborted = ArgumentCaptor.forClass(Response.class);
+        verify(ctx).abortWith(aborted.capture());
+        assertEquals(404, aborted.getValue().getStatus());
+    }
+
+    /** The default serves every service everywhere: the catalog is consulted only when strict. */
+    @Test
+    void lenientModeServesAPartitionAbsentService() {
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=AKID/20260617/us-gov-west-1/cloudfront/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null);
+        filter.filter(ctx);
+        verify(ctx, never()).abortWith(any());
+        assertEquals("aws-us-gov", requestContext.getPartition());
     }
 
     @Test

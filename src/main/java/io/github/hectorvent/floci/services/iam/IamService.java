@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
@@ -166,8 +167,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final StorageBackend<String, String> serviceLinkedRoleDeletions;
     private final StorageBackend<String, OrganizationRootFeatures> orgRootFeatures;
     /**
-     * Holds at most one entry per account under {@link #CREDENTIAL_REPORT_KEY}: the same
-     * single-value-per-account shape as {@link #accountAliases}.
+     * Holds at most one report per account and partition, keyed by {@link #credentialReportKey}:
+     * the report's root row names the partition it was generated for, so a report generated for
+     * one partition is never handed to a caller in another.
      */
     private final StorageBackend<String, CredentialReport> credentialReports;
     private final RegionResolver regionResolver;
@@ -512,7 +514,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 users.delete(userName);
                 user.setUserName(newUserName);
                 if (newPath != null) user.setPath(normalizePath(newPath));
-                user.setArn(iamArn("user", user.getPath(), newUserName));
+                user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
                 users.put(newUserName, user);
                 loginProfiles.get(userName).ifPresent(profile -> {
                     loginProfiles.delete(userName);
@@ -533,7 +535,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             } else {
                 if (newPath != null) {
                     user.setPath(normalizePath(newPath));
-                    user.setArn(iamArn("user", user.getPath(), userName));
+                    user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), userName));
                 }
                 users.put(userName, user);
             }
@@ -607,7 +609,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 if (newPath != null) {
                     group.setPath(normalizePath(newPath));
                 }
-                group.setArn(iamArn("group", group.getPath(), newGroupName));
+                group.setArn(iamArnBeside(group.getArn(), "group", group.getPath(), newGroupName));
                 groups.put(newGroupName, group);
                 // Keep member references in sync so group policies still resolve after a rename.
                 for (String memberName : group.getUserNames()) {
@@ -620,7 +622,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             } else {
                 if (newPath != null) {
                     group.setPath(normalizePath(newPath));
-                    group.setArn(iamArn("group", group.getPath(), groupName));
+                    group.setArn(iamArnBeside(group.getArn(), "group", group.getPath(), groupName));
                 }
                 groups.put(groupName, group);
             }
@@ -1182,7 +1184,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         summary.put("AccountAccessKeysPresent", 0L);
         summary.put("AccountSigningCertificatesPresent", 0L);
         summary.put("AccountPasswordPresent", 0L);
-        summary.put("GlobalEndpointTokenVersion", 1L);
+        // The STS global endpoint (and so the v1/v2 token choice it reports) exists only where
+        // the partition publishes one: aws today. Elsewhere AWS has no such entry to report.
+        if (AwsPartitions.byId(regionResolver.getPartition()).hasGlobalSts()) {
+            summary.put("GlobalEndpointTokenVersion", 1L);
+        }
         return summary;
     }
 
@@ -1952,7 +1958,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /**
      * AWS identifies a provider by URL, so the ARN is derived from it rather than from a random
      * id, and the scheme is stripped: {@code https://host/path} becomes
-     * {@code arn:aws:iam::<account>:oidc-provider/host/path}. Creating the same URL twice is
+     * {@code arn:<partition>:iam::<account>:oidc-provider/host/path}. Creating the same URL twice is
      * therefore a duplicate resource, not a second provider.
      */
     public OpenIDConnectProvider createOpenIDConnectProvider(String url, List<String> clientIdList,
@@ -2641,11 +2647,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 sessionName = session.getEc2InstanceId() != null
                         ? session.getEc2InstanceId() : "floci-session";
             }
-            String partition = AwsArnUtils.isArn(roleArn)
-                    ? AwsArnUtils.parse(roleArn).partition()
-                    : regionResolver.getPartition();
-            return Optional.of(AwsArnUtils.Arn.global(partition, "sts", accountId, "assumed-role/" + roleName + "/"
-                    + sessionName).toString());
+            // The session lives in its role's partition, as AssumeRole issued it, whatever region
+            // a later call is signed for.
+            String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
+            return Optional.of(AwsArnUtils.Arn.global(partition, "sts", accountId,
+                    "assumed-role/" + roleName + "/" + sessionName).toString());
         }
 
         return Optional.empty();
@@ -2870,13 +2876,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return docs;
     }
 
-    String iamArn(String resourceType, String path, String name) {
-        return iamArn(resourceType, path, name, regionResolver.getAccountId());
+    /**
+     * Mints the ARN of a new IAM resource in the request's partition (the deployment's outside a
+     * request, as for the seeded deployer user). An IAM resource then stays in the partition it was
+     * created in: AWS never has to choose, since an account belongs to one partition, but Floci
+     * keys IAM by account and serves every partition from one process.
+     */
+    private String iamArn(String resourceType, String path, String name) {
+        return regionResolver.buildGlobalArn("iam", resourceType + path + name);
     }
 
-    String iamArn(String resourceType, String path, String name, String accountId) {
-        return AwsArnUtils.Arn.of("iam", "", accountId,
-                resourceType + normalizePath(path) + name).toString();
+    /** Re-mints a renamed or moved resource's ARN in the partition its current ARN names. */
+    private String iamArnBeside(String currentArn, String resourceType, String path, String name) {
+        String partition = AwsArnUtils.partitionOrDefault(currentArn, regionResolver.getPartition());
+        return AwsArnUtils.Arn.global(partition, "iam", regionResolver.getAccountId(),
+                resourceType + path + name).toString();
     }
 
     private static <T> boolean containsNameIgnoreCase(StorageBackend<String, T> storage,
@@ -3094,22 +3108,26 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public CredentialReportGeneration generateCredentialReport() {
         Instant now = Instant.now();
-        Optional<CredentialReport> existing = credentialReports.get(CREDENTIAL_REPORT_KEY);
+        Optional<CredentialReport> existing = credentialReports.get(credentialReportKey());
         if (existing.isPresent() && now.isBefore(existing.get().getGeneratedTime().plus(CREDENTIAL_REPORT_MAX_AGE))) {
             return new CredentialReportGeneration("COMPLETE",
                     "Current report has already been generated within the past 4 hours.");
         }
         String csv = buildCredentialReportCsv();
         String base64Content = Base64.getEncoder().encodeToString(csv.getBytes(StandardCharsets.UTF_8));
-        credentialReports.put(CREDENTIAL_REPORT_KEY, new CredentialReport(base64Content, now));
+        credentialReports.put(credentialReportKey(), new CredentialReport(base64Content, now));
         String description = existing.isEmpty()
                 ? "No report exists. Starting a new report generation task"
                 : "The previous report has expired. Starting a new report generation task";
         return new CredentialReportGeneration("STARTED", description);
     }
 
+    private String credentialReportKey() {
+        return CREDENTIAL_REPORT_KEY + "/" + regionResolver.getPartition();
+    }
+
     public CredentialReportContent getCredentialReport() {
-        CredentialReport report = credentialReports.get(CREDENTIAL_REPORT_KEY)
+        CredentialReport report = credentialReports.get(credentialReportKey())
                 .orElseThrow(() -> new AwsException("ReportNotPresent",
                         "The request was rejected because the credential report does not exist. "
                                 + "To generate a credential report, use GenerateCredentialReport.", 410));
@@ -3146,7 +3164,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private String rootAccountReportRow() {
-        String arn = AwsArnUtils.Arn.of("iam", "", regionResolver.getAccountId(), "root").toString();
+        String arn = regionResolver.buildGlobalArn("iam", "root");
         return String.join(",",
                 "<root_account>", arn, "N/A",
                 "FALSE", "N/A", "N/A", "not_supported",

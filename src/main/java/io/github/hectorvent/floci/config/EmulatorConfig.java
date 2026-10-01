@@ -75,6 +75,15 @@ public interface EmulatorConfig {
         Optional<String> id();
 
         /**
+         * Refuse requests signed for a service AWS does not publish in the request's partition
+         * (CloudFront in GovCloud, IAM in {@code aws-eusc}). On AWS such a request never reaches
+         * an API because its endpoint does not resolve; Floci serves every enabled service in
+         * every partition unless this is set.
+         */
+        @WithDefault("false")
+        boolean strict();
+
+        /**
          * Accept a request whose SigV4 credential scope names a region that no partition
          * publishes or admits by its region pattern ({@code polygondwanaland-west-1}). Refused by
          * default, as moto ({@code MOTO_ALLOW_NONEXISTENT_REGION}) and LocalStack
