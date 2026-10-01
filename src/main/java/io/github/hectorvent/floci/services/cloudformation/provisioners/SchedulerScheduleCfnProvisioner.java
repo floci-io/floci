@@ -74,6 +74,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         boolean groupMove = ctx.reusesPriorEntity(name) && !priorGroup.equals(group);
 
         Schedule schedule;
+        ObjectNode moveSnapshot = null;
         if (sameAddress) {
             Schedule current = schedulerService.getSchedule(name, group, ctx.region());
             snapshot(resource, current, ctx.region(), null, null);
@@ -85,7 +86,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
             }
         } else if (groupMove) {
             Schedule current = schedulerService.getSchedule(name, priorGroup, ctx.region());
-            snapshot(resource, current, ctx.region(), name, group);
+            moveSnapshot = snapshot(resource, current, ctx.region(), name, group);
             ScheduleRequest paused = requestFrom(current);
             paused.setState("DISABLED");
             try {
@@ -112,17 +113,23 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         ProvisionContext cleanupContext = new ProvisionContext(ctx.engine(), ctx.region(), ctx.accountId(),
                 ctx.stackName(), ctx.isUpdate() ? address(priorGroup, ctx.priorPhysicalId()) : null, ctx.progress());
         ReplacementCleanup.record(cleanupResource(resource), cleanupContext, attributesBefore);
+        if (moveSnapshot != null) {
+            moveSnapshot.put("destinationOwned", true);
+            resource.getAttributes().put(SNAPSHOT_ATTR, moveSnapshot.toString());
+        }
     }
 
-    private static void snapshot(StackResource resource, Schedule current, String region,
-                                  String destinationName, String destinationGroup) {
+    private static ObjectNode snapshot(StackResource resource, Schedule current, String region,
+                                       String destinationName, String destinationGroup) {
         ObjectNode snapshot = MAPPER.createObjectNode().put("region", region);
         snapshot.set("request", MAPPER.valueToTree(requestFrom(current)));
         if (destinationName != null) {
             snapshot.put("destinationName", destinationName);
             snapshot.put("destinationGroup", destinationGroup);
+            snapshot.put("destinationOwned", false);
         }
         resource.getAttributes().put(SNAPSHOT_ATTR, snapshot.toString());
+        return snapshot;
     }
 
     private static ScheduleRequest request(JsonNode props, String name, String group, ProvisionContext ctx) {
@@ -282,7 +289,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public boolean rollbackUpdate(StackResource resource) {
         JsonNode snapshot = readSnapshot(resource);
-        if (snapshot != null && snapshot.has("destinationName") && ReplacementCleanup.hasReplacement(resource)) {
+        if (snapshot != null && snapshot.path("destinationOwned").asBoolean(false)) {
             // Disable the move's destination before restoring an enabled original, even if deleting
             // the destination fails. The cleanup helper retains ownership of that disabled orphan.
             pauseDestination(snapshot);

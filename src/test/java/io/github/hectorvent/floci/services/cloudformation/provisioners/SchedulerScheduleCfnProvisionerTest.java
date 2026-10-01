@@ -218,6 +218,48 @@ class SchedulerScheduleCfnProvisionerTest {
     }
 
     @Test
+    void failedGroupMoveWithPriorOrphanNeverTouchesAnExternalDestination() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("same", "a"), context(null));
+        Schedule original = schedule(request("same", "a", "rate(5 minutes)"));
+        original.setState("ENABLED");
+        when(scheduler.getSchedule("same", "a", REGION)).thenReturn(original);
+        provisioner.provision(resource, properties("same", "b"), context("same"));
+        Schedule orphan = schedule(request("same", "b", "rate(5 minutes)"));
+        orphan.setState("ENABLED");
+        when(scheduler.getSchedule("same", "b", REGION)).thenReturn(orphan);
+        doThrow(new AwsException("InternalServerException", "delete unavailable", 500)).doNothing()
+                .when(scheduler).deleteSchedule("same", "b", REGION);
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(resource));
+        assertEquals("b/same", provisioner.updateCleanupPhysicalId(resource));
+
+        Schedule external = schedule(request("same", "c", "rate(1 minute)"));
+        external.setState("ENABLED");
+        when(scheduler.getSchedule("same", "c", REGION)).thenReturn(external);
+        when(scheduler.createSchedule(argThat(r -> "c".equals(r.getGroupName())), eq(REGION)))
+                .thenThrow(new AwsException("ConflictException", "destination owned elsewhere", 409));
+
+        assertThrows(AwsException.class,
+                () -> provisioner.provision(resource, properties("same", "c"), context("same")));
+
+        verify(scheduler, never()).getSchedule("same", "c", REGION);
+        verify(scheduler, never()).updateSchedule(argThat(r -> "c".equals(r.getGroupName())), eq(REGION));
+        verify(scheduler, never()).deleteSchedule("same", "c", REGION);
+        ArgumentCaptor<ScheduleRequest> requests = ArgumentCaptor.forClass(ScheduleRequest.class);
+        verify(scheduler, times(4)).updateSchedule(argThat(r -> "a".equals(r.getGroupName())), eq(REGION));
+        verify(scheduler, times(5)).updateSchedule(requests.capture(), eq(REGION));
+        assertEquals("a", requests.getAllValues().getLast().getGroupName());
+        assertEquals("ENABLED", requests.getAllValues().getLast().getState());
+        assertEquals("same", resource.getPhysicalId());
+        assertEquals("a", resource.getAttributes().get("FlociSchedulerGroupName"));
+        assertEquals("b/same", provisioner.updateCleanupPhysicalId(resource));
+
+        assertTrue(provisioner.completeUpdate(resource).complete());
+        verify(scheduler, times(2)).deleteSchedule("same", "b", REGION);
+        verify(scheduler, never()).deleteSchedule("same", "a", REGION);
+    }
+
+    @Test
     void aFailedEagerRestoreKeepsTheSnapshotForRollbackRetry() throws Exception {
         StackResource resource = resource();
         provisioner.provision(resource, properties("same", "a"), context(null));
