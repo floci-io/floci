@@ -3,7 +3,7 @@ package io.github.hectorvent.floci.services.ssoportal;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
@@ -34,16 +34,19 @@ public class SsoPortalService {
     private final SsoAdminService ssoAdminService;
     private final OrganizationsService organizationsService;
     private final IamService iamService;
+    private final RegionResolver regionResolver;
 
     @Inject
     public SsoPortalService(SsoOidcService oidcService,
                             SsoAdminService ssoAdminService,
                             OrganizationsService organizationsService,
-                            IamService iamService) {
+                            IamService iamService,
+                            RegionResolver regionResolver) {
         this.oidcService = oidcService;
         this.ssoAdminService = ssoAdminService;
         this.organizationsService = organizationsService;
         this.iamService = iamService;
+        this.regionResolver = regionResolver;
     }
 
     public PaginatedResult<PortalAccountInfo> listAccounts(
@@ -105,9 +108,8 @@ public class SsoPortalService {
         String accessKeyId = "ASIA" + random(UPPER_ALPHANUMERIC, 16);
         String secretAccessKey = random(SECRET_CHARACTERS, 40);
         String sessionToken = random(SECRET_CHARACTERS, 200);
-        String roleArn = AwsArnUtils.Arn.of("iam", "", accountId,
-                "role/aws-reserved/" + ServicePrincipals.of("sso") + "/AWSReservedSSO_" + roleName + "_floci")
-                .toString();
+        String roleArn = regionResolver.buildGlobalArn("iam", accountId,
+                "role/aws-reserved/" + ServicePrincipals.of("sso") + "/AWSReservedSSO_" + roleName + "_floci");
         iamService.registerSessionForAccount(accountId, accessKeyId, secretAccessKey, sessionToken,
                 roleArn, expiration, null);
         return new PortalRoleCredentials(accessKeyId, expiration.toEpochMilli(), secretAccessKey, sessionToken);

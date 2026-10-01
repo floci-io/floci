@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,7 +33,17 @@ class CostAnomalyServiceTest {
     @BeforeEach
     void setUp() {
         service = new CostAnomalyService(AccountAwareStorageBackend.inMemory(ACCOUNT),
-                AccountAwareStorageBackend.inMemory(ACCOUNT), mapper);
+                AccountAwareStorageBackend.inMemory(ACCOUNT), mapper, new RegionResolver("us-east-1", ACCOUNT));
+    }
+
+    @Test
+    void monitorArnsTakeTheRequestsPartition() {
+        CostAnomalyService china = new CostAnomalyService(AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT), mapper, new RegionResolver("cn-north-1", ACCOUNT));
+
+        String arn = china.createMonitor(customMonitor("china")).path("MonitorArn").asText();
+
+        assertTrue(arn.startsWith("arn:aws-cn:ce::" + ACCOUNT + ":anomalymonitor/"), arn);
     }
 
     @Test
@@ -212,7 +223,8 @@ class CostAnomalyServiceTest {
         monitors.load();
         subscriptions.load();
         return new CostAnomalyService(new AccountAwareStorageBackend<>(monitors, null, ACCOUNT),
-                new AccountAwareStorageBackend<>(subscriptions, null, ACCOUNT), mapper);
+                new AccountAwareStorageBackend<>(subscriptions, null, ACCOUNT), mapper,
+                new RegionResolver("us-east-1", ACCOUNT));
     }
 
     private ObjectNode customMonitor(String name) {

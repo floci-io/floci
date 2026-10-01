@@ -121,14 +121,19 @@ Floci must implement real AWS wire protocols.
 Floci serves every AWS partition, not only the commercial one, so a literal that bakes
 `aws` into a code path is a bug in a GovCloud, China, ISO or EUSC deployment even when it
 prints correctly in `us-east-1`. `make partition-check` (CI: Partition Literals) inventories
-`src/main/java` for `arn:aws:` prefixes, `amazonaws.com` hosts, Route 53 hosted-zone ids
-and hand-rolled `arn:aws[a-z-]*:` regexes against `tools/partition/baseline.tsv`, per file.
+`src/main/java` for `arn:aws:` prefixes, `amazonaws.com` hosts, Route 53 hosted-zone ids,
+hand-rolled `arn:aws[a-z-]*:` regexes and `Arn.of(...)` calls with a blank region against
+`tools/partition/baseline.tsv`, per file. The baseline is empty, so any new one fails.
 A literal in a new file fails, growth in an existing file fails, and a drop fails until you
 run `make partition-baseline` and commit the smaller baseline.
 
 - Mint ARNs through `AwsArnUtils.Arn.of(...)` / `RegionResolver.buildArn(...)`, recognise
   them with `AwsArnUtils.isArn` / `PARTITION_REGEX`, and derive hosts from the region's
   DNS suffix (`AwsRegions.dnsSuffixFor`).
+- A regionless ARN (IAM, STS, CloudFront, Organizations, an S3 bucket) never goes through
+  `Arn.of(service, "", ...)`, which silently means `aws`: use `RegionResolver.buildGlobalArn`
+  for the request's partition, or `Arn.global(partition, ...)` with the resource's own
+  (`AwsRegions.partitionFor(region)` for a bucket or a stack's region).
 - A service principal is `ServicePrincipals.of("<service>")`, never a literal: it is
   `<service>.amazonaws.com` in every partition, and `ServicePrincipals.canonical` folds the
   legacy per-partition forms a policy may still use before matching.

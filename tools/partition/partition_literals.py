@@ -58,6 +58,9 @@ class Category:
     regex: re.Pattern
     gated: bool
     description: str
+    # "literal" runs the regex over each string literal's content; "code" over each source line
+    # with comments blanked, for a partition bug that is a call shape rather than a literal.
+    scope: str = "literal"
 
 
 # Regexes run against the content of one string literal (one line of a text block), never
@@ -94,6 +97,14 @@ CATEGORIES: tuple[Category, ...] = (
         ),
         True,
         "a region or availability-zone id; take it from the request or the resource, or the configured default",
+    ),
+    Category(
+        "blank-region-arn",
+        re.compile(r'Arn\.of\(\s*"[^"]*"\s*,\s*(?:""|null)\s*,'),
+        True,
+        "an ARN minted by Arn.of with a blank region, which silently means the commercial partition; "
+        "use Arn.global with the resource's or the request's partition",
+        "code",
     ),
 )
 
@@ -181,6 +192,47 @@ def scan_java(text: str) -> tuple[list[Literal], dict[int, str]]:
     return literals, escapes
 
 
+def code_lines(text: str) -> list[str]:
+    """The source split into lines with every comment blanked and strings kept as written.
+
+    Uses the same lexing rules as scan_java, so a `//` inside a string survives and a call
+    shape inside a comment or javadoc never counts.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            out.append(" " * (end - i))
+            i = end
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            out.append("".join(c if c == "\n" else " " for c in text[i:end]))
+            i = end
+        elif text.startswith('"""', i):
+            j = i + 3
+            while j < n and not text.startswith('"""', j):
+                j += 2 if text[j] == "\\" else 1
+            end = min(j + 3, n)
+            out.append(text[i:end])
+            i = end
+        elif text[i] in "\"'":
+            quote = text[i]
+            j = i + 1
+            while j < n and text[j] not in quote + "\n":
+                j += 2 if text[j] == "\\" else 1
+            end = j + 1 if j < n and text[j] == quote else j
+            out.append(text[i:end])
+            i = end
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out).split("\n")
+
+
 @dataclass(frozen=True)
 class AllowRule:
     kind: str
@@ -220,17 +272,21 @@ def collect_findings(source_root: Path, rules: list[AllowRule]) -> list[Finding]
         text = java.read_text(encoding="utf-8")
         lines = text.split("\n")
         literals, escapes = scan_java(text)
-        for literal in literals:
-            source_line = lines[literal.line - 1] if literal.line - 1 < len(lines) else ""
+        scanned = [(literal.line, literal.text, "literal") for literal in literals]
+        scanned += [(number, code, "code") for number, code in enumerate(code_lines(text), start=1)]
+        for line_number, content, scope in scanned:
+            source_line = lines[line_number - 1] if line_number - 1 < len(lines) else ""
             for category in CATEGORIES:
-                hits = len(category.regex.findall(literal.text))
+                if category.scope != scope:
+                    continue
+                hits = len(category.regex.findall(content))
                 if hits == 0:
                     continue
                 excuse = excuse_for(rel_path, source_line, rules)
-                if excuse is None and literal.line in escapes:
-                    excuse = f"escape: {escapes[literal.line]}"
+                if excuse is None and line_number in escapes:
+                    excuse = f"escape: {escapes[line_number]}"
                 findings.extend(
-                    Finding(category.name, rel_path, literal.line, source_line.strip(), excuse)
+                    Finding(category.name, rel_path, line_number, source_line.strip(), excuse)
                     for _ in range(hits)
                 )
     return findings

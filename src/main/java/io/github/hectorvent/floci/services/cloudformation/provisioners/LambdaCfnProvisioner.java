@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.InlineZipPackager;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -209,7 +210,8 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         createRequest.put("PackageType", packageType);
 
         String role = ctx.resolveOrDefault(props, "Role",
-                AwsArnUtils.Arn.of("iam", "", ctx.accountId(), "role/default").toString());
+                AwsArnUtils.Arn.global(AwsRegions.partitionFor(ctx.region()), "iam", ctx.accountId(),
+                        "role/default").toString());
         createRequest.put("Role", role);
         configRequest.put("Role", role);
 

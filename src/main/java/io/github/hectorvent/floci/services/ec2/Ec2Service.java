@@ -6415,7 +6415,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         launchTemplate.setLaunchTemplateId("lt-" + randomHex(17));
         launchTemplate.setLaunchTemplateName(name);
         launchTemplate.setCreateTime(Instant.now());
-        launchTemplate.setCreatedBy(AwsArnUtils.Arn.of("iam", "", callerAccountId(), "root").toString());
+        launchTemplate.setCreatedBy(
+                AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", callerAccountId(), "root").toString());
         launchTemplate.setRegion(region);
         launchTemplate.setData(new LaunchTemplateData(data != null ? data : new LaunchTemplateData()));
         if (launchTemplateTags != null && !launchTemplateTags.isEmpty()) {
