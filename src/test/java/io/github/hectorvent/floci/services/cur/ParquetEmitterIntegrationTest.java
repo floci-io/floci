@@ -3,7 +3,7 @@ package io.github.hectorvent.floci.services.cur;
 import io.github.hectorvent.floci.core.common.UsageLine;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.testing.FixedPortNoEmissionProfile;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -44,7 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * runner that adds the host alias).
  */
 @QuarkusTest
-@TestProfile(FixedPortNoEmissionProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 @EnabledIfEnvironmentVariable(named = "FLOCI_DUCK_CROSS_CONTAINER_TEST", matches = "1|true|yes")
 class ParquetEmitterIntegrationTest {
 
