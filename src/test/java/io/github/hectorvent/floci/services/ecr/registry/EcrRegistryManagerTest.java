@@ -51,8 +51,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for {@link EcrRegistryManager} startup behavior. Uses a real
- * {@link PortAllocator} and a mocked Docker layer so the failure path can be
- * exercised without a Docker daemon.
+ * {@link PortAllocator} that skips the host probe and a mocked Docker layer so the
+ * failure path can be exercised without a Docker daemon or free host ports.
  */
 class EcrRegistryManagerTest {
 
@@ -79,7 +79,12 @@ class EcrRegistryManagerTest {
 
     @BeforeEach
     void setUp() {
-        portAllocator = new PortAllocator();
+        portAllocator = new PortAllocator() {
+            @Override
+            public boolean isPortFree(int port) {
+                return true;
+            }
+        };
 
         containerBuilder = Mockito.mock(ContainerBuilder.class);
         builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);

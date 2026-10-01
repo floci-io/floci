@@ -13,7 +13,6 @@ import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,8 +34,6 @@ import static org.mockito.Mockito.when;
  */
 @QuarkusTest
 class EcrRegistryPortConflictDockerIntegrationTest {
-
-    private static final Logger LOG = Logger.getLogger(EcrRegistryPortConflictDockerIntegrationTest.class);
 
     @Inject
     DockerClient dockerClient;
@@ -129,12 +126,11 @@ class EcrRegistryPortConflictDockerIntegrationTest {
 
     private int freePortPair() {
         PortAllocator probe = new PortAllocator(dockerClient);
-        for (int port = 15100; port < 15900; port += 2) {
-            if (probe.isPortFree(port) && probe.isPortFree(port + 1)) {
-                return port;
-            }
+        int port = probe.allocate(15100, 15899);
+        for (int next = probe.allocate(port + 1, 15899); next != port + 1; next = probe.allocate(next + 1, 15899)) {
+            port = next;
         }
-        throw new IllegalStateException("No free port pair in 15100-15899");
+        return port;
     }
 
     private static boolean isReachable(EcrRegistryManager manager) throws InterruptedException {
@@ -151,8 +147,8 @@ class EcrRegistryPortConflictDockerIntegrationTest {
         try {
             dockerClient.pingCmd().exec();
             return true;
-        } catch (Exception e) {
-            LOG.warn("Docker daemon is not available for the ECR port conflict test", e);
+        } catch (Exception ignored) {
+            // The assumption in requireDocker reports Docker as unavailable.
             return false;
         }
     }
