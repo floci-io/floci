@@ -116,9 +116,12 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         route53Service.changeResourceRecordSets(zoneId, List.of(change),
                 "CloudFormation " + ctx.stackName() + "/" + resource.getLogicalId());
 
-        // An update that changes the identity leaves the prior record orphaned, so remove it,
-        // otherwise it lingers in the zone and later blocks the zone's own delete.
-        if (!sameIdentity) {
+        // Leave one record for this identity: an update that changes the identity orphans the prior
+        // record, and one that keeps it may leave a copy an earlier version stored as written. Either
+        // would linger in the zone and later block the zone's own delete.
+        if (sameIdentity) {
+            removeLegacyCopies(zoneId, rrs);
+        } else {
             removeSupersededRecord(ctx, priorAttributes);
         }
 
@@ -145,6 +148,23 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
                 && Route53Service.normalizeName(name).equals(Route53Service.normalizeName(ctx.priorPhysicalId()))
                 && type.equals(priorAttributes.get(RECORD_TYPE_ATTR))
                 && Objects.equals(priorAttributes.get(RECORD_SET_ID_ATTR), setIdentifier);
+    }
+
+    /**
+     * An earlier version stored a record with the template's Name and SetIdentifier as written, so
+     * possibly undotted or with a blank identifier. The UPSERT then wrote the fully qualified record
+     * beside that copy instead of replacing it, so delete the copy, or it outlives the stack and
+     * blocks the zone's own delete.
+     */
+    private void removeLegacyCopies(String zoneId, ResourceRecordSet written) {
+        for (ResourceRecordSet rrs : route53Service.listResourceRecordSets(zoneId, null, null, 0)) {
+            boolean storedAsWritten = written.getName().equals(rrs.getName())
+                    && Objects.equals(written.getSetIdentifier(), rrs.getSetIdentifier());
+            if (!storedAsWritten
+                    && isRecord(rrs, written.getName(), written.getType(), written.getSetIdentifier())) {
+                deleteRecord(zoneId, rrs, "CloudFormation legacy copy");
+            }
+        }
     }
 
     /**
@@ -380,29 +400,41 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
     private void removeRecord(String zoneId, String name, String type, String setIdentifier, String comment) {
         CfnDeletes.safeDelete("Route53 record set", name + " " + type, () -> {
             ResourceRecordSet existing = findRecord(zoneId, name, type, setIdentifier);
-            if (existing == null) {
-                return;
+            if (existing != null) {
+                deleteRecord(zoneId, existing, comment);
             }
-            Map<String, Object> change = new HashMap<>();
-            change.put("action", "DELETE");
-            change.put("rrs", existing);
-            route53Service.changeResourceRecordSets(zoneId, List.of(change), comment);
         }, "NoSuchHostedZone", "InvalidChangeBatch");
     }
 
-    /**
-     * The zone holds every record name fully qualified, while the physical id keeps the name as the
-     * template wrote it, so the lookup qualifies the name before comparing.
-     */
+    private void deleteRecord(String zoneId, ResourceRecordSet existing, String comment) {
+        Map<String, Object> change = new HashMap<>();
+        change.put("action", "DELETE");
+        change.put("rrs", existing);
+        route53Service.changeResourceRecordSets(zoneId, List.of(change), comment);
+    }
+
     private ResourceRecordSet findRecord(String zoneId, String name, String type, String setIdentifier) {
-        String storedName = Route53Service.normalizeName(name);
         for (ResourceRecordSet rrs : route53Service.listResourceRecordSets(zoneId, null, null, 0)) {
-            if (storedName.equals(rrs.getName()) && type.equals(rrs.getType())
-                    && Objects.equals(setIdentifier, rrs.getSetIdentifier())) {
+            if (isRecord(rrs, name, type, setIdentifier)) {
                 return rrs;
             }
         }
         return null;
+    }
+
+    /**
+     * Whether {@code rrs} holds this record identity. The physical id keeps the name as the template
+     * wrote it, so names are compared fully qualified, and a blank SetIdentifier counts as none. That
+     * also matches a record an earlier version stored undotted or with an empty identifier.
+     */
+    private static boolean isRecord(ResourceRecordSet rrs, String name, String type, String setIdentifier) {
+        return Route53Service.normalizeName(name).equals(Route53Service.normalizeName(rrs.getName()))
+                && type.equals(rrs.getType())
+                && Objects.equals(blankToNull(setIdentifier), blankToNull(rrs.getSetIdentifier()));
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     private List<VpcAssociation> parseVpcs(JsonNode node) {
