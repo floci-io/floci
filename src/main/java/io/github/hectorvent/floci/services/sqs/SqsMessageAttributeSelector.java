@@ -30,7 +30,7 @@ final class SqsMessageAttributeSelector {
             return true;
         }
         for (String requestedName : requestedNames) {
-            if (requestedName.endsWith(".*") && name.startsWith(requestedName.substring(0, requestedName.length() - 1))) {
+            if (requestedName.endsWith(".*") && name.startsWith(requestedName.substring(0, requestedName.length() - 2))) {
                 return true;
             }
         }

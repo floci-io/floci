@@ -128,6 +128,12 @@ class SqsIntegrationTest {
                 .formParam("MessageAttribute.2.Name", "secret")
                 .formParam("MessageAttribute.2.Value.DataType", "String")
                 .formParam("MessageAttribute.2.Value.StringValue", "private")
+                .formParam("MessageAttribute.3.Name", "color")
+                .formParam("MessageAttribute.3.Value.DataType", "String")
+                .formParam("MessageAttribute.3.Value.StringValue", "blue")
+                .formParam("MessageAttribute.4.Name", "colorful")
+                .formParam("MessageAttribute.4.Value.DataType", "String")
+                .formParam("MessageAttribute.4.Value.StringValue", "bright")
             .when().post("/").then().statusCode(200);
 
             given()
@@ -148,6 +154,8 @@ class SqsIntegrationTest {
                 .formParam("MessageAttributeName.1", "color.primary")
             .when().post("/").then().statusCode(200)
                 .body(containsString("<Name>color.primary</Name>"))
+                .body(not(containsString("<Name>color</Name>")))
+                .body(not(containsString("<Name>colorful</Name>")))
                 .body(not(containsString("<Name>secret</Name>")))
                 .body(containsString("<MD5OfMessageAttributes>d1cf84dfbac1cbe5c78ed09a1768b0d9</MD5OfMessageAttributes>"));
 
@@ -159,8 +167,10 @@ class SqsIntegrationTest {
                 .formParam("MessageAttributeName.1", "color.*")
             .when().post("/").then().statusCode(200)
                 .body(containsString("<Name>color.primary</Name>"))
+                .body(containsString("<Name>color</Name>"))
+                .body(containsString("<Name>colorful</Name>"))
                 .body(not(containsString("<Name>secret</Name>")))
-                .body(containsString("<MD5OfMessageAttributes>d1cf84dfbac1cbe5c78ed09a1768b0d9</MD5OfMessageAttributes>"));
+                .body(containsString("<MD5OfMessageAttributes>46db9885b8f221ea04082f03e3a63d14</MD5OfMessageAttributes>"));
 
             for (String allSelector : new String[]{"All", ".*"}) {
                 given()

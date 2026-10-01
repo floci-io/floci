@@ -376,6 +376,8 @@ class SqsJsonProtocolTest {
                         + "\"MessageBody\":\"filter-test\","
                         + "\"MessageAttributes\":{"
                         + "\"color.primary\":{\"DataType\":\"String\",\"StringValue\":\"red\"},"
+                        + "\"color\":{\"DataType\":\"String\",\"StringValue\":\"blue\"},"
+                        + "\"colorful\":{\"DataType\":\"String\",\"StringValue\":\"bright\"},"
                         + "\"secret\":{\"DataType\":\"String\",\"StringValue\":\"private\"}}}")
             .when().post("/").then().statusCode(200);
 
@@ -395,6 +397,8 @@ class SqsJsonProtocolTest {
                 .body(receiveBody + ",\"MessageAttributeNames\":[\"color.primary\"]}")
             .when().post("/").then().statusCode(200)
                 .body("Messages[0].MessageAttributes", hasKey("color.primary"))
+                .body("Messages[0].MessageAttributes", not(hasKey("color")))
+                .body("Messages[0].MessageAttributes", not(hasKey("colorful")))
                 .body("Messages[0].MessageAttributes", not(hasKey("secret")))
                 .body("Messages[0].MD5OfMessageAttributes", equalTo("d1cf84dfbac1cbe5c78ed09a1768b0d9"));
 
@@ -404,8 +408,10 @@ class SqsJsonProtocolTest {
                 .body(receiveBody + ",\"MessageAttributeNames\":[\"color.*\"]}")
             .when().post("/").then().statusCode(200)
                 .body("Messages[0].MessageAttributes", hasKey("color.primary"))
+                .body("Messages[0].MessageAttributes", hasKey("color"))
+                .body("Messages[0].MessageAttributes", hasKey("colorful"))
                 .body("Messages[0].MessageAttributes", not(hasKey("secret")))
-                .body("Messages[0].MD5OfMessageAttributes", equalTo("d1cf84dfbac1cbe5c78ed09a1768b0d9"));
+                .body("Messages[0].MD5OfMessageAttributes", equalTo("46db9885b8f221ea04082f03e3a63d14"));
 
             for (String allSelector : new String[]{"All", ".*"}) {
                 given()
