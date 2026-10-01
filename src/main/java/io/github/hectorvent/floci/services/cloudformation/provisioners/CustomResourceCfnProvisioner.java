@@ -45,6 +45,7 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
     /** Reserved attribute keys used to carry custom-resource state to the later Delete invocation. */
     private static final String CR_SERVICE_TOKEN_ATTR = "__FlociServiceToken";
     private static final String CR_PROPERTIES_ATTR = "__FlociResourceProperties";
+    private static final String CR_STACK_ID_ATTR = "__FlociStackId";
     /**
      * How long to wait for the Lambda's ResponseURL callback after the synchronous invoke returns.
      * The invoke already blocks until the handler finishes, so this only covers a PUT that lands
@@ -117,9 +118,10 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
             return;
         }
 
+        String stackId = stackIdOrMinted(engine.getStackId(), region, accountId, stackName);
         JsonNode response = invokeCustomResourceHandler(serviceToken, requestType, r.getLogicalId(),
                 r.getResourceType(), priorPhysicalId, resourceProperties, oldResourceProperties,
-                region, accountId, stackName);
+                region, stackId);
 
         String status = response.path("Status").asText("FAILED");
         if (!"SUCCESS".equals(status)) {
@@ -147,6 +149,7 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
         // Stash what a later Delete invocation needs (delete() only gets the StackResource).
         r.getAttributes().put(CR_SERVICE_TOKEN_ATTR, serviceToken);
         r.getAttributes().put(CR_PROPERTIES_ATTR, resourceProperties.toString());
+        r.getAttributes().put(CR_STACK_ID_ATTR, stackId);
     }
 
     @Override
@@ -158,10 +161,12 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
         }
         ObjectNode stashed = readStashedProperties(r);
         ObjectNode resourceProperties = stashed != null ? stashed : objectMapper.createObjectNode();
+        // A resource stashed before the stack id was recorded has none, and delete() has no stack.
+        String stackId = stackIdOrMinted(r.getAttributes().get(CR_STACK_ID_ATTR), region,
+                accountFromArn(serviceToken), "");
         try {
             JsonNode response = invokeCustomResourceHandler(serviceToken, "Delete", r.getLogicalId(),
-                    r.getResourceType(), r.getPhysicalId(), resourceProperties, null, region,
-                    accountFromArn(serviceToken), "");
+                    r.getResourceType(), r.getPhysicalId(), resourceProperties, null, region, stackId);
             if (!"SUCCESS".equals(response.path("Status").asText("FAILED"))) {
                 LOG.warnv("Custom resource {0} Delete reported FAILED: {1}",
                         r.getLogicalId(), response.path("Reason").asText("(no reason given)"));
@@ -192,14 +197,13 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
     private JsonNode invokeCustomResourceHandler(String serviceToken, String requestType, String logicalId,
                                                  String resourceType, String physicalId,
                                                  ObjectNode resourceProperties, ObjectNode oldResourceProperties,
-                                                 String region, String accountId, String stackName) {
+                                                 String region, String stackId) {
         String token = customResourceResponseStore.register();
         try {
             ObjectNode event = objectMapper.createObjectNode();
             event.put("RequestType", requestType);
             event.put("ResponseURL", reachableEndpoint.baseUrl() + "/cfn-response/" + token);
-            event.put("StackId", AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/"
-                    + (stackName == null ? "" : stackName) + "/" + UUID.randomUUID()).toString());
+            event.put("StackId", stackId);
             event.put("RequestId", UUID.randomUUID().toString());
             event.put("ResourceType", resourceType);
             event.put("LogicalResourceId", logicalId);
@@ -262,6 +266,19 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
             return out;
         }
         return objectMapper.getNodeFactory().textNode(node.asText());
+    }
+
+    /**
+     * The {@code StackId} a request carries: the id of the stack that contains the resource, the
+     * value {@code Ref AWS::StackId} returns. A resource with no stack ARN, one provisioned through
+     * Cloud Control or one stashed before the id was recorded, gets one minted in its place.
+     */
+    private static String stackIdOrMinted(String stackId, String region, String accountId, String stackName) {
+        if (AwsArnUtils.isArn(stackId)) {
+            return stackId;
+        }
+        return AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/"
+                + (stackName == null ? "" : stackName) + "/" + UUID.randomUUID()).toString();
     }
 
     private static String accountFromArn(String arn) {
