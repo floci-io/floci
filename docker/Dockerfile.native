@@ -21,7 +21,7 @@ RUN mvn clean package -Dnative -DskipTests -B \
     -Dquarkus.native.additional-build-args-append=-H:-AOTSingleCallsiteInline
 
 # Stage 2: Minimal runtime. Same base and user setup as Dockerfile.native-package.
-FROM registry.access.redhat.com/ubi9-micro:9.7
+FROM registry.access.redhat.com/ubi9-micro:9.8
 
 WORKDIR /app
 RUN echo 'floci:x:1001:0:Floci:/app:/sbin/nologin' >> /etc/passwd \
