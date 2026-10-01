@@ -247,15 +247,17 @@ preferences, SMS/email MFA challenges, and managed-login MFA are not emulated.
 `USER_AUTH` is the choice-based flow: with no `PREFERRED_CHALLENGE` it returns
 `ChallengeName=SELECT_CHALLENGE` and an `AvailableChallenges` list drawn from what the user has
 configured (`PASSWORD`, `PASSWORD_SRP`, `EMAIL_OTP`, `SMS_OTP`); with one, it goes straight to that
-challenge. When the pool's `Policies.SignInPolicy.AllowedFirstAuthFactors` names first factors, the
-list keeps only those it allows: its `PASSWORD` covers both `PASSWORD` and `PASSWORD_SRP`, so a pool
-that allows only `EMAIL_OTP` offers `["EMAIL_OTP"]`, and a user with no password is never offered a
-password challenge. A `PREFERRED_CHALLENGE` outside the list, because the policy leaves it out or the
-user has not set it up, gets `SELECT_CHALLENGE` and the list, as on AWS; one that names no challenge
-Cognito supports fails with `InvalidParameterException`. A `SELECT_CHALLENGE` answer outside the list
-fails with `InvalidParameterException`. A pool with no
-`SignInPolicy` is not narrowed, where AWS defaults it to `PASSWORD` alone. It requires the user pool's
-tier to be Essentials or higher. `WEB_AUTHN` and the `ConfirmSignUp` session as a first-factor
+challenge. The list keeps only the first factors the pool's
+`Policies.SignInPolicy.AllowedFirstAuthFactors` allows: its `PASSWORD` covers both `PASSWORD` and
+`PASSWORD_SRP`, so a pool that allows only `EMAIL_OTP` offers `["EMAIL_OTP"]`, and a user with no
+password is never offered a password challenge. A pool created without a `SignInPolicy` gets
+`{"AllowedFirstAuthFactors": ["PASSWORD"]}`, on any tier, as `DescribeUserPool` reports on AWS, so it
+offers password challenges alone. `UpdateUserPool` keeps the policy when the request omits `Policies`,
+and puts the default back when its `Policies` has no `SignInPolicy`. A `PREFERRED_CHALLENGE` outside
+the list, because the policy leaves it out or the user has not set it up, gets `SELECT_CHALLENGE` and
+the list, as on AWS; one that names no challenge Cognito supports fails with
+`InvalidParameterException`. A `SELECT_CHALLENGE` answer outside the list fails with
+`InvalidParameterException`. It requires the user pool's tier to be Essentials or higher. `WEB_AUTHN` and the `ConfirmSignUp` session as a first-factor
 shortcut are not implemented yet.
 
 Any other `AuthFlow` value is rejected with `InvalidParameterException` and no tokens are issued.

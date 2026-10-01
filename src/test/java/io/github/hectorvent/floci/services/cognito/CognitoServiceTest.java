@@ -60,6 +60,9 @@ import static org.mockito.Mockito.*;
 class CognitoServiceTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** What AWS's DescribeUserPool reports for a pool created without a SignInPolicy. */
+    private static final Map<String, Object> DEFAULT_SIGN_IN_POLICY =
+            Map.of("AllowedFirstAuthFactors", List.of("PASSWORD"));
 
     @Test
     void authSessionValiditySurvivesSerializationAndDefaultsForLegacyClients() throws Exception {
@@ -163,7 +166,8 @@ class CognitoServiceTest {
         Map<String, Object> expectedPasswordPolicy = new HashMap<>();
         expectedPasswordPolicy.put("MinimumLength", 12);
         expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
-        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
+        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy, "SignInPolicy", DEFAULT_SIGN_IN_POLICY),
+                pool.getPolicies());
         assertEquals(List.of("email"), pool.getUsernameAttributes());
     }
 
@@ -660,7 +664,8 @@ class CognitoServiceTest {
         Map<String, Object> expectedPasswordPolicy = new HashMap<>();
         expectedPasswordPolicy.put("MinimumLength", 7);
         expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
-        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
+        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy, "SignInPolicy", DEFAULT_SIGN_IN_POLICY),
+                pool.getPolicies());
 
         UserPoolClient client = service.createUserPoolClient(
                 pool.getId(), "no-requirements-client", false, false, List.of(), List.of());
@@ -690,7 +695,8 @@ class CognitoServiceTest {
         expectedPasswordPolicy.put("RequireNumbers", false);
         expectedPasswordPolicy.put("RequireSymbols", false);
         expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
-        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
+        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy, "SignInPolicy", DEFAULT_SIGN_IN_POLICY),
+                pool.getPolicies());
     }
 
     @Test
@@ -3260,7 +3266,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class)
         );
 
-        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "EMAIL_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
@@ -3316,7 +3322,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class)
         );
 
-        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "SMS_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("phone_number", "+15551234567", "phone_number_verified", "true"), "TempPass1!");
@@ -3374,7 +3380,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class)
         );
 
-        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "EMAIL_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
@@ -3431,6 +3437,54 @@ class CognitoServiceTest {
                 Map.of("USERNAME", "alice"));
 
         assertEquals(List.of("EMAIL_OTP"), result.get("AvailableChallenges"));
+    }
+
+    /** Observed on AWS: a pool created without a SignInPolicy, on any tier, describes it as PASSWORD alone. */
+    @ParameterizedTest
+    @CsvSource({"LITE", "ESSENTIALS", "PLUS"})
+    void createUserPoolDefaultsTheSignInPolicyToPasswordAlone(String tier) {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool", "UserPoolTier", tier), "us-east-1");
+
+        assertEquals(Map.of("SignInPolicy", DEFAULT_SIGN_IN_POLICY),
+                service.describeUserPool(pool.getId()).getPolicies());
+    }
+
+    /**
+     * UpdateUserPool keeps a pool's policies when the request names none, as it keeps every member it omits,
+     * and a Policies without a SignInPolicy replaces them whole, so the sign-in policy is its default again.
+     */
+    @Test
+    void updateUserPoolKeepsTheSignInPolicyOrPutsTheDefaultBack() {
+        UserPool pool = poolWithFirstFactors(service, "PASSWORD", "EMAIL_OTP");
+
+        service.updateUserPool(Map.of("UserPoolId", pool.getId()), "us-east-1");
+        assertEquals(Map.of("AllowedFirstAuthFactors", List.of("PASSWORD", "EMAIL_OTP")),
+                service.describeUserPool(pool.getId()).getPolicies().get("SignInPolicy"));
+
+        service.updateUserPool(Map.of("UserPoolId", pool.getId(),
+                "Policies", Map.of("PasswordPolicy", Map.of("MinimumLength", 8))), "us-east-1");
+        assertEquals(DEFAULT_SIGN_IN_POLICY, service.describeUserPool(pool.getId()).getPolicies().get("SignInPolicy"));
+    }
+
+    /**
+     * A pool without a SignInPolicy, created so or persisted by a Floci that did not store the default yet,
+     * allows PASSWORD alone, as AWS's default does: a user with a verified email is offered no EMAIL_OTP.
+     */
+    @Test
+    void initiateAuthWithUserAuthOffersOnlyPasswordChallengesWithoutASignInPolicy() {
+        CognitoService serviceWithVerification = serviceWithEmailOtpCode("654321");
+        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
+        createUserWithVerifiedEmail(serviceWithVerification, pool, "Perm1234!");
+
+        Map<String, Object> created = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+        serviceWithVerification.describeUserPool(pool.getId()).setPolicies(null);
+        Map<String, Object> persisted = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+
+        assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), created.get("AvailableChallenges"));
+        assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), persisted.get("AvailableChallenges"));
     }
 
     /**
@@ -3766,7 +3820,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class)
         );
 
-        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "EMAIL_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
@@ -3808,7 +3862,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class)
         );
 
-        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPool pool = poolWithFirstFactors(serviceWithVerification, "PASSWORD", "EMAIL_OTP");
         UserPoolClient client = openClient(serviceWithVerification, pool.getId(), "c", false);
         serviceWithVerification.adminCreateUser(pool.getId(), "alice",
                 Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");

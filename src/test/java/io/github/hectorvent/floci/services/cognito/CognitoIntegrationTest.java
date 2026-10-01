@@ -3317,6 +3317,24 @@ class CognitoIntegrationTest {
                         + "[PASSWORD, PASSWORD_SRP, SMS_OTP, EMAIL_OTP, WEB_AUTHN]"));
     }
 
+    /** Observed on AWS: DescribeUserPool reports a SignInPolicy of PASSWORD for a pool created without one. */
+    @Test
+    @Order(113)
+    void describeUserPoolReportsAPasswordSignInPolicyForAPoolCreatedWithoutOne() throws Exception {
+        for (String tier : List.of("LITE", "ESSENTIALS")) {
+            String poolId = cognitoJson("CreateUserPool", """
+                    {"PoolName": "DefaultSignInPolicyPool", "UserPoolTier": "%s"}
+                    """.formatted(tier)).path("UserPool").path("Id").asText();
+
+            JsonNode policies = cognitoJson("DescribeUserPool", """
+                    {"UserPoolId": "%s"}
+                    """.formatted(poolId)).path("UserPool").path("Policies");
+
+            assertEquals(List.of("PASSWORD"),
+                    textValues(policies.path("SignInPolicy").path("AllowedFirstAuthFactors")), tier);
+        }
+    }
+
     private static List<String> textValues(JsonNode array) {
         List<String> values = new ArrayList<>();
         for (JsonNode value : array) {

@@ -518,15 +518,14 @@ final class CognitoAuthFlowHandler {
 
     /**
      * The first factors in the pool's sign-in policy when the client can use USER_AUTH, which is what
-     * managed login's choice-based sign-in may offer. Empty for a Lite pool, a client without
-     * {@code ALLOW_USER_AUTH}, or a pool whose policy names no first factors.
+     * managed login's choice-based sign-in may offer. Empty for a Lite pool or a client without
+     * {@code ALLOW_USER_AUTH}.
      */
     List<String> managedLoginFirstFactors(UserPool pool, UserPoolClient client) {
         if ("LITE".equals(pool.getUserPoolTier()) || !enabledAuthFlows(client).contains("ALLOW_USER_AUTH")) {
             return List.of();
         }
-        List<String> factors = allowedFirstAuthFactors(pool);
-        return factors == null ? List.of() : factors;
+        return allowedFirstAuthFactors(pool);
     }
 
     /**
@@ -1140,13 +1139,8 @@ final class CognitoAuthFlowHandler {
     }
 
     private List<String> configuredUserAuthChallenges(UserPool pool) {
-        List<String> factors = allowedFirstAuthFactors(pool);
-        if (factors == null) {
-            return List.of("PASSWORD");
-        }
-
         List<String> supported = new ArrayList<>();
-        for (String name : factors) {
+        for (String name : allowedFirstAuthFactors(pool)) {
             if ("PASSWORD".equals(name) || "EMAIL_OTP".equals(name) || "SMS_OTP".equals(name)) {
                 supported.add(name);
             }
@@ -1155,14 +1149,15 @@ final class CognitoAuthFlowHandler {
     }
 
     /**
-     * The pool's {@code SignInPolicy.AllowedFirstAuthFactors} without duplicates, or null when the
-     * pool configures none.
+     * The pool's {@code SignInPolicy.AllowedFirstAuthFactors} without duplicates, or {@code PASSWORD} alone
+     * when it names none: AWS's DescribeUserPool reports {@code ["PASSWORD"]} for a pool created without a
+     * sign-in policy. Floci now stores that default too, but a pool it persisted earlier may have none.
      */
     private static List<String> allowedFirstAuthFactors(UserPool pool) {
         Map<String, Object> policies = pool.getPolicies();
         if (policies == null || !(policies.get("SignInPolicy") instanceof Map<?, ?> signInPolicy)
                 || !(signInPolicy.get("AllowedFirstAuthFactors") instanceof List<?> factors) || factors.isEmpty()) {
-            return null;
+            return List.of("PASSWORD");
         }
         List<String> names = new ArrayList<>();
         for (Object factor : factors) {
@@ -1174,17 +1169,14 @@ final class CognitoAuthFlowHandler {
     }
 
     /**
-     * The USER_AUTH challenges this user qualifies for that the pool's sign-in policy allows, where
-     * it names first factors. The policy's {@code PASSWORD} covers both PASSWORD and PASSWORD_SRP.
-     * A pool with no policy is not narrowed, where AWS would default it to PASSWORD alone.
+     * The USER_AUTH challenges this user qualifies for that the pool's sign-in policy allows. The
+     * policy's {@code PASSWORD} covers both PASSWORD and PASSWORD_SRP, and a pool with no policy
+     * allows PASSWORD alone, as AWS's default does.
      */
     private List<String> allowedUserAuthChallenges(UserPool pool, CognitoUser user) {
         List<String> available = availableUserAuthChallenges(user);
         List<String> allowed = allowedFirstAuthFactors(pool);
-        if (allowed != null) {
-            available.removeIf(challenge ->
-                    !allowed.contains("PASSWORD_SRP".equals(challenge) ? "PASSWORD" : challenge));
-        }
+        available.removeIf(challenge -> !allowed.contains("PASSWORD_SRP".equals(challenge) ? "PASSWORD" : challenge));
         return available;
     }
 
