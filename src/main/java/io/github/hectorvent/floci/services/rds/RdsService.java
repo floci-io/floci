@@ -8,6 +8,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
@@ -1041,7 +1042,10 @@ public class RdsService implements Resettable, ResourceProvider {
         if (sourceIdentifier != null && sourceIdentifier.startsWith("arn:")) {
             try {
                 AwsArnUtils.Arn parsed = AwsArnUtils.parse(sourceIdentifier);
-                if (!"aws".equals(parsed.partition()) || !"rds".equals(parsed.service())
+                // A snapshot copies within its partition only, so a source ARN naming another
+                // partition than the target region's is not a snapshot this copy can read.
+                if (!AwsRegions.partitionFor(targetRegion).equals(parsed.partition())
+                        || !"rds".equals(parsed.service())
                         || !parsed.resource().startsWith("snapshot:")) {
                     throw new IllegalArgumentException("not an RDS snapshot ARN");
                 }
@@ -6736,7 +6740,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         try {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(targetGroup.getTargetGroupArn());
-            return "aws".equals(arn.partition())
+            return AwsRegions.partitionFor(region).equals(arn.partition())
                     && "rds".equals(arn.service())
                     && Objects.equals(accountId, arn.accountId())
                     && Objects.equals(region, arn.region())
@@ -8220,7 +8224,7 @@ public class RdsService implements Resettable, ResourceProvider {
             String resourceType, String resourceId) {
         try {
             AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-            return "aws".equals(parsed.partition())
+            return AwsRegions.partitionFor(region).equals(parsed.partition())
                     && "rds".equals(parsed.service())
                     && Objects.equals(accountId, parsed.accountId())
                     && Objects.equals(region, parsed.region())

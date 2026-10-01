@@ -112,6 +112,16 @@ class RamServiceTest {
     }
 
     @Test
+    void chinaOuPrincipalIsVisibleToOrgAccounts() {
+        service.createResourceShare("cn-tgw-share",
+                List.of("arn:aws-cn:organizations::000000000000:ou/o-abc123/ou-root-infra"),
+                List.of("arn:aws-cn:ec2:cn-north-1:111111111111:transit-gateway/tgw-0abc"),
+                false, "cn-north-1", OWNER);
+
+        assertEquals(1, service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS").size());
+    }
+
+    @Test
     void directAccountPrincipalIsVisibleToTheSharedAccount() {
         service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);

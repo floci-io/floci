@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -1831,7 +1832,25 @@ class SsoAdminServiceTest {
                 () -> service.getAssignmentOperation(service.getInstanceArn(), operation.requestId()));
     }
 
+    /** The seeded instance lives in the deployment's home region, so its ARN takes that partition. */
+    @Test
+    void seededInstanceTakesTheHomeRegionsPartition() {
+        SsoAdminService china = emptyService("cn-north-1");
+
+        assertEquals("arn:aws-cn:sso:::instance/ssoins-7223b02a5d9f7c8e", china.getInstanceArn());
+        assertEquals(List.of(china.getInstanceArn()),
+                china.listInstances("999999999999").stream().map(SsoInstance::instanceArn).toList());
+        ObjectNode addHome = mapper.createObjectNode()
+                .put("InstanceArn", china.getInstanceArn())
+                .put("RegionName", "cn-north-1");
+        assertError("ConflictException", () -> china.addRegion(addHome));
+    }
+
     private SsoAdminService emptyService() {
+        return emptyService("us-east-1");
+    }
+
+    private SsoAdminService emptyService(String defaultRegion) {
         return new SsoAdminService(
                 new InMemoryStorage<String, PermissionSet>(),
                 new InMemoryStorage<String, Assignment>(),
@@ -1861,7 +1880,7 @@ class SsoAdminServiceTest {
                 identityStoreService,
                 organizationsService,
                 "999999999999",
-                "us-east-1");
+                defaultRegion);
     }
 
     private ObjectNode trustedTokenIssuerRequest(String name, String clientToken) {

@@ -51,9 +51,8 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SsoAdminService implements Resettable {
-    private static final String INSTANCE_ARN = globalArn("sso", "us-east-1", "", "instance/ssoins-7223b02a5d9f7c8e"); // partition-literal: seeded Identity Center instance home region
+    private static final String BOOTSTRAP_INSTANCE = "instance/ssoins-7223b02a5d9f7c8e";
     private static final String IDENTITY_STORE_ID = "d-9067f2a3c1";
-    private static final String PRIMARY_REGION = "us-east-1"; // partition-literal: seeded Identity Center instance home region
     private static final Pattern INSTANCE_ARN_PATTERN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso:::instance/(?:sso)?ins-[a-zA-Z0-9-.]{16}");
     private static final Pattern PERMISSION_SET_NAME = Pattern.compile("[\\w+=,.@-]+");
     private static final Pattern PERMISSION_SET_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso:::permissionSet/(?:sso)?ins-[a-zA-Z0-9-.]{16}/ps-[a-zA-Z0-9-./]{16}");
@@ -127,6 +126,8 @@ public class SsoAdminService implements Resettable {
     private final OrganizationsService organizationsService;
     private final String defaultAccountId;
     private final String defaultRegion;
+    /** The seeded instance lives in the deployment's home region, so its ARN takes that partition. */
+    private final String bootstrapInstanceArn;
 
     @Inject
     public SsoAdminService(StorageFactory storageFactory, IdentityStoreService identityStoreService,
@@ -221,10 +222,11 @@ public class SsoAdminService implements Resettable {
         this.organizationsService = organizationsService;
         this.defaultAccountId = defaultAccountId;
         this.defaultRegion = defaultRegion;
+        this.bootstrapInstanceArn = globalArn("sso", defaultRegion, "", BOOTSTRAP_INSTANCE);
         ensureBootstrapInstance(defaultAccountId, defaultRegion);
     }
 
-    public String getInstanceArn() { return INSTANCE_ARN; }
+    public String getInstanceArn() { return bootstrapInstanceArn; }
     public String getIdentityStoreId() { return IDENTITY_STORE_ID; }
 
     public boolean hasIdentityStore(String identityStoreId) {
@@ -252,9 +254,9 @@ public class SsoAdminService implements Resettable {
             return;
         }
         if (instances.get(ownerAccountId).isEmpty()) {
-            instances.put(ownerAccountId, new SsoInstance(INSTANCE_ARN, IDENTITY_STORE_ID, "floci-identity-center",
-                    ownerAccountId, region, System.currentTimeMillis(), "ACTIVE", null, false,
-                    new LinkedHashMap<>()));
+            instances.put(ownerAccountId, new SsoInstance(bootstrapInstanceArn, IDENTITY_STORE_ID,
+                    "floci-identity-center", ownerAccountId, region, System.currentTimeMillis(), "ACTIVE",
+                    null, false, new LinkedHashMap<>()));
         }
     }
 
@@ -1445,9 +1447,9 @@ public class SsoAdminService implements Resettable {
     }
 
     public synchronized RegionMetadata addRegion(JsonNode request) {
-        requireInstance(required(request, "InstanceArn"));
+        SsoInstance instance = requireInstance(required(request, "InstanceArn"));
         String regionName = validateRegionName(required(request, "RegionName"));
-        if (PRIMARY_REGION.equals(regionName) || regions.get(regionName).isPresent()) {
+        if (instance.primaryRegion().equals(regionName) || regions.get(regionName).isPresent()) {
             throw conflict("Region is already enabled for this IAM Identity Center instance: " + regionName);
         }
         if (regions.scan(key -> true).size() >= REGION_QUOTA - 1) {

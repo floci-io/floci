@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ram;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -543,7 +544,8 @@ public class RamService {
             return false;
         }
         String[] arn = principal.split(":", 6);
-        if (arn.length != 6 || !"aws".equals(arn[1]) || !"organizations".equals(arn[2])) {
+        // Any published partition: the organization id below is what ties the ARN to the caller's.
+        if (arn.length != 6 || AwsPartitions.find(arn[1]).isEmpty() || !"organizations".equals(arn[2])) {
             return false;
         }
         String[] resource = arn[5].split("/");
