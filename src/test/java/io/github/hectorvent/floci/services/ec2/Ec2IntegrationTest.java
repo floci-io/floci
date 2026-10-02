@@ -4704,6 +4704,87 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(314)
+    void networkAclEntryKeepsItsIpv6CidrBlockAndIcmpTypeCode() {
+        String vpc = newVpc("10.34.0.0/16");
+        String aclId = given()
+            .formParam("Action", "CreateNetworkAcl")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateNetworkAclResponse.networkAcl.networkAclId");
+
+        given()
+            .formParam("Action", "CreateNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "101")
+            .formParam("Protocol", "-1")
+            .formParam("RuleAction", "allow")
+            .formParam("Egress", "true")
+            .formParam("Ipv6CidrBlock", "::/0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .formParam("Action", "CreateNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "110")
+            .formParam("Protocol", "1")
+            .formParam("RuleAction", "allow")
+            .formParam("Egress", "false")
+            .formParam("CidrBlock", "10.0.0.0/8")
+            .formParam("Icmp.Type", "8")
+            .formParam("Icmp.Code", "0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+
+        String entries = "DescribeNetworkAclsResponse.networkAclSet.item.entrySet.item";
+        given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("NetworkAclId.1", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(entries + ".find { it.ruleNumber == '101' }.ipv6CidrBlock", equalTo("::/0"))
+            .body(entries + ".find { it.ruleNumber == '101' }.cidrBlock.size()", equalTo(0))
+            .body(entries + ".find { it.ruleNumber == '110' }.cidrBlock", equalTo("10.0.0.0/8"))
+            .body(entries + ".find { it.ruleNumber == '110' }.icmpTypeCode.type", equalTo("8"))
+            .body(entries + ".find { it.ruleNumber == '110' }.icmpTypeCode.code", equalTo("0"))
+            .body(entries + ".find { it.ruleNumber == '101' }.icmpTypeCode.size()", equalTo(0));
+
+        // Replacing an IPv4 rule with an IPv6 one must not leave the old IPv4 CIDR behind.
+        given()
+            .formParam("Action", "ReplaceNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "110")
+            .formParam("Protocol", "58")
+            .formParam("RuleAction", "allow")
+            .formParam("Egress", "false")
+            .formParam("Ipv6CidrBlock", "fd00::/8")
+            .formParam("Icmp.Type", "128")
+            .formParam("Icmp.Code", "-1")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("NetworkAclId.1", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(entries + ".find { it.ruleNumber == '110' }.ipv6CidrBlock", equalTo("fd00::/8"))
+            .body(entries + ".find { it.ruleNumber == '110' }.cidrBlock.size()", equalTo(0))
+            .body(entries + ".find { it.ruleNumber == '110' }.icmpTypeCode.type", equalTo("128"))
+            .body(entries + ".find { it.ruleNumber == '110' }.icmpTypeCode.code", equalTo("-1"));
+    }
+
+    @Test
     @Order(315)
     void describePrefixListsReturnsManagedS3() {
         String prefixListId = given()

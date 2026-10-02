@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -94,20 +95,22 @@ public class Ec2NetworkAclCfnProvisioner implements CfnResourceProvisioner {
         int ruleNumber = ruleNumberValue != null ? Integer.parseInt(ruleNumberValue) : 100;
         boolean egress = Boolean.parseBoolean(ctx.resolveOptional(props, "Egress"));
         JsonNode portRange = props != null && props.hasNonNull("PortRange") ? props.get("PortRange") : null;
-        String fromValue = ctx.resolveOptional(portRange, "From");
-        String toValue = ctx.resolveOptional(portRange, "To");
-        Integer from = fromValue != null ? Integer.valueOf(fromValue) : null;
-        Integer to = toValue != null ? Integer.valueOf(toValue) : null;
+        JsonNode icmp = props != null && props.hasNonNull("Icmp") ? props.get("Icmp") : null;
         String protocol = ctx.resolveOptional(props, "Protocol");
-        ec2Service.createNetworkAclEntry(ctx.region(), aclId, ruleNumber,
-                protocol != null ? protocol : "-1",
-                ctx.resolveOptional(props, "RuleAction"),
-                egress,
-                ctx.resolveOptional(props, "CidrBlock"),
-                // RuleNumber, Egress and NetworkAclId are the createOnly key, so re-provisioning
-                // the same key is an update. replace=false would raise NetworkAclEntryAlreadyExists
-                // on every stack update.
-                from, to, true);
+        NetworkAclEntry entry = new NetworkAclEntry();
+        entry.setRuleNumber(ruleNumber);
+        entry.setProtocol(protocol != null ? protocol : "-1");
+        entry.setRuleAction(ctx.resolveOptional(props, "RuleAction"));
+        entry.setEgress(egress);
+        entry.setCidrBlock(ctx.resolveOptional(props, "CidrBlock"));
+        entry.setIpv6CidrBlock(ctx.resolveOptional(props, "Ipv6CidrBlock"));
+        entry.setPortRangeFrom(optionalInt(ctx.resolveOptional(portRange, "From")));
+        entry.setPortRangeTo(optionalInt(ctx.resolveOptional(portRange, "To")));
+        entry.setIcmpType(optionalInt(ctx.resolveOptional(icmp, "Type")));
+        entry.setIcmpCode(optionalInt(ctx.resolveOptional(icmp, "Code")));
+        // RuleNumber, Egress and NetworkAclId are the createOnly key, so re-provisioning the same
+        // key is an update. replace=false would raise NetworkAclEntryAlreadyExists on every update.
+        ec2Service.putNetworkAclEntry(ctx.region(), aclId, entry, true);
         String entryId = aclId + "|" + ruleNumber + "|" + (egress ? "egress" : "ingress");
         r.setPhysicalId(entryId);
         // Id is the type's primaryIdentifier and its only readOnlyProperty, so Fn::GetAtt Id must
@@ -168,5 +171,9 @@ public class Ec2NetworkAclCfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         ec2Service.replaceNetworkAclAssociation(region, physicalId, defaultAcl.getNetworkAclId());
+    }
+
+    private static Integer optionalInt(String value) {
+        return value != null ? Integer.valueOf(value) : null;
     }
 }
