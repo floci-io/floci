@@ -70,6 +70,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -426,6 +427,11 @@ public class EksClusterManager
                 : DEFAULT_POD_CIDR;
 
         List<String> serverArgs = buildServerArgs(config.services().eks().disableCni(), serviceCidr, clusterCidr);
+        // Without a fixed name k3s names the node after the container's hostname, which Docker sets
+        // to the container ID. The container is recreated on restore, so the node came back under a
+        // new name while the old one stayed NotReady, and anything bound to it (local-path volumes
+        // and their pods) could never schedule again.
+        serverArgs.add("--node-name=" + nodeNameFor(containerName));
 
         EksNodeCapacity.Limits nodeLimits = resolveNodeCapacity(cluster);
         if (nodeLimits != null) {
@@ -1190,6 +1196,19 @@ public class EksClusterManager
         return configuredDefault != null && !configuredDefault.isBlank()
                 ? configuredDefault
                 : "rancher/k3s:latest";
+    }
+
+    /**
+     * The node name for a cluster's k3s container: its Docker name, which is stable for the life of
+     * the cluster, turned into a valid Kubernetes node name (lower case; anything outside
+     * {@code [a-z0-9.-]} becomes {@code -}; at most 63 characters, so it also fits a hostname label).
+     */
+    static String nodeNameFor(String dockerName) {
+        String name = dockerName.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9.-]", "-");
+        if (name.length() > 63) {
+            name = name.substring(0, 63);
+        }
+        return name.replaceAll("^[^a-z0-9]+|[^a-z0-9]+$", "");
     }
 
     /**
