@@ -12,6 +12,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -153,7 +154,7 @@ public class ResourceArnBuilder {
                 }
             }
             if (json.path("TableCreationParameters").hasNonNull("TableName")) {
-                var tableName = json.path("TableCreationParameters").get("TableName").asText().trim();
+                String tableName = json.path("TableCreationParameters").get("TableName").asText().trim();
                 if (!tableName.isEmpty()) {
                     return List.of(toDynamoDbTableArn(tableName, region, accountId));
                 }
@@ -183,14 +184,14 @@ public class ResourceArnBuilder {
                 }
             }
             if (json.hasNonNull("ImportArn")) {
-                var importArn = json.get("ImportArn").asText().trim();
+                String importArn = json.get("ImportArn").asText().trim();
                 if (!importArn.isEmpty()) {
                     return List.of(importArn);
                 }
             }
             if (json.hasNonNull("RequestItems") && json.get("RequestItems").isObject()) {
                 Set<String> arns = new LinkedHashSet<>();
-                var fieldNames = json.get("RequestItems").fieldNames();
+                Iterator<String> fieldNames = json.get("RequestItems").fieldNames();
                 while (fieldNames.hasNext()) {
                     String table = fieldNames.next().trim();
                     if (!table.isEmpty()) {

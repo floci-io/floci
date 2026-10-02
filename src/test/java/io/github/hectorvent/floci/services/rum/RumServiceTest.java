@@ -191,7 +191,7 @@ class RumServiceTest {
     @Test
     void appMonitorConfigurationCanBeReloadedFromPersistentStorage(@TempDir Path tempDir) throws Exception {
         Path file = tempDir.resolve("rum.json");
-        var firstStore = new PersistentStorage<String, AppMonitor>(
+        PersistentStorage<String, AppMonitor> firstStore = new PersistentStorage<>(
                 file, new TypeReference<Map<String, AppMonitor>>() {
                 });
         firstStore.load();
@@ -206,7 +206,7 @@ class RumServiceTest {
                 }
                 """));
 
-        var reloadedStore = new PersistentStorage<String, AppMonitor>(
+        PersistentStorage<String, AppMonitor> reloadedStore = new PersistentStorage<>(
                 file, new TypeReference<Map<String, AppMonitor>>() {
                 });
         reloadedStore.load();

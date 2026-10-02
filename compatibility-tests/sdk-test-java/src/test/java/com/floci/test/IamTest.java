@@ -88,6 +88,7 @@ import software.amazon.awssdk.services.iam.model.PutRolePolicyRequest;
 import software.amazon.awssdk.services.iam.model.RemoveRoleFromInstanceProfileRequest;
 import software.amazon.awssdk.services.iam.model.RemoveUserFromGroupRequest;
 import software.amazon.awssdk.services.iam.model.SimulatePrincipalPolicyRequest;
+import software.amazon.awssdk.services.iam.model.SimulatePrincipalPolicyResponse;
 import software.amazon.awssdk.services.iam.model.StatusType;
 import software.amazon.awssdk.services.iam.model.SummaryKeyType;
 import software.amazon.awssdk.services.iam.model.Tag;
@@ -489,7 +490,7 @@ class IamTest {
     @Test
     @Order(24)
     void simulatePrincipalPolicy() {
-        var response = iam.simulatePrincipalPolicy(SimulatePrincipalPolicyRequest.builder()
+        SimulatePrincipalPolicyResponse response = iam.simulatePrincipalPolicy(SimulatePrincipalPolicyRequest.builder()
                 .policySourceArn("arn:aws:iam::000000000000:user/" + USER_NAME)
                 .actionNames("s3:GetObject", "ec2:RunInstances")
                 .resourceArns("*")

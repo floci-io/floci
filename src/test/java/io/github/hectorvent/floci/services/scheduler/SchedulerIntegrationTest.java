@@ -20,6 +20,45 @@ import static org.hamcrest.Matchers.*;
 class SchedulerIntegrationTest {
 
     @Test
+    @Order(44)
+    void directScheduleRequestsRejectInvalidExpressionAndRoleArn() {
+        String validTarget = """
+                {"Arn":"arn:aws:sqs:us-east-1:000000000000:queue",
+                 "RoleArn":"arn:aws:iam::000000000000:role/scheduler-role"}
+                """;
+        String invalidExpression = """
+                {"ScheduleExpression":"cron(invalid)",
+                 "FlexibleTimeWindow":{"Mode":"OFF"},"Target":%s}
+                """.formatted(validTarget);
+        given().contentType("application/json").body(invalidExpression)
+                .when().post("/schedules/invalid-expression")
+                .then().statusCode(400).body("__type", containsString("ValidationException"));
+
+        String invalidRole = """
+                {"ScheduleExpression":"rate(1 hour)",
+                 "FlexibleTimeWindow":{"Mode":"OFF"},
+                 "Target":{"Arn":"arn:aws:sqs:us-east-1:000000000000:queue",
+                           "RoleArn":"not-a-role-arn"}}
+                """;
+        given().contentType("application/json").body(invalidRole)
+                .when().post("/schedules/invalid-role")
+                .then().statusCode(400).body("__type", containsString("ValidationException"));
+
+        String valid = """
+                {"ScheduleExpression":"rate(1 hour)",
+                 "FlexibleTimeWindow":{"Mode":"OFF"},"Target":%s}
+                """.formatted(validTarget);
+        given().contentType("application/json").body(valid)
+                .when().post("/schedules/validation-update")
+                .then().statusCode(200);
+        given().contentType("application/json").body(invalidExpression)
+                .when().put("/schedules/validation-update")
+                .then().statusCode(400).body("__type", containsString("ValidationException"));
+        given().when().get("/schedules/validation-update")
+                .then().statusCode(200).body("ScheduleExpression", equalTo("rate(1 hour)"));
+    }
+
+    @Test
     @Order(1)
     void createScheduleGroup() {
         given()
@@ -689,7 +728,7 @@ class SchedulerIntegrationTest {
                 {
                     "ScheduleExpression": "rate(1 hour)",
                     "FlexibleTimeWindow": {"Mode": "OFF"},
-                    "Target": {"Arn": "arn:t", "RoleArn": "arn:r"}
+                    "Target": {"Arn": "arn:t", "RoleArn": "arn:aws:iam::000000000000:role/r"}
                 }
                 """)
         .when()
@@ -930,7 +969,7 @@ class SchedulerIntegrationTest {
                 {
                     "ScheduleExpression": "rate(1 hour)",
                     "FlexibleTimeWindow": {"Mode": "OFF"},
-                    "Target": {"Arn": "arn:t", "RoleArn": "arn:r"}
+                    "Target": {"Arn": "arn:t", "RoleArn": "arn:aws:iam::000000000000:role/r"}
                 }
                 """)
         .when()

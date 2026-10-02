@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -153,14 +154,14 @@ class StepFunctionsMockedServiceIntegrationTest {
     @Test
     @Order(1)
     void mockedReturnRunsUnsupportedIntegrationToCompletion() throws Exception {
-        var execArn = startExecution(mockSmArn + "#HappyPath", "{}");
+        String execArn = startExecution(mockSmArn + "#HappyPath", "{}");
         assertFalse(execArn.contains("#"));
 
-        var describe = waitForTerminalState(execArn);
+        Response describe = waitForTerminalState(execArn);
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"));
         assertEquals(mockSmArn, describe.jsonPath().getString("stateMachineArn"));
 
-        var output = mapper.readTree(describe.jsonPath().getString("output"));
+        JsonNode output = mapper.readTree(describe.jsonPath().getString("output"));
         assertEquals(200, output.path("StatusCode").asInt());
         assertEquals(1, output.path("ResponseBody").path("id").asInt());
     }
@@ -168,12 +169,12 @@ class StepFunctionsMockedServiceIntegrationTest {
     @Test
     @Order(2)
     void mockedThrowReachesCatchWithErrorAndCauseUnchanged() throws Exception {
-        var execArn = startExecution(mockSmArn + "#Throw422", "{}");
+        String execArn = startExecution(mockSmArn + "#Throw422", "{}");
 
-        var describe = waitForTerminalState(execArn);
+        Response describe = waitForTerminalState(execArn);
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"));
 
-        var output = mapper.readTree(describe.jsonPath().getString("output"));
+        JsonNode output = mapper.readTree(describe.jsonPath().getString("output"));
         assertEquals("ApiGateway.422", output.path("error").path("Error").asText());
         assertEquals("Unprocessable", output.path("error").path("Cause").asText());
     }
@@ -181,9 +182,9 @@ class StepFunctionsMockedServiceIntegrationTest {
     @Test
     @Order(3)
     void mockedThrowIsRetriedUsingAttemptKeyedResponses() throws Exception {
-        var execArn = startExecution(mockSmArn + "#RetryOnce", "{}");
+        String execArn = startExecution(mockSmArn + "#RetryOnce", "{}");
 
-        var describe = waitForTerminalState(execArn);
+        Response describe = waitForTerminalState(execArn);
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"));
         assertTrue(mapper.readTree(describe.jsonPath().getString("output"))
                 .path("ResponseBody").path("retried").asBoolean());
@@ -192,12 +193,12 @@ class StepFunctionsMockedServiceIntegrationTest {
     @Test
     @Order(4)
     void mockedStateCombinesWithRealDynamoDbIntegration() throws Exception {
-        var execArn = startExecution(ddbSmArn + "#MockedApiRealDdb", "{}");
+        String execArn = startExecution(ddbSmArn + "#MockedApiRealDdb", "{}");
 
-        var describe = waitForTerminalState(execArn);
+        Response describe = waitForTerminalState(execArn);
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"));
 
-        var getItem = given()
+        Response getItem = given()
                 .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
                 .contentType(DDB_CONTENT_TYPE)
                 .body("""
@@ -208,7 +209,7 @@ class StepFunctionsMockedServiceIntegrationTest {
                         """.formatted(TABLE_NAME))
                 .when().post("/");
         getItem.then().statusCode(200);
-        var item = mapper.readTree(getItem.body().asString()).path("Item");
+        JsonNode item = mapper.readTree(getItem.body().asString()).path("Item");
         assertEquals("mocked-run", item.path("pk").path("S").asText());
         assertEquals("200", item.path("statusCode").path("N").asText());
     }
@@ -218,7 +219,7 @@ class StepFunctionsMockedServiceIntegrationTest {
     void syncExecutionRejectsMockTestCases() {
         // Verified against Step Functions Local 2.0.0, which rejects the suffix here with
         // UnsupportedOperation.
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.StartSyncExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -234,7 +235,7 @@ class StepFunctionsMockedServiceIntegrationTest {
     void syncExecutionDoesNotStripABareSuffix() {
         // Verified against Step Functions Local 2.0.0. StartSyncExecution looks up the raw ARN,
         // so a bare trailing '#' fails with StateMachineDoesNotExist instead of running unmocked.
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.StartSyncExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -248,9 +249,9 @@ class StepFunctionsMockedServiceIntegrationTest {
     @Test
     @Order(6)
     void executionWithoutTestCaseSuffixStillCallsRealIntegration() {
-        var execArn = startExecution(mockSmArn, "{}");
+        String execArn = startExecution(mockSmArn, "{}");
 
-        var describe = waitForTerminalState(execArn);
+        Response describe = waitForTerminalState(execArn);
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("States.TaskFailed", describe.jsonPath().getString("error"));
         assertTrue(describe.jsonPath().getString("cause").contains("Unsupported resource"));
@@ -261,7 +262,7 @@ class StepFunctionsMockedServiceIntegrationTest {
     void unknownTestCaseIsRejected() {
         // Intentional deviation. Step Functions Local 2.0.0 returns a plain HTTP 500 with the
         // text "No mock map found for test DoesNotExist". Floci returns a structured 400 instead.
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -277,9 +278,9 @@ class StepFunctionsMockedServiceIntegrationTest {
     void blankSuffixRunsWithoutMocks() {
         // Verified against Step Functions Local 2.0.0. A bare trailing '#' selects no test case
         // and the execution runs its real integrations.
-        var execArn = startExecution(mockSmArn + "#", "{}");
+        String execArn = startExecution(mockSmArn + "#", "{}");
 
-        var describe = waitForTerminalState(execArn);
+        Response describe = waitForTerminalState(execArn);
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("States.TaskFailed", describe.jsonPath().getString("error"));
         assertTrue(describe.jsonPath().getString("cause").contains("Unsupported resource"));
@@ -290,12 +291,12 @@ class StepFunctionsMockedServiceIntegrationTest {
     void emptyMockedResponseIsIgnoredWhenItsStateIsNotEntered() throws Exception {
         // Verified against Step Functions Local 2.0.0. A mocked response with no attempt entries
         // does not stop the execution from starting when its state is never entered.
-        var execArn = startExecution(skipSmArn + "#EmptyUnusedResponse", "{\"go\": \"run\"}");
+        String execArn = startExecution(skipSmArn + "#EmptyUnusedResponse", "{\"go\": \"run\"}");
 
-        var describe = waitForTerminalState(execArn);
+        Response describe = waitForTerminalState(execArn);
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"));
 
-        var output = mapper.readTree(describe.jsonPath().getString("output"));
+        JsonNode output = mapper.readTree(describe.jsonPath().getString("output"));
         assertEquals(200, output.path("StatusCode").asInt());
     }
 
@@ -304,16 +305,16 @@ class StepFunctionsMockedServiceIntegrationTest {
     void emptyMockedResponseFailsTheExecutionWhenItsStateIsEntered() {
         // Verified against Step Functions Local 2.0.0. Entering the state fails the execution
         // with States.Runtime rather than rejecting StartExecution.
-        var execArn = startExecution(skipSmArn + "#EmptyUnusedResponse", "{\"go\": \"skip\"}");
+        String execArn = startExecution(skipSmArn + "#EmptyUnusedResponse", "{\"go\": \"skip\"}");
 
-        var describe = waitForTerminalState(execArn);
+        Response describe = waitForTerminalState(execArn);
         assertEquals("FAILED", describe.jsonPath().getString("status"));
         assertEquals("States.Runtime", describe.jsonPath().getString("error"));
     }
 
     private static String createStateMachine(String name, String type, String definition) {
-        var typeField = type != null ? "\"type\": \"%s\",".formatted(type) : "";
-        var resp = given()
+        String typeField = type != null ? "\"type\": \"%s\",".formatted(type) : "";
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -330,7 +331,7 @@ class StepFunctionsMockedServiceIntegrationTest {
     }
 
     private static String startExecution(String smArn, String input) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -342,15 +343,15 @@ class StepFunctionsMockedServiceIntegrationTest {
     }
 
     private static Response waitForTerminalState(String execArn) {
-        for (var i = 0; i < 100; i++) {
-            var resp = given()
+        for (int i = 0; i < 100; i++) {
+            Response resp = given()
                     .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
                     .contentType(SFN_CONTENT_TYPE)
                     .body("""
                             {"executionArn": "%s"}
                             """.formatted(execArn))
                     .when().post("/");
-            var status = resp.jsonPath().getString("status");
+            String status = resp.jsonPath().getString("status");
             if (!"RUNNING".equals(status)) {
                 return resp;
             }

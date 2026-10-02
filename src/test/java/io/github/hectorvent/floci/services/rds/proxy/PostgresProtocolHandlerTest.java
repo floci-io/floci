@@ -14,6 +14,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -1160,7 +1161,7 @@ class PostgresProtocolHandlerTest {
     private static SSLSocket verifyingClientSocket(Socket socket, Path caCertFile, String advertisedHost)
             throws Exception {
         X509Certificate ca;
-        try (var in = Files.newInputStream(caCertFile)) {
+        try (InputStream in = Files.newInputStream(caCertFile)) {
             ca = (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(in);
         }
         KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());

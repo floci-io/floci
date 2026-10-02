@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -64,7 +65,7 @@ final class ProjectionEvaluator {
     }
 
     static Set<String> topLevelAttributes(String projectionExpression, JsonNode exprAttrNames) {
-        var attributes = new java.util.HashSet<String>();
+        HashSet<String> attributes = new HashSet<>();
         for (String rawPath : splitProjectionPaths(projectionExpression)) {
             List<PathSegment> segments = resolvePath(rawPath.trim(), exprAttrNames);
             if (!segments.isEmpty()) {
@@ -222,11 +223,11 @@ final class ProjectionEvaluator {
         if (content.isEmpty()) {
             throw syntaxError("ProjectionExpression", "]", "[]");
         }
-        final var contentLength = content.length();
-        for (var i = 0; i < contentLength; i++) {
-            var c = content.charAt(i);
+        final int contentLength = content.length();
+        for (int i = 0; i < contentLength; i++) {
+            char c = content.charAt(i);
             if (c < '0' || '9' < c) {
-                var near = "[" + content + "]";
+                String near = "[" + content + "]";
                 throw syntaxError("ProjectionExpression", String.valueOf(c),
                         near.substring(0, Math.min(3, near.length())));
             }

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.msk;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -628,7 +629,7 @@ class MskControllerIntegrationTest {
             .when().post("/v1/configurations")
             .then().statusCode(200);
 
-        var page1 = given()
+        JsonPath page1 = given()
             .when().get("/v1/configurations?maxResults=1")
             .then().statusCode(200)
             .body("configurations", hasSize(1))

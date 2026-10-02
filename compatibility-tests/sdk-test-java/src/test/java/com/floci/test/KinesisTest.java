@@ -15,6 +15,7 @@ import software.amazon.awssdk.services.kinesis.KinesisClient;
 import software.amazon.awssdk.services.kinesis.model.CreateStreamRequest;
 import software.amazon.awssdk.services.kinesis.model.DeleteStreamRequest;
 import software.amazon.awssdk.services.kinesis.model.DescribeStreamSummaryRequest;
+import software.amazon.awssdk.services.kinesis.model.DescribeStreamSummaryResponse;
 import software.amazon.awssdk.services.kinesis.model.ListShardsRequest;
 import software.amazon.awssdk.services.kinesis.model.ListShardsResponse;
 
@@ -69,7 +70,7 @@ class KinesisTest {
                     .shardCount(1)
                     .build()));
 
-            var response = assertDoesNotThrow(() -> kinesis.describeStreamSummary(
+            DescribeStreamSummaryResponse response = assertDoesNotThrow(() -> kinesis.describeStreamSummary(
                     DescribeStreamSummaryRequest.builder()
                             .streamName(streamName)
                             .build()));

@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.CapacityReservation;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.model.Host;
 import io.github.hectorvent.floci.services.ec2.model.IamInstanceProfileAssociation;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -105,6 +106,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
@@ -259,6 +261,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final StorageBackend<String, CapacityReservation> capacityReservations;
+    private final StorageBackend<String, Host> hosts;
+    // Serialises a launch onto a host against ModifyHosts/ReleaseHosts, so a host cannot be
+    // released between the launch's availability check and the store of its instance.
+    private final Object hostLock = new Object();
     private final Set<String> seededAccountRegions = ConcurrentHashMap.newKeySet();
     // region::subnetId → offset the next synthesised address is tried at. Only an ordering hint:
     // restart forgets it, and privateIpsInUse is what keeps addresses from being handed out twice.
@@ -460,7 +466,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         new TypeReference<Map<String, CapacityReservation>>() {}),
                 storageFactory.create("ec2", "ec2-volume-modifications.json",
                         new TypeReference<Map<String, VolumeModification>>() {}),
-                requestContextInstance, iamService, volumeBlockDeviceManager);
+                requestContextInstance, iamService, volumeBlockDeviceManager,
+                storageFactory.create("ec2", "ec2-hosts.json", new TypeReference<Map<String, Host>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -659,6 +666,56 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
                IamService iamService,
                Ec2VolumeBlockDeviceManager volumeBlockDeviceManager) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, vpcs, subnets, securityGroups, securityGroupRules,
+                internetGateways, routeTables, keyPairs, addresses, instances,
+                volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
+                natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
+                transitGateways, transitGatewayRouteTables, transitGatewayVpcAttachments,
+                transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections,
+                networkInterfaces, capacityReservations, volumeModifications,
+                requestContextInstance, iamService, volumeBlockDeviceManager, new InMemoryStorage<>());
+    }
+
+    // The terminal constructor. Dedicated Hosts ride on their own parameter so the shorter
+    // overloads above keep their arity for existing fixtures.
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
+               StorageBackend<String, Vpc> vpcs,
+               StorageBackend<String, Subnet> subnets,
+               StorageBackend<String, SecurityGroup> securityGroups,
+               StorageBackend<String, SecurityGroupRule> securityGroupRules,
+               StorageBackend<String, InternetGateway> internetGateways,
+               StorageBackend<String, RouteTable> routeTables,
+               StorageBackend<String, KeyPair> keyPairs,
+               StorageBackend<String, Address> addresses,
+               StorageBackend<String, Instance> instances,
+               StorageBackend<String, Volume> volumes,
+               StorageBackend<String, Image> registeredImages,
+               StorageBackend<String, Snapshot> snapshots,
+               StorageBackend<String, LaunchTemplate> launchTemplates,
+               StorageBackend<String, VpcEndpoint> vpcEndpoints,
+               StorageBackend<String, NatGateway> natGateways,
+               StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, List<Tag>> tags,
+               StorageBackend<String, TransitGateway> transitGateways,
+               StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables,
+               StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments,
+               StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
+               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
+               StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections,
+               StorageBackend<String, NetworkInterface> networkInterfaces,
+               StorageBackend<String, CapacityReservation> capacityReservations,
+               StorageBackend<String, VolumeModification> volumeModifications,
+               jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
+               IamService iamService,
+               Ec2VolumeBlockDeviceManager volumeBlockDeviceManager,
+               StorageBackend<String, Host> hosts) {
+        this.hosts = hosts;
         this.iamService = iamService;
         this.volumeBlockDeviceManager = volumeBlockDeviceManager;
         this.defaultAccountId = config.defaultAccountId();
@@ -2893,6 +2950,40 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                                     int networkInterfaceDeviceIndex, String availabilityZone,
                                     LaunchTemplateData.MetadataOptions metadataOptions,
                                     String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData, dryRun, null, null);
+    }
+
+    /**
+     * @param hostId  Placement.HostId: the Dedicated Host to launch onto. It must exist and not be
+     *                released; with no subnet or zone named, the launch lands in the host's zone.
+     * @param tenancy Placement.Tenancy; defaults to {@code host} when a host is named.
+     */
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
+                                    String hostId, String tenancy) {
+        if (hostId != null && !hostId.isBlank()) {
+            Host host = getRequiredAvailableHost(region, hostId);
+            if ((availabilityZone == null || availabilityZone.isBlank())
+                    && (subnetId == null || subnetId.isBlank())
+                    && (networkInterfaceId == null || networkInterfaceId.isBlank())) {
+                availabilityZone = host.getAvailabilityZone();
+            }
+            if (tenancy == null || tenancy.isBlank()) {
+                tenancy = "host";
+            }
+        } else {
+            hostId = null;
+        }
         if (imageId == null || imageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
         }
@@ -2970,6 +3061,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         reservation.setOwnerId(callerAccountId());
 
         String effectiveInstanceType = instanceType != null ? instanceType : "t2.micro";
+        if (hostId != null) {
+            validateHostPlacement(getRequiredAvailableHost(region, hostId), az, effectiveInstanceType, tenancy);
+        }
         validateArchitectureCompatibility(region, imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
         String architecture = architectureFor(region, imageId, effectiveInstanceType);
@@ -3007,112 +3101,124 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
             }
             synchronized (privateIpAllocationLock) {
-                List<String> privateIps = allocateLaunchAddresses(region, finalSubnetId, suppliedEni, count);
-                for (int i = 0; i < count; i++) {
-                    String instanceId = "i-" + randomHex(17);
-                    String privateIp = privateIps.get(i);
-
-                    Instance inst = new Instance();
-                    inst.setInstanceId(instanceId);
-                    inst.setImageId(imageId);
-                    inst.setState(InstanceState.pending());
-                    inst.setInstanceType(effectiveInstanceType);
-                    inst.setPlacement(new Placement(az));
-                    inst.setSubnetId(finalSubnetId);
-                    inst.setVpcId(vpcId);
-                    // AWS precedence (#1984): the launch-time AssociatePublicIpAddress
-                    // override wins in both directions; the subnet's MapPublicIpOnLaunch
-                    // attribute is only the default when the launch does not specify it.
-                    inst.setAssociatePublicIp(associatePublicIp != null
-                            ? associatePublicIp
-                            : subnet != null && subnet.isMapPublicIpOnLaunch());
-                    inst.setPrivateIpAddress(privateIp);
-                    inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
-                    inst.setKeyName(keyName);
-                    inst.setSecurityGroups(new ArrayList<>(sgIdentifiers));
-                    inst.setArchitecture(architecture);
-                    inst.setLaunchTime(Instant.now());
-                    inst.setAmiLaunchIndex(i);
-                    inst.setClientToken(clientToken);
-                    inst.setRegion(region);
-                    inst.setUserData(userData);
-                    inst.setEncodedUserData(encodedUserData);
-                    inst.setIamInstanceProfileArn(iamInstanceProfileArn);
-                    if (iamInstanceProfileArn != null) {
-                        inst.setIamInstanceProfileAssociationTime(inst.getLaunchTime());
+                synchronized (hostLock) {
+                    if (hostId != null) {
+                        // Re-checked under hostLock: a ReleaseHosts or ModifyHosts may have landed
+                        // since the unlocked check above.
+                        validateHostPlacement(getRequiredAvailableHost(region, hostId), az, effectiveInstanceType, tenancy);
                     }
-                    inst.setMetadataOptions(LaunchTemplateData.MetadataOptions.merge(launchMetadataOptions, null));
-                    inst.setCreditSpecificationCpuCredits(
-                            acquiredCpuCredits(effectiveInstanceType, creditSpecificationCpuCredits));
-                    if (instanceTags != null && !instanceTags.isEmpty()) {
-                        inst.setTags(new ArrayList<>(instanceTags));
-                        tags.put(instanceId, new ArrayList<>(instanceTags));
-                    }
+                    List<String> privateIps = allocateLaunchAddresses(region, finalSubnetId, suppliedEni, count);
+                    for (int i = 0; i < count; i++) {
+                        String instanceId = "i-" + randomHex(17);
+                        String privateIp = privateIps.get(i);
 
-                    // Network interface, either the caller-supplied standalone ENI (override-default-eni,
-                    // floci-kt9) or a freshly-minted implicit primary interface.
-                    InstanceNetworkInterface eni = new InstanceNetworkInterface();
-                    eni.setNetworkInterfaceId(suppliedEni != null
-                            ? suppliedEni.getNetworkInterfaceId()
-                            : "eni-" + randomHex(17));
-                    eni.setSubnetId(finalSubnetId);
-                    eni.setVpcId(vpcId);
-                    eni.setOwnerId(callerAccountId());
-                    eni.setDescription(suppliedEni != null ? suppliedEni.getDescription() : null);
-                    eni.setMacAddress(suppliedEni != null ? suppliedEni.getMacAddress() : null);
-                    eni.setPrivateIpAddress(privateIp);
-                    eni.setPrivateDnsName(inst.getPrivateDnsName());
-                    eni.setGroups(new ArrayList<>(sgIdentifiers));
-                    eni.setAttachmentId("eni-attach-" + randomHex(17));
-                    eni.setDeviceIndex(suppliedEni != null ? networkInterfaceDeviceIndex : 0);
-                    if (inst.getLaunchTime() != null) {
-                        eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
-                    }
-                    inst.getNetworkInterfaces().add(eni);
-                    if (suppliedEni != null) {
-                        // The standalone record stays authoritative rather than being folded into the
-                        // instance: AWS defaults deleteOnTermination to false for an interface the caller
-                        // created and handed to a launch, so it outlives the instance and returns to
-                        // "available" on termination instead of vanishing with it. Double-counting is
-                        // avoided in describeNetworkInterfaces, which skips the instance-side copy of any
-                        // id the standalone store owns.
-                        NetworkInterfaceAttachment launchAttachment = new NetworkInterfaceAttachment();
-                        launchAttachment.setAttachmentId(eni.getAttachmentId());
-                        launchAttachment.setDeviceIndex(eni.getDeviceIndex());
-                        launchAttachment.setStatus("attached");
-                        launchAttachment.setInstanceId(instanceId);
-                        launchAttachment.setInstanceOwnerId(callerAccountId());
-                        launchAttachment.setAttachTime(eni.getAttachTime());
-                        launchAttachment.setDeleteOnTermination(false);
-                        suppliedEni.setAttachment(launchAttachment);
-                        suppliedEni.setStatus("in-use");
-                        networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
-                    }
+                        Instance inst = new Instance();
+                        inst.setInstanceId(instanceId);
+                        inst.setImageId(imageId);
+                        inst.setState(InstanceState.pending());
+                        inst.setInstanceType(effectiveInstanceType);
+                        Placement placement = new Placement(az);
+                        placement.setHostId(hostId);
+                        if (tenancy != null && !tenancy.isBlank()) {
+                            placement.setTenancy(tenancy);
+                        }
+                        inst.setPlacement(placement);
+                        inst.setSubnetId(finalSubnetId);
+                        inst.setVpcId(vpcId);
+                        // AWS precedence (#1984): the launch-time AssociatePublicIpAddress
+                        // override wins in both directions; the subnet's MapPublicIpOnLaunch
+                        // attribute is only the default when the launch does not specify it.
+                        inst.setAssociatePublicIp(associatePublicIp != null
+                                ? associatePublicIp
+                                : subnet != null && subnet.isMapPublicIpOnLaunch());
+                        inst.setPrivateIpAddress(privateIp);
+                        inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
+                        inst.setKeyName(keyName);
+                        inst.setSecurityGroups(new ArrayList<>(sgIdentifiers));
+                        inst.setArchitecture(architecture);
+                        inst.setLaunchTime(Instant.now());
+                        inst.setAmiLaunchIndex(i);
+                        inst.setClientToken(clientToken);
+                        inst.setRegion(region);
+                        inst.setUserData(userData);
+                        inst.setEncodedUserData(encodedUserData);
+                        inst.setIamInstanceProfileArn(iamInstanceProfileArn);
+                        if (iamInstanceProfileArn != null) {
+                            inst.setIamInstanceProfileAssociationTime(inst.getLaunchTime());
+                        }
+                        inst.setMetadataOptions(LaunchTemplateData.MetadataOptions.merge(launchMetadataOptions, null));
+                        inst.setCreditSpecificationCpuCredits(
+                                acquiredCpuCredits(effectiveInstanceType, creditSpecificationCpuCredits));
+                        if (instanceTags != null && !instanceTags.isEmpty()) {
+                            inst.setTags(new ArrayList<>(instanceTags));
+                            tags.put(instanceId, new ArrayList<>(instanceTags));
+                        }
 
-                    // Root EBS volume
-                    String rootVolId = "vol-" + randomHex(17);
-                    inst.setRootVolumeId(rootVolId);
-                    Volume rootVol = new Volume();
-                    rootVol.setVolumeId(rootVolId);
-                    rootVol.setAvailabilityZone(az);
-                    rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
-                    rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
-                    rootVol.setState("in-use");
-                    rootVol.setRegion(region);
-                    rootVol.setCreateTime(Instant.now());
-                    VolumeAttachment att = new VolumeAttachment();
-                    att.setVolumeId(rootVolId);
-                    att.setInstanceId(instanceId);
-                    att.setDevice(inst.getRootDeviceName());
-                    att.setState("attached");
-                    att.setDeleteOnTermination(true);
-                    att.setAttachTime(Instant.now());
-                    rootVol.getAttachments().add(att);
-                    volumes.put(key(region, rootVolId), rootVol);
+                        // Network interface, either the caller-supplied standalone ENI (override-default-eni,
+                        // floci-kt9) or a freshly-minted implicit primary interface.
+                        InstanceNetworkInterface eni = new InstanceNetworkInterface();
+                        eni.setNetworkInterfaceId(suppliedEni != null
+                                ? suppliedEni.getNetworkInterfaceId()
+                                : "eni-" + randomHex(17));
+                        eni.setSubnetId(finalSubnetId);
+                        eni.setVpcId(vpcId);
+                        eni.setOwnerId(callerAccountId());
+                        eni.setDescription(suppliedEni != null ? suppliedEni.getDescription() : null);
+                        eni.setMacAddress(suppliedEni != null ? suppliedEni.getMacAddress() : null);
+                        eni.setPrivateIpAddress(privateIp);
+                        eni.setPrivateDnsName(inst.getPrivateDnsName());
+                        eni.setGroups(new ArrayList<>(sgIdentifiers));
+                        eni.setAttachmentId("eni-attach-" + randomHex(17));
+                        eni.setDeviceIndex(suppliedEni != null ? networkInterfaceDeviceIndex : 0);
+                        if (inst.getLaunchTime() != null) {
+                            eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
+                        }
+                        inst.getNetworkInterfaces().add(eni);
+                        if (suppliedEni != null) {
+                            // The standalone record stays authoritative rather than being folded into the
+                            // instance: AWS defaults deleteOnTermination to false for an interface the caller
+                            // created and handed to a launch, so it outlives the instance and returns to
+                            // "available" on termination instead of vanishing with it. Double-counting is
+                            // avoided in describeNetworkInterfaces, which skips the instance-side copy of any
+                            // id the standalone store owns.
+                            NetworkInterfaceAttachment launchAttachment = new NetworkInterfaceAttachment();
+                            launchAttachment.setAttachmentId(eni.getAttachmentId());
+                            launchAttachment.setDeviceIndex(eni.getDeviceIndex());
+                            launchAttachment.setStatus("attached");
+                            launchAttachment.setInstanceId(instanceId);
+                            launchAttachment.setInstanceOwnerId(callerAccountId());
+                            launchAttachment.setAttachTime(eni.getAttachTime());
+                            launchAttachment.setDeleteOnTermination(false);
+                            suppliedEni.setAttachment(launchAttachment);
+                            suppliedEni.setStatus("in-use");
+                            networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
+                        }
 
-                    instances.put(key(region, instanceId), inst);
-                    launched.add(inst);
-                    reservation.getInstances().add(inst);
+                        // Root EBS volume
+                        String rootVolId = "vol-" + randomHex(17);
+                        inst.setRootVolumeId(rootVolId);
+                        Volume rootVol = new Volume();
+                        rootVol.setVolumeId(rootVolId);
+                        rootVol.setAvailabilityZone(az);
+                        rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
+                        rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
+                        rootVol.setState("in-use");
+                        rootVol.setRegion(region);
+                        rootVol.setCreateTime(Instant.now());
+                        VolumeAttachment att = new VolumeAttachment();
+                        att.setVolumeId(rootVolId);
+                        att.setInstanceId(instanceId);
+                        att.setDevice(inst.getRootDeviceName());
+                        att.setState("attached");
+                        att.setDeleteOnTermination(true);
+                        att.setAttachTime(Instant.now());
+                        rootVol.getAttachments().add(att);
+                        volumes.put(key(region, rootVolId), rootVol);
+
+                        instances.put(key(region, instanceId), inst);
+                        launched.add(inst);
+                        reservation.getInstances().add(inst);
+                    }
                 }
             }
         }
@@ -7099,6 +7205,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (vpc != null) { vpc.setTags(new ArrayList<>(tagList)); vpcs.put(storeKey, vpc); return; }
         CapacityReservation cr = capacityReservations.get(storeKey).orElse(null);
         if (cr != null) { cr.setTags(new ArrayList<>(tagList)); capacityReservations.put(storeKey, cr); return; }
+        Host host = hosts.get(storeKey).orElse(null);
+        if (host != null) {
+            host.setTags(new ArrayList<>(tagList));
+            hosts.put(storeKey, host);
+            return;
+        }
         Subnet subnet = subnets.get(storeKey).orElse(null);
         if (subnet != null) { subnet.setTags(new ArrayList<>(tagList)); subnets.put(storeKey, subnet); return; }
         SecurityGroup sg = securityGroups.get(storeKey).orElse(null);
@@ -7226,6 +7338,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         if (resourceId.startsWith("cr-")) {
             return "capacity-reservation";
+        }
+        if (resourceId.startsWith("h-")) {
+            return "dedicated-host";
         }
         if (resourceId.startsWith("vpc-")) {
             return "vpc";
@@ -7468,6 +7583,179 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     "The Capacity Reservation '" + capacityReservationId + "' does not exist.", 400);
         }
         return reservation;
+    }
+
+    // ─── Dedicated Hosts ───────────────────────────────────────────────────────
+
+    public List<Host> allocateHosts(String region, String availabilityZone, String instanceType,
+            String instanceFamily, Integer quantity, String autoPlacement, String hostRecovery,
+            String hostMaintenance, String outpostArn, String assetId) {
+        ensureDefaultResources(region);
+        if (availabilityZone == null || availabilityZone.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter AvailabilityZone.", 400);
+        }
+        boolean hasType = instanceType != null && !instanceType.isBlank();
+        boolean hasFamily = instanceFamily != null && !instanceFamily.isBlank();
+        if (hasType == hasFamily) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Specify exactly one of InstanceType or InstanceFamily.", 400);
+        }
+        int count = quantity == null ? 1 : quantity;
+        if (count <= 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + count + ") for parameter Quantity is invalid.", 400);
+        }
+        validateHostSettings(autoPlacement, hostRecovery, hostMaintenance);
+        boolean zoneExists = Arrays.stream(MODELLED_ZONE_SUFFIXES)
+                .anyMatch(suffix -> availabilityZone.equals(region + suffix));
+        if (!zoneExists) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid availability zone: [" + availabilityZone + "]", 400);
+        }
+        List<Host> allocated = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            Host host = new Host();
+            host.setHostId("h-" + randomHex(17));
+            host.setOwnerId(callerAccountId());
+            host.setRegion(region);
+            host.setAvailabilityZone(availabilityZone);
+            host.setInstanceType(hasType ? instanceType : null);
+            host.setInstanceFamily(hasFamily ? instanceFamily : null);
+            if (autoPlacement != null) {
+                host.setAutoPlacement(autoPlacement);
+            }
+            if (hostRecovery != null) {
+                host.setHostRecovery(hostRecovery);
+            }
+            if (hostMaintenance != null) {
+                host.setHostMaintenance(hostMaintenance);
+            }
+            host.setOutpostArn(outpostArn);
+            host.setAssetId(assetId);
+            host.setAllocationTime(Instant.now());
+            hosts.put(key(region, host.getHostId()), host);
+            allocated.add(host);
+        }
+        return allocated;
+    }
+
+    public List<Host> describeHosts(String region, List<String> ids, Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        for (String id : ids) {
+            getRequiredHost(region, id);
+        }
+        return hosts.scan(k -> true).stream()
+                .filter(h -> h.getRegion().equals(region))
+                .filter(h -> ids.isEmpty() || ids.contains(h.getHostId()))
+                .filter(h -> matchesFilters(h, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    /** Instances placed on the host that still occupy it, i.e. not shutting down or terminated. */
+    public List<Instance> hostInstances(String region, String hostId) {
+        return instances.scan(k -> true).stream()
+                .filter(i -> region.equals(i.getRegion()))
+                .filter(i -> i.getPlacement() != null && hostId.equals(i.getPlacement().getHostId()))
+                .filter(i -> i.getState() == null
+                        || !List.of("shutting-down", "terminated").contains(i.getState().getName()))
+                .collect(Collectors.toList());
+    }
+
+    /** One host of a ModifyHosts batch; the caller reports a throw as that id's unsuccessful item. */
+    public void modifyHost(String region, String hostId, String autoPlacement, String hostRecovery,
+            String hostMaintenance, String instanceType, String instanceFamily) {
+        validateHostSettings(autoPlacement, hostRecovery, hostMaintenance);
+        synchronized (hostLock) {
+            Host host = getRequiredAvailableHost(region, hostId);
+            if (autoPlacement != null) {
+                host.setAutoPlacement(autoPlacement);
+            }
+            if (hostRecovery != null) {
+                host.setHostRecovery(hostRecovery);
+            }
+            if (hostMaintenance != null) {
+                host.setHostMaintenance(hostMaintenance);
+            }
+            if (instanceType != null) {
+                host.setInstanceType(instanceType);
+                host.setInstanceFamily(null);
+            } else if (instanceFamily != null) {
+                host.setInstanceFamily(instanceFamily);
+                host.setInstanceType(null);
+            }
+            hosts.put(key(region, hostId), host);
+        }
+    }
+
+    /** AutoPlacement, HostRecovery and HostMaintenance each take only on or off. */
+    public void validateHostSettings(String autoPlacement, String hostRecovery, String hostMaintenance) {
+        String[][] settings = {{"AutoPlacement", autoPlacement}, {"HostRecovery", hostRecovery},
+                {"HostMaintenance", hostMaintenance}};
+        for (String[] setting : settings) {
+            if (setting[1] != null && !setting[1].equals("on") && !setting[1].equals("off")) {
+                throw new AwsException("InvalidParameterValue",
+                        "Value (" + setting[1] + ") for parameter " + setting[0] + " is invalid.", 400);
+            }
+        }
+    }
+
+    // A launch onto a host must land in the host's zone, with host tenancy, on a type it accepts.
+    private void validateHostPlacement(Host host, String az, String instanceType, String tenancy) {
+        if (!host.getAvailabilityZone().equals(az)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "The Dedicated Host " + host.getHostId() + " is in availability zone '"
+                            + host.getAvailabilityZone() + "', not '" + az + "'.", 400);
+        }
+        if (tenancy != null && !tenancy.isBlank() && !"host".equals(tenancy)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Tenancy '" + tenancy + "' cannot be combined with a Dedicated Host placement.", 400);
+        }
+        boolean typeOk = host.getInstanceType() != null
+                ? host.getInstanceType().equals(instanceType)
+                : host.getInstanceFamily() == null
+                        || instanceType.startsWith(host.getInstanceFamily() + ".");
+        if (!typeOk) {
+            throw new AwsException("InvalidParameter",
+                    "The instance type " + instanceType + " is not supported on Dedicated Host "
+                            + host.getHostId() + ".", 400);
+        }
+    }
+
+    /**
+     * One host of a ReleaseHosts batch. The record is kept with state {@code released}, which is
+     * how AWS reports it afterwards, and a host still carrying instances cannot be released.
+     */
+    public void releaseHost(String region, String hostId) {
+        synchronized (hostLock) {
+            Host host = getRequiredAvailableHost(region, hostId);
+            if (!hostInstances(region, hostId).isEmpty()) {
+                throw new AwsException("InvalidHost.Occupied",
+                        "Dedicated host '" + hostId + "' cannot be released as it is occupied.", 400);
+            }
+            host.setState("released");
+            host.setReleaseTime(Instant.now());
+            hosts.put(key(region, hostId), host);
+        }
+    }
+
+    // A released host is still describable but is gone for every other purpose.
+    private Host getRequiredAvailableHost(String region, String hostId) {
+        Host host = getRequiredHost(region, hostId);
+        if ("released".equals(host.getState())) {
+            throw new AwsException("InvalidHostID.NotFound",
+                    "The specified Dedicated Host ID '" + hostId + "' does not exist.", 400);
+        }
+        return host;
+    }
+
+    private Host getRequiredHost(String region, String hostId) {
+        Host host = hostId == null ? null : hosts.get(key(region, hostId)).orElse(null);
+        if (host == null) {
+            throw new AwsException("InvalidHostID.NotFound",
+                    "The specified Dedicated Host ID '" + hostId + "' does not exist.", 400);
+        }
+        return host;
     }
 
     // ─── Route Tables ──────────────────────────────────────────────────────────
@@ -8924,6 +9212,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 default -> true;
             };
         }
+        if (resource instanceof Host host) {
+            return switch (filterName) {
+                case "availability-zone" -> matchesValue(values, host.getAvailabilityZone());
+                case "instance-type" -> matchesValue(values, host.getInstanceType());
+                case "state" -> matchesValue(values, host.getState());
+                case "auto-placement" -> matchesValue(values, host.getAutoPlacement());
+                default -> true;
+            };
+        }
         return true;
     }
 
@@ -8948,6 +9245,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (resource instanceof TransitGatewayVpcAttachment attachment) return attachment.getTags();
         if (resource instanceof VpcPeeringConnection pcx) return pcx.getTags();
         if (resource instanceof CapacityReservation cr) return cr.getTags();
+        if (resource instanceof Host host) {
+            return host.getTags();
+        }
         return Collections.emptyList();
     }
 

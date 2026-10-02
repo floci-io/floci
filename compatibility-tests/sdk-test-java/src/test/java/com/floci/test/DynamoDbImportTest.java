@@ -38,8 +38,8 @@ class DynamoDbImportTest {
             ddb.deleteTable(DeleteTableRequest.builder().tableName(TABLE_NAME).build());
         } catch (Exception ignored) {}
         try {
-            var objects = s3.listObjectsV2(ListObjectsV2Request.builder().bucket(BUCKET_NAME).build());
-            for (var obj : objects.contents()) {
+            ListObjectsV2Response objects = s3.listObjectsV2(ListObjectsV2Request.builder().bucket(BUCKET_NAME).build());
+            for (S3Object obj : objects.contents()) {
                 s3.deleteObject(DeleteObjectRequest.builder()
                         .bucket(BUCKET_NAME).key(obj.key()).build());
             }
@@ -77,9 +77,9 @@ class DynamoDbImportTest {
     @Test
     @Order(1)
     void importTable_returnsInProgress() {
-        var resp = ddb.importTable(importRequest());
+        ImportTableResponse resp = ddb.importTable(importRequest());
 
-        var desc = resp.importTableDescription();
+        ImportTableDescription desc = resp.importTableDescription();
         assertThat(desc.importArn()).contains("/import/");
         assertThat(desc.importStatus()).isEqualTo(ImportStatus.IN_PROGRESS);
         assertThat(desc.tableArn()).endsWith(":table/" + TABLE_NAME);
@@ -98,7 +98,7 @@ class DynamoDbImportTest {
     void listImports_containsImport() {
         assertThat(importArn).isNotNull();
 
-        var resp = ddb.listImports(ListImportsRequest.builder().build());
+        ListImportsResponse resp = ddb.listImports(ListImportsRequest.builder().build());
 
         assertThat(resp.importSummaryList())
                 .extracting(ImportSummary::importArn)
@@ -110,8 +110,8 @@ class DynamoDbImportTest {
     void describeImport_reachesCompleted() throws Exception {
         assertThat(importArn).isNotNull();
 
-        var desc = describeImport();
-        var deadline = System.currentTimeMillis() + 10_000;
+        ImportTableDescription desc = describeImport();
+        long deadline = System.currentTimeMillis() + 10_000;
         while (desc.importStatus() == ImportStatus.IN_PROGRESS && System.currentTimeMillis() < deadline) {
             Thread.sleep(100);
             desc = describeImport();
@@ -129,10 +129,10 @@ class DynamoDbImportTest {
     @Test
     @Order(4)
     void importedTable_isActiveAndHoldsTheItems() {
-        var table = ddb.describeTable(DescribeTableRequest.builder().tableName(TABLE_NAME).build());
+        DescribeTableResponse table = ddb.describeTable(DescribeTableRequest.builder().tableName(TABLE_NAME).build());
         assertThat(table.table().tableStatus()).isEqualTo(TableStatus.ACTIVE);
 
-        var scan = ddb.scan(ScanRequest.builder().tableName(TABLE_NAME).build());
+        ScanResponse scan = ddb.scan(ScanRequest.builder().tableName(TABLE_NAME).build());
         assertThat(scan.count()).isEqualTo(2);
         assertThat(scan.items())
                 .extracting(item -> item.get("pk").s())

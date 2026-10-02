@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.marketplace;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Test;
 
@@ -14,7 +15,7 @@ class MarketplaceReportingServiceTest {
 
     @Test
     void getBuyerDashboardBuildsAccountScopedEmbedUrl() throws Exception {
-        var response = service.getBuyerDashboard(mapper.readTree("""
+        ObjectNode response = service.getBuyerDashboard(mapper.readTree("""
                 {"dashboardIdentifier":"arn:aws:aws-marketplace::123456789012:AWSMarketplace/ReportingData/Agreement_V1/Dashboard/AgreementSummary_V1",
                 "embeddingDomains":["https://example.com"]}
                 """), "123456789012");

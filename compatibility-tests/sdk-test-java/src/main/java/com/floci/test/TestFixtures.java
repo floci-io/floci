@@ -17,6 +17,7 @@ import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityPr
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.resourceexplorer2.ResourceExplorer2ClientBuilder;
 import software.amazon.awssdk.services.servicediscovery.ServiceDiscoveryClient;
 import software.amazon.awssdk.services.emr.EmrClient;
 import software.amazon.awssdk.services.emrserverless.EmrServerlessClient;
@@ -969,6 +970,19 @@ public final class TestFixtures {
                 .build();
     }
 
+    /**
+     * An SES v2 client acting as {@code accountId}, which the emulator reads from a 12-digit access
+     * key: SES allows one contact list per account, so a test that needs its own list uses an
+     * account no other test touches.
+     */
+    public static SesV2Client sesV2Client(String accountId) {
+        return SesV2Client.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .build();
+    }
+
     public static Route53Client route53Client() {
         return route53Client("test");
     }
@@ -1404,7 +1418,7 @@ public final class TestFixtures {
      * to exercise a real create against a region that starts with no index.
      */
     public static ResourceExplorer2Client resourceExplorer2Client(Region region) {
-        var builder = ResourceExplorer2Client.builder().region(region);
+        ResourceExplorer2ClientBuilder builder = ResourceExplorer2Client.builder().region(region);
         if (!isRealAws()) {
             builder.endpointOverride(ENDPOINT).credentialsProvider(CREDENTIALS);
         }

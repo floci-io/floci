@@ -4,6 +4,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.detective.DetectiveClient;
 import software.amazon.awssdk.services.detective.model.Account;
+import software.amazon.awssdk.services.detective.model.CreateMembersResponse;
+import software.amazon.awssdk.services.organizations.OrganizationsClient;
 
 import java.util.List;
 
@@ -21,7 +23,7 @@ class DetectiveOrganizationAdministrationTest {
     void organizationAdministrationUsesAwsSdk() {
         assumeFalse(TestFixtures.isRealAws(), "Avoids changing Detective organization settings in real AWS");
 
-        try (var organizations = TestFixtures.organizationsClient(MANAGEMENT_ACCOUNT);
+        try (OrganizationsClient organizations = TestFixtures.organizationsClient(MANAGEMENT_ACCOUNT);
              DetectiveClient management = TestFixtures.detectiveClient(MANAGEMENT_ACCOUNT);
              DetectiveClient administrator = TestFixtures.detectiveClient(ADMIN_ACCOUNT)) {
             try {
@@ -44,13 +46,13 @@ class DetectiveOrganizationAdministrationTest {
             assertThat(administrator.describeOrganizationConfiguration(request -> request.graphArn(graphArn)).autoEnable())
                     .isTrue();
 
-            var created = administrator.createMembers(request -> request
+            CreateMembersResponse created = administrator.createMembers(request -> request
                     .graphArn(graphArn)
                     .accounts(List.of(Account.builder().accountId(MEMBER_ACCOUNT).build())));
             assertThat(created.members()).extracting(member -> member.accountId()).containsExactly(MEMBER_ACCOUNT);
             assertThat(created.unprocessedAccounts()).isEmpty();
 
-            var duplicate = administrator.createMembers(request -> request
+            CreateMembersResponse duplicate = administrator.createMembers(request -> request
                     .graphArn(graphArn)
                     .accounts(List.of(Account.builder().accountId(MEMBER_ACCOUNT).build())));
             assertThat(duplicate.members()).isEmpty();

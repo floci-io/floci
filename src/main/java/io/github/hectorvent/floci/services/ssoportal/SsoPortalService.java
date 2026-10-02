@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.ssoadmin.SsoAdminService;
+import io.github.hectorvent.floci.services.ssoadmin.model.Assignment;
+import io.github.hectorvent.floci.services.ssoadmin.model.PermissionSet;
 import io.github.hectorvent.floci.services.ssooidc.SsoOidcException;
 import io.github.hectorvent.floci.services.ssooidc.SsoOidcService;
 import io.github.hectorvent.floci.services.ssooidc.model.TokenSession;
@@ -78,7 +80,7 @@ public class SsoPortalService {
         ssoAdminService.portalAssignmentsForUser(session.principalId()).stream()
                 .filter(assignment -> accountId.equals(assignment.accountId()))
                 .forEach(assignment -> {
-                    var permissionSet = ssoAdminService.permissionSetForPortal(assignment.permissionSetArn());
+                    PermissionSet permissionSet = ssoAdminService.permissionSetForPortal(assignment.permissionSetArn());
                     roles.putIfAbsent(assignment.permissionSetArn(),
                             new PortalRoleInfo(accountId, permissionSet.name()));
                 });
@@ -96,14 +98,14 @@ public class SsoPortalService {
         if (roleName == null || roleName.isBlank()) {
             throw new AwsException("InvalidRequestException", "roleName is required.", 400);
         }
-        var assignment = ssoAdminService.portalAssignmentsForUser(session.principalId()).stream()
+        Assignment assignment = ssoAdminService.portalAssignmentsForUser(session.principalId()).stream()
                 .filter(candidate -> accountId.equals(candidate.accountId()))
                 .filter(candidate -> roleName.equals(
                         ssoAdminService.permissionSetForPortal(candidate.permissionSetArn()).name()))
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The requested account role is not assigned to this user.", 404));
-        var permissionSet = ssoAdminService.permissionSetForPortal(assignment.permissionSetArn());
+        PermissionSet permissionSet = ssoAdminService.permissionSetForPortal(assignment.permissionSetArn());
         Instant expiration = Instant.now().plus(Duration.parse(permissionSet.sessionDuration()));
         String accessKeyId = "ASIA" + random(UPPER_ALPHANUMERIC, 16);
         String secretAccessKey = random(SECRET_CHARACTERS, 40);

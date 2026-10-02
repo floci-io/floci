@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.networknt.schema.ValidationMessage;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
@@ -58,6 +59,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -1099,7 +1101,7 @@ public class ApiGatewayExecuteController {
                                     com.networknt.schema.JsonSchemaFactory.getInstance(
                                             com.networknt.schema.SpecVersion.VersionFlag.V4);
                             com.networknt.schema.JsonSchema schema = factory.getSchema(schemaNode);
-                            var errors = schema.validate(bodyNode);
+                            Set<ValidationMessage> errors = schema.validate(bodyNode);
                             if (!errors.isEmpty()) {
                                 String errorMsg = errors.iterator().next().getMessage();
                                 return gatewayResponse(scope, GatewayResponseType.BAD_REQUEST_BODY, 400,
@@ -1527,9 +1529,9 @@ public class ApiGatewayExecuteController {
         if (headersNode == null || !headersNode.isObject()) {
             return Optional.empty();
         }
-        var it = headersNode.fields();
+        Iterator<Map.Entry<String, JsonNode>> it = headersNode.fields();
         while (it.hasNext()) {
-            var e = it.next();
+            Map.Entry<String, JsonNode> e = it.next();
             if (e.getKey().equalsIgnoreCase(name)) {
                 JsonNode value = e.getValue().isArray() ? e.getValue().get(0) : e.getValue();
                 return value == null || value.isNull() ? Optional.empty() : Optional.of(value.asText());

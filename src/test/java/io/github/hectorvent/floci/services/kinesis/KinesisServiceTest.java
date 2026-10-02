@@ -119,7 +119,7 @@ class KinesisServiceTest {
                 "TRIM_HORIZON", null, REGION);
         Map<String, Object> result = kinesisService.getRecords(iterator, 10, REGION);
 
-        var records = (List<?>) result.get("Records");
+        List<?> records = (List<?>) result.get("Records");
         assertEquals(1, records.size());
     }
 
@@ -132,7 +132,7 @@ class KinesisServiceTest {
         String iterator = kinesisService.getShardIterator("my-stream", shardId, "LATEST", null, REGION);
         Map<String, Object> result = kinesisService.getRecords(iterator, 10, REGION);
 
-        var records = (List<?>) result.get("Records");
+        List<?> records = (List<?>) result.get("Records");
         assertTrue(records.isEmpty());
         assertEquals(0L, ((Number) result.get("MillisBehindLatest")).longValue());
     }
@@ -148,7 +148,7 @@ class KinesisServiceTest {
         kinesisService.putRecord("my-stream", "after".getBytes(StandardCharsets.UTF_8), "pk", REGION);
 
         Map<String, Object> result = kinesisService.getRecords(iterator, 10, REGION);
-        var records = (List<?>) result.get("Records");
+        List<?> records = (List<?>) result.get("Records");
         assertEquals(1, records.size());
         assertEquals("after", new String(((KinesisRecord) records.getFirst()).getData(), StandardCharsets.UTF_8));
     }
@@ -166,7 +166,7 @@ class KinesisServiceTest {
         kinesisService.putRecord("my-stream", "tailed".getBytes(StandardCharsets.UTF_8), "pk", REGION);
 
         Map<String, Object> second = kinesisService.getRecords((String) first.get("NextShardIterator"), 10, REGION);
-        var records = (List<?>) second.get("Records");
+        List<?> records = (List<?>) second.get("Records");
         assertEquals(1, records.size());
         assertEquals("tailed", new String(((KinesisRecord) records.getFirst()).getData(), StandardCharsets.UTF_8));
     }
@@ -203,7 +203,7 @@ class KinesisServiceTest {
 
         Map<String, Object> result = kinesisService.getRecords(iterator, 10, REGION);
 
-        var records = (List<?>) result.get("Records");
+        List<?> records = (List<?>) result.get("Records");
         assertEquals(2, records.size());
         assertEquals(0L, ((Number) result.get("MillisBehindLatest")).longValue());
     }
@@ -229,7 +229,7 @@ class KinesisServiceTest {
 
         Map<String, Object> result = service.getRecords(iterator, 2, REGION);
 
-        var returned = (List<?>) result.get("Records");
+        List<?> returned = (List<?>) result.get("Records");
         assertEquals(2, returned.size());
         // Last returned = records[1] at +1500ms, tip = records[2] at +4000ms, delta = 2500ms
         assertEquals(2500L, ((Number) result.get("MillisBehindLatest")).longValue());

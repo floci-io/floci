@@ -94,22 +94,22 @@ class S3PresignedUrlSigV4VerificationTest {
     void sdkPresignedUrlIsAcceptedButNotValidForAnotherObject() throws Exception {
         assumeEnforcementEnabled();
 
-        var urlA = presignGet(KEY_A);
-        var urlB = presignGet(KEY_B);
+        String urlA = presignGet(KEY_A);
+        String urlB = presignGet(KEY_B);
 
-        var a = httpGet(urlA);
+        HttpResponse<String> a = httpGet(urlA);
         assertThat(a.statusCode()).isEqualTo(200);
         assertThat(a.body()).isEqualTo(BODY_A);
 
-        var b = httpGet(urlB);
+        HttpResponse<String> b = httpGet(urlB);
         assertThat(b.statusCode()).isEqualTo(200);
         assertThat(b.body()).isEqualTo(BODY_B);
 
         // Transplant: object A's raw path with object B's complete raw query
-        var transplanted = TestFixtures.endpoint()
+        String transplanted = TestFixtures.endpoint()
                 + URI.create(urlA).getRawPath() + "?" + URI.create(urlB).getRawQuery();
 
-        var t = httpGet(transplanted);
+        HttpResponse<String> t = httpGet(transplanted);
         assertThat(t.statusCode()).isEqualTo(403);
         assertThat(t.body()).contains("SignatureDoesNotMatch");
     }
@@ -119,17 +119,17 @@ class S3PresignedUrlSigV4VerificationTest {
     void reorderedQueryParametersStillVerify() throws Exception {
         assumeEnforcementEnabled();
 
-        var url = URI.create(presignGet(KEY_A));
-        var pairs = url.getRawQuery().split("&");
-        var reordered = new StringBuilder();
-        for (var i = pairs.length - 1; i >= 0; i--) {
+        URI url = URI.create(presignGet(KEY_A));
+        String[] pairs = url.getRawQuery().split("&");
+        StringBuilder reordered = new StringBuilder();
+        for (int i = pairs.length - 1; i >= 0; i--) {
             reordered.append(pairs[i]);
             if (i > 0) {
                 reordered.append("&");
             }
         }
 
-        var r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + reordered);
+        HttpResponse<String> r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + reordered);
         assertThat(r.statusCode()).isEqualTo(200);
         assertThat(r.body()).isEqualTo(BODY_A);
     }
@@ -140,7 +140,7 @@ class S3PresignedUrlSigV4VerificationTest {
         assumeEnforcementEnabled();
 
         String url;
-        try (var presigner = presigner()) {
+        try (S3Presigner presigner = presigner()) {
             url = presigner.presignGetObject(GetObjectPresignRequest.builder()
                     .signatureDuration(Duration.ofMinutes(5))
                     .getObjectRequest(GetObjectRequest.builder()
@@ -150,7 +150,7 @@ class S3PresignedUrlSigV4VerificationTest {
                     .build()).url().toString();
         }
 
-        var r = httpGet(url);
+        HttpResponse<String> r = httpGet(url);
         assertThat(r.statusCode()).isEqualTo(200);
         assertThat(r.body()).isEqualTo(BODY_A);
     }
@@ -160,11 +160,11 @@ class S3PresignedUrlSigV4VerificationTest {
     void expiredPresignedUrlIsRejected() throws Exception {
         assumeEnforcementEnabled();
 
-        var url = URI.create(presignGet(KEY_A));
-        var expiredQuery = url.getRawQuery()
+        URI url = URI.create(presignGet(KEY_A));
+        String expiredQuery = url.getRawQuery()
                 .replaceFirst("X-Amz-Date=[^&]+", "X-Amz-Date=20200101T000000Z");
 
-        var r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + expiredQuery);
+        HttpResponse<String> r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + expiredQuery);
         assertThat(r.statusCode()).isEqualTo(403);
         assertThat(r.body()).contains("AccessDenied");
     }
@@ -174,21 +174,21 @@ class S3PresignedUrlSigV4VerificationTest {
     void presignedUrlSignedWithIamAccessKeyIsAccepted() throws Exception {
         assumeEnforcementEnabled();
 
-        var userName = TestFixtures.uniqueName("presign-user");
+        String userName = TestFixtures.uniqueName("presign-user");
         iam.createUser(r -> r.userName(userName).path("/"));
         CreateAccessKeyResponse keyResponse = iam.createAccessKey(r -> r.userName(userName));
-        var accessKeyId = keyResponse.accessKey().accessKeyId();
-        var secretKey = keyResponse.accessKey().secretAccessKey();
+        String accessKeyId = keyResponse.accessKey().accessKeyId();
+        String secretKey = keyResponse.accessKey().secretAccessKey();
 
         String url;
-        try (var presigner = presigner(accessKeyId, secretKey)) {
+        try (S3Presigner presigner = presigner(accessKeyId, secretKey)) {
             url = presigner.presignGetObject(GetObjectPresignRequest.builder()
                     .signatureDuration(Duration.ofMinutes(5))
                     .getObjectRequest(GetObjectRequest.builder().bucket(BUCKET).key(KEY_A).build())
                     .build()).url().toString();
         }
 
-        var r = httpGet(url);
+        HttpResponse<String> r = httpGet(url);
         assertThat(r.statusCode()).isEqualTo(200);
         assertThat(r.body()).isEqualTo(BODY_A);
     }
@@ -198,10 +198,10 @@ class S3PresignedUrlSigV4VerificationTest {
     void presignedUrlWithMalformedCredentialIsRejected() throws Exception {
         assumeEnforcementEnabled();
 
-        var url = URI.create(presignGet(KEY_A));
-        var query = url.getRawQuery().replaceFirst("X-Amz-Credential=[^&]+", "X-Amz-Credential=test");
+        URI url = URI.create(presignGet(KEY_A));
+        String query = url.getRawQuery().replaceFirst("X-Amz-Credential=[^&]+", "X-Amz-Credential=test");
 
-        var r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + query);
+        HttpResponse<String> r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + query);
         assertThat(r.statusCode()).isEqualTo(403);
         assertThat(r.body()).contains("InvalidAccessKeyId");
     }
@@ -287,7 +287,7 @@ class S3PresignedUrlSigV4VerificationTest {
     }
 
     private static boolean probeEnforcementEnabled() {
-        var unknownS3 = S3Client.builder()
+        S3Client unknownS3 = S3Client.builder()
                 .endpointOverride(TestFixtures.endpoint())
                 .region(Region.US_EAST_1)
                 .credentialsProvider(StaticCredentialsProvider.create(
@@ -328,7 +328,7 @@ class S3PresignedUrlSigV4VerificationTest {
     }
 
     private static String presignGet(String key) {
-        try (var presigner = presigner()) {
+        try (S3Presigner presigner = presigner()) {
             return presigner.presignGetObject(GetObjectPresignRequest.builder()
                     .signatureDuration(Duration.ofMinutes(5))
                     .getObjectRequest(GetObjectRequest.builder().bucket(BUCKET).key(key).build())

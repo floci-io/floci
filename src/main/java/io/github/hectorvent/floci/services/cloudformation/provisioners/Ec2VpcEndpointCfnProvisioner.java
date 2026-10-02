@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -54,7 +55,7 @@ public class Ec2VpcEndpointCfnProvisioner implements CfnResourceProvisioner {
                 ? Boolean.parseBoolean(privateDns)
                 : null;
         String previousEndpointId = r.getPhysicalId();
-        var endpoint = ec2Service.createVpcEndpoint(ctx.region(), vpcId, serviceName,
+        VpcEndpoint endpoint = ec2Service.createVpcEndpoint(ctx.region(), vpcId, serviceName,
                 endpointType != null ? endpointType : "Gateway",
                 resolveIdList(props, "RouteTableIds", ctx),
                 resolveIdList(props, "SubnetIds", ctx),

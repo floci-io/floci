@@ -25,6 +25,8 @@ import software.amazon.awssdk.services.ses.model.SesException;
 import software.amazon.awssdk.services.ses.model.TlsPolicy;
 import software.amazon.awssdk.services.sns.SnsClient;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -316,7 +318,7 @@ class SesReceiptRuleSetTest {
         ses.createReceiptFilter(b -> b.filter(f -> f.name(allowFilter)
                 .ipFilter(ip -> ip.policy(ReceiptFilterPolicy.ALLOW).cidr("192.0.2.10"))));
 
-        var filters = ses.listReceiptFilters().filters();
+        List<ReceiptFilter> filters = ses.listReceiptFilters().filters();
         ReceiptFilter block = filters.stream()
                 .filter(f -> blockFilter.equals(f.name())).findFirst().orElseThrow();
         assertThat(block.ipFilter().policy()).isEqualTo(ReceiptFilterPolicy.BLOCK);

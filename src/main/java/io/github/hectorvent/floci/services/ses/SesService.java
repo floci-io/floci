@@ -1282,6 +1282,19 @@ public class SesService {
         });
     }
 
+    public PaginatedResult<SuppressedDestination> listSuppressedDestinations(
+            String region, List<String> reasonFilters, String tenantName, SesListPaging paging, Integer pageSize,
+            String nextToken) {
+        if (tenantName == null) {
+            return suppressionService.listSuppressedDestinations(region, reasonFilters, paging, pageSize,
+                    nextToken);
+        }
+        SesSuppressionService.validateReasonFilters(reasonFilters);
+        return tenantService.runWithTenant(tenantName, region, tenant ->
+                suppressionService.listTenantSuppressedDestinations(region, tenant.tenantId(),
+                        reasonFilters, paging, pageSize, nextToken));
+    }
+
     public List<SuppressedDestination> listSuppressedDestinations(String region,
                                                                   List<String> reasonFilters,
                                                                   String tenantName) {

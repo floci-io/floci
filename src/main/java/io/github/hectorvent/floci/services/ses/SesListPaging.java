@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
+import jakarta.ws.rs.core.UriInfo;
 
 import java.time.Instant;
 import java.util.List;
@@ -84,7 +85,44 @@ public enum SesListPaging {
      * ListImportJobs refuses sandbox accounts, so nothing about it could be probed; it is modelled
      * on the tenant lists, which share its Smithy-generated validation.
      */
-    V2_LIST_IMPORT_JOBS(Namespace.IMPORT_JOB);
+    V2_LIST_IMPORT_JOBS(Namespace.IMPORT_JOB),
+
+    /** SES holds one contact list per region, so no default could be measured; it is taken to be the bound. */
+    V2_LIST_CONTACT_LISTS(Namespace.CONTACT_LIST, 1000, 1000,
+            size -> badRequest("The page size must be between 1 and 1000"),
+            token -> badRequest("Provided NextToken is invalid"),
+            true),
+
+    V2_LIST_CONTACTS(Namespace.CONTACT, 50, 1000,
+            size -> badRequest("The page size must be between 1 and 1000"),
+            token -> badRequest("Provided NextToken is invalid"),
+            true),
+
+    /** 12 pools came back whole without a PageSize, so the default is taken to be the bound. */
+    V2_LIST_DEDICATED_IP_POOLS(Namespace.DEDICATED_IP_POOL, 1000, 1000,
+            size -> badRequest("The page size must be in [1, 1000] range."),
+            token -> badRequest("Invalid next token."),
+            false),
+
+    /** Unmeasurable without leased IPs; modelled on the pool list, whose messages it shares. */
+    V2_GET_DEDICATED_IPS(Namespace.DEDICATED_IP, 1000, 1000,
+            size -> badRequest("The page size must be in [1, 1000] range."),
+            token -> badRequest("Invalid next token."),
+            false),
+
+    /** 24 destinations came back whole without a PageSize, so the default is taken to be the bound. */
+    V2_LIST_SUPPRESSED_DESTINATIONS(Namespace.SUPPRESSED_DESTINATION, 1000, 1000,
+            size -> badRequest("Page size " + size + " is invalid, expected a number between 1 and 1000"),
+            token -> new AwsException("InvalidNextTokenException", "Token is invalid.", 400),
+            true),
+
+    /**
+     * The request has no size member; the model documents "up to 100 receipt rule sets at a time".
+     * SES allows 40 rule sets per region, so a second page could not be observed.
+     */
+    V1_LIST_RECEIPT_RULE_SETS(Namespace.RECEIPT_RULE_SET, 100, 100, 100,
+            token -> invalidParameterValue("Invalid page token: " + token),
+            false);
 
     private static final class Namespace {
         static final String TEMPLATE = "template";
@@ -96,6 +134,12 @@ public enum SesListPaging {
         static final String TENANT_RESOURCE = "tenant-resource";
         static final String RESOURCE_TENANT = "resource-tenant";
         static final String IMPORT_JOB = "import-job";
+        static final String CONTACT_LIST = "contact-list";
+        static final String CONTACT = "contact";
+        static final String DEDICATED_IP_POOL = "dedicated-ip-pool";
+        static final String DEDICATED_IP = "dedicated-ip";
+        static final String SUPPRESSED_DESTINATION = "suppressed-destination";
+        static final String RECEIPT_RULE_SET = "receipt-rule-set";
     }
 
     /** What the tenant lists share, and ListImportJobs borrows: the bound and Smithy's messages. */
@@ -226,6 +270,14 @@ public enum SesListPaging {
                 ? "~"
                 : String.format(Locale.ROOT, "%019d.%09d", created.getEpochSecond(), created.getNano());
         return time + "#" + id;
+    }
+
+    /**
+     * The NextToken of a REST JSON query string, for a list that refuses an empty token: a
+     * {@code @QueryParam} binds an empty value as null, which would read as an absent token.
+     */
+    static String queryToken(UriInfo uriInfo) {
+        return uriInfo.getQueryParameters().getFirst("NextToken");
     }
 
     /** A REST JSON query-string page size; a value that is not an int is a serialization error. */

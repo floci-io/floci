@@ -2495,4 +2495,94 @@ class EksServiceTest {
                 new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
                 mock(EksPodIdentityAssociationService.class));
     }
+
+    @Test
+    void createClusterWithClusterArgsExtractsArgsAndStripsReservedTags() {
+        CreateClusterRequest req = createTestClusterRequest("args-cluster");
+        req.setTags(Map.of(
+                "floci:kubelet-arg:max-pods=250", "true",
+                "floci:kube-apiserver-arg:runtime-config=batch/v1=true", "true",
+                "env", "production"
+        ));
+
+        Cluster created = eksService.createCluster(req);
+        assertNotNull(created.getClusterArgs());
+        assertEquals(2, created.getClusterArgs().size());
+        assertTrue(created.getClusterArgs().contains("--kubelet-arg=max-pods=250"));
+        assertTrue(created.getClusterArgs().contains("--kube-apiserver-arg=runtime-config=batch/v1=true"));
+
+        // Reserved tags must be stripped from public tags
+        assertNotNull(created.getTags());
+        assertEquals(Map.of("env", "production"), created.getTags());
+        assertFalse(created.getTags().containsKey("floci:kubelet-arg:max-pods=250"));
+
+        Cluster described = eksService.describeCluster("args-cluster");
+        assertEquals(Map.of("env", "production"), described.getTags());
+        assertEquals(created.getClusterArgs(), described.getClusterArgs());
+    }
+
+    @Test
+    void createClusterWithCollidingArgThrowsInvalidParameterException() {
+        CreateClusterRequest req = createTestClusterRequest("colliding-cluster");
+        req.setTags(Map.of("floci:kubelet-arg:provider-id", "my-id"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> eksService.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("collides with Floci-managed kubelet argument"));
+    }
+
+    @Test
+    void createClusterWithCollidingArgDoesNotLeakSecurityGroup() {
+        Ec2Service ec2 = realEc2Service();
+        ec2.ensureDefaultResources("us-east-1");
+        String vpcId = ec2.createVpc("us-east-1", "172.31.0.0/16", false).getVpcId();
+        String subnetId = ec2.createSubnet("us-east-1", vpcId, "172.31.1.0/24", "us-east-1a").getSubnetId();
+
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class));
+
+        CreateClusterRequest req = createTestClusterRequest("colliding-sg-leak");
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(subnetId));
+        req.setResourcesVpcConfig(vpcConfig);
+        req.setTags(Map.of("floci:kubelet-arg:provider-id", "my-id"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+
+        List<SecurityGroup> allSgs = ec2.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of());
+        boolean leaked = allSgs.stream().anyMatch(sg -> sg.getGroupName().startsWith("eks-cluster-sg-colliding-sg-leak-"));
+        assertFalse(leaked, "Cluster security group should not be created when argument validation fails");
+    }
+
+    @Test
+    void tagResourceWithReservedTagThrowsValidationException() {
+        createTestCluster("tag-resource-cluster");
+        Cluster cluster = eksService.describeCluster("tag-resource-cluster");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                eksService.tagResource(cluster.getArn(), Map.of("floci:kubelet-arg:max-pods=250", "true")));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void clusterArgsSurviveRestart(@TempDir Path directory) {
+        EksService before = persistentEksService(directory);
+        before.init();
+
+        CreateClusterRequest req = createTestClusterRequest("restart-args-cluster");
+        req.setTags(Map.of("floci:kubelet-arg:max-pods=250", "true", "owner", "ops"));
+        Cluster created = before.createCluster(req);
+        assertEquals(List.of("--kubelet-arg=max-pods=250"), created.getClusterArgs());
+
+        EksService after = persistentEksService(directory);
+        after.init();
+
+        Cluster described = after.describeCluster("restart-args-cluster");
+        assertEquals(List.of("--kubelet-arg=max-pods=250"), described.getClusterArgs());
+        assertEquals(Map.of("owner", "ops"), described.getTags());
+    }
 }

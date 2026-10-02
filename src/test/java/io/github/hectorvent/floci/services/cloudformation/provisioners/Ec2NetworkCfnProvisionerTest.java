@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -478,7 +479,7 @@ class Ec2NetworkCfnProvisionerTest {
     }
 
     private static ObjectNode withTags(ObjectNode props, String... keyValues) {
-        var tags = props.putArray("Tags");
+        ArrayNode tags = props.putArray("Tags");
         for (int i = 0; i + 1 < keyValues.length; i += 2) {
             tags.addObject().put("Key", keyValues[i]).put("Value", keyValues[i + 1]);
         }
@@ -714,7 +715,7 @@ class Ec2NetworkCfnProvisionerTest {
         when(ec2.allocateAddress(REGION)).thenReturn(addr);
         doThrow(new AwsException("TagLimitExceeded", "too many tags", 400)).when(ec2).createTags(any(), any(), any());
 
-        for (var attempt : List.of(
+        for (Map.Entry<String, ObjectNode> attempt : List.of(
                 Map.entry("AWS::EC2::Subnet", withTags(mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.0/24"), "k", "v")),
                 Map.entry("AWS::EC2::RouteTable", withTags(mapper.createObjectNode().put("VpcId", VPC_ID), "k", "v")),
                 Map.entry("AWS::EC2::InternetGateway", withTags(mapper.createObjectNode(), "k", "v")),

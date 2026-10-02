@@ -3,10 +3,14 @@ package com.floci.test;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.cloudfront.CloudFrontClient;
 import software.amazon.awssdk.services.cloudfront.model.CreateResponseHeadersPolicyResponse;
+import software.amazon.awssdk.services.cloudfront.model.GetResponseHeadersPolicyConfigResponse;
+import software.amazon.awssdk.services.cloudfront.model.GetResponseHeadersPolicyResponse;
 import software.amazon.awssdk.services.cloudfront.model.NoSuchResponseHeadersPolicyException;
 import software.amazon.awssdk.services.cloudfront.model.PreconditionFailedException;
 import software.amazon.awssdk.services.cloudfront.model.ResponseHeadersPolicyConfig;
+import software.amazon.awssdk.services.cloudfront.model.ResponseHeadersPolicyList;
 import software.amazon.awssdk.services.cloudfront.model.ResponseHeadersPolicyType;
+import software.amazon.awssdk.services.cloudfront.model.UpdateResponseHeadersPolicyResponse;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -44,7 +48,7 @@ class CloudFrontResponseHeadersPolicyTest {
                             .name());
 
             String id = policyId;
-            var fetched = cloudFront.getResponseHeadersPolicy(
+            GetResponseHeadersPolicyResponse fetched = cloudFront.getResponseHeadersPolicy(
                     request -> request.id(id));
             assertEquals(etag, fetched.eTag());
             assertEquals("created",
@@ -77,7 +81,7 @@ class CloudFrontResponseHeadersPolicyTest {
                     .get(0)
                     .override());
 
-            var fetchedConfig = cloudFront.getResponseHeadersPolicyConfig(
+            GetResponseHeadersPolicyConfigResponse fetchedConfig = cloudFront.getResponseHeadersPolicyConfig(
                     request -> request.id(id));
             assertEquals(etag, fetchedConfig.eTag());
             assertEquals("created-value",
@@ -94,7 +98,7 @@ class CloudFrontResponseHeadersPolicyTest {
                     .serverTimingHeadersConfig()
                     .enabled());
 
-            var listed = cloudFront.listResponseHeadersPolicies(request -> request
+            ResponseHeadersPolicyList listed = cloudFront.listResponseHeadersPolicies(request -> request
                     .type(ResponseHeadersPolicyType.CUSTOM)
                     .maxItems("100"))
                     .responseHeadersPolicyList();
@@ -110,7 +114,7 @@ class CloudFrontResponseHeadersPolicyTest {
                             .responseHeadersPolicyConfig(policyConfig(
                                     suffix, "stale", "stale-value"))));
 
-            var updated = cloudFront.updateResponseHeadersPolicy(request -> request
+            UpdateResponseHeadersPolicyResponse updated = cloudFront.updateResponseHeadersPolicy(request -> request
                     .id(id)
                     .ifMatch(created.eTag())
                     .responseHeadersPolicyConfig(policyConfig(

@@ -134,6 +134,27 @@ class SesListPagingTest {
     }
 
     @Test
+    void aTokenFromAnotherScope_isRefusedAsUnreadable() {
+        SesListPaging paging = SesListPaging.V2_LIST_SUPPRESSED_DESTINATIONS;
+        String token = paging.page(REGION, "BOUNCE", ITEMS, Function.identity(), 1, null).nextToken();
+
+        assertThat(paging.page(REGION, "BOUNCE", ITEMS, Function.identity(), 1, token).items(), contains("b"));
+        assertError("InvalidNextTokenException", "Token is invalid.",
+                () -> paging.page(REGION, "COMPLAINT", ITEMS, Function.identity(), 1, token));
+        assertError("InvalidNextTokenException", "Token is invalid.",
+                () -> paging.page(REGION, ITEMS, Function.identity(), 1, token));
+    }
+
+    @Test
+    void contactsDefaultToFiftyAndTheUnmeasuredListsToTheirBound() {
+        assertEquals(50, SesListPaging.V2_LIST_CONTACTS.pageSize(null));
+        assertEquals(1000, SesListPaging.V2_LIST_CONTACT_LISTS.pageSize(null));
+        assertEquals(1000, SesListPaging.V2_LIST_DEDICATED_IP_POOLS.pageSize(null));
+        assertEquals(1000, SesListPaging.V2_GET_DEDICATED_IPS.pageSize(null));
+        assertEquals(1000, SesListPaging.V2_LIST_SUPPRESSED_DESTINATIONS.pageSize(null));
+    }
+
+    @Test
     void invalidToken_messagesQuoteTheToken() {
         assertError("BadRequestException", "Invalid PageToken <garbage>.",
                 () -> page(SesListPaging.V2_LIST_EMAIL_TEMPLATES, 1, "garbage"));

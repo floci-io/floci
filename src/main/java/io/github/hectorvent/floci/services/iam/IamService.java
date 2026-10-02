@@ -460,6 +460,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public IamUser createUser(String userName, String path) {
+        return createUser(userName, path, null);
+    }
+
+    public IamUser createUser(String userName, String path, String permissionsBoundaryArn) {
+        if (permissionsBoundaryArn != null) {
+            requirePolicy(permissionsBoundaryArn); // validate before anything is created
+        }
         synchronized (resourceNameLock) {
             if (containsNameIgnoreCase(users, IamUser::getUserName, userName)) {
                 throw new AwsException("EntityAlreadyExists",
@@ -469,6 +476,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             String normalizedPath = normalizePath(path);
             String arn = iamArn("user", normalizedPath, userName);
             IamUser user = new IamUser(userId, userName, normalizedPath, arn);
+            user.setPermissionsBoundaryArn(permissionsBoundaryArn);
             users.put(userName, user);
             LOG.infov("Created IAM user: {0}", userName);
             return user;
@@ -747,6 +755,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public IamRole createRole(String roleName, String path, String assumeRolePolicyDocument,
                               String description, int maxSessionDuration, Map<String, String> tags) {
+        return createRole(roleName, path, assumeRolePolicyDocument, description, maxSessionDuration, tags, null);
+    }
+
+    public IamRole createRole(String roleName, String path, String assumeRolePolicyDocument,
+                              String description, int maxSessionDuration, Map<String, String> tags,
+                              String permissionsBoundaryArn) {
+        if (permissionsBoundaryArn != null) {
+            requirePolicy(permissionsBoundaryArn); // validate before anything is created
+        }
         synchronized (resourceNameLock) {
             if (containsNameIgnoreCase(roles, IamRole::getRoleName, roleName)) {
                 throw new AwsException("EntityAlreadyExists",
@@ -757,6 +774,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             String arn = iamArn("role", normalizedPath, roleName);
             IamRole role = new IamRole(roleId, roleName, normalizedPath, arn, assumeRolePolicyDocument);
             role.setDescription(description);
+            role.setPermissionsBoundaryArn(permissionsBoundaryArn);
             if (maxSessionDuration > 0) {
                 role.setMaxSessionDuration(maxSessionDuration);
             }

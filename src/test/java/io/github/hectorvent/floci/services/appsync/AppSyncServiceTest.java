@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizer
 import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizerResult;
 import io.github.hectorvent.floci.services.appsync.model.ApiKey;
 import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
+import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import jakarta.enterprise.inject.Instance;
@@ -57,7 +58,7 @@ class AppSyncServiceTest {
         GraphqlApi api = service.createGraphqlApi(
                 Map.of("name", "rename", "authenticationType", "API_KEY"), "us-east-1");
         service.createDataSource(api.getApiId(), Map.of("name", "ds", "type", "NONE"), "us-east-1");
-        var created = service.createFunction(api.getApiId(),
+        FunctionConfiguration created = service.createFunction(api.getApiId(),
                 Map.of("name", "Query_getMessages_0", "dataSourceName", "ds"), "us-east-1");
 
         service.updateFunction(api.getApiId(), created.getFunctionId(),

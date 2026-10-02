@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -395,7 +396,7 @@ class S3ServiceAnnotationsTest {
         // root is empty for every account partition.
         Path accountsRoot = tempDir.resolve("s3").resolve(".accounts");
         if (Files.isDirectory(accountsRoot)) {
-            try (var accounts = Files.list(accountsRoot)) {
+            try (Stream<Path> accounts = Files.list(accountsRoot)) {
                 for (Path account : accounts.toList()) {
                     Path annotationsRoot = account.resolve(".annotations");
                     assertFalse(Files.exists(annotationsRoot),
@@ -473,7 +474,7 @@ class S3ServiceAnnotationsTest {
         s3Service.deleteObject(BUCKET, "docs/readme.txt");
 
         // The annotations are gone, including the payload files on disk.
-        try (var stream = Files.walk(tempDir.resolve("s3").resolve(".accounts")
+        try (Stream<Path> stream = Files.walk(tempDir.resolve("s3").resolve(".accounts")
                 .resolve("000000000000").resolve(".annotations"))) {
             List<java.nio.file.Path> files = stream.filter(Files::isRegularFile).toList();
             assertTrue(files.isEmpty(), "annotation payload files should be removed, found: " + files);
@@ -558,7 +559,7 @@ class S3ServiceAnnotationsTest {
                 "disk-backed", null);
         assertEquals("on disk", readPayload("disk-backed"));
         // The .s3ann file exists under the account-scoped .annotations root.
-        try (var stream = Files.walk(tempDir.resolve("s3").resolve(".accounts")
+        try (Stream<Path> stream = Files.walk(tempDir.resolve("s3").resolve(".accounts")
                 .resolve("000000000000").resolve(".annotations"))) {
             List<java.nio.file.Path> files = stream.filter(Files::isRegularFile).toList();
             assertEquals(1, files.size());

@@ -106,7 +106,11 @@ class DynamoDbKinesisStreamingIntegrationTest {
             .statusCode(200)
             .body("TableName", equalTo("StreamingTable"))
             .body("StreamArn", equalTo(kinesisStreamArn))
-            .body("DestinationStatus", equalTo("ACTIVE"));
+            .body("DestinationStatus", equalTo("ACTIVE"))
+            .body("EnableKinesisStreamingConfiguration.ApproximateCreationDateTimePrecision",
+                    equalTo("MILLISECOND"))
+            // AWS carries DestinationStatusDescription on Describe only, not on Enable.
+            .body("$", not(hasKey("DestinationStatusDescription")));
     }
 
     @Test
@@ -344,7 +348,13 @@ class DynamoDbKinesisStreamingIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DestinationStatus", equalTo("DISABLED"));
+            .body("TableName", equalTo("StreamingTable"))
+            .body("StreamArn", equalTo(kinesisStreamArn))
+            .body("DestinationStatus", equalTo("DISABLED"))
+            // AWS answers Disable with the destination's configuration too.
+            .body("EnableKinesisStreamingConfiguration.ApproximateCreationDateTimePrecision",
+                    equalTo("MILLISECOND"))
+            .body("$", not(hasKey("DestinationStatusDescription")));
     }
 
     @Test
@@ -657,7 +667,10 @@ class DynamoDbKinesisStreamingIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            // Disable reports the precision the destination still carries, not the default.
+            .body("EnableKinesisStreamingConfiguration.ApproximateCreationDateTimePrecision",
+                    equalTo("MICROSECOND"));
 
         // No configuration on re-enable means the AWS default, not the previously stored MICROSECOND.
         given()

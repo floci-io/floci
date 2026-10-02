@@ -64,7 +64,7 @@ final class HistoryChain {
     }
 
     void continueAfter(Collection<HistoryChain> chains) {
-        var last = lastEventId;
+        long last = lastEventId;
         for (HistoryChain chain : chains) {
             last = Math.max(last, chain.lastEventId);
         }
@@ -169,7 +169,7 @@ final class HistoryChain {
     }
 
     private boolean isAbandoned() {
-        for (var chain = this; chain != null; chain = chain.parent) {
+        for (HistoryChain chain = this; chain != null; chain = chain.parent) {
             if (chain.abandoned) {
                 return true;
             }
@@ -245,7 +245,7 @@ final class HistoryChain {
             if (counted) {
                 AslExecutor.countTowardsHistoryEventLimit(producedEventCount);
             }
-            var event = new HistoryEvent();
+            HistoryEvent event = new HistoryEvent();
             event.setId(history.size() + 1L);
             event.setPreviousEventId(previousEventId);
             event.setType(type);

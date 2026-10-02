@@ -673,38 +673,41 @@ public class SecretsManagerService implements ResourceProvider {
                     "The RecoveryWindowInDays value must be between 7 and 30 days, inclusive.", 400);
         }
 
-        Secret secret = resolveSecret(secretId, region);
-        throwIfReplica(secret);
-        // AWS: "You can't delete a primary secret that is replicated to other Regions. You must
-        // first delete the replicas." Deleting it here would strand every replica with no primary
-        // to sync from and no way to remove them.
-        if (secret.getReplicationStatus() != null && !secret.getReplicationStatus().isEmpty()) {
-            throw new AwsException("InvalidRequestException",
-                    "You can't delete a secret that is replicated to other Regions. "
-                            + "Remove the replicas with RemoveRegionsFromReplication first.", 400);
-        }
-        String storageKey = regionKey(region, secret.getName());
+        Secret resolved = resolveSecret(secretId, region);
+        synchronized (lockFor(resolved.getArn())) {
+            Secret secret = resolveSecret(resolved.getArn(), region);
+            throwIfReplica(secret);
+            // AWS: "You can't delete a primary secret that is replicated to other Regions. You must
+            // first delete the replicas." Deleting it here would strand every replica with no primary
+            // to sync from and no way to remove them.
+            if (secret.getReplicationStatus() != null && !secret.getReplicationStatus().isEmpty()) {
+                throw new AwsException("InvalidRequestException",
+                        "You can't delete a secret that is replicated to other Regions. "
+                                + "Remove the replicas with RemoveRegionsFromReplication first.", 400);
+            }
+            String storageKey = regionKey(region, secret.getName());
 
-        if (forceDelete) {
-            store.delete(storageKey);
-            LOG.infov("Force-deleted secret: {0}", secret.getName());
-            secret.setDeletedDate(Instant.now());
+            if (forceDelete) {
+                store.delete(storageKey);
+                LOG.infov("Force-deleted secret: {0}", secret.getName());
+                secret.setDeletedDate(Instant.now());
+                return secret;
+            }
+
+            // Guard placed AFTER the force-delete branch on purpose: force-deleting a secret that is
+            // already inside its recovery window is a legitimate "skip the window, remove it now"
+            // escape hatch, so only the scheduling path is refused. Re-scheduling an already-scheduled
+            // secret silently moved its DeletionDate, which would quietly extend a window a caller
+            // believed was already counting down.
+            throwIfPendingDeletion(secret);
+
+            int windowDays = (recoveryWindowInDays != null) ? recoveryWindowInDays : defaultRecoveryWindowDays;
+            Instant deletedDate = Instant.now().plusSeconds((long) windowDays * 86400);
+            secret.setDeletedDate(deletedDate);
+            store.put(storageKey, secret);
+            LOG.infov("Scheduled deletion of secret: {0} at {1}", secret.getName(), deletedDate);
             return secret;
         }
-
-        // Guard placed AFTER the force-delete branch on purpose: force-deleting a secret that is
-        // already inside its recovery window is a legitimate "skip the window, remove it now"
-        // escape hatch, so only the scheduling path is refused. Re-scheduling an already-scheduled
-        // secret silently moved its DeletionDate, which would quietly extend a window a caller
-        // believed was already counting down.
-        throwIfPendingDeletion(secret);
-
-        int windowDays = (recoveryWindowInDays != null) ? recoveryWindowInDays : defaultRecoveryWindowDays;
-        Instant deletedDate = Instant.now().plusSeconds((long) windowDays * 86400);
-        secret.setDeletedDate(deletedDate);
-        store.put(storageKey, secret);
-        LOG.infov("Scheduled deletion of secret: {0} at {1}", secret.getName(), deletedDate);
-        return secret;
     }
 
     // ─── Multi-region replication ──────────────────────────────────────────────
@@ -1339,10 +1342,12 @@ public class SecretsManagerService implements ResourceProvider {
             }
             invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "testSecret", region);
             invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "finishSecret", region);
-            
-            Secret refreshed = resolveSecret(secretArn, region);
-            refreshed.setLastRotatedDate(Instant.now());
-            persist(refreshed, region);
+
+            synchronized (lockFor(secretArn)) {
+                Secret refreshed = resolveSecret(secretArn, region);
+                refreshed.setLastRotatedDate(Instant.now());
+                persist(refreshed, region);
+            }
         } catch (Exception e) {
             LOG.errorv(e, "Error during rotation steps for secret {0}", secretArn);
             throw e;

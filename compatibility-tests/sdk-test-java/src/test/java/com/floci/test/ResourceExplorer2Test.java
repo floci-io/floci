@@ -132,7 +132,7 @@ class ResourceExplorer2Test {
                 ListSupportedResourceTypesRequest.builder().maxResults(50).build());
 
         assertThat(response.resourceTypes()).as("ResourceTypes").isNotEmpty();
-        for (var rt : response.resourceTypes()) {
+        for (SupportedResourceType rt : response.resourceTypes()) {
             assertThat(rt.resourceType()).as("SupportedResourceType.ResourceType").isNotBlank();
             assertThat(rt.service()).as("SupportedResourceType.Service").isNotBlank();
             // Verify format: "service:type"
@@ -355,7 +355,7 @@ class ResourceExplorer2Test {
         ListIndexesResponse response = client.listIndexes(ListIndexesRequest.builder().build());
 
         assertThat(response.indexes()).as("ListIndexes.Indexes").isNotEmpty();
-        for (var idx : response.indexes()) {
+        for (Index idx : response.indexes()) {
             assertThat(idx.arn()).as("Index.Arn").isNotBlank();
             assertThat(idx.region()).as("Index.Region").isNotBlank();
             assertThat(idx.type()).as("Index.Type").isNotNull();

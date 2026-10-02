@@ -86,7 +86,7 @@ record DynamoDbAccessPath(String indexName, Kind kind, List<KeySchemaElement> ke
     }
 
     Set<String> projectedAttributeNames(TableDefinition table) {
-        var projected = table.getKeySchema().stream()
+        Set<String> projected = table.getKeySchema().stream()
                 .map(KeySchemaElement::getAttributeName)
                 .collect(Collectors.toSet());
         projected.addAll(keyAttributeNames());

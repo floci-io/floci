@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.stepfunctions.model.MapRun;
 import io.github.hectorvent.floci.services.stepfunctions.model.RoutingConfiguration;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachineAlias;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachineVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -140,7 +141,7 @@ public class StepFunctionsJsonHandler {
     }
 
     private Response handlePublishStateMachineVersion(JsonNode request) {
-        var version = service.publishStateMachineVersion(
+        StateMachineVersion version = service.publishStateMachineVersion(
                 requiredText(request, "stateMachineArn"),
                 optionalText(request, "revisionId"),
                 optionalText(request, "description"));
@@ -151,10 +152,10 @@ public class StepFunctionsJsonHandler {
     }
 
     private Response handleListStateMachineVersions(JsonNode request) {
-        var versions = service.listStateMachineVersions(request.path("stateMachineArn").asText());
+        List<StateMachineVersion> versions = service.listStateMachineVersions(request.path("stateMachineArn").asText());
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("stateMachineVersions");
-        for (var v : versions) {
+        for (StateMachineVersion v : versions) {
             ObjectNode item = array.addObject();
             item.put("stateMachineVersionArn", v.getStateMachineVersionArn());
             item.put("creationDate", v.getCreationDate());
@@ -464,10 +465,10 @@ public class StepFunctionsJsonHandler {
     }
 
     private Response handleGetExecutionHistory(JsonNode request) {
-        var arn = request.path("executionArn").asText();
-        var includeExecutionData = request.path("includeExecutionData").asBoolean(true);
+        String arn = request.path("executionArn").asText();
+        boolean includeExecutionData = request.path("includeExecutionData").asBoolean(true);
 
-        var live = service.getExecutionHistory(arn);
+        List<HistoryEvent> live = service.getExecutionHistory(arn);
         List<HistoryEvent> events;
         // Branch and iteration threads append under the history's own monitor while a client reads.
         synchronized (live) {
@@ -482,9 +483,9 @@ public class StepFunctionsJsonHandler {
             item.put("type", e.getType());
             if (e.getPreviousEventId() != null) item.put("previousEventId", e.getPreviousEventId());
             if (e.getDetails() != null) {
-                var details = e.getDetails();
+                Map<String, Object> details = e.getDetails();
                 if (!includeExecutionData) {
-                    var filtered = new LinkedHashMap<>(details);
+                    LinkedHashMap<String, Object> filtered = new LinkedHashMap<>(details);
                     filtered.keySet().removeAll(EXECUTION_DATA_FIELDS);
                     details = filtered;
                 }

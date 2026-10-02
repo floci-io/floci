@@ -205,7 +205,7 @@ class IotMqttBrokerServiceTest {
     @Test
     void aClientCertificateFromAnyIssuerCompletesTheHandshake() throws Exception {
         broker.startIfEnabled();
-        var device = GENERATOR.generateSelfSignedCertificate("device", List.of(), KeyAlgorithm.RSA_2048);
+        CertificateGenerator.GeneratedCertificate device = GENERATOR.generateSelfSignedCertificate("device", List.of(), KeyAlgorithm.RSA_2048);
 
         X509Certificate served = handshake(keyManagers(device));
 

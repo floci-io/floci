@@ -12,6 +12,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -154,14 +158,14 @@ class S3TablesServiceTest {
     void allowsOnlyOneConcurrentMetadataUpdatePerVersionToken() throws Exception {
         String arn = createBucketWithNamespace("analytics");
         S3Table created = createTable(arn, "analytics", "events");
-        var ready = new java.util.concurrent.CountDownLatch(2);
-        var start = new java.util.concurrent.CountDownLatch(1);
-        var executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
 
         try {
-            var first = executor.submit(() -> updateMetadataWithToken(arn, created.getVersionToken(),
+            Future<String> first = executor.submit(() -> updateMetadataWithToken(arn, created.getVersionToken(),
                     "s3://warehouse/events/metadata/v2.json", ready, start));
-            var second = executor.submit(() -> updateMetadataWithToken(arn, created.getVersionToken(),
+            Future<String> second = executor.submit(() -> updateMetadataWithToken(arn, created.getVersionToken(),
                     "s3://warehouse/events/metadata/v3.json", ready, start));
 
             assertEquals(true, ready.await(5, java.util.concurrent.TimeUnit.SECONDS));

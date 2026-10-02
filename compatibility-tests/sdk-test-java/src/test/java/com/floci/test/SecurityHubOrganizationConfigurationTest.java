@@ -5,8 +5,17 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
 import software.amazon.awssdk.services.organizations.model.AlreadyInOrganizationException;
+import software.amazon.awssdk.services.organizations.model.CreateAccountResponse;
 import software.amazon.awssdk.services.securityhub.SecurityHubClient;
+import software.amazon.awssdk.services.securityhub.model.CreateConfigurationPolicyResponse;
+import software.amazon.awssdk.services.securityhub.model.CreateFindingAggregatorResponse;
+import software.amazon.awssdk.services.securityhub.model.DescribeHubResponse;
+import software.amazon.awssdk.services.securityhub.model.DescribeOrganizationConfigurationResponse;
+import software.amazon.awssdk.services.securityhub.model.EnableOrganizationAdminAccountResponse;
+import software.amazon.awssdk.services.securityhub.model.GetConfigurationPolicyAssociationResponse;
+import software.amazon.awssdk.services.securityhub.model.ListOrganizationAdminAccountsResponse;
 import software.amazon.awssdk.services.securityhub.model.Policy;
+import software.amazon.awssdk.services.securityhub.model.StartConfigurationPolicyAssociationResponse;
 
 import java.util.Map;
 
@@ -31,12 +40,12 @@ class SecurityHubOrganizationConfigurationTest {
                  SecurityHubClient administrator = TestFixtures.securityHubClient(adminAccount)) {
                 assertThat(management.listOrganizationAdminAccounts(request -> {}).adminAccounts()).isEmpty();
 
-                var enabledAdmin = management.enableOrganizationAdminAccount(request -> request
+                EnableOrganizationAdminAccountResponse enabledAdmin = management.enableOrganizationAdminAccount(request -> request
                         .adminAccountId(adminAccount));
                 assertThat(enabledAdmin.adminAccountId()).isEqualTo(adminAccount);
                 assertThat(enabledAdmin.featureAsString()).isEqualTo("SecurityHub");
 
-                var administrators = management.listOrganizationAdminAccounts(request -> {});
+                ListOrganizationAdminAccountsResponse administrators = management.listOrganizationAdminAccounts(request -> {});
                 assertThat(administrators.featureAsString()).isEqualTo("SecurityHub");
                 assertThat(administrators.adminAccounts())
                     .singleElement()
@@ -49,7 +58,7 @@ class SecurityHubOrganizationConfigurationTest {
                 administrator.updateSecurityHubConfiguration(request -> request
                     .autoEnableControls(false)
                     .controlFindingGenerator("STANDARD_CONTROL"));
-                var hub = administrator.describeHub(request -> {});
+                DescribeHubResponse hub = administrator.describeHub(request -> {});
                 assertThat(hub.autoEnableControls()).isFalse();
                 assertThat(hub.controlFindingGeneratorAsString()).isEqualTo("STANDARD_CONTROL");
 
@@ -58,15 +67,15 @@ class SecurityHubOrganizationConfigurationTest {
                     .autoEnableStandards("NONE")
                     .organizationConfiguration(configuration -> configuration.configurationType("CENTRAL")));
 
-                var organization = administrator.describeOrganizationConfiguration(request -> {});
+                DescribeOrganizationConfigurationResponse organization = administrator.describeOrganizationConfiguration(request -> {});
                 assertThat(organization.autoEnable()).isFalse();
                 assertThat(organization.autoEnableStandardsAsString()).isEqualTo("NONE");
                 assertThat(organization.organizationConfiguration().configurationTypeAsString()).isEqualTo("CENTRAL");
 
-                var aggregator = administrator.createFindingAggregator(request -> request.regionLinkingMode("ALL_REGIONS"));
+                CreateFindingAggregatorResponse aggregator = administrator.createFindingAggregator(request -> request.regionLinkingMode("ALL_REGIONS"));
                 assertThat(aggregator.findingAggregatorArn()).isNotBlank();
 
-                var policy = administrator.createConfigurationPolicy(request -> request
+                CreateConfigurationPolicyResponse policy = administrator.createConfigurationPolicy(request -> request
                     .name(TestFixtures.uniqueName("securityhub-policy"))
                     .configurationPolicy(Policy.fromSecurityHub(securityHub -> securityHub.serviceEnabled(true)))
                     .tags(Map.of("env", "test")));
@@ -79,7 +88,7 @@ class SecurityHubOrganizationConfigurationTest {
                         assertThat(summary.serviceEnabled()).isTrue();
                     });
 
-                var association = administrator.startConfigurationPolicyAssociation(request -> request
+                StartConfigurationPolicyAssociationResponse association = administrator.startConfigurationPolicyAssociation(request -> request
                     .configurationPolicyIdentifier(policy.id())
                     .target(target -> target.accountId(memberAccount)));
                 assertThat(association.targetId()).isEqualTo(memberAccount);
@@ -87,7 +96,7 @@ class SecurityHubOrganizationConfigurationTest {
 
                 administrator.getConfigurationPolicyAssociation(request -> request
                     .target(target -> target.accountId(memberAccount)));
-                var converged = administrator.getConfigurationPolicyAssociation(request -> request
+                GetConfigurationPolicyAssociationResponse converged = administrator.getConfigurationPolicyAssociation(request -> request
                     .target(target -> target.accountId(memberAccount)));
                 assertThat(converged.associationStatusAsString()).isEqualTo("SUCCESS");
 
@@ -125,7 +134,7 @@ class SecurityHubOrganizationConfigurationTest {
 
     private static String createMemberAccount(OrganizationsClient organizations, String prefix) {
         String suffix = TestFixtures.uniqueName(prefix);
-        var response = organizations.createAccount(request -> request
+        CreateAccountResponse response = organizations.createAccount(request -> request
                 .accountName(suffix)
                 .email(suffix + "@example.com"));
         return response.createAccountStatus().accountId();

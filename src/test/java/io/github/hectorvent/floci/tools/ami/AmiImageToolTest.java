@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -151,7 +152,7 @@ class AmiImageToolTest {
     void toolTreeDoesNotContainShellScripts() throws Exception {
         Path tools = Path.of("src/main/java/io/github/hectorvent/floci/tools/ami");
         if (Files.isDirectory(tools)) {
-            try (var stream = Files.walk(tools)) {
+            try (Stream<Path> stream = Files.walk(tools)) {
                 assertFalse(stream.anyMatch(path -> path.getFileName().toString().endsWith(".sh")));
             }
         }

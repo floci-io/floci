@@ -246,12 +246,13 @@ final class SesV2Json {
     }
 
     /**
-     * Reproduces the AWS deserialization behavior for {@code SendingEnabled}
-     * (verified against real AWS SES V2 on 2026-06-13): a missing member
-     * defaults to {@code false}, and a present value goes through
-     * {@link #coerceBoolean(JsonNode)}.
+     * An optional SES v2 boolean member whose absence means {@code false}: a missing member is
+     * {@code false}, and a present value, {@code null} included, goes through
+     * {@link #coerceBoolean(JsonNode)}. AWS-verified for the account's and a configuration set's
+     * SendingEnabled, SigningEnabled, EmailForwardingEnabled, ReputationMetricsEnabled and an event
+     * destination's Enabled.
      */
-    static boolean parseSendingEnabled(JsonNode enabledNode) {
+    static boolean coerceBooleanOrFalse(JsonNode enabledNode) {
         if (enabledNode.isMissingNode()) {
             return false;
         }

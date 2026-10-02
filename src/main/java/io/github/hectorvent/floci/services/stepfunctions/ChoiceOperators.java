@@ -6,6 +6,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -159,7 +160,7 @@ public final class ChoiceOperators {
     private static void assertRuntimeWellFormed(JsonNode rule) {
         int logical = 0;
         int dataTest = 0;
-        var it = rule.fieldNames();
+        Iterator<String> it = rule.fieldNames();
         while (it.hasNext()) {
             String field = it.next();
             if (LOGICAL_OPERATORS.contains(field)) {
@@ -265,7 +266,7 @@ public final class ChoiceOperators {
     }
 
     private static String dataTestOperatorOf(JsonNode rule) {
-        var it = rule.fieldNames();
+        Iterator<String> it = rule.fieldNames();
         while (it.hasNext()) {
             String field = it.next();
             if (DATA_TEST_OPERATORS.contains(field)) {
@@ -345,7 +346,7 @@ public final class ChoiceOperators {
 
         int logicalCount = 0;
         int dataTestCount = 0;
-        var names = rule.fieldNames();
+        Iterator<String> names = rule.fieldNames();
         while (names.hasNext()) {
             String field = names.next();
             if (LOGICAL_OPERATORS.contains(field)) {
