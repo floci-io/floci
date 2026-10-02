@@ -766,6 +766,15 @@ public class ContainerLifecycleManager {
      * @return information about the adopted container
      */
     public ContainerInfo adopt(String containerId, List<Integer> ports) {
+        return adopt(containerId, ports, Optional.empty());
+    }
+
+    /**
+     * Adopts a container and resolves its endpoints on {@code preferredNetwork} when it is attached
+     * there, as {@link #createAndStart} does with the spec's network. A container that is on the
+     * default bridge as well as that network is otherwise reached at whichever address comes first.
+     */
+    public ContainerInfo adopt(String containerId, List<Integer> ports, Optional<String> preferredNetwork) {
         LOG.infov("Adopting existing container {0}", containerId);
 
         InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
@@ -780,7 +789,7 @@ public class ContainerLifecycleManager {
         Map<Integer, EndpointInfo> endpoints = new HashMap<>();
         Map<Integer, Integer> publishedHostPorts = new HashMap<>();
         for (int port : ports) {
-            endpoints.put(port, resolveEndpoint(inspect, port));
+            endpoints.put(port, resolveEndpoint(inspect, port, preferredNetwork.orElse(null)));
             OptionalInt published = readPublishedHostPort(inspect, port);
             if (published.isPresent()) {
                 publishedHostPorts.put(port, published.getAsInt());

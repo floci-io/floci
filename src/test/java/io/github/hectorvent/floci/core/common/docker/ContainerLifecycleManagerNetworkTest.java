@@ -13,6 +13,7 @@ import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.NetworkSettings;
+import com.github.dockerjava.api.model.Ports;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -28,6 +29,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -233,6 +235,74 @@ class ContainerLifecycleManagerNetworkTest {
         ContainerInfo info = manager().createAndStart(spec("container:sibling", Map.of(9200, 9400), List.of(9200)));
 
         assertEquals(new EndpointInfo("localhost", 9200), info.getEndpoint(9200));
+    }
+
+    @Test
+    void adoptReachesASurvivorOnSeveralNetworksThroughThePreferredOne() {
+        // A container created on the default bridge and then connected to Floci's network lists
+        // both; only the one Floci shares is reachable from Floci.
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        InspectContainerResponse.ContainerState running = runningState();
+        InspectContainerResponse survivor = inspectOf("survivor-id");
+        when(survivor.getState()).thenReturn(running);
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(survivor.getNetworkSettings()).thenReturn(networks);
+        when(survivor.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
+        Map<String, ContainerNetwork> attached = new LinkedHashMap<>();
+        attached.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.3"));
+        attached.put("floci_default", new ContainerNetwork().withIpv4Address("172.18.0.3"));
+        when(networks.getNetworks()).thenReturn(attached);
+        when(networks.getPorts()).thenReturn(new Ports());
+
+        ContainerInfo info = manager().adopt("survivor-id", List.of(6443), Optional.of("floci_default"));
+
+        assertEquals(new EndpointInfo("172.18.0.3", 6443), info.getEndpoint(6443));
+    }
+
+    @Test
+    void adoptWithoutAPreferredNetworkKeepsTakingTheFirstAddress() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        InspectContainerResponse.ContainerState running = runningState();
+        InspectContainerResponse survivor = inspectOf("survivor-id");
+        when(survivor.getState()).thenReturn(running);
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(survivor.getNetworkSettings()).thenReturn(networks);
+        when(survivor.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
+        Map<String, ContainerNetwork> attached = new LinkedHashMap<>();
+        attached.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.3"));
+        attached.put("floci_default", new ContainerNetwork().withIpv4Address("172.18.0.3"));
+        when(networks.getNetworks()).thenReturn(attached);
+        when(networks.getPorts()).thenReturn(new Ports());
+
+        ContainerInfo info = manager().adopt("survivor-id", List.of(6443));
+
+        assertEquals(new EndpointInfo("172.17.0.3", 6443), info.getEndpoint(6443));
+    }
+
+    @Test
+    void adoptFallsBackToTheFirstAddressWhenTheSurvivorIsNotOnThePreferredNetwork() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        InspectContainerResponse.ContainerState running = runningState();
+        InspectContainerResponse survivor = inspectOf("survivor-id");
+        when(survivor.getState()).thenReturn(running);
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(survivor.getNetworkSettings()).thenReturn(networks);
+        when(survivor.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
+        Map<String, ContainerNetwork> attached = new LinkedHashMap<>();
+        attached.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.3"));
+        attached.put("other", new ContainerNetwork().withIpv4Address("172.19.0.3"));
+        when(networks.getNetworks()).thenReturn(attached);
+        when(networks.getPorts()).thenReturn(new Ports());
+
+        ContainerInfo info = manager().adopt("survivor-id", List.of(6443), Optional.of("floci_default"));
+
+        assertEquals(new EndpointInfo("172.17.0.3", 6443), info.getEndpoint(6443));
+    }
+
+    private static InspectContainerResponse.ContainerState runningState() {
+        InspectContainerResponse.ContainerState state = mock(InspectContainerResponse.ContainerState.class);
+        when(state.getRunning()).thenReturn(true);
+        return state;
     }
 
     private InspectContainerResponse inspectOf(String containerId) {
