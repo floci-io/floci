@@ -518,6 +518,44 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void deletingAClusterHandsItsApiServerPortBackForTheNextCluster() {
+            stubFreshStart("cid-1", 6441);
+            Cluster cluster = cluster();
+            manager.startCluster(cluster);
+
+            manager.stopCluster(cluster);
+
+            verify(portAllocator).release(6441);
+        }
+
+        @Test
+        void retryingADeleteAfterBackupCleanupFailedHandsThePortBackOnlyOnce() {
+            Cluster cluster = cluster();
+            cluster.setDockerName("floci-eks-demo");
+            cluster.setContainerId("cid-1");
+            cluster.setHostPort(6441);
+            Mockito.doThrow(new IllegalStateException("Docker cleanup failed")).doNothing()
+                    .when(lifecycleManager).removeIfExistsStrict("floci-aws-eks-capacity-backup.demo");
+
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+            manager.stopCluster(cluster);
+
+            verify(portAllocator, Mockito.times(1)).release(6441);
+        }
+
+        @Test
+        void aClusterWhoseContainerCannotBeCreatedHandsItsPortBackExactlyOnce() {
+            when(portAllocator.allocate(6440, 6499)).thenReturn(6441);
+            when(lifecycleManager.create(any())).thenThrow(new IllegalStateException("Docker unreachable"));
+            Cluster cluster = cluster();
+
+            assertThrows(IllegalStateException.class, () -> manager.startCluster(cluster));
+            manager.stopCluster(cluster);
+
+            verify(portAllocator, Mockito.times(1)).release(6441);
+        }
+
+        @Test
         void capacityBackupDoesNotCollideWithAnotherClusterName() {
             when(lifecycleManager.create(any())).thenReturn("cid-new");
             when(lifecycleManager.startCreated(any(), any()))

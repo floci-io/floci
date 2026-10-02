@@ -402,7 +402,19 @@ public class EksClusterManager
                 config.services().eks().apiServerMaxPort());
 
         cluster.setHostPort(hostPort);
+        try {
+            launchCluster(cluster, image, containerName, hostPort);
+        } catch (RuntimeException e) {
+            // A retained port still belongs to the surviving container the caller restores.
+            if (retainedPort == null) {
+                portAllocator.release(hostPort);
+                cluster.setHostPort(0);
+            }
+            throw e;
+        }
+    }
 
+    private void launchCluster(Cluster cluster, String image, String containerName, int hostPort) {
         // Remove any stale container
         ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, containerName);
 
@@ -822,6 +834,11 @@ public class EksClusterManager
             return;
         }
         lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
+        if (cluster.getHostPort() > 0) {
+            portAllocator.release(cluster.getHostPort());
+            // Cleared so a delete retried after a failed backup cleanup cannot free a reused port.
+            cluster.setHostPort(0);
+        }
         if (cluster.getDockerName() != null) {
             // A failed backup cleanup must not leave the live node running. Keep the cluster
             // record so explicit deletion can be retried once Docker accepts the removal.
