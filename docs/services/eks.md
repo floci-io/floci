@@ -134,13 +134,13 @@ Floci supports the EKS cluster addon management plane for AWS SDKs and Terraform
 
 ### Supported operations
 
-- **Creation**: `CreateAddon` creates an addon on an ACTIVE cluster. Supported addons include `vpc-cni`, `coredns`, `kube-proxy`, and `eks-pod-identity-agent`. If `addonVersion` is omitted, the default version compatible with the cluster Kubernetes version is resolved automatically. Referenced `serviceAccountRoleArn` must exist in IAM. Idempotency is supported via `clientRequestToken`.
+- **Creation**: `CreateAddon` creates an addon on an ACTIVE cluster. Supported addons are `vpc-cni`, `coredns`, `kube-proxy`, `eks-pod-identity-agent`, `aws-ebs-csi-driver`, and `amazon-cloudwatch-observability`. If `addonVersion` is omitted, the default version compatible with the cluster Kubernetes version is resolved automatically. Referenced `serviceAccountRoleArn` must exist in IAM. Idempotency is supported via `clientRequestToken`.
 - **Retrieval**: `DescribeAddon` returns the complete addon resource shape, including ARN, cluster name, version, status (`ACTIVE`), health issues, tags, service account role ARN, configuration values, pod identity associations, owner, and publisher.
 - **Listing**: `ListAddons` lists installed addon names with pagination (`maxResults` and `nextToken`).
 - **Updating**: `UpdateAddon` updates the addon version, configuration values, service account role ARN, or resolve-conflicts strategy. It returns an `Update` tracking object and updates the addon metadata.
 - **Update tracking**: `DescribeUpdate` describes the status of an addon update (such as an in-place addon version update queried by Terraform).
 - **Deletion**: `DeleteAddon` marks the addon as `DELETING` and removes it from the cluster. Deleting a cluster automatically cleans up all associated addons.
-- **Supported versions**: `DescribeAddonVersions` queries the addon version catalog with optional filtering by `addonName` and `kubernetesVersion`, supporting pagination.
+- **Supported versions**: `DescribeAddonVersions` queries the addon version catalog with optional filtering by `addonName` and `kubernetesVersion`, supporting pagination. As in AWS, a `kubernetesVersion` filter also limits each version's `compatibilities` to that Kubernetes version. The catalog in `src/main/resources/eks/addon-versions.json` is AWS's own, for every Kubernetes version Floci can run; `make eks-addons-sync` regenerates it from `DescribeAddonVersions` with any AWS account's credentials.
 
 ### Metadata recording only
 

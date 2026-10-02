@@ -158,8 +158,13 @@ public class EksAddonCatalog {
     }
 
     private static AddonInfo filterByK8s(AddonInfo addon, String k8s) {
+        // Like AWS, a version-filtered answer keeps only that version's compatibility: clients such
+        // as Terraform's aws_eks_addon_version take the first entry flagged default.
         List<AddonVersionInfo> filtered = addon.addonVersions().stream()
                 .filter(v -> isCompatible(v, k8s, false))
+                .map(v -> new AddonVersionInfo(v.addonVersion(), v.architecture(),
+                        v.compatibilities().stream().filter(c -> k8s.equals(c.clusterVersion())).toList(),
+                        v.requiresConfiguration(), v.requiresIamPermissions()))
                 .toList();
         return filtered.isEmpty() ? null
                 : new AddonInfo(addon.addonName(), addon.type(), filtered, addon.publisher(), addon.owner());
