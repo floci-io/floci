@@ -71,7 +71,8 @@ class CognitoUserPoolUserCfnProvisionerTest {
         attributes.put("name", "One");
         verify(cognito).adminCreateUser("pool-a", "user-one", attributes, null, "SUPPRESS", true);
         assertEquals("user-one", r.getPhysicalId(), "Ref must resolve to the username");
-        assertEquals("pool-a", r.getAttributes().get("UserPoolId"));
+        assertTrue(r.getAttributes().keySet().stream().allMatch(key -> key.startsWith("__Floci")),
+                "AWS::Cognito::UserPoolUser exposes no Fn::GetAtt attribute");
         assertFalse(provisioner.hasReplacementUpdate(r));
     }
 
@@ -161,8 +162,10 @@ class CognitoUserPoolUserCfnProvisionerTest {
 
         verifyNoInteractions(cognito);
         assertEquals("user-one", r.getPhysicalId());
-        assertEquals("pool-a", r.getAttributes().get("UserPoolId"));
         assertFalse(provisioner.hasReplacementUpdate(r));
+
+        provisioner.delete(r, "us-east-1");
+        verify(cognito).adminDeleteUser("pool-a", r.getPhysicalId());
     }
 
     @Test
@@ -237,7 +240,9 @@ class CognitoUserPoolUserCfnProvisionerTest {
 
         verify(cognito).adminDeleteUser("pool-a", first);
         verify(cognito, never()).adminDeleteUser(eq("pool-b"), any());
-        assertEquals("pool-b", r.getAttributes().get("UserPoolId"));
+
+        provisioner.delete(r, "us-east-1");
+        verify(cognito).adminDeleteUser("pool-b", r.getPhysicalId());
     }
 
     @Test
@@ -256,13 +261,15 @@ class CognitoUserPoolUserCfnProvisionerTest {
         verify(cognito).adminDeleteUser("pool-b", "user-one-b");
         verifyNoMoreInteractions(cognito);
         assertEquals("user-one", r.getPhysicalId());
-        assertEquals("pool-a", r.getAttributes().get("UserPoolId"));
         assertFalse(provisioner.hasReplacementUpdate(r));
 
         // The createOnly record is the prior one again, so re-applying the original template is a no-op.
         clearInvocations(cognito);
         provisioner.provision(r, props(original), ctx("user-one"));
         verifyNoInteractions(cognito);
+
+        provisioner.delete(r, "us-east-1");
+        verify(cognito).adminDeleteUser("pool-a", r.getPhysicalId());
     }
 
     @Test

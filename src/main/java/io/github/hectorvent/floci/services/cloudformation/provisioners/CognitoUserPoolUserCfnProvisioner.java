@@ -29,7 +29,6 @@ public class CognitoUserPoolUserCfnProvisioner implements CfnResourceProvisioner
 
     private static final Logger LOG = Logger.getLogger(CognitoUserPoolUserCfnProvisioner.class);
     private static final String TYPE = "AWS::Cognito::UserPoolUser";
-    private static final String USER_POOL_ID_ATTR = "UserPoolId";
     private static final String CREATE_ONLY_ATTR = "__FlociCreateOnly";
     private static final String CREATE_ONLY_PRIOR_ATTR = "__FlociCreateOnlyPrior";
     /** Physical id to pool id, so a displaced user is deleted in its own pool, not the current one. */
@@ -89,7 +88,6 @@ public class CognitoUserPoolUserCfnProvisioner implements CfnResourceProvisioner
                 Boolean.parseBoolean(text(resolved, "ForceAliasCreation")));
 
         r.setPhysicalId(user.getUsername());
-        r.getAttributes().put(USER_POOL_ID_ATTR, userPoolId);
         r.getAttributes().put(CREATE_ONLY_ATTR, resolved.toString());
         recordPool(r, attributesBefore, userPoolId);
         ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -166,7 +164,7 @@ public class CognitoUserPoolUserCfnProvisioner implements CfnResourceProvisioner
 
     private static String poolFor(Map<String, String> attributes, String physicalId) {
         JsonNode pool = physicalId == null ? null : pools(attributes).get(physicalId);
-        return pool != null && pool.isTextual() ? pool.textValue() : attributes.get(USER_POOL_ID_ATTR);
+        return pool != null && pool.isTextual() ? pool.textValue() : null;
     }
 
     private static ObjectNode pools(Map<String, String> attributes) {
