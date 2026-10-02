@@ -36,8 +36,9 @@ import org.jboss.logging.Logger;
 
 import java.util.List;
 
+import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBoolean;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrFalse;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseOptionString;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.parseSendingEnabled;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseSuppressedReasons;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
@@ -107,7 +108,7 @@ public class SesConfigurationSetController {
                 if (!sendingNode.isObject()) {
                     throw new AwsException("SerializationException", "Expected null", 400);
                 }
-                cs.setSendingEnabled(parseSendingEnabled(sendingNode.path("SendingEnabled")));
+                cs.setSendingEnabled(coerceBooleanOrFalse(sendingNode.path("SendingEnabled")));
             }
             JsonNode reputationNode = request.path("ReputationOptions");
             if (!reputationNode.isMissingNode() && !reputationNode.isNull()) {
@@ -240,7 +241,7 @@ public class SesConfigurationSetController {
             // Reuse the AWS-aligned SendingEnabled deserialization shared with CreateConfigurationSet:
             // absent -> false, otherwise SesV2Json.coerceBoolean. An empty body / {} therefore
             // disables sending (200). Verified against real AWS.
-            boolean enabled = parseSendingEnabled(
+            boolean enabled = coerceBooleanOrFalse(
                     readOptionBody(objectMapper, body).path("SendingEnabled"));
             configSetService.setSendingEnabled(name, enabled, region);
             LOG.infov("SES V2 PutConfigurationSetSendingOptions: {0} on {1}", enabled, name);
@@ -258,10 +259,9 @@ public class SesConfigurationSetController {
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode request = readOptionBody(objectMapper, body);
-            Boolean enabled = parseReputationMetricsEnabled(request.path("ReputationMetricsEnabled"));
-            boolean effectiveEnabled = enabled != null && enabled;
-            configSetService.setReputationMetricsEnabled(name, effectiveEnabled, region);
-            LOG.infov("SES V2 PutConfigurationSetReputationOptions: {0} on {1}", effectiveEnabled, name);
+            boolean enabled = coerceBooleanOrFalse(request.path("ReputationMetricsEnabled"));
+            configSetService.setReputationMetricsEnabled(name, enabled, region);
+            LOG.infov("SES V2 PutConfigurationSetReputationOptions: {0} on {1}", enabled, name);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
@@ -346,11 +346,17 @@ public class SesConfigurationSetController {
         if (node.isMissingNode() || node.isNull()) {
             return null;
         }
-        if (!node.isBoolean()) {
-            throw new AwsException("BadRequestException",
-                    "ReputationMetricsEnabled must be a boolean.", 400);
-        }
-        return node.booleanValue();
+        return coerceBoolean(node);
+    }
+
+    // Enabled takes the shared SES v2 boolean coercion, which Jackson's own binding does not match.
+    private EventDestination parseEventDestination(JsonNode edNode) throws JsonProcessingException {
+        boolean enabled = coerceBooleanOrFalse(edNode.path("Enabled"));
+        ObjectNode withoutEnabled = edNode.deepCopy();
+        withoutEnabled.remove("Enabled");
+        EventDestination dest = objectMapper.treeToValue(withoutEnabled, EventDestination.class);
+        dest.setEnabled(enabled);
+        return dest;
     }
 
     private static TrackingOptions parseTrackingOptions(JsonNode node) {
@@ -460,7 +466,7 @@ public class SesConfigurationSetController {
             if (!edNode.isObject()) {
                 throw new AwsException("BadRequestException", "EventDestination is required.", 400);
             }
-            EventDestination dest = objectMapper.treeToValue(edNode, EventDestination.class);
+            EventDestination dest = parseEventDestination(edNode);
             configSetService.createEventDestination(configurationSetName, edName, dest,
                     regionResolver.getAccountId(), region);
             LOG.infov("SES V2 CreateConfigurationSetEventDestination: {0} on {1}", edName, configurationSetName);
@@ -504,7 +510,7 @@ public class SesConfigurationSetController {
             if (!edNode.isObject()) {
                 throw new AwsException("BadRequestException", "EventDestination is required.", 400);
             }
-            EventDestination dest = objectMapper.treeToValue(edNode, EventDestination.class);
+            EventDestination dest = parseEventDestination(edNode);
             configSetService.updateEventDestination(configurationSetName, eventDestinationName,
                     dest, regionResolver.getAccountId(), region);
             LOG.infov("SES V2 UpdateConfigurationSetEventDestination: {0} on {1}",

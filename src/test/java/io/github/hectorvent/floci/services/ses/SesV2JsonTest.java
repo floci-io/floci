@@ -239,13 +239,13 @@ class SesV2JsonTest {
     }
 
     @Test
-    void parseSendingEnabled_missingIsFalse_otherwiseCoerces() {
-        assertFalse(SesV2Json.parseSendingEnabled(json("{}").path("SendingEnabled")));
-        assertTrue(SesV2Json.parseSendingEnabled(json("true")));
-        assertTrue(SesV2Json.parseSendingEnabled(json("\"yes\"")));
-        assertFalse(SesV2Json.parseSendingEnabled(json("\"no\"")));
-        assertAws("SerializationException", 400, () -> SesV2Json.parseSendingEnabled(json("null")));
-        assertAws("SerializationException", 400, () -> SesV2Json.parseSendingEnabled(json("0")));
+    void coerceBooleanOrFalse_missingIsFalse_otherwiseCoerces() {
+        assertFalse(SesV2Json.coerceBooleanOrFalse(json("{}").path("SendingEnabled")));
+        assertTrue(SesV2Json.coerceBooleanOrFalse(json("true")));
+        assertTrue(SesV2Json.coerceBooleanOrFalse(json("\"yes\"")));
+        assertFalse(SesV2Json.coerceBooleanOrFalse(json("\"no\"")));
+        assertAws("SerializationException", 400, () -> SesV2Json.coerceBooleanOrFalse(json("null")));
+        assertAws("SerializationException", 400, () -> SesV2Json.coerceBooleanOrFalse(json("0")));
     }
 
     @Test
