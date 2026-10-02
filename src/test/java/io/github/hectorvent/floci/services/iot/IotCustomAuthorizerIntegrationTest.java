@@ -127,12 +127,12 @@ class IotCustomAuthorizerIntegrationTest {
     }
 
     @Test
-    void aTestInvokeBodyWithTrailingContentIsAnInvalidRequest() {
+    void aTestInvokeBodyWithTrailingContentIsASerializationError() {
         given().contentType("application/json").body("{\"mqttContext\": {}} trailing")
         .when().post("/authorizer/" + authorizer + "/test")
         .then()
             .statusCode(400)
-            .header("X-Amzn-ErrorType", "InvalidRequestException");
+            .header("X-Amzn-ErrorType", "SerializationException");
     }
 
     @Test
