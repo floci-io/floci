@@ -163,17 +163,17 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
                 ctx, r.getLogicalId());
         String protocol = ctx.resolveOptional(props, "Protocol");
         String protocolVersion = ctx.resolveOptional(props, "ProtocolVersion");
-        Integer port = parseIntOrNull(ctx.resolveOptional(props, "Port"));
+        Integer port = optionalInt(props, ctx, "Port");
         String vpcId = ctx.resolveOptional(props, "VpcId");
         String targetType = ctx.resolveOptional(props, "TargetType");
         String hcProtocol = ctx.resolveOptional(props, "HealthCheckProtocol");
         String hcPort = ctx.resolveOptional(props, "HealthCheckPort");
         Boolean hcEnabled = parseBooleanOrNull(ctx.resolveOptional(props, "HealthCheckEnabled"));
         String hcPath = ctx.resolveOptional(props, "HealthCheckPath");
-        Integer hcInterval = parseIntOrNull(ctx.resolveOptional(props, "HealthCheckIntervalSeconds"));
-        Integer hcTimeout = parseIntOrNull(ctx.resolveOptional(props, "HealthCheckTimeoutSeconds"));
-        Integer healthyThreshold = parseIntOrNull(ctx.resolveOptional(props, "HealthyThresholdCount"));
-        Integer unhealthyThreshold = parseIntOrNull(ctx.resolveOptional(props, "UnhealthyThresholdCount"));
+        Integer hcInterval = optionalInt(props, ctx, "HealthCheckIntervalSeconds");
+        Integer hcTimeout = optionalInt(props, ctx, "HealthCheckTimeoutSeconds");
+        Integer healthyThreshold = optionalInt(props, ctx, "HealthyThresholdCount");
+        Integer unhealthyThreshold = optionalInt(props, ctx, "UnhealthyThresholdCount");
         String matcher = parseMatcher(props, ctx);
         String ipAddressType = ctx.resolveOptional(props, "IpAddressType");
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
@@ -475,17 +475,13 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    /** The switch treated an unparsable optional integer as unset; kept so a stray value does not fail a stack. */
-    private static Integer parseIntOrNull(String value) {
+    /** An absent property stays unset for the service to default; anything present has to be an integer. */
+    private static Integer optionalInt(JsonNode props, ProvisionContext ctx, String property) {
+        String value = ctx.resolveOptional(props, property);
         if (value == null || value.isBlank()) {
             return null;
         }
-        try {
-            return Integer.valueOf(value.trim());
-        } catch (NumberFormatException e) {
-            LOG.debugv("Ignoring non-integer value {0}", value);
-            return null;
-        }
+        return parseInt(value, property, 0);
     }
 
     private static Boolean parseBooleanOrNull(String value) {
