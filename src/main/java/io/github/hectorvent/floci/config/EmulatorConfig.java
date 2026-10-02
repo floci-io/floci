@@ -2112,7 +2112,7 @@ public interface EmulatorConfig {
 
         /**
          * When true, Floci removes on startup, in Docker mode, every ECS container a previous run
-         * of <em>this same</em> Floci left on the daemon (matched by the {@code floci_owner_port}
+         * of <em>this same</em> Floci left on the daemon (matched by the {@code io.floci.owner}
          * label), task-role credentials proxies included, before the service scheduler starts
          * replacement tasks. Turn it off when two Floci instances share a daemon with the same
          * port and no resource namespace, so one does not remove the other's containers.
@@ -2965,7 +2965,7 @@ public interface EmulatorConfig {
         /**
          * When true, Floci removes on startup any EC2 instance container left on the Docker
          * daemon by a previous run of <em>this same</em> Floci (matched by the
-         * {@code floci_owner_port} label) whose instance record did not survive the restart, or
+         * {@code io.floci.owner} label) whose instance record did not survive the restart, or
          * came back already terminated. Stopped instances are never swept — their containers are
          * exactly what StartInstances revives.
          *
@@ -3064,8 +3064,8 @@ public interface EmulatorConfig {
 
         /**
          * When true, VPC networks left behind by a previous run of this same Floci instance are
-         * removed at startup. Scoped by the emulator's API port, so instances sharing a Docker
-         * daemon never reconcile each other's networks.
+         * removed at startup. Scoped by the emulator's resource namespace and API port, so
+         * instances sharing a Docker daemon never reconcile each other's networks.
          */
         @WithDefault("true")
         boolean reconcileOnStartup();

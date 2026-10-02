@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.cloudhsmv2;
 
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
@@ -44,12 +44,11 @@ class CloudHsmCertificateChainIntegrationTest {
                 .statusCode(200)
                 .extract().jsonPath();
 
-        CertificateGenerator generator = new CertificateGenerator();
-        X509Certificate manufacturer = generator.parseCertificate(
+        X509Certificate manufacturer = Pem.parseCertificate(
                 response.getString("Cluster.Certificates.ManufacturerHardwareCertificate"));
-        X509Certificate aws = generator.parseCertificate(
+        X509Certificate aws = Pem.parseCertificate(
                 response.getString("Cluster.Certificates.AwsHardwareCertificate"));
-        X509Certificate hsm = generator.parseCertificate(
+        X509Certificate hsm = Pem.parseCertificate(
                 response.getString("Cluster.Certificates.HsmCertificate"));
 
         assertEquals(manufacturer.getSubjectX500Principal(), aws.getSubjectX500Principal());

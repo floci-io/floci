@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iot;
 
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.restassured.path.json.JsonPath;
 
@@ -20,7 +21,6 @@ import static io.restassured.RestAssured.given;
 final class IotDeviceIdentity {
 
     private static final char[] PASSWORD = "device".toCharArray();
-    private static final CertificateGenerator GENERATOR = new CertificateGenerator();
 
     final String certificateId;
     final String certificateArn;
@@ -44,15 +44,15 @@ final class IotDeviceIdentity {
         return new IotDeviceIdentity(
                 created.getString("certificateId"),
                 created.getString("certificateArn"),
-                GENERATOR.parseCertificate(created.getString("certificatePem")),
-                GENERATOR.parsePrivateKey(created.getString("keyPair.PrivateKey")));
+                Pem.parseCertificate(created.getString("certificatePem")),
+                Pem.parsePrivateKey(created.getString("keyPair.PrivateKey")));
     }
 
     /** A certificate the Floci CA signed but IoT Core never registered. */
     static IotDeviceIdentity stranger(Path tlsDir) {
         CertificateGenerator.GeneratedCertificate issued = FlociCertificateAuthority.loadOrCreate(tlsDir).issueClientCertificate("stranger");
         return new IotDeviceIdentity("unregistered", "arn:aws:iot:us-east-1:000000000000:cert/unregistered",
-                GENERATOR.parseCertificate(issued.certificatePem()), GENERATOR.parsePrivateKey(issued.privateKeyPem()));
+                Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()));
     }
 
     /** Presents the device certificate and trusts only the Floci CA. */

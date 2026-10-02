@@ -24,8 +24,10 @@ import java.util.Set;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -203,6 +205,40 @@ class Ec2LaunchTemplateCfnProvisionerTest {
                 captor.getValue().getIamInstanceProfile().getArn());
         assertNull(captor.getValue().getIamInstanceProfile().getName());
         assertEquals(List.of("sg-1", "sg-2"), captor.getValue().getSecurityGroupIds());
+    }
+
+    @Test
+    void rollbackUpdateDeletesCreatedVersionAndRestoresAttributes() {
+        LaunchTemplate existing = template("lt-abc123");
+        existing.setLaunchTemplateName("my-lt");
+        existing.setLatestVersionNumber("1");
+        existing.setDefaultVersionNumber("1");
+        when(ec2.describeLaunchTemplates(eq("us-east-1"), eq(List.of("lt-abc123")), eq(List.of()), any()))
+                .thenReturn(List.of(existing));
+
+        LaunchTemplate updated = template("lt-abc123");
+        updated.setLaunchTemplateName("my-lt");
+        updated.setLatestVersionNumber("2");
+        updated.setDefaultVersionNumber("1");
+        when(ec2.createLaunchTemplateVersion(eq("us-east-1"), eq("lt-abc123"), isNull(), isNull(), any()))
+                .thenReturn(updated);
+
+        ObjectNode props = mapper.createObjectNode().put("LaunchTemplateName", "my-lt");
+        props.set("LaunchTemplateData", mapper.createObjectNode().put("ImageId", "ami-v2"));
+        StackResource r = resource("Lt");
+        r.setPhysicalId("lt-abc123");
+
+        provisioner.provision(r, props, ctx());
+        assertEquals("2", r.getAttributes().get("LatestVersionNumber"));
+
+        boolean rolledBack = provisioner.rollbackUpdate(r);
+        assertTrue(rolledBack);
+        verify(ec2).deleteLaunchTemplateVersion("us-east-1", "lt-abc123", "2");
+        assertEquals("1", r.getAttributes().get("LatestVersionNumber"));
+        assertEquals("1", r.getAttributes().get("DefaultVersionNumber"));
+
+        // Second rollback without snapshot should return false
+        assertFalse(provisioner.rollbackUpdate(r));
     }
 
     @Test

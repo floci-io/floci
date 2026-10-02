@@ -129,8 +129,10 @@ class IamGetAccountSummaryIntegrationTest {
                     + ".find { it.key == 'AssumeRolePolicySizeQuota' }.value", equalTo("2048"))
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
                     + ".find { it.key == 'AccountPasswordPresent' }.value", equalTo("0"))
+            // Root MFA, like the root password and root access keys above: not modeled, so it
+            // stays zero however many devices the account's IAM users hold.
             .body("GetAccountSummaryResponse.GetAccountSummaryResult.SummaryMap.entry"
-                    + ".find { it.key == 'MFADevices' }.value", equalTo("0"));
+                    + ".find { it.key == 'AccountMFAEnabled' }.value", equalTo("0"));
     }
 
     @Test

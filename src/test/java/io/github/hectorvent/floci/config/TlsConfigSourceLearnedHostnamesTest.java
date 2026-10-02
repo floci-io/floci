@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -132,10 +133,9 @@ class TlsConfigSourceLearnedHostnamesTest {
         // A runtime reissue whose certificate rename succeeded and whose metadata rename did not:
         // the served leaf carries the learned name, the metadata knows nothing about it.
         FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
-        CertificateGenerator gen = new CertificateGenerator();
         X509Certificate served = parseCertificate(tlsDir.resolve("floci-server.crt"));
         KeyPair keyPair = new KeyPair(served.getPublicKey(),
-                gen.parsePrivateKey(Files.readString(tlsDir.resolve("floci-server.key"))));
+                Pem.parsePrivateKey(Files.readString(tlsDir.resolve("floci-server.key"))));
         List<String> sans = new ArrayList<>(bootMetadata.getHostnames());
         sans.add(LEARNED);
         Files.writeString(tlsDir.resolve("floci-server.crt"),
@@ -170,6 +170,6 @@ class TlsConfigSourceLearnedHostnamesTest {
     }
 
     private static X509Certificate parseCertificate(Path certFile) throws Exception {
-        return new CertificateGenerator().parseCertificate(Files.readString(certFile));
+        return Pem.parseCertificate(Files.readString(certFile));
     }
 }

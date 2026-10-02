@@ -17,8 +17,10 @@ import java.util.HashMap;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -26,6 +28,8 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -249,5 +253,89 @@ class AutoScalingGroupCfnProvisionerTest {
         assertThrows(IllegalStateException.class,
                 () -> provisioner.delete("AWS::AutoScaling::ScalingPolicy", "p", REGION));
         verify(autoScaling, never()).deleteAutoScalingGroup(anyString(), anyString(), anyBoolean());
+    }
+
+    @Test
+    void rollbackUpdateRestoresSnapshotWhenPresent() {
+        AutoScalingGroup existing = group("my-asg");
+        existing.setLaunchTemplateId("lt-123");
+        existing.setLaunchTemplateVersion("1");
+        existing.setMinSize(1);
+        existing.setMaxSize(5);
+        existing.setDesiredCapacity(2);
+        existing.setAvailabilityZones(List.of("us-east-1a"));
+
+        when(autoScaling.describeAutoScalingGroups(eq(REGION), eq(List.of("my-asg"))))
+                .thenReturn(List.of(existing));
+
+        StackResource r = resource(GROUP, "Asg", "my-asg");
+
+        ObjectNode props = mapper.createObjectNode();
+        props.put("AutoScalingGroupName", "my-asg");
+        ObjectNode lt = props.putObject("LaunchTemplate");
+        lt.put("LaunchTemplateId", "lt-123");
+        lt.put("Version", "2");
+        props.put("MinSize", 3);
+        props.put("MaxSize", 8);
+        props.put("DesiredCapacity", 4);
+        props.putArray("AvailabilityZones").add("us-east-1a");
+
+        provisioner.provision(r, props, ctx("my-asg"));
+
+        String snapshot = r.getAttributes().get(CfnRollback.ASG_UPDATE_SNAPSHOT_ATTR);
+        assertTrue(snapshot != null && !snapshot.isBlank());
+
+        clearInvocations(autoScaling);
+
+        boolean rolledBack = provisioner.rollbackUpdate(r);
+        assertTrue(rolledBack);
+
+        ArgumentCaptor<Integer> minSizeCaptor = ArgumentCaptor.forClass(Integer.class);
+        ArgumentCaptor<Integer> maxSizeCaptor = ArgumentCaptor.forClass(Integer.class);
+        ArgumentCaptor<String> versionCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<AsgOptionalFields> optionalFieldsCaptor = ArgumentCaptor.forClass(AsgOptionalFields.class);
+
+        verify(autoScaling).updateAutoScalingGroup(
+                eq(REGION),
+                eq("my-asg"),
+                isNull(),
+                eq("lt-123"),
+                isNull(),
+                versionCaptor.capture(),
+                isNull(),
+                minSizeCaptor.capture(),
+                maxSizeCaptor.capture(),
+                anyInt(),
+                anyInt(),
+                any(),
+                any(),
+                any(),
+                anyInt(),
+                any(),
+                optionalFieldsCaptor.capture()
+        );
+
+        assertEquals("1", versionCaptor.getValue());
+        assertEquals(1, minSizeCaptor.getValue());
+        assertEquals(5, maxSizeCaptor.getValue());
+
+        AsgOptionalFields optionalFields = optionalFieldsCaptor.getValue();
+        assertEquals("units", optionalFields.desiredCapacityType());
+        assertEquals(Boolean.FALSE, optionalFields.capacityRebalance());
+        assertEquals(0, optionalFields.maxInstanceLifetime());
+        assertEquals(AsgOptionalFields.DEFAULT_INSTANCE_WARMUP_REMOVAL_SENTINEL,
+                optionalFields.defaultInstanceWarmup());
+
+        // Subsequent rollback should return false since snapshot is spent
+        assertFalse(provisioner.rollbackUpdate(r));
+    }
+
+    @Test
+    void clearUpdateRemovesSnapshotAttribute() {
+        StackResource r = resource(GROUP, "Asg", "my-asg");
+        r.getAttributes().put(CfnRollback.ASG_UPDATE_SNAPSHOT_ATTR, "{\"name\":\"my-asg\"}");
+
+        provisioner.clearUpdate(r);
+        assertNull(r.getAttributes().get(CfnRollback.ASG_UPDATE_SNAPSHOT_ATTR));
     }
 }

@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.iot;
 
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
@@ -83,7 +83,7 @@ class IotDeviceCertificateIntegrationTest {
 
         String privateKeyPem = body.getString("keyPair.PrivateKey");
         assertTrue(privateKeyPem.startsWith("-----BEGIN RSA PRIVATE KEY-----"), "AWS returns a PKCS#1 RSA key");
-        PrivateKey privateKey = new CertificateGenerator().parsePrivateKey(privateKeyPem);
+        PrivateKey privateKey = Pem.parsePrivateKey(privateKeyPem);
         Signature signer = Signature.getInstance("SHA256withRSA");
         signer.initSign(privateKey);
         signer.update("floci".getBytes(StandardCharsets.UTF_8));

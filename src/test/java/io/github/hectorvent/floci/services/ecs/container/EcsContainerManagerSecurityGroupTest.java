@@ -122,7 +122,7 @@ class EcsContainerManagerSecurityGroupTest {
                 List.of(), "us-east-1");
 
         verify(builder).withNetworkMode("container:helper-id");
-        verify(builder).withLabels(Map.of("floci.security-group-workload", "true"));
+        verify(builder).withLabels(Map.of("io.floci.security-group.workload", "true"));
         verify(builder, never()).withPortBinding(anyInt(), anyInt());
         verify(builder, never()).withDynamicPort(anyInt());
         verify(builder, never()).withExposedPort(anyInt());
@@ -144,7 +144,7 @@ class EcsContainerManagerSecurityGroupTest {
                 List.of(), "us-east-1");
 
         verify(builder, never()).withNetworkMode(anyString());
-        verify(builder, never()).withLabels(Map.of("floci.security-group-workload", "true"));
+        verify(builder, never()).withLabels(Map.of("io.floci.security-group.workload", "true"));
         verify(ec2Service, never()).createNetworkInterface(any(), any(), any(), any(), any(), any(), any());
         verify(builder).withDynamicPort(80);
     }
@@ -235,7 +235,7 @@ class EcsContainerManagerSecurityGroupTest {
         manager.startTask(awsvpcTask(), taskDef, List.of(), "us-east-1");
 
         verify(builder, times(2)).withNetworkMode("container:helper-id");
-        verify(builder, times(2)).withLabels(Map.of("floci.security-group-workload", "true"));
+        verify(builder, times(2)).withLabels(Map.of("io.floci.security-group.workload", "true"));
 
         verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any());
         verify(lifecycleManager).create(any());

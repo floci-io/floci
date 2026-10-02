@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
@@ -8,9 +9,11 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
@@ -157,6 +160,7 @@ class CloudFormationNamedResourceIdenticalUpdateIntegrationTest {
         boolean noUpdates = update.statusCode() == 400 && update.asString().contains("No updates");
         if (!noUpdates) {
             expect(stackName, "UPDATE_COMPLETE", "UPDATE");
+            assertNoResourceUpdateEvents(stackName);
         }
 
         cfn("DeleteStack", stackName, null);
@@ -193,5 +197,17 @@ class CloudFormationNamedResourceIdenticalUpdateIntegrationTest {
             }
         }
         return reasons.isEmpty() ? "" : " | " + String.join(" | ", reasons);
+    }
+
+    private static void assertNoResourceUpdateEvents(String stackName) {
+        String eventXml = cfn("DescribeStackEvents", stackName, null).asString();
+        List<Map<String, String>> events = XmlParser.extractGroups(eventXml, "member");
+        for (Map<String, String> event : events) {
+            if (event.get("LogicalResourceId") != null
+                    && !stackName.equals(event.get("LogicalResourceId"))) {
+                assertFalse(event.get("ResourceStatus").startsWith("UPDATE_"),
+                        "Identical update should not update resource " + event.get("LogicalResourceId"));
+            }
+        }
     }
 }

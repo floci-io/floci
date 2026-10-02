@@ -522,9 +522,11 @@ nothing manages:
 - In Docker mode, every ECS container a previous run of this Floci left on the daemon is
   removed. A graceful shutdown already stops them; this covers a run that ended without one
   (SIGKILL, OOM, a stop timeout that expired mid-drain). Containers are recognised by the
-  `floci_owner_port` label (the resource namespace and API port), so the containers of another
+  `io.floci.owner` label (the resource namespace and API port), so the containers of another
   Floci sharing the daemon stay, and are told apart from the current run's by a per-process
-  `floci.ecs-run` label rather than by creation time. Containers created by a Floci version without that label are
+  `io.floci.ecs.run` label rather than by creation time. Both are also written under their legacy
+  names, `floci_owner_port` and `floci.ecs-run`, which are still read for containers an earlier
+  version created (see [Internal Labels](../configuration/docker.md#internal-labels)). Containers created by a Floci version without that label are
   not recognised and must be removed by hand once. If Docker cannot list or remove one, the
   ECS starts no task until it is gone, retrying the removal before each launch: a service's
   replacement on a reconciliation tick, or a `RunTask` or `StartTask` call, whose task then stops

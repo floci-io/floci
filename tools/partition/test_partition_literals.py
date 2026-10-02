@@ -186,6 +186,42 @@ def test_blank_region_arn_matches_a_call_split_across_lines(tmp_path):
     assert [f.line for f in findings] == [2]
 
 
+@pytest.mark.parametrize("code, expected", [
+    ('"aws".equals(arn.partition())', True),
+    ('!"aws".equalsIgnoreCase(partition)', True),
+    ('partition.equals("aws")', True),
+    ('Objects.equals(parsed.partition(), "aws")', True),
+    ('Objects.equals("aws", partition)', True),
+    ('Objects.equals(arn.partition(), "aws")', True),
+    ('foo(Objects.equals(a, b), "aws")', False),
+    ('Objects.equals(a, b) || log("aws")', False),
+    ('switch (arn.partition()) { case "aws" -> 1; default -> 2; }', True),
+    ('case "aws":', True),
+    ('case "aws-cn", "aws" ->', True),
+    ('case "aws", "aws-cn" ->', True),
+    ('case "aws-cn" ->', False),
+    ('AwsRegions.partitionFor(region).equals(arn.partition())', False),
+    ('"aws-cn".equals(partition)', False),
+    ('name.equals("awsome")', False),
+])
+def test_aws_partition_compare_matches_comparisons_with_the_literal_aws(code, expected):
+    category = p.CATEGORY_BY_NAME["aws-partition-compare"]
+    assert (category.regex.search(code) is not None) is expected
+
+
+def test_aws_partition_compare_is_counted_and_an_escape_excuses_its_line(tmp_path):
+    write_java(tmp_path, "a/A.java", (
+        'class A {\n'
+        '    boolean commercial = "aws".equals(arn.partition());\n'
+        '    boolean managed = "aws".equals(arn.accountId()); // partition-literal: the managed-policy account\n'
+        '    // "aws".equals(partition) in a comment never counts\n'
+        '}\n'
+    ))
+    findings = p.collect_findings(tmp_path, [])
+    assert p.count(findings) == Counter({("aws-partition-compare", "a/A.java"): 1})
+    assert [(f.line, f.counted) for f in findings] == [(2, True), (3, False)]
+
+
 def test_blank_region_arn_is_a_code_category_and_never_matches_literals(tmp_path):
     write_java(tmp_path, "a/A.java", (
         'class A {\n'

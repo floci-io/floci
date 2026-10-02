@@ -144,6 +144,10 @@ aws secretsmanager validate-resource-policy \
 - **A rotation function that does not exist** is reported as AWS reports it: `AccessDeniedException`
   (HTTP 400), "Secrets Manager cannot invoke the specified Lambda function". The secret's rotation
   settings are left as they were, including any rotation function configured before.
+- **A rotation function reference Lambda refuses**, one it cannot parse or a full ARN in another
+  Region, gets `InvalidParameterException` (HTTP 400), the error `RotateSecret` declares for an
+  invalid parameter, with Lambda's reason in the message. The secret is left as it was. AWS does not
+  document which error a function in another Region gets.
 - **Replication is synchronous.** Real AWS reports `InProgress` first; floci copies the secret
   immediately, so a replica is `InSync` by the time the call returns. Replicas are read-only and
   track later writes to the primary.

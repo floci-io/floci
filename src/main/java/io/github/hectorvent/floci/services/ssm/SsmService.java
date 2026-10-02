@@ -366,7 +366,7 @@ public class SsmService implements ResourceProvider {
     private static void rejectReservedName(String name) {
         String bare = name == null ? "" : name.startsWith("/") ? name.substring(1) : name;
         String lower = bare.toLowerCase(Locale.ROOT);
-        if (lower.equals("aws") || lower.equals("ssm")
+        if (lower.equals("aws") || lower.equals("ssm") // partition-literal: reserved name prefix
                 || lower.startsWith("aws/") || lower.startsWith("ssm/")) {
             throw new AwsException("ValidationException",
                     "Parameter name: can't be prefixed with \"aws\" or \"ssm\" (case-insensitive). "

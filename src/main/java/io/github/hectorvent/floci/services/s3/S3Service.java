@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
@@ -1067,7 +1068,8 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = ownedBucketEntry.value();
         String bucketOwner = ownedBucketEntry.account();
 
-        String principalArn = resolvePrincipalArn(authorization.accessKeyId()).orElse(null);
+        CallerArns caller = resolveCaller(authorization.accessKeyId()).orElse(null);
+        String principalArn = caller == null ? null : caller.callerArn();
         boolean sameAccountAsOwner = isSameAccountAsBucketOwner(authorization.accessKeyId(), principalArn, bucketOwner);
 
         if (isBucketPolicyAction(action) && !sameAccountAsOwner) {
@@ -1091,8 +1093,8 @@ public class S3Service implements Resettable, ResourceProvider {
             throw accessDeniedException(bucketName, key);
         }
 
-        Map<String, List<String>> conditionCtx = principalArn != null
-                ? Map.of("aws:PrincipalArn", List.of(principalArn),
+        Map<String, List<String>> conditionCtx = caller != null
+                ? Map.of("aws:PrincipalArn", List.of(caller.principalArn()),
                         "aws:PrincipalIsAWSService", List.of("false"))
                 : Map.of("aws:PrincipalIsAWSService", List.of("false"));
 
@@ -1115,18 +1117,25 @@ public class S3Service implements Resettable, ResourceProvider {
         throw accessDeniedException(bucketName, key);
     }
 
-    private Optional<String> resolvePrincipalArn(String accessKeyId) {
+    /**
+     * The signing caller's two ARNs: the caller ARN a bucket policy's {@code Principal} is matched
+     * against, and the request's {@code aws:PrincipalArn}, which for a role session is the role's ARN,
+     * path included, rather than the session's. A key IAM does not know is treated as its account's
+     * root, which is both.
+     */
+    private Optional<CallerArns> resolveCaller(String accessKeyId) {
         if (accessKeyId == null || accessKeyId.isBlank()) {
             return Optional.empty();
         }
         if (iamService != null) {
-            Optional<String> callerArn = iamService.resolveCallerArn(accessKeyId);
-            if (callerArn.isPresent()) {
-                return callerArn;
+            Optional<CallerArns> callerArns = iamService.resolveCallerArns(accessKeyId);
+            if (callerArns.isPresent()) {
+                return callerArns;
             }
         }
         String account = accessKeyId.matches("\\d{12}") ? accessKeyId : ownerId();
-        return Optional.of(regionResolver.buildGlobalArn("iam", account, "root"));
+        String rootArn = regionResolver.buildGlobalArn("iam", account, "root");
+        return Optional.of(new CallerArns(rootArn, rootArn));
     }
 
     private boolean isSameAccountAsBucketOwner(String accessKeyId, String principalArn, String bucketOwnerAccount) {
@@ -1159,8 +1168,8 @@ public class S3Service implements Resettable, ResourceProvider {
             return new SignedPrincipalResourcePolicyEvaluation(ResourcePolicyDecision.NEUTRAL, null);
         }
 
-        Optional<String> principalArn = resolvePrincipalArn(authorization.accessKeyId());
-        if (principalArn.isEmpty()) {
+        Optional<CallerArns> caller = resolveCaller(authorization.accessKeyId());
+        if (caller.isEmpty()) {
             return new SignedPrincipalResourcePolicyEvaluation(ResourcePolicyDecision.NEUTRAL, null);
         }
 
@@ -1172,13 +1181,13 @@ public class S3Service implements Resettable, ResourceProvider {
                         objectMapper,
                         ownedBucket.value().getPolicy(),
                         "AWS",
-                        principalArn.get(),
+                        caller.get().callerArn(),
                         action,
                         resourceArn,
-                        Map.of("aws:PrincipalArn", principalArn.get(),
+                        Map.of("aws:PrincipalArn", caller.get().principalArn(),
                                 "aws:PrincipalIsAWSService", "false"));
         ResourcePolicyDecision decision = switch (policyEvaluation.decision()) {
-            case ALLOW -> policyEvaluation.directPrincipalAllow() && principalArn.get().contains(":user/")
+            case ALLOW -> policyEvaluation.directPrincipalAllow() && caller.get().callerArn().contains(":user/")
                     ? ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
                     : ResourcePolicyDecision.ALLOW;
             case DENY -> ResourcePolicyDecision.EXPLICIT_DENY;

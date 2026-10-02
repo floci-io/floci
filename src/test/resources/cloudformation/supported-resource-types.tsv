@@ -149,5 +149,6 @@ AWS::ServiceDiscovery::PrivateDnsNamespace	CloudMapCfnProvisioner
 AWS::ServiceDiscovery::PublicDnsNamespace	CloudMapCfnProvisioner
 AWS::ServiceDiscovery::Service	CloudMapCfnProvisioner
 AWS::StepFunctions::StateMachine	StepFunctionsCfnProvisioner
+AWS::Transfer::Server	TransferCfnProvisioner
 AWS::WAFv2::WebACL	WafV2CfnProvisioner
 Custom::DynamoDBReplica	DynamoDbCfnProvisioner

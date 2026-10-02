@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.config;
 
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.Extension;
@@ -209,7 +210,7 @@ class TlsConfigSourceCertificateReuseTest {
 
         new TlsConfigSource();
 
-        X509Certificate reissued = generator.parseCertificate(Files.readString(certFile));
+        X509Certificate reissued = Pem.parseCertificate(Files.readString(certFile));
         assertNotEquals(legacy, reissued);
         assertNotNull(reissued.getExtensionValue(Extension.subjectKeyIdentifier.getId()));
         assertNotNull(reissued.getExtensionValue(Extension.authorityKeyIdentifier.getId()));
