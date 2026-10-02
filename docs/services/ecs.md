@@ -441,9 +441,12 @@ Known differences from AWS:
   counts tasks that fail to start and moves a deployment through `STOP_REQUESTED` to `STOPPED`,
   or, with rollback enabled, through `ROLLBACK_IN_PROGRESS` to `ROLLBACK_SUCCESSFUL` or
   `ROLLBACK_FAILED`. A rollback restores the most recent successful service revision while
-  retaining the service's current `desiredCount`. Enabled
+  retaining the service's current `desiredCount`. `DescribeServiceDeployments` reports the
+  rollback target and reason under `rollback`, and configured and triggered alarm names under
+  `alarms`. Enabled
   CloudWatch deployment alarms are also checked during reconciliation and fail the deployment
-  when any configured alarm is in `ALARM`. `healthCheckGracePeriodSeconds`, `serviceRegistries`
+  when any configured alarm is in `ALARM`. Floci stops monitoring alarms when tasks converge;
+  AWS continues monitoring through the deployment bake time. `healthCheckGracePeriodSeconds`, `serviceRegistries`
   and placement constraints and strategies are stored and reported but are not enforced; task
   placement does not evaluate constraints.
 - `StopServiceDeployment` is not implemented.
@@ -457,10 +460,10 @@ and mock mode.
 | `detail-type` | When | Key `detail` fields |
 |---|---|---|
 | `ECS Task State Change` | a task starts or stops | `lastStatus`, `desiredStatus`, `taskDefinitionArn`, `group`, `startedBy`, `stoppedReason`, `containers[].exitCode` |
-| `ECS Deployment State Change` | a service deployment starts, is in progress, or reaches steady state | `eventType` (always `INFO`), `eventName`, `deploymentId` |
+| `ECS Deployment State Change` | a service deployment starts, fails, rolls back, or reaches steady state | `eventType` (`ERROR` on failure, otherwise `INFO`), `eventName`, `deploymentId` |
 
 `eventName` is one of `SERVICE_DEPLOYMENT_STARTED`, `SERVICE_DEPLOYMENT_IN_PROGRESS`,
-`SERVICE_DEPLOYMENT_COMPLETED`.
+`SERVICE_DEPLOYMENT_COMPLETED`, `SERVICE_DEPLOYMENT_FAILED`.
 
 Known differences from AWS:
 

@@ -34,8 +34,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -203,8 +206,8 @@ class EcsServiceDeploymentCircuitBreakerTest {
         when(metricsService.describeAlarms(List.of("deployment-failure"), null, REGION))
                 .thenReturn(List.of(alarm));
         EcsService service = newService(new InMemoryStorageFactory(), metricsService);
-        EcsServiceModel model = createService(service, "cb-alarm", 1, null);
-        model.setDeploymentConfiguration(Map.of("alarms", Map.of(
+        EcsServiceModel model = createServiceWithDeploymentConfiguration(service, "cb-alarm", 1,
+                Map.of("alarms", Map.of(
                 "enable", true,
                 "rollback", false,
                 "alarmNames", List.of("deployment-failure"))));
@@ -215,6 +218,9 @@ class EcsServiceDeploymentCircuitBreakerTest {
         ServiceDeployment deployment = deploymentOf(service, "cb-alarm", id);
         assertEquals("STOP_REQUESTED", deployment.getStatus());
         assertTrue(deployment.getStatusReason().contains("deployment-failure"));
+        assertEquals(List.of("deployment-failure"), deployment.getAlarmNames());
+        assertEquals(List.of("deployment-failure"), deployment.getTriggeredAlarmNames());
+        assertEquals("TRIGGERED", deployment.getAlarmStatus());
         assertTrue(stoppedTasks(service).isEmpty(), "an active alarm is checked before starting another task");
 
         service.reconcileServices();
@@ -244,7 +250,8 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
     @Test
     void rollbackRestoresTheMostRecentSuccessfulRevision() {
-        EcsService service = newService();
+        EcsEventPublisher publisher = mock(EcsEventPublisher.class);
+        EcsService service = newService(new InMemoryStorageFactory(), null, publisher);
         healthy = true;
         String successfulDeploymentId = createService(service, "cb-rollback", 1, breaker(true, true))
                 .getDeploymentId();
@@ -262,16 +269,27 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
         ServiceDeployment rollingBack = deploymentOf(service, "cb-rollback", failedDeploymentId);
         assertEquals("ROLLBACK_IN_PROGRESS", rollingBack.getStatus());
+        assertNotNull(rollingBack.getRollbackStartedAt());
+        assertNotNull(rollingBack.getRollbackReason());
         assertEquals(originalTaskDefinition,
                 service.serviceByArn(rollingBack.getServiceArn()).getTaskDefinition());
+        assertEquals("IN_PROGRESS", liveDeployment(service, "cb-rollback").getRolloutState());
+        assertEquals(deploymentOf(service, "cb-rollback", successfulDeploymentId)
+                .getTargetServiceRevisionArn(), rollingBack.getRollbackTargetServiceRevisionArn());
+        verify(publisher).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_FAILED"),
+                anyString(), eq(REGION));
+        verify(publisher).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_IN_PROGRESS"),
+                argThat(reason -> reason.contains("rolling back to deployment " + successfulDeploymentId)),
+                eq(REGION));
 
         service.reconcileServices();
         assertEquals("ROLLBACK_SUCCESSFUL",
                 deploymentOf(service, "cb-rollback", failedDeploymentId).getStatus());
         assertEquals(List.of(original.getTaskArn()), runningTasks(service).stream().map(EcsTask::getTaskArn).toList());
         assertEquals("SUCCESSFUL", deploymentOf(service, "cb-rollback", successfulDeploymentId).getStatus());
-        assertEquals("FAILED", liveDeployment(service, "cb-rollback").getRolloutState(),
-                "a service restored to its previous revision still reports the failed rollout");
+        assertEquals("COMPLETED", liveDeployment(service, "cb-rollback").getRolloutState());
+        verify(publisher).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"),
+                argThat(reason -> reason.contains(successfulDeploymentId)), eq(REGION));
     }
 
     @Test
@@ -691,6 +709,11 @@ class EcsServiceDeploymentCircuitBreakerTest {
     }
 
     private EcsService newService(InMemoryStorageFactory storage, CloudWatchMetricsService metricsService) {
+        return newService(storage, metricsService, null);
+    }
+
+    private EcsService newService(InMemoryStorageFactory storage, CloudWatchMetricsService metricsService,
+                                  EcsEventPublisher eventPublisher) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -718,7 +741,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 config,
                 mock(EcsLoadBalancerRegistrar.class),
                 storage,
-                null,
+                eventPublisher,
                 new EcsExecSessionRegistry(),
                 null,
                 metricsService);

@@ -89,6 +89,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -2499,106 +2500,108 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (svc == null) {
             throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
         }
-        if ("INACTIVE".equals(svc.getStatus())) {
-            throw new AwsException("ServiceNotActiveException",
-                    "Service " + serviceName + " is not active.", 400);
-        }
-        // Settle the outgoing deployment against the service as it stands, before this request
-        // changes its desired count or task definition: one whose tasks are up has finished,
-        // whether or not anything read it. recordServiceDeployment stops it if it has not.
-        currentServiceDeployment(svc);
-        if (request.getDesiredCount() != null) {
-            if (request.getDesiredCount() < 0) {
-                throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
+        synchronized (svc) {
+            if ("INACTIVE".equals(svc.getStatus())) {
+                throw new AwsException("ServiceNotActiveException",
+                        "Service " + serviceName + " is not active.", 400);
             }
-            svc.setDesiredCount(request.getDesiredCount());
-        }
-        // The members whose change starts new tasks, as UpdateService documents them: the network
-        // configuration, the load balancers, the service registries, the Service Connect
-        // configuration, the task definition and the platform version. The rest (desired count,
-        // deployment configuration, the exec and managed-tag switches, placement, propagateTags,
-        // the capacity provider strategy) are applied without rolling anything.
-        boolean rollingChange = false;
-        if (request.getNetworkConfiguration() != null) {
-            rollingChange |= networkConfigurationChanged(svc.getNetworkConfiguration(),
-                    request.getNetworkConfiguration());
-            svc.setNetworkConfiguration(request.getNetworkConfiguration());
-        }
-        if (request.getAvailabilityZoneRebalancing() != null) {
-            svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing());
-        }
-        if (request.getCapacityProviderStrategy() != null) {
-            svc.setCapacityProviderStrategy(request.getCapacityProviderStrategy());
-            svc.setLaunchType(request.getCapacityProviderStrategy().isEmpty()
-                    ? svc.getLaunchType()
-                    : placementFor(request.getCapacityProviderStrategy().getFirst().capacityProvider()).launchType());
-        }
-        if (request.getEnableExecuteCommand() != null) {
-            svc.setEnableExecuteCommand(request.getEnableExecuteCommand());
-        }
-        if (request.getEnableECSManagedTags() != null) {
-            svc.setEnableECSManagedTags(request.getEnableECSManagedTags());
-        }
-        if (request.getPropagateTags() != null) {
-            svc.setPropagateTags(request.getPropagateTags());
-        }
-        if (request.getHealthCheckGracePeriodSeconds() != null) {
-            svc.setHealthCheckGracePeriodSeconds(request.getHealthCheckGracePeriodSeconds());
-        }
-        if (request.getDeploymentConfiguration() != null) {
-            svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
-        }
-        if (request.getLoadBalancers() != null) {
-            rollingChange |= loadBalancersChanged(svc.getLoadBalancers(), request.getLoadBalancers());
-            svc.setLoadBalancers(request.getLoadBalancers());
-        }
-        if (request.getServiceRegistries() != null) {
-            boolean registriesChanged = !request.getServiceRegistries().equals(svc.getServiceRegistries());
-            rollingChange |= registriesChanged;
-            svc.setServiceRegistries(request.getServiceRegistries());
-            if (registriesChanged) {
-                reconcileServiceDiscoveryRegistries(svc, cluster, region);
+            // Settle the outgoing deployment against the service as it stands, before this request
+            // changes its desired count or task definition: one whose tasks are up has finished,
+            // whether or not anything read it. recordServiceDeployment stops it if it has not.
+            currentServiceDeployment(svc);
+            if (request.getDesiredCount() != null) {
+                if (request.getDesiredCount() < 0) {
+                    throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
+                }
+                svc.setDesiredCount(request.getDesiredCount());
             }
-        }
-        if (request.getUnparsed() != null) {
-            svc.setUnparsed(mergedUnparsed(svc.getUnparsed(), request.getUnparsed()));
-        }
-        // UpdateServiceRequest.serviceConnectConfiguration is documented as "This parameter
-        // triggers a new service deployment", so a real change rolls the deployment the way a
-        // task-definition change does. An omitted parameter is not a change and rolls nothing.
-        Map<String, Object> serviceConnectConfiguration = request.getServiceConnectConfiguration();
-        boolean serviceConnectChanged = serviceConnectConfiguration != null
-                && !serviceConnectConfiguration.equals(svc.getServiceConnectConfiguration());
-        if (serviceConnectConfiguration != null) {
-            svc.setServiceConnectConfiguration(serviceConnectConfiguration);
-        }
-        boolean taskDefChanged = false;
-        String platformVersionBefore = svc.getPlatformVersion();
-        if (request.getTaskDefinition() != null) {
-            TaskDefinition resolved = resolveLaunchableTaskDefinition(request.getTaskDefinition(), region);
-            taskDefChanged = !resolved.getTaskDefinitionArn().equals(svc.getTaskDefinition());
-            svc.setTaskDefinition(resolved.getTaskDefinitionArn());
-            applyServicePlatform(svc, resolved, request.getPlatformVersion() != null
-                    ? request.getPlatformVersion() : svc.getPlatformVersion());
-        } else if (request.getPlatformVersion() != null) {
-            svc.setPlatformVersion(PLATFORM_VERSION_LATEST.equals(request.getPlatformVersion())
-                    ? DEFAULT_PLATFORM_VERSION : request.getPlatformVersion());
-        }
-        // UpdateServiceRequest.platformVersion is documented as "This parameter triggers a new
-        // service deployment". Compared after resolution, so a request that asks for LATEST on a
-        // service already running the version LATEST resolves to is not a change.
-        rollingChange |= !Objects.equals(platformVersionBefore, svc.getPlatformVersion());
-        if (taskDefChanged || forceNewDeployment || serviceConnectChanged || rollingChange) {
-            svc.setDeploymentId(newDeploymentId());
-            svc.setLastDeploymentAt(Instant.now());
-            recordServiceDeployment(svc, svc.getTaskDefinition(), region);
-            if (eventPublisher != null) {
-                eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_STARTED",
-                        "ECS deployment " + svc.getDeploymentId() + " started.", region);
+            // The members whose change starts new tasks, as UpdateService documents them: the network
+            // configuration, the load balancers, the service registries, the Service Connect
+            // configuration, the task definition and the platform version. The rest (desired count,
+            // deployment configuration, the exec and managed-tag switches, placement, propagateTags,
+            // the capacity provider strategy) are applied without rolling anything.
+            boolean rollingChange = false;
+            if (request.getNetworkConfiguration() != null) {
+                rollingChange |= networkConfigurationChanged(svc.getNetworkConfiguration(),
+                        request.getNetworkConfiguration());
+                svc.setNetworkConfiguration(request.getNetworkConfiguration());
             }
+            if (request.getAvailabilityZoneRebalancing() != null) {
+                svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing());
+            }
+            if (request.getCapacityProviderStrategy() != null) {
+                svc.setCapacityProviderStrategy(request.getCapacityProviderStrategy());
+                svc.setLaunchType(request.getCapacityProviderStrategy().isEmpty()
+                        ? svc.getLaunchType()
+                        : placementFor(request.getCapacityProviderStrategy().getFirst().capacityProvider()).launchType());
+            }
+            if (request.getEnableExecuteCommand() != null) {
+                svc.setEnableExecuteCommand(request.getEnableExecuteCommand());
+            }
+            if (request.getEnableECSManagedTags() != null) {
+                svc.setEnableECSManagedTags(request.getEnableECSManagedTags());
+            }
+            if (request.getPropagateTags() != null) {
+                svc.setPropagateTags(request.getPropagateTags());
+            }
+            if (request.getHealthCheckGracePeriodSeconds() != null) {
+                svc.setHealthCheckGracePeriodSeconds(request.getHealthCheckGracePeriodSeconds());
+            }
+            if (request.getDeploymentConfiguration() != null) {
+                svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
+            }
+            if (request.getLoadBalancers() != null) {
+                rollingChange |= loadBalancersChanged(svc.getLoadBalancers(), request.getLoadBalancers());
+                svc.setLoadBalancers(request.getLoadBalancers());
+            }
+            if (request.getServiceRegistries() != null) {
+                boolean registriesChanged = !request.getServiceRegistries().equals(svc.getServiceRegistries());
+                rollingChange |= registriesChanged;
+                svc.setServiceRegistries(request.getServiceRegistries());
+                if (registriesChanged) {
+                    reconcileServiceDiscoveryRegistries(svc, cluster, region);
+                }
+            }
+            if (request.getUnparsed() != null) {
+                svc.setUnparsed(mergedUnparsed(svc.getUnparsed(), request.getUnparsed()));
+            }
+            // UpdateServiceRequest.serviceConnectConfiguration is documented as "This parameter
+            // triggers a new service deployment", so a real change rolls the deployment the way a
+            // task-definition change does. An omitted parameter is not a change and rolls nothing.
+            Map<String, Object> serviceConnectConfiguration = request.getServiceConnectConfiguration();
+            boolean serviceConnectChanged = serviceConnectConfiguration != null
+                    && !serviceConnectConfiguration.equals(svc.getServiceConnectConfiguration());
+            if (serviceConnectConfiguration != null) {
+                svc.setServiceConnectConfiguration(serviceConnectConfiguration);
+            }
+            boolean taskDefChanged = false;
+            String platformVersionBefore = svc.getPlatformVersion();
+            if (request.getTaskDefinition() != null) {
+                TaskDefinition resolved = resolveLaunchableTaskDefinition(request.getTaskDefinition(), region);
+                taskDefChanged = !resolved.getTaskDefinitionArn().equals(svc.getTaskDefinition());
+                svc.setTaskDefinition(resolved.getTaskDefinitionArn());
+                applyServicePlatform(svc, resolved, request.getPlatformVersion() != null
+                        ? request.getPlatformVersion() : svc.getPlatformVersion());
+            } else if (request.getPlatformVersion() != null) {
+                svc.setPlatformVersion(PLATFORM_VERSION_LATEST.equals(request.getPlatformVersion())
+                        ? DEFAULT_PLATFORM_VERSION : request.getPlatformVersion());
+            }
+            // UpdateServiceRequest.platformVersion is documented as "This parameter triggers a new
+            // service deployment". Compared after resolution, so a request that asks for LATEST on a
+            // service already running the version LATEST resolves to is not a change.
+            rollingChange |= !Objects.equals(platformVersionBefore, svc.getPlatformVersion());
+            if (taskDefChanged || forceNewDeployment || serviceConnectChanged || rollingChange) {
+                svc.setDeploymentId(newDeploymentId());
+                svc.setLastDeploymentAt(Instant.now());
+                recordServiceDeployment(svc, svc.getTaskDefinition(), region);
+                if (eventPublisher != null) {
+                    eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_STARTED",
+                            "ECS deployment " + svc.getDeploymentId() + " started.", region);
+                }
+            }
+            services.put(key, svc);
+            return svc;
         }
-        services.put(key, svc);
-        return svc;
     }
 
     private void reconcileServiceDiscoveryRegistries(EcsServiceModel svc, EcsCluster cluster, String region) {
@@ -3906,8 +3909,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         // deployment would report a task-definition change COMPLETED as soon as it was made.
         long running = runningOnCurrentDeployment(svc);
         boolean converged = running >= svc.getDesiredCount();
+        boolean rollbackPending = latestServiceDeployment(svc.getServiceArn(), candidate ->
+                DEPLOYMENT_STATUS_ROLLBACK_IN_PROGRESS.equals(candidate.getStatus())) != null;
         ServiceDeployment record = lockedCopyOf(deploymentRecordOf(svc));
-        boolean failed = svc.getFailedDeploymentId() != null;
+        boolean failed = deploymentId.equals(svc.getFailedDeploymentId());
         ServiceDeployment failedRecord = failed ? failedDeploymentOf(svc) : null;
 
         Deployment d = new Deployment();
@@ -3923,9 +3928,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             d.setRolloutStateReason(failedRecord != null && failedRecord.getStatusReason() != null
                     ? failedRecord.getStatusReason() : CIRCUIT_BREAKER_REASON);
         } else {
-            d.setRolloutState(converged ? "COMPLETED" : "IN_PROGRESS");
+            d.setRolloutState(converged && !rollbackPending ? "COMPLETED" : "IN_PROGRESS");
             d.setRolloutStateReason("ECS deployment " + deploymentId
-                    + (converged ? " completed." : " in progress."));
+                    + (converged && !rollbackPending ? " completed." : " in progress."));
         }
         // A deployment reports the placement it runs under the same way the service does: a
         // capacity provider strategy when there is one, a launch type otherwise, never both.
@@ -4038,7 +4043,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * calls the task set id, and what names the service revision that deployment targets.
      */
     private String taskSetId(EcsServiceModel svc) {
-        String id = deploymentId(svc);
+        return taskSetId(deploymentId(svc));
+    }
+
+    private static String taskSetId(String id) {
         int slash = id.indexOf('/');
         return slash < 0 ? id : id.substring(slash + 1);
     }
@@ -4072,21 +4080,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .map(ServiceRevision::getServiceRevisionArn)
                 .toList();
 
-        ServiceDeployment deployment = new ServiceDeployment();
-        deployment.setServiceDeploymentArn(deploymentArn);
-        deployment.setServiceArn(svc.getServiceArn());
-        deployment.setClusterArn(svc.getClusterArn());
-        deployment.setTaskDefinition(taskDefinition);
-        deployment.setStatus(DEPLOYMENT_STATUS_IN_PROGRESS);
-        deployment.setCreatedAt(now);
-        deployment.setStartedAt(now);
-        deployment.setUpdatedAt(now);
-        deployment.setTargetServiceRevisionArn(revisionArn);
+        ServiceDeployment deployment = newServiceDeployment(svc, taskDefinition, deploymentArn, revisionArn, now);
         deployment.setSourceServiceRevisionArns(priorRevisions);
         stopNonTerminalDeployments(svc.getServiceArn(), now,
                 "Superseded by service deployment " + deploymentArn + ".");
         serviceDeployments.put(deploymentArn, deployment);
 
+        ServiceRevision revision = newServiceRevision(svc, taskDefinition, revisionArn, now, region);
+        serviceRevisions.put(revisionArn, revision);
+    }
+
+    private ServiceRevision newServiceRevision(EcsServiceModel svc, String taskDefinition,
+                                               String revisionArn, Instant now, String region) {
         ServiceRevision revision = new ServiceRevision();
         revision.setServiceRevisionArn(revisionArn);
         revision.setServiceArn(svc.getServiceArn());
@@ -4102,7 +4107,29 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         revision.setServiceConnectConfiguration(svc.getServiceConnectConfiguration());
         revision.setContainerImages(containerImagesOf(taskDefinition, region));
         revision.setCreatedAt(now);
-        serviceRevisions.put(revisionArn, revision);
+        return revision;
+    }
+
+    private ServiceDeployment newServiceDeployment(EcsServiceModel svc, String taskDefinition,
+                                                   String deploymentArn, String revisionArn, Instant now) {
+        ServiceDeployment deployment = new ServiceDeployment();
+        deployment.setServiceDeploymentArn(deploymentArn);
+        deployment.setServiceArn(svc.getServiceArn());
+        deployment.setClusterArn(svc.getClusterArn());
+        deployment.setTaskDefinition(taskDefinition);
+        deployment.setStatus(DEPLOYMENT_STATUS_IN_PROGRESS);
+        deployment.setCreatedAt(now);
+        deployment.setStartedAt(now);
+        deployment.setUpdatedAt(now);
+        deployment.setTargetServiceRevisionArn(revisionArn);
+        Map<String, Object> alarms = deploymentAlarmsOf(svc);
+        if (flag(alarms.get("enable"), false) && alarms.get("alarmNames") instanceof List<?> names) {
+            deployment.setAlarmNames(names.stream().filter(String.class::isInstance)
+                    .map(String.class::cast).toList());
+            deployment.setTriggeredAlarmNames(List.of());
+            deployment.setAlarmStatus("MONITORING");
+        }
+        return deployment;
     }
 
     /**
@@ -4149,6 +4176,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     && runningOnCurrentDeployment(svc) >= svc.getDesiredCount()) {
                 Instant now = Instant.now();
                 deployment.setStatus(DEPLOYMENT_STATUS_SUCCESSFUL);
+                if (deployment.getAlarmNames() != null) {
+                    deployment.setAlarmStatus("MONITORING_COMPLETE");
+                }
                 deployment.setFinishedAt(now);
                 deployment.setUpdatedAt(now);
                 svc.setLastSettledDeploymentId(deploymentId(svc));
@@ -4230,41 +4260,57 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     || deployment.getFailedTasks() < circuitBreakerThreshold(breaker, svc.getDesiredCount())) {
                 return false;
             }
-            requestDeploymentFailure(svc, deployment, CIRCUIT_BREAKER_REASON,
-                    flag(breaker.get("rollback"), false));
+        }
+        return requestDeploymentFailure(svc, deployment, CIRCUIT_BREAKER_REASON,
+                flag(breaker.get("rollback"), false));
+    }
+
+    private boolean requestDeploymentFailure(EcsServiceModel svc, ServiceDeployment deployment,
+                                             String reason, boolean rollback) {
+        synchronized (svc) {
+            synchronized (deployment) {
+                if (!DEPLOYMENT_STATUS_IN_PROGRESS.equals(deployment.getStatus())
+                        || !deployment.getTargetServiceRevisionArn().endsWith("/" + taskSetId(svc))) {
+                    return false;
+                }
+                String failedId = deploymentId(svc);
+                Instant now = Instant.now();
+                deployment.setStatus(rollback ? DEPLOYMENT_STATUS_ROLLBACK_IN_PROGRESS
+                        : DEPLOYMENT_STATUS_STOP_REQUESTED);
+                deployment.setStatusReason(reason);
+                deployment.setUpdatedAt(now);
+                svc.setFailedDeploymentId(failedId);
+                if (eventPublisher != null) {
+                    eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_FAILED", reason,
+                            serviceRegion(svc));
+                }
+                if (rollback) {
+                    ServiceRevision target = previousSuccessfulRevision(svc, deployment);
+                    if (target != null) {
+                        deployment.setRollbackTargetServiceRevisionArn(target.getServiceRevisionArn());
+                        deployment.setRollbackStartedAt(now);
+                        deployment.setRollbackReason(reason);
+                        restoreServiceRevision(svc, target);
+                        String targetId = deploymentId(svc);
+                        inProgressEmitted.add(targetId);
+                        if (eventPublisher != null) {
+                            eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_IN_PROGRESS",
+                                    "ECS deployment " + failedId + " is rolling back to deployment "
+                                            + targetId + ".", serviceRegion(svc));
+                        }
+                    }
+                }
+            }
+            persistServiceModel(svc);
             return true;
         }
     }
 
-    private void requestDeploymentFailure(EcsServiceModel svc, ServiceDeployment deployment,
-                                          String reason, boolean rollback) {
-        synchronized (deployment) {
-            if (!DEPLOYMENT_STATUS_IN_PROGRESS.equals(deployment.getStatus())) {
-                return;
-            }
-            deployment.setStatus(rollback ? DEPLOYMENT_STATUS_ROLLBACK_IN_PROGRESS
-                    : DEPLOYMENT_STATUS_STOP_REQUESTED);
-            deployment.setStatusReason(reason);
-            deployment.setUpdatedAt(Instant.now());
-            if (rollback) {
-                ServiceRevision target = previousSuccessfulRevision(svc, deployment);
-                if (target != null) {
-                    deployment.setRollbackTargetServiceRevisionArn(target.getServiceRevisionArn());
-                    restoreServiceRevision(svc, target);
-                }
-            }
-        }
-    }
-
     private ServiceRevision previousSuccessfulRevision(EcsServiceModel svc, ServiceDeployment failedDeployment) {
-        ServiceRevision previous = serviceDeployments.values().stream()
-                .filter(candidate -> candidate != failedDeployment)
-                .filter(candidate -> failedDeployment.getServiceArn().equals(candidate.getServiceArn()))
-                .filter(candidate -> DEPLOYMENT_STATUS_SUCCESSFUL.equals(candidate.getStatus()))
-                .max(Comparator.comparing(ServiceDeployment::getCreatedAt,
-                        Comparator.nullsFirst(Comparator.naturalOrder())))
-                .map(candidate -> serviceRevisions.get(candidate.getTargetServiceRevisionArn()))
-                .orElse(null);
+        ServiceDeployment successful = latestServiceDeployment(svc.getServiceArn(), candidate ->
+                candidate != failedDeployment && DEPLOYMENT_STATUS_SUCCESSFUL.equals(candidate.getStatus()));
+        ServiceRevision previous = successful == null ? null
+                : serviceRevisions.get(successful.getTargetServiceRevisionArn());
         if (previous != null) {
             return previous;
         }
@@ -4276,7 +4322,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     private void restoreServiceRevision(EcsServiceModel svc, ServiceRevision revision) {
         String revisionArn = revision.getServiceRevisionArn();
-        String taskSetId = revisionArn.substring(revisionArn.lastIndexOf('/') + 1);
+        String taskSetId = taskSetId(revisionArn);
         svc.setTaskDefinition(revision.getTaskDefinition());
         svc.setLaunchType(revision.getLaunchType());
         svc.setCapacityProviderStrategy(revision.getCapacityProviderStrategy());
@@ -4288,17 +4334,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         svc.setServiceConnectConfiguration(revision.getServiceConnectConfiguration());
         svc.setDeploymentId("ecs-svc/" + taskSetId);
         svc.setLastDeploymentAt(revision.getCreatedAt());
-        svc.setLastCompletedDeploymentId(svc.getDeploymentId());
+        svc.setLastCompletedDeploymentId(null);
     }
 
     private boolean progressPendingDeploymentFailure(String key, EcsServiceModel svc) {
-        ServiceDeployment pending = serviceDeployments.values().stream()
-                .filter(deployment -> svc.getServiceArn().equals(deployment.getServiceArn()))
-                .filter(deployment -> DEPLOYMENT_STATUS_STOP_REQUESTED.equals(deployment.getStatus())
-                        || DEPLOYMENT_STATUS_ROLLBACK_IN_PROGRESS.equals(deployment.getStatus()))
-                .max(Comparator.comparing(ServiceDeployment::getCreatedAt,
-                        Comparator.nullsFirst(Comparator.naturalOrder())))
-                .orElse(null);
+        ServiceDeployment pending = latestServiceDeployment(svc.getServiceArn(), deployment ->
+                DEPLOYMENT_STATUS_STOP_REQUESTED.equals(deployment.getStatus())
+                        || DEPLOYMENT_STATUS_ROLLBACK_IN_PROGRESS.equals(deployment.getStatus()));
         if (pending == null) {
             return false;
         }
@@ -4334,7 +4376,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (targetRevisionArn == null) {
             return false;
         }
-        String failedTaskSetId = targetRevisionArn.substring(targetRevisionArn.lastIndexOf('/') + 1);
+        String failedTaskSetId = taskSetId(targetRevisionArn);
         String failedDeploymentId = "ecs-svc/" + failedTaskSetId;
         EcsCluster cluster = resolveClusterByArn(svc.getClusterArn());
         if (cluster == null) {
@@ -4422,6 +4464,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         copy.setTargetServiceRevisionArn(source.getTargetServiceRevisionArn());
         copy.setSourceServiceRevisionArns(source.getSourceServiceRevisionArns());
         copy.setRollbackTargetServiceRevisionArn(source.getRollbackTargetServiceRevisionArn());
+        copy.setRollbackStartedAt(source.getRollbackStartedAt());
+        copy.setRollbackReason(source.getRollbackReason());
+        copy.setAlarmNames(source.getAlarmNames());
+        copy.setTriggeredAlarmNames(source.getTriggeredAlarmNames());
+        copy.setAlarmStatus(source.getAlarmStatus());
         copy.setFailedTasks(source.getFailedTasks());
         return copy;
     }
@@ -4978,14 +5025,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         ServiceDeployment deployment = deploymentRecordForReconciliation(svc, key, region);
         if (deployment != null && DEPLOYMENT_STATUS_IN_PROGRESS.equals(deployment.getStatus())) {
-            Optional<String> alarmFailure = deploymentAlarmFailureReason(svc, region);
-            if (alarmFailure.isPresent()) {
-                String failedDeploymentId = deploymentId(svc);
+            List<String> triggeredAlarms = triggeredDeploymentAlarms(svc, region);
+            if (!triggeredAlarms.isEmpty()) {
                 Map<String, Object> alarms = deploymentAlarmsOf(svc);
-                requestDeploymentFailure(svc, deployment, alarmFailure.get(),
+                synchronized (deployment) {
+                    if (deployment.getAlarmNames() == null && alarms.get("alarmNames") instanceof List<?> names) {
+                        deployment.setAlarmNames(names.stream().filter(String.class::isInstance)
+                                .map(String.class::cast).toList());
+                    }
+                    deployment.setTriggeredAlarmNames(triggeredAlarms);
+                    deployment.setAlarmStatus("TRIGGERED");
+                }
+                requestDeploymentFailure(svc, deployment,
+                        ALARM_FAILURE_REASON + " Alarms: " + String.join(", ", triggeredAlarms),
                         flag(alarms.get("rollback"), false));
-                svc.setFailedDeploymentId(failedDeploymentId);
-                services.put(key, svc);
                 return;
             }
         }
@@ -5014,14 +5067,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (eventPublisher != null) {
             String deploymentId = currentDeploymentId;
             boolean converged = current >= svc.getDesiredCount();
-            if (converged) {
-                boolean completionEventPending = deploymentId.equals(svc.getPendingCompletionEventDeploymentId());
-                boolean completionEventAlreadyEmitted = deploymentId.equals(svc.getLastCompletionEventDeploymentId())
-                        || (deploymentId.equals(svc.getLastCompletedDeploymentId()) && !completionEventPending);
-                if (!completionEventAlreadyEmitted) {
+            ServiceDeployment pendingFailure = latestServiceDeployment(svc.getServiceArn(), candidate ->
+                    DEPLOYMENT_STATUS_ROLLBACK_IN_PROGRESS.equals(candidate.getStatus()));
+            if (converged && pendingFailure == null) {
+                if (!deploymentId.equals(svc.getLastCompletedDeploymentId())) {
                     svc.setLastCompletedDeploymentId(deploymentId);
-                    svc.setLastCompletionEventDeploymentId(deploymentId);
-                    svc.setPendingCompletionEventDeploymentId(null);
                     services.put(key, svc);
                     eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_COMPLETED",
                             "ECS deployment " + deploymentId + " completed.", region);
@@ -5049,8 +5099,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     LOG.infov("Service reconciler started task {0} for service {1}",
                             launched.getTaskArn(), svc.getServiceName());
                     if (countLaunch(svc, deployment, launched)) {
-                        svc.setFailedDeploymentId(currentDeploymentId);
-                        services.put(key, svc);
                         break;
                     }
                 } catch (Exception e) {
@@ -5088,14 +5136,21 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     private ServiceDeployment deploymentRecordForCurrentWorkload(EcsServiceModel svc) {
         String currentTaskSetId = taskSetId(svc);
+        ServiceDeployment rollingBack = latestServiceDeployment(svc.getServiceArn(), deployment ->
+                DEPLOYMENT_STATUS_ROLLBACK_IN_PROGRESS.equals(deployment.getStatus())
+                        && deployment.getRollbackTargetServiceRevisionArn() != null
+                        && deployment.getRollbackTargetServiceRevisionArn().endsWith("/" + currentTaskSetId));
+        return rollingBack != null ? rollingBack : deploymentRecordOf(svc);
+    }
+
+    private ServiceDeployment latestServiceDeployment(String serviceArn,
+                                                      Predicate<ServiceDeployment> filter) {
         return serviceDeployments.values().stream()
-                .filter(deployment -> svc.getServiceArn().equals(deployment.getServiceArn()))
-                .filter(deployment -> DEPLOYMENT_STATUS_ROLLBACK_IN_PROGRESS.equals(deployment.getStatus()))
-                .filter(deployment -> deployment.getRollbackTargetServiceRevisionArn() != null
-                        && deployment.getRollbackTargetServiceRevisionArn().endsWith("/" + currentTaskSetId))
+                .filter(deployment -> Objects.equals(serviceArn, deployment.getServiceArn()))
+                .filter(filter)
                 .max(Comparator.comparing(ServiceDeployment::getCreatedAt,
                         Comparator.nullsFirst(Comparator.naturalOrder())))
-                .orElseGet(() -> deploymentRecordOf(svc));
+                .orElse(null);
     }
 
     private ServiceDeployment deploymentRecordForReconciliation(EcsServiceModel svc, String key, String region) {
@@ -5110,34 +5165,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         Instant createdAt = svc.getLastDeploymentAt() != null ? svc.getLastDeploymentAt() : svc.getCreatedAt();
         String revisionArn = regionResolver.buildArn("ecs", region,
                 "service-revision/" + taskSetId(svc));
-        ServiceRevision revision = new ServiceRevision();
-        revision.setServiceRevisionArn(revisionArn);
-        revision.setServiceArn(svc.getServiceArn());
-        revision.setClusterArn(svc.getClusterArn());
-        revision.setTaskDefinition(pinnedTaskDefinitionArn(svc, key, region));
-        revision.setContainerImages(containerImagesOf(revision.getTaskDefinition(), region));
-        revision.setLaunchType(svc.getLaunchType());
-        revision.setCapacityProviderStrategy(svc.getCapacityProviderStrategy());
-        revision.setPlatformVersion(svc.getPlatformVersion());
-        revision.setPlatformFamily(svc.getPlatformFamily());
-        revision.setLoadBalancers(svc.getLoadBalancers());
-        revision.setServiceRegistries(svc.getServiceRegistries());
-        revision.setNetworkConfiguration(svc.getNetworkConfiguration());
-        revision.setServiceConnectConfiguration(svc.getServiceConnectConfiguration());
-        revision.setCreatedAt(createdAt);
+        ServiceRevision revision = newServiceRevision(svc, pinnedTaskDefinitionArn(svc, key, region),
+                revisionArn, createdAt, region);
         serviceRevisions.putIfAbsent(revisionArn, revision);
 
-        ServiceDeployment recovered = new ServiceDeployment();
-        recovered.setServiceDeploymentArn(regionResolver.buildArn("ecs", region,
-                "service-deployment/" + UUID.randomUUID().toString().replace("-", "")));
-        recovered.setServiceArn(svc.getServiceArn());
-        recovered.setClusterArn(svc.getClusterArn());
-        recovered.setTaskDefinition(revision.getTaskDefinition());
-        recovered.setStatus(DEPLOYMENT_STATUS_IN_PROGRESS);
-        recovered.setCreatedAt(createdAt);
-        recovered.setStartedAt(createdAt);
-        recovered.setUpdatedAt(createdAt);
-        recovered.setTargetServiceRevisionArn(revisionArn);
+        ServiceDeployment recovered = newServiceDeployment(svc, revision.getTaskDefinition(),
+                regionResolver.buildArn("ecs", region,
+                        "service-deployment/" + UUID.randomUUID().toString().replace("-", "")),
+                revisionArn, createdAt);
         recovered.setSourceServiceRevisionArns(List.of());
         ServiceDeployment existing = serviceDeployments.putIfAbsent(
                 recovered.getServiceDeploymentArn(), recovered);
@@ -5151,26 +5186,24 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return alarms instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
     }
 
-    private Optional<String> deploymentAlarmFailureReason(EcsServiceModel svc, String region) {
+    private List<String> triggeredDeploymentAlarms(EcsServiceModel svc, String region) {
         Map<String, Object> alarms = deploymentAlarmsOf(svc);
         if (cloudWatchMetricsService == null || !flag(alarms.get("enable"), false)
                 || !(alarms.get("alarmNames") instanceof List<?> rawNames)) {
-            return Optional.empty();
+            return List.of();
         }
         List<String> alarmNames = rawNames.stream()
                 .filter(String.class::isInstance)
                 .map(String.class::cast)
                 .toList();
         if (alarmNames.isEmpty()) {
-            return Optional.empty();
+            return List.of();
         }
         List<String> alarmsInAlarm = cloudWatchMetricsService.describeAlarms(alarmNames, null, region).stream()
                 .filter(alarm -> "ALARM".equals(alarm.getStateValue()))
                 .map(MetricAlarm::getAlarmName)
                 .toList();
-        return alarmsInAlarm.isEmpty()
-                ? Optional.empty()
-                : Optional.of(ALARM_FAILURE_REASON + " Alarms: " + String.join(", ", alarmsInAlarm));
+        return alarmsInAlarm;
     }
 
     // ── Resolution helpers ────────────────────────────────────────────────────

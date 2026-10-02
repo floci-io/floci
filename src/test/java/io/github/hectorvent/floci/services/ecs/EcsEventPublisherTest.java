@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.TaskStatus;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import org.junit.jupiter.api.Test;
@@ -97,5 +98,22 @@ class EcsEventPublisherTest {
 
         publisher.emitTaskLadder(runningTask(), TaskStatus.PENDING, TaskStatus.RUNNING, REGION);
         // no exception propagates
+    }
+
+    @Test
+    void failedDeploymentEventUsesErrorType() throws Exception {
+        EventBridgeService eb = mock(EventBridgeService.class);
+        EcsEventPublisher publisher = new EcsEventPublisher(eb,
+                new RegionResolver(REGION, "000000000000"), objectMapper);
+        EcsServiceModel svc = new EcsServiceModel();
+        svc.setServiceArn("arn:aws:ecs:us-east-1:000000000000:service/c/s");
+        svc.setDeploymentId("ecs-svc/failed");
+
+        publisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_FAILED", "Alarm triggered", REGION);
+
+        JsonNode detail = objectMapper.readTree((String) capture(eb, 1).getFirst().get("Detail"));
+        assertEquals("ERROR", detail.path("eventType").asText());
+        assertEquals("SERVICE_DEPLOYMENT_FAILED", detail.path("eventName").asText());
+        assertEquals("ecs-svc/failed", detail.path("deploymentId").asText());
     }
 }

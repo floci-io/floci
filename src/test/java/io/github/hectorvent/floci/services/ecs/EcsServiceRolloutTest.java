@@ -192,7 +192,7 @@ class EcsServiceRolloutTest {
         service.createCluster("dep-cluster", REGION);
         registerTaskDef(service, "dep-fam", "app:1");
 
-        EcsServiceModel serviceModel = service.createService("dep-cluster", "dep-svc", "dep-fam", 1,
+        service.createService("dep-cluster", "dep-svc", "dep-fam", 1,
                 LaunchType.FARGATE, List.of(), null, REGION);
         verify(publisher).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_STARTED"), any(), eq(REGION));
 
@@ -208,20 +208,6 @@ class EcsServiceRolloutTest {
         verify(publisher, times(1))
                 .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
 
-        // Old persisted models used lastCompletedDeploymentId as the event deduplication marker.
-        serviceModel.setLastSettledDeploymentId(null);
-        serviceModel.setLastCompletionEventDeploymentId(null);
-        serviceModel.setPendingCompletionEventDeploymentId(serviceModel.getDeploymentId());
-        service.reconcileServices();
-        verify(publisher, times(2))
-                .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
-
-        // A legacy completion without a pending event remains deduplicated by lastCompletedDeploymentId.
-        serviceModel.setLastCompletionEventDeploymentId(null);
-        serviceModel.setPendingCompletionEventDeploymentId(null);
-        service.reconcileServices();
-        verify(publisher, times(2))
-                .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
     }
 
     private static List<EcsTask> runningTasks(EcsService service) {
