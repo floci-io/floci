@@ -395,8 +395,8 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
         if (!props.has("Tags")) {
             return List.of();
         }
-        JsonNode tags = ctx.engine().resolveNode(props.get("Tags"));
-        if (tags == null || tags.isNull()) {
+        JsonNode tags = ctx.engine().resolveNodeOmittingNoValue(props.get("Tags"));
+        if (tags == null || tags.isNull() || tags.isMissingNode()) {
             return List.of();
         }
         if (!tags.isArray()) {
@@ -423,8 +423,8 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
         if (props == null || !props.has(name)) {
             return null;
         }
-        JsonNode resolved = ctx.engine().resolveNode(props.get(name));
-        if (resolved == null || resolved.isNull()) {
+        JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(props.get(name));
+        if (resolved == null || resolved.isNull() || resolved.isMissingNode()) {
             return null;
         }
         if (!resolved.isObject()) {

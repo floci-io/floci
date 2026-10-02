@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -34,6 +35,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -136,6 +138,80 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
                 assertEquals(404, sesIdentity(address).statusCode()));
         stack = null;
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void conditionalOptionsCanBeRemovedAndRestoredWithoutReplacingTheIdentity(boolean members) throws Exception {
+        String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        cfn("CreateStack", conditionalOptionsTemplate(identityName, true, members)).then().statusCode(200);
+        awaitStatus("CREATE_COMPLETE");
+        assertConditionalOptions(identityName, true, members);
+        clearInvocations(sesService);
+
+        cfn("UpdateStack", conditionalOptionsTemplate(identityName, false, members)).then().statusCode(200);
+        String omitted = await().atMost(Duration.ofSeconds(15)).until(
+                () -> cfn("DescribeStacks", null).then().statusCode(200).extract().asString(),
+                body -> List.of("UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE", "UPDATE_ROLLBACK_FAILED")
+                        .contains(XmlParser.extractFirst(body, "StackStatus", null)));
+        assertEquals("UPDATE_COMPLETE", XmlParser.extractFirst(omitted, "StackStatus", null), omitted);
+        assertEquals(identityName, XmlParser.extractPairs(omitted,
+                "Outputs", "OutputKey", "OutputValue").get("IdentityRef"));
+        assertConditionalOptions(identityName, false, members);
+
+        cfn("UpdateStack", conditionalOptionsTemplate(identityName, true, members)).then().statusCode(200);
+        String restored = awaitStatus("UPDATE_COMPLETE");
+        Map<String, String> outputs = XmlParser.extractPairs(restored, "Outputs", "OutputKey", "OutputValue");
+        assertEquals(identityName, outputs.get("IdentityRef"));
+        assertConditionalOptions(identityName, true, members);
+        List<String> tokens = sesIdentity(identityName).jsonPath().getList("DkimAttributes.Tokens", String.class);
+        assertEquals(3, tokens.size());
+        for (int index = 1; index <= 3; index++) {
+            assertEquals(tokens.get(index - 1) + "._domainkey." + identityName, outputs.get("DkimName" + index));
+            assertEquals(tokens.get(index - 1) + ".dkim.amazonses.com", outputs.get("DkimValue" + index));
+        }
+        verify(sesService, never()).createEmailIdentity(eq(identityName), any(), any(), eq("us-east-1"));
+        verify(sesService, never()).deleteIdentity(identityName, "us-east-1");
+    }
+
+    @Test
+    void optionalSettingsSelectedAsNoValueCanCreateAnIdentity() throws Exception {
+        String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        ObjectNode template = (ObjectNode) MAPPER.readTree(conditionalOptionsTemplate(identityName, false, false));
+        template.withObject("/Resources/Identity/Properties").set("ConfigurationSetAttributes",
+                optionalValue(MAPPER.createObjectNode().put("ConfigurationSetName", "unused")));
+        cfn("CreateStack", template.toString()).then().statusCode(200);
+        String created = await().atMost(Duration.ofSeconds(15)).until(
+                () -> cfn("DescribeStacks", null).then().statusCode(200).extract().asString(),
+                body -> List.of("CREATE_COMPLETE", "ROLLBACK_COMPLETE", "ROLLBACK_FAILED")
+                        .contains(XmlParser.extractFirst(body, "StackStatus", null)));
+        assertEquals("CREATE_COMPLETE", XmlParser.extractFirst(created, "StackStatus", null), created);
+        assertConditionalOptions(identityName, false, false);
+        assertEquals(null, sesIdentity(identityName).jsonPath().getString("ConfigurationSetName"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"DkimAttributes", "Tags", "Tag.Key", "Tag.Value"})
+    void noValueSupportDoesNotAcceptInvalidShapesOrMissingRequiredTagFields(String invalid) throws Exception {
+        String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        ObjectNode template = (ObjectNode) MAPPER.readTree(conditionalOptionsTemplate(identityName, false, false));
+        ObjectNode properties = template.withObject("/Resources/Identity/Properties");
+        if (invalid.startsWith("Tag.")) {
+            ObjectNode tag = properties.putArray("Tags").addObject().put("Key", "purpose").put("Value", "");
+            tag.set(invalid.substring(4), optionalValue(MAPPER.createObjectNode().put("Ref", "AWS::Region")));
+        } else {
+            properties.put(invalid, "");
+        }
+        cfn("CreateStack", template.toString()).then().statusCode(200);
+        String failed = await().atMost(Duration.ofSeconds(15)).until(
+                () -> cfn("DescribeStacks", null).then().statusCode(200).extract().asString(),
+                body -> List.of("CREATE_COMPLETE", "ROLLBACK_COMPLETE", "ROLLBACK_FAILED")
+                        .contains(XmlParser.extractFirst(body, "StackStatus", null)));
+        assertEquals("ROLLBACK_COMPLETE", XmlParser.extractFirst(failed, "StackStatus", null), failed);
+        sesIdentity(identityName).then().statusCode(404);
     }
 
     @Test
@@ -690,6 +766,58 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         ObjectNode retained = (ObjectNode) MAPPER.readTree(template(identity, updated));
         retained.withObject("/Resources/Identity").put("UpdateReplacePolicy", "Retain");
         return retained.toString();
+    }
+
+    private String conditionalOptionsTemplate(String identity, boolean include, boolean members) throws Exception {
+        ObjectNode conditional = (ObjectNode) MAPPER.readTree(template(identity, true));
+        conditional.putObject("Conditions").putObject("IncludeOptions")
+                .putArray("Fn::Equals").add("enabled").add(include ? "enabled" : "disabled");
+        ObjectNode properties = conditional.withObject("/Resources/Identity/Properties");
+        for (String name : List.of("DkimSigningAttributes", "DkimAttributes", "MailFromAttributes", "FeedbackAttributes")) {
+            JsonNode value = properties.get(name);
+            if (members) {
+                ObjectNode object = MAPPER.createObjectNode();
+                value.fields().forEachRemaining(field -> object.set(field.getKey(), optionalValue(field.getValue())));
+                properties.set(name, object);
+            } else {
+                properties.set(name, optionalValue(value));
+            }
+        }
+        if (members) {
+            properties.putArray("Tags").addObject().put("Key", "stable").put("Value", "");
+            properties.withArray("Tags").add(optionalValue(MAPPER.valueToTree(Map.of("Key", "purpose", "Value", "new"))));
+        } else {
+            properties.set("Tags", optionalValue(properties.get("Tags")));
+        }
+        return conditional.toString();
+    }
+
+    private ObjectNode optionalValue(JsonNode value) {
+        ObjectNode conditional = MAPPER.createObjectNode();
+        conditional.putArray("Fn::If").add("IncludeOptions").add(value)
+                .add(MAPPER.createObjectNode().put("Ref", "AWS::NoValue"));
+        return conditional;
+    }
+
+    private void assertConditionalOptions(String identityName, boolean include, boolean members) {
+        Response identity = sesIdentity(identityName);
+        assertEquals(200, identity.statusCode(), identity.asString());
+        assertEquals(!include, identity.jsonPath().getBoolean("FeedbackForwardingStatus"));
+        assertEquals(!include, identity.jsonPath().getBoolean("DkimAttributes.SigningEnabled"));
+        assertEquals(include ? "RSA_1024_BIT" : "RSA_2048_BIT",
+                identity.jsonPath().getString("DkimAttributes.NextSigningKeyLength"));
+        assertEquals(include ? "mail." + identityName : null,
+                identity.jsonPath().getString("MailFromAttributes.MailFromDomain"));
+        assertEquals(include ? "REJECT_MESSAGE" : "USE_DEFAULT_VALUE",
+                identity.jsonPath().getString("MailFromAttributes.BehaviorOnMxFailure"));
+        List<Map<String, String>> tags = identity.jsonPath().getList("Tags");
+        assertEquals((include ? 1 : 0) + (members ? 1 : 0), tags.size());
+        if (include) {
+            assertEquals("new", identity.jsonPath().getString("Tags.find { it.Key == 'purpose' }.Value"));
+        }
+        if (members) {
+            assertEquals("", identity.jsonPath().getString("Tags.find { it.Key == 'stable' }.Value"));
+        }
     }
 
     private String template(String identity, boolean updated) throws Exception {

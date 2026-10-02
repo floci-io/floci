@@ -512,6 +512,7 @@ class SesCfnProvisionerTest {
     private ProvisionContext context(String priorPhysicalId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolveNode(any())).thenAnswer(call -> call.getArgument(0));
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(call -> call.getArgument(0));
         return new ProvisionContext(engine, "us-east-1", "000000000000", "ses-stack", priorPhysicalId);
     }
 
