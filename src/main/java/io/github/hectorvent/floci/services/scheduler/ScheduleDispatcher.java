@@ -73,6 +73,7 @@ public class ScheduleDispatcher implements Resettable {
     private final ScheduleInvoker invoker;
     private final SqsService sqsService;
     private final String baseUrl;
+    private final String defaultRegion;
     private final long tickIntervalSeconds;
     private final boolean enabled;
     private final ScheduledExecutorService executor;
@@ -89,6 +90,7 @@ public class ScheduleDispatcher implements Resettable {
         this.invoker = invoker;
         this.sqsService = sqsService;
         this.baseUrl = config.baseUrl();
+        this.defaultRegion = config.defaultRegion();
         this.tickIntervalSeconds = config.services().scheduler().tickIntervalSeconds();
         this.enabled = config.services().scheduler().enabled()
                 && config.services().scheduler().invocationEnabled();
@@ -364,8 +366,8 @@ public class ScheduleDispatcher implements Resettable {
         return "DELETE".equalsIgnoreCase(schedule.getActionAfterCompletion());
     }
 
-    private static String regionOf(Schedule schedule) {
-        return ScheduleInvoker.regionOf(schedule);
+    private String regionOf(Schedule schedule) {
+        return ScheduleInvoker.regionOf(schedule, defaultRegion);
     }
 
     private record Occurrence(String scheduleArn, Instant scheduledAt) {

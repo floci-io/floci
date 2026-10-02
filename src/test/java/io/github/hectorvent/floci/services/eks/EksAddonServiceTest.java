@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eks;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.eks.model.Addon;
 import io.github.hectorvent.floci.services.eks.model.AddonInfo;
@@ -648,7 +649,8 @@ class EksAddonServiceTest {
         InMemoryStorage<String, EksAddonService.StoredAddon> storage = new InMemoryStorage<>();
         InMemoryStorage<String, EksAddonService.StoredUpdate> updatesStorage = new InMemoryStorage<>();
         InMemoryStorage<String, EksPodIdentityAssociationService.StoredAssociation> assocStorage = new InMemoryStorage<>();
-        EksPodIdentityAssociationService podIdentityAssociations = new EksPodIdentityAssociationService(assocStorage, iam);
+        EksPodIdentityAssociationService podIdentityAssociations = new EksPodIdentityAssociationService(
+                assocStorage, iam, new RegionResolver("us-east-1", "000000000000"));
         EksAddonService service = new EksAddonService(storage, updatesStorage, catalog, iam, podIdentityAssociations);
 
         return new Fixture(cluster, iam, role, storage, updatesStorage, catalog, podIdentityAssociations, service);

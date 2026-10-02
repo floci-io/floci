@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ce.enumerator;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ResourceUsageEnumerator;
 import io.github.hectorvent.floci.core.common.UsageLine;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -36,10 +37,12 @@ public class S3UsageEnumerator implements ResourceUsageEnumerator {
     private static final double SECONDS_PER_MONTH = 30.0 * 86_400.0;
 
     private final S3Service s3;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public S3UsageEnumerator(S3Service s3) {
+    public S3UsageEnumerator(S3Service s3, RegionResolver regionResolver) {
         this.s3 = s3;
+        this.regionResolver = regionResolver;
     }
 
     @Override
@@ -61,7 +64,7 @@ public class S3UsageEnumerator implements ResourceUsageEnumerator {
         for (Bucket bucket : buckets) {
             String bucketRegion = bucket.getRegion();
             if (bucketRegion == null) {
-                bucketRegion = "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+                bucketRegion = regionResolver.getDefaultRegion();
             }
             if (!bucketRegion.equals(region)) {
                 continue;

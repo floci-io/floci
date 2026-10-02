@@ -2756,7 +2756,7 @@ public class NativeDynamoDbJsonHandler {
                 sseDescription.put("KMSMasterKeyArn", table.getKmsMasterKeyArn() != null
                         ? table.getKmsMasterKeyArn()
                         : NativeDynamoDbTableService.defaultKmsMasterKeyArn(
-                                AwsArnUtils.regionOrDefault(table.getTableArn(), "us-east-1"))); // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+                                AwsArnUtils.parse(table.getTableArn()).region()));
             }
             node.set("SSEDescription", sseDescription);
         }

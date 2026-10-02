@@ -7,6 +7,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
@@ -1401,7 +1402,7 @@ public class EksClusterManager
         try {
             Files.createDirectories(localFile.getParent());
             Files.writeString(localFile, buildWebhookKubeconfig("http://" + dockerHostResolver.resolve() + ":"
-                    + config.port() + webhookPath(cluster)));
+                    + config.port() + webhookPath(cluster, clusterRegion(cluster))));
         } catch (IOException e) {
             LOG.warnv("EKS token-webhook disabled for cluster {0}: could not write kubeconfig: {1}",
                     clusterName, e.getMessage());
@@ -2068,18 +2069,13 @@ public class EksClusterManager
         return "http://" + dockerHostResolver.resolve() + ":" + config.port() + webhookPath(clusterName);
     }
 
-    static String webhookPath(Cluster cluster) {
+    /** The cluster's ARN names its region; {@code defaultRegion} answers for a cluster without one. */
+    static String webhookPath(Cluster cluster, String defaultRegion) {
         // client-go replaces a server URL query when constructing its TokenReview request.
         String accountId = cluster.getAccountId() != null && !cluster.getAccountId().isBlank()
                 ? cluster.getAccountId()
                 : (cluster.getArn() != null && cluster.getArn().split(":", 6).length > 4 ? cluster.getArn().split(":", 6)[4] : "000000000000");
-        String region = "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
-        if (cluster.getArn() != null) {
-            String[] parts = cluster.getArn().split(":", 6);
-            if (parts.length > 3 && !parts[3].isBlank()) {
-                region = parts[3];
-            }
-        }
+        String region = AwsArnUtils.regionOrDefault(cluster.getArn(), defaultRegion);
         Instant createdAt = cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.EPOCH;
         return webhookPath(cluster.getName()) + "/scope/" + accountId
                 + "/" + region + "/" + createdAt;
@@ -2271,7 +2267,7 @@ public class EksClusterManager
                         vpcId, vpcConfig.getSubnetIds(), vpcRouteTables);
                 List<EksVpcRouteProgramming.VpcRouteEntry> entries = applicable.isEmpty()
                         ? List.of()
-                        : EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, applicable, ec2);
+                        : EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, region, applicable, ec2);
 
                 Set<String> desiredDests = entries.stream()
                         .map(EksVpcRouteProgramming.VpcRouteEntry::destinationCidrBlock)
@@ -2386,7 +2382,8 @@ public class EksClusterManager
         if (config != null && config.defaultRegion() != null && !config.defaultRegion().isBlank()) {
             return config.defaultRegion();
         }
-        return "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+        // Reached only by a test constructor that wires neither the resolver nor the config.
+        return "us-east-1"; // partition-literal: unreachable under CDI, where the resolver or config answers
     }
 
     String deriveClusterNodeAvailabilityZone(Cluster cluster, String region) {

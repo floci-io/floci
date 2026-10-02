@@ -715,7 +715,7 @@ public class MwaaService implements TagHandler {
         return region + "/" + name;
     }
 
-    static String environmentIdentity(Environment environment) {
+    String environmentIdentity(Environment environment) {
         return environmentAccount(environment) + "/" + environmentRegion(environment) + "/" + environment.getName();
     }
 
@@ -723,8 +723,8 @@ public class MwaaService implements TagHandler {
         return MwaaEnvironmentManager.environmentAccount(environment);
     }
 
-    private static String environmentRegion(Environment environment) {
-        return MwaaEnvironmentManager.environmentRegion(environment);
+    private String environmentRegion(Environment environment) {
+        return MwaaEnvironmentManager.environmentRegion(environment, regionResolver.getDefaultRegion());
     }
 
 }
