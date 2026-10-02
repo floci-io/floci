@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.eks;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -628,9 +629,28 @@ public class EksClusterManager
             startCluster(cluster);
             return;
         }
-        if (capacityChanged) {
+        if (capacityChanged || onAnotherNetwork(existing.get())) {
             replaceClusterContainer(cluster, null);
         }
+    }
+
+    /**
+     * A survivor from before Floci moved to another Docker network (FLOCI_SERVICES_DOCKER_NETWORK
+     * changed, or Floci left host networking) is unreachable from Floci across the bridge
+     * isolation, so the cluster could never become ACTIVE again.
+     */
+    private boolean onAnotherNetwork(Container survivor) {
+        Optional<String> network = containerBuilder.resolveDockerNetwork(config.services().eks().dockerNetwork());
+        if (network.isEmpty() || survivor.getNetworkSettings() == null
+                || survivor.getNetworkSettings().getNetworks() == null) {
+            return false;
+        }
+        boolean moved = !survivor.getNetworkSettings().getNetworks().containsKey(network.get());
+        if (moved) {
+            LOG.infov("Surviving k3s container {0} is not on Docker network {1}; replacing it (its data volume is kept)",
+                    survivor.getId(), network.get());
+        }
+        return moved;
     }
 
     private boolean adoptSurvivingCluster(Cluster cluster, String containerId) {
