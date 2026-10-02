@@ -9,9 +9,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Tag reconciliation shared by the EC2 provisioners ({@code Ec2InstanceCfnProvisioner} and
- * {@code Ec2SecurityGroupCfnProvisioner}). Both drive it from the desired tags resolved via
- * {@link ProvisionContext#resolveTags}; the reconcile itself is identical.
+ * Tag reconciliation shared by the EC2 provisioners ({@code Ec2InstanceCfnProvisioner},
+ * {@code Ec2SecurityGroupCfnProvisioner} and {@code Ec2FlowLogCfnProvisioner}). Each drives it from
+ * the desired tags resolved via {@link ProvisionContext#resolveTags}; the reconcile itself is identical.
  */
 final class Ec2Tags {
 

@@ -84,6 +84,19 @@ class FlowLogServiceTest {
     }
 
     @Test
+    void deleteFlowLogsForgetsTheLogsTags() {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        when(ec2Service.callerAccountId()).thenReturn("000000000000");
+        FlowLogService service = new FlowLogService(ec2Service, mock(S3Service.class), new InMemoryStorage<>());
+        FlowLog fl = service.createFlowLog("us-east-1", "vpc-123", "VPC", "ALL", "s3",
+                "arn:aws:s3:::flow-bucket", null, null, 600);
+
+        service.deleteFlowLogs("us-east-1", List.of(fl.getFlowLogId()));
+
+        verify(ec2Service).forgetResourceTags(fl.getFlowLogId());
+    }
+
+    @Test
     void deleteFlowLogsIgnoresUnknownIds() {
         assertTrue(flowLogService.deleteFlowLogs("us-east-1", List.of("fl-doesnotexist")).isEmpty());
     }

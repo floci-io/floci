@@ -3,12 +3,15 @@ package io.github.hectorvent.floci.services.ec2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+
+import java.util.List;
 
 /**
  * Integration tests for VPC Flow Logs via the EC2 Query Protocol
@@ -189,5 +192,147 @@ class Ec2FlowLogIntegrationTest {
             .statusCode(200)
             .body("DescribeFlowLogsResponse.flowLogSet.findAll { it.flowLogId == '" + flowLogId + "' }.size()",
                     equalTo(0));
+    }
+
+    @Test
+    @Order(15)
+    void flowLogKeepsTheTagsOfItsOwnTagSpecification() {
+        // Terraform tags aws_flow_log at create and reads the tags back from DescribeFlowLogs.
+        String id = given()
+            .formParam("Action", "CreateFlowLogs")
+            .formParam("ResourceType", "VPC")
+            .formParam("ResourceId.1", vpcId)
+            .formParam("TrafficType", "ALL")
+            .formParam("LogDestinationType", "s3")
+            .formParam("LogDestination", "arn:aws:s3:::flow-logs-bucket")
+            .formParam("TagSpecification.1.ResourceType", "vpc")
+            .formParam("TagSpecification.1.Tag.1.Key", "Decoy")
+            .formParam("TagSpecification.1.Tag.1.Value", "not-mine")
+            .formParam("TagSpecification.2.ResourceType", "vpc-flow-log")
+            .formParam("TagSpecification.2.Tag.1.Key", "Environment")
+            .formParam("TagSpecification.2.Tag.1.Value", "dev")
+            .formParam("TagSpecification.2.Tag.2.Key", "Layer")
+            .formParam("TagSpecification.2.Tag.2.Value", "vpc")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateFlowLogsResponse.flowLogIdSet.item[0]");
+
+        String tags = "DescribeFlowLogsResponse.flowLogSet.item[0].tagSet.item";
+        given()
+            .formParam("Action", "DescribeFlowLogs")
+            .formParam("FlowLogId.1", id)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(tags + ".size()", equalTo(2))
+            .body(tags + ".find { it.key == 'Environment' }.value", equalTo("dev"))
+            .body(tags + ".find { it.key == 'Layer' }.value", equalTo("vpc"));
+
+        given()
+            .formParam("Action", "CreateTags")
+            .formParam("ResourceId.1", id)
+            .formParam("Tag.1.Key", "Owner")
+            .formParam("Tag.1.Value", "platform")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeFlowLogs")
+            .formParam("FlowLogId.1", id)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(tags + ".size()", equalTo(3))
+            .body(tags + ".find { it.key == 'Owner' }.value", equalTo("platform"));
+
+        given()
+            .formParam("Action", "DescribeTags")
+            .formParam("Filter.1.Name", "resource-type")
+            .formParam("Filter.1.Value.1", "vpc-flow-log")
+            .formParam("Filter.2.Name", "resource-id")
+            .formParam("Filter.2.Value.1", id)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeTagsResponse.tagSet.item.size()", equalTo(3))
+            .body("DescribeTagsResponse.tagSet.item.findAll { it.resourceType != 'vpc-flow-log' }.size()", equalTo(0));
+
+        given()
+            .formParam("Action", "DeleteFlowLogs")
+            .formParam("FlowLogId.1", id)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // A deleted flow log's tags must not outlive it.
+        given()
+            .formParam("Action", "DescribeTags")
+            .formParam("Filter.1.Name", "resource-id")
+            .formParam("Filter.1.Value.1", id)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeTagsResponse.tagSet.item.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(16)
+    void everyFlowLogOfOneRequestGetsTheTags() {
+        String secondVpc = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.91.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+
+        List<String> ids = given()
+            .formParam("Action", "CreateFlowLogs")
+            .formParam("ResourceType", "VPC")
+            .formParam("ResourceId.1", vpcId)
+            .formParam("ResourceId.2", secondVpc)
+            .formParam("TrafficType", "ALL")
+            .formParam("LogDestinationType", "s3")
+            .formParam("LogDestination", "arn:aws:s3:::flow-logs-bucket")
+            .formParam("TagSpecifications.1.ResourceType", "vpc-flow-log")
+            .formParam("TagSpecifications.1.Tag.1.Key", "Environment")
+            .formParam("TagSpecifications.1.Tag.1.Value", "dev")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getList("CreateFlowLogsResponse.flowLogIdSet.item", String.class);
+
+        assertEquals(2, ids.size());
+        for (String id : ids) {
+            given()
+                .formParam("Action", "DescribeFlowLogs")
+                .formParam("FlowLogId.1", id)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeFlowLogsResponse.flowLogSet.item[0].tagSet.item.key", equalTo("Environment"));
+        }
     }
 }

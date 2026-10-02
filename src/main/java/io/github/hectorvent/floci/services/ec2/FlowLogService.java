@@ -210,6 +210,7 @@ public class FlowLogService {
                 continue;
             }
             flowLogs.delete(id);
+            ec2Service.forgetResourceTags(id);
             deleted.add(id);
         }
         return deleted;

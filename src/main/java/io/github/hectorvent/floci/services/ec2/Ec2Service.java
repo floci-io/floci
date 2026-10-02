@@ -7155,6 +7155,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return List.copyOf(tags.get(resourceId).orElse(List.of()));
     }
 
+    /** Drops every tag of a resource that no longer exists, as each EC2 delete does for its own. */
+    public void forgetResourceTags(String resourceId) {
+        tags.delete(resourceId);
+    }
+
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
         List<String> filterResourceIds   = filters != null ? filters.get("resource-id")   : null;
@@ -7229,6 +7234,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         if (resourceId.startsWith("vpc-")) {
             return "vpc";
+        }
+        if (resourceId.startsWith("fl-")) {
+            return "vpc-flow-log";
         }
         if (resourceId.startsWith("subnet-")) {
             return "subnet";
