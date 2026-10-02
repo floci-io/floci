@@ -237,7 +237,9 @@ public class EcrJsonHandler {
         String repositoryName = request.path("repositoryName").asText(null);
         String registryId = request.path("registryId").asText(null);
         JsonNode scanOnPushNode = scanningConfiguration.path("scanOnPush");
-        if (!scanOnPushNode.isMissingNode() && !scanOnPushNode.isBoolean()) {
+        if (!scanOnPushNode.isMissingNode()
+                && !scanOnPushNode.isNull()
+                && !scanOnPushNode.isBoolean()) {
             throw new AwsException("InvalidParameterException",
                     "scanOnPush must be a boolean", 400);
         }

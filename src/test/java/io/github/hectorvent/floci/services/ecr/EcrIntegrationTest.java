@@ -195,6 +195,21 @@ class EcrIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidParameterException"));
+
+        given()
+            .header("X-Amz-Target", PREFIX + "PutImageScanningConfiguration")
+            .contentType(CT)
+            .body("""
+                {
+                  "repositoryName": "%s",
+                  "imageScanningConfiguration": { "scanOnPush": null }
+                }
+                """.formatted(REPO))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("imageScanningConfiguration.scanOnPush", equalTo(false));
     }
 
     @Test
@@ -212,8 +227,8 @@ class EcrIntegrationTest {
             .statusCode(200)
             .body("scanningConfigurations[0].repositoryName", equalTo(REPO))
             .body("scanningConfigurations[0].repositoryArn", startsWith("arn:aws:ecr:"))
-            .body("scanningConfigurations[0].scanOnPush", equalTo(true))
-            .body("scanningConfigurations[0].scanFrequency", equalTo("SCAN_ON_PUSH"))
+            .body("scanningConfigurations[0].scanOnPush", equalTo(false))
+            .body("scanningConfigurations[0].scanFrequency", equalTo("MANUAL"))
             .body("scanningConfigurations[0].appliedScanFilters", empty())
             .body("failures", empty());
     }
