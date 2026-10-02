@@ -10,7 +10,6 @@ import software.amazon.awssdk.services.sesv2.model.Contact;
 import software.amazon.awssdk.services.sesv2.model.CreateContactListRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateContactRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteContactListRequest;
-import software.amazon.awssdk.services.sesv2.model.DeleteContactRequest;
 import software.amazon.awssdk.services.sesv2.model.ListContactListsRequest;
 import software.amazon.awssdk.services.sesv2.model.ListContactsRequest;
 import software.amazon.awssdk.services.sesv2.model.ListContactsResponse;
@@ -19,10 +18,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
+// Runs as its own account, so the one contact list it needs leaves every other test's list alone.
 @DisplayName("SES v2 contact and contact list paging")
 class SesContactPagingTest {
 
+    private static final String ACCOUNT_ID = "777788889999";
     private static final String LIST = "compat-paging-list";
     private static final List<String> ADDRESSES =
             List.of("page-b@example.com", "page-c@example.com", "page-a@example.com");
@@ -31,8 +33,9 @@ class SesContactPagingTest {
 
     @BeforeAll
     static void setup() {
-        sesV2 = TestFixtures.sesV2Client();
-        deleteAllContactLists();
+        assumeFalse(TestFixtures.isRealAws(), "Uses an emulator account picked by the access key");
+        sesV2 = TestFixtures.sesV2Client(ACCOUNT_ID);
+        deleteList();
         sesV2.createContactList(CreateContactListRequest.builder().contactListName(LIST).build());
         for (String address : ADDRESSES) {
             sesV2.createContact(CreateContactRequest.builder()
@@ -43,22 +46,17 @@ class SesContactPagingTest {
     @AfterAll
     static void cleanup() {
         if (sesV2 != null) {
-            deleteAllContactLists();
+            deleteList();
             sesV2.close();
         }
     }
 
-    private static void deleteAllContactLists() {
-        // Only one contact list may exist per account; clear whatever is present (and its contacts).
-        sesV2.listContactListsPaginator(ListContactListsRequest.builder().build()).stream()
-                .flatMap(page -> page.contactLists().stream()).toList().forEach(cl -> {
-                    String name = cl.contactListName();
-                    sesV2.listContactsPaginator(ListContactsRequest.builder().contactListName(name).build())
-                            .stream().flatMap(page -> page.contacts().stream()).toList().forEach(c ->
-                                    sesV2.deleteContact(DeleteContactRequest.builder()
-                                            .contactListName(name).emailAddress(c.emailAddress()).build()));
-                    sesV2.deleteContactList(DeleteContactListRequest.builder().contactListName(name).build());
-                });
+    private static void deleteList() {
+        try {
+            sesV2.deleteContactList(DeleteContactListRequest.builder().contactListName(LIST).build());
+        } catch (Exception ignored) {
+            // Absent on a clean run; a list left by an interrupted run is the only other case.
+        }
     }
 
     @Test

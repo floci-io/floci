@@ -969,6 +969,19 @@ public final class TestFixtures {
                 .build();
     }
 
+    /**
+     * An SES v2 client acting as {@code accountId}, which the emulator reads from a 12-digit access
+     * key: SES allows one contact list per account, so a test that needs its own list uses an
+     * account no other test touches.
+     */
+    public static SesV2Client sesV2Client(String accountId) {
+        return SesV2Client.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .build();
+    }
+
     public static Route53Client route53Client() {
         return route53Client("test");
     }
