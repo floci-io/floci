@@ -96,7 +96,7 @@ public class EcsContainerManager {
 
     private static final String ATTACHMENT_DELETED = "DELETED";
     /** The label naming the Floci process that created a container, set by {@link #ownerLabels()}. */
-    public static final String RUN_LABEL = "floci.ecs-run";
+    public static final String RUN_LABEL = ContainerStorageHelper.ECS_RUN_LABEL;
 
     /** EC2 error codes the task ENI path can raise, none of which RunTask declares. */
     private static final Set<String> EC2_NETWORK_LOOKUP_FAILURES =
@@ -339,7 +339,7 @@ public class EcsContainerManager {
                         .withLabels(ownerLabels());
                 if (protectedNetwork != null) {
                     specBuilder.withNetworkMode("container:" + protectedNetwork.namespace().helperId());
-                    specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
+                    specBuilder.withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL, "true"));
                 }
                 // Its own address in the credential endpoint's range, so this container has a
                 // connected route to 169.254.170.2 at all. One per container, not per task: each
@@ -1115,14 +1115,18 @@ public class EcsContainerManager {
     /** {@link #removeLeftoverContainers()} keeping only the containers of run {@code currentRunId}. */
     public boolean removeLeftoverContainers(String currentRunId) {
         String owner = ContainerStorageHelper.ownerIdentity(config);
+        ContainerStorageHelper.LabelAliases aliases = ContainerStorageHelper.CONTAINER_LABEL_ALIASES;
         List<com.github.dockerjava.api.model.Container> containers;
         try {
             // Docker's container summary, not the ECS model Container this class imports.
-            containers = lifecycleManager.getDockerClient()
-                    .listContainersCmd()
-                    .withShowAll(true)
-                    .withLabelFilter(Map.of("io.floci.service", "ecs", ContainerStorageHelper.OWNER_LABEL, owner))
-                    .exec();
+            containers = aliases.listByLabels(
+                    Map.of(ContainerStorageHelper.SERVICE_LABEL, "ecs", ContainerStorageHelper.OWNER_LABEL, owner),
+                    filter -> lifecycleManager.getDockerClient()
+                            .listContainersCmd()
+                            .withShowAll(true)
+                            .withLabelFilter(filter)
+                            .exec(),
+                    com.github.dockerjava.api.model.Container::getId);
         } catch (Exception e) {
             LOG.logv(leftoverListFailureReported ? Logger.Level.DEBUG : Logger.Level.WARN,
                     "Could not list the ECS containers a previous run left behind: {0}", e.getMessage());
@@ -1132,7 +1136,10 @@ public class EcsContainerManager {
         leftoverListFailureReported = false;
         boolean allRemoved = true;
         for (com.github.dockerjava.api.model.Container container : containers) {
-            if (container.getLabels() != null && currentRunId.equals(container.getLabels().get(RUN_LABEL))) {
+            Map<String, String> labels = container.getLabels();
+            if (!aliases.consistent(container.getId(), labels)
+                    || !aliases.matches(labels, ContainerStorageHelper.OWNER_LABEL, owner)
+                    || currentRunId.equals(aliases.labelValue(labels, RUN_LABEL))) {
                 continue;
             }
             try {

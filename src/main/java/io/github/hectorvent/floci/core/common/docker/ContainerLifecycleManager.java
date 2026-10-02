@@ -497,14 +497,15 @@ public class ContainerLifecycleManager {
 
     /**
      * Default emulator labels overlaid with the spec's labels; a per-spec label
-     * wins on key conflicts.
+     * wins on key conflicts. Each new key with a legacy alias also gets that alias, with the
+     * same value (see {@link ContainerStorageHelper#CONTAINER_LABEL_ALIASES}).
      */
     private Map<String, String> mergedLabels(Map<String, String> specLabels) {
         Map<String, String> labels = ContainerStorageHelper.defaultLabels(config);
         if (specLabels != null) {
             labels.putAll(specLabels);
         }
-        return labels;
+        return ContainerStorageHelper.CONTAINER_LABEL_ALIASES.withLegacyAliases(labels);
     }
 
     /**
@@ -973,12 +974,14 @@ public class ContainerLifecycleManager {
         if (spec.privileged()) {
             hostConfig.withPrivileged(true);
         }
-        if (spec.labels() != null && "true".equals(spec.labels().get("floci.security-group-workload"))) {
+        if ("true".equals(ContainerStorageHelper.labelValue(
+                spec.labels(), ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL))) {
             hostConfig.withCapDrop(Capability.NET_ADMIN, Capability.NET_RAW);
         }
         // The firewall helper only has to program nftables in the namespace it already owns,
         // which needs CAP_NET_ADMIN and nothing else that privileged mode would also grant.
-        if (spec.labels() != null && "true".equals(spec.labels().get("floci.security-group-helper"))) {
+        if ("true".equals(ContainerStorageHelper.labelValue(
+                spec.labels(), ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL))) {
             hostConfig.withCapAdd(Capability.NET_ADMIN);
         }
 

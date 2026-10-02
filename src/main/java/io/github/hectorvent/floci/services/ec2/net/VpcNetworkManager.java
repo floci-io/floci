@@ -88,17 +88,16 @@ public class VpcNetworkManager {
 
     private static final Logger LOG = Logger.getLogger(VpcNetworkManager.class);
 
-    /** Marks a Docker network as a Floci VPC network, for discovery and orphan reconciliation. */
-    public static final String LABEL_COMPONENT = "floci_component";
-    public static final String COMPONENT_VALUE = "ec2-vpc";
-    public static final String LABEL_VPC_ID = "floci_vpc_id";
-    public static final String LABEL_VPC_REGION = "floci_vpc_region";
     /**
-     * The API port of the Floci process that created the network. Several Floci instances
-     * routinely share one Docker daemon, and reconciliation deletes things; scoping it by
-     * owner is what stops one instance's startup from tearing down another's live networks.
+     * With {@code io.floci.service=ec2}, marks a Docker network as a Floci VPC network, for
+     * discovery and orphan reconciliation. The network also carries the VPC id and region as its
+     * resource identity, and {@link ContainerStorageHelper#OWNER_LABEL}: several Floci instances
+     * routinely share one Docker daemon, and reconciliation deletes things; scoping it by owner is
+     * what stops one instance's startup from tearing down another's live networks.
      */
-    public static final String LABEL_OWNER_PORT = "floci_vpc_owner_port";
+    public static final String COMPONENT_VALUE = "vpc-network";
+    public static final String SERVICE_VALUE = "ec2";
+    private static final ContainerStorageHelper.LabelAliases ALIASES = ContainerStorageHelper.NETWORK_LABEL_ALIASES;
 
     /**
      * Instance addresses start here inside each subnet slice. AWS reserves the first four
@@ -738,11 +737,10 @@ public class VpcNetworkManager {
 
     private Map<String, String> networkLabels(VpcBinding vpc) {
         Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.defaultLabels(config));
-        labels.put(LABEL_COMPONENT, COMPONENT_VALUE);
-        labels.put(LABEL_VPC_ID, vpc.vpcId);
-        labels.put(LABEL_VPC_REGION, vpc.region);
-        labels.put(LABEL_OWNER_PORT, String.valueOf(config.port()));
-        return labels;
+        labels.putAll(ContainerStorageHelper.resourceIdentityLabels(SERVICE_VALUE, vpc.vpcId, null, vpc.region));
+        labels.put(ContainerStorageHelper.COMPONENT_LABEL, COMPONENT_VALUE);
+        labels.put(ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config));
+        return ALIASES.withLegacyAliases(labels);
     }
 
     // ─── Teardown ────────────────────────────────────────────────────────────
@@ -798,8 +796,9 @@ public class VpcNetworkManager {
      * mode in this project, and one that looks like a genuine collision, so it would silently
      * push every VPC into the fallback pool.
      *
-     * <p>Only networks labelled with this process's own API port are considered. Several Floci
-     * instances share a daemon here; scoping by owner is what makes the deletion safe.
+     * <p>Only networks labelled with this deployment's own owner identity (resource namespace and
+     * API port) are considered. Several Floci instances share a daemon here; scoping by owner is
+     * what makes the deletion safe.
      *
      * @param stillDeclared answers whether (region, vpcId) exists in the restored state
      */
@@ -807,18 +806,26 @@ public class VpcNetworkManager {
         if (!enabled() || !config.services().ec2().vpcNetworks().reconcileOnStartup()) {
             return;
         }
-        String owner = String.valueOf(config.port());
+        String owner = ContainerStorageHelper.ownerIdentity(config);
         int removed = 0;
         try {
-            for (Network network : dockerClient.listNetworksCmd()
-                    .withFilter("label", List.of(LABEL_COMPONENT + "=" + COMPONENT_VALUE))
-                    .exec()) {
+            List<Network> networks = ALIASES.listByLabels(
+                    Map.of(ContainerStorageHelper.SERVICE_LABEL, SERVICE_VALUE,
+                            ContainerStorageHelper.COMPONENT_LABEL, COMPONENT_VALUE),
+                    filter -> dockerClient.listNetworksCmd()
+                            .withFilter("label", filter.entrySet().stream()
+                                    .map(entry -> entry.getKey() + "=" + entry.getValue())
+                                    .toList())
+                            .exec(),
+                    Network::getId);
+            for (Network network : networks) {
                 Map<String, String> labels = network.getLabels() == null ? Map.of() : network.getLabels();
-                if (!owner.equals(labels.get(LABEL_OWNER_PORT))) {
+                if (!ALIASES.consistent(network.getName(), labels)
+                        || !ALIASES.matches(labels, ContainerStorageHelper.OWNER_LABEL, owner)) {
                     continue;
                 }
-                String vpcId = labels.get(LABEL_VPC_ID);
-                String region = labels.get(LABEL_VPC_REGION);
+                String vpcId = ALIASES.labelValue(labels, ContainerStorageHelper.RESOURCE_ID_LABEL);
+                String region = ALIASES.labelValue(labels, ContainerStorageHelper.REGION_LABEL);
                 if (vpcId != null && region != null && stillDeclared.test(region, vpcId)) {
                     continue;
                 }
@@ -918,12 +925,12 @@ public class VpcNetworkManager {
      */
     private Set<Cidr4> dockerNetworkSubnets(String ownVpcId) {
         Set<Cidr4> taken = new java.util.LinkedHashSet<>();
-        String owner = String.valueOf(config.port());
+        String owner = ContainerStorageHelper.ownerIdentity(config);
         try {
             for (Network network : dockerClient.listNetworksCmd().exec()) {
                 Map<String, String> labels = network.getLabels() == null ? Map.of() : network.getLabels();
-                if (ownVpcId != null && ownVpcId.equals(labels.get(LABEL_VPC_ID))
-                        && owner.equals(labels.get(LABEL_OWNER_PORT))) {
+                if (ownVpcId != null && ALIASES.matches(labels, ContainerStorageHelper.RESOURCE_ID_LABEL, ownVpcId)
+                        && ALIASES.matches(labels, ContainerStorageHelper.OWNER_LABEL, owner)) {
                     continue;
                 }
                 if (network.getIpam() == null || network.getIpam().getConfig() == null) {
