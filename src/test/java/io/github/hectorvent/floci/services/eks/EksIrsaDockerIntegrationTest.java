@@ -21,6 +21,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -209,6 +210,12 @@ class EksIrsaDockerIntegrationTest {
         assertEquals(eksClusterManager.deriveClusterNodeProviderId(cluster), nodeResult.stdout().trim(),
                 "Node providerID must match the derived AWS provider ID");
 
+        ContainerExec.Result nodeNameResult = execInContainerWithExitCode(containerId,
+                new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[0].metadata.name}"});
+        assertEquals(0, nodeNameResult.exitCode(), "kubectl get nodes failed");
+        assertEquals(eksClusterManager.deriveClusterNodePrivateDnsName(cluster), nodeNameResult.stdout().trim(),
+                "Node name must match the derived cluster node private DNS name");
+
         ContainerExec.Result zoneResult = execInContainerWithExitCode(containerId,
                 new String[]{"kubectl", "get", "nodes", "-o",
                         "jsonpath={.items[0].metadata.labels.topology\\.kubernetes\\.io/zone}"});
@@ -318,6 +325,34 @@ class EksIrsaDockerIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("InvalidIdentityToken"));
+
+        // 5. Container recreation: recreate the cluster container and verify that k3s
+        // reuses the same node name on the existing data volume without duplicate or stale nodes
+        dockerClient.stopContainerCmd(containerId).exec();
+        dockerClient.removeContainerCmd(containerId).exec();
+
+        eksClusterManager.startCluster(cluster);
+        String recreatedContainerId = cluster.getContainerId();
+        assertNotNull(recreatedContainerId);
+        assertNotEquals(containerId, recreatedContainerId);
+
+        long recreateDeadline = System.currentTimeMillis() + 60000;
+        boolean recreateReady = false;
+        while (System.currentTimeMillis() < recreateDeadline) {
+            if (eksClusterManager.isReady(cluster)) {
+                recreateReady = true;
+                break;
+            }
+            Thread.sleep(2000);
+        }
+        assertTrue(recreateReady, "k3s API server must become ready after container recreation");
+        eksClusterManager.finalizeCluster(cluster);
+
+        ContainerExec.Result recreatedNodeResult = execInContainerWithExitCode(recreatedContainerId,
+                new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[*].metadata.name}"});
+        assertEquals(0, recreatedNodeResult.exitCode(), "kubectl get nodes failed on recreated cluster");
+        assertEquals(eksClusterManager.deriveClusterNodePrivateDnsName(cluster), recreatedNodeResult.stdout().trim(),
+                "Recreated cluster must keep the same node name without leaving duplicate or stale nodes");
     }
 
     private String createRole(String name, String trustPolicy) {

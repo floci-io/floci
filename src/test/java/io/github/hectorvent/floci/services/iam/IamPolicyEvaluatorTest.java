@@ -686,7 +686,8 @@ class IamPolicyEvaluatorTest {
         String serviceWildcard = resourcePolicy("Allow", "\"Principal\":{\"Service\":\"*\"}");
         assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(serviceWildcard, alice));
         assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(serviceWildcard, sns));
-        // Federated and CanonicalUser name callers of their own kinds, never an IAM identity.
+        // Federated names callers of its own kind, never an IAM identity; CanonicalUser names one
+        // account by its canonical ID, never every account.
         assertEquals(ResourcePolicyDecision.NEUTRAL,
                 resourceDecision(resourcePolicy("Allow", "\"Principal\":{\"Federated\":\"*\"}"), alice));
         assertEquals(ResourcePolicyDecision.NEUTRAL,
@@ -736,6 +737,52 @@ class IamPolicyEvaluatorTest {
         assertEquals(Decision.DENY, evaluator.evaluateServicePrincipal(
                 List.of(allowSns, resourcePolicy("Deny", "\"Principal\":{\"AWS\":\"*\"}")),
                 sns, "sqs:SendMessage", "*", null));
+    }
+
+    @Test
+    void aCanonicalUserNamesTheIamIdentitiesOfItsAccount() {
+        // S3 bucket policies can name an account by its canonical user ID (IAM User Guide, "AWS
+        // account principals"); Floci's canonical ID for an account is the account id.
+        String canonical = resourcePolicy("Allow", "\"Principal\":{\"CanonicalUser\":\"123456789012\"}");
+        assertEquals(ResourcePolicyDecision.ALLOW,
+                resourceDecision(canonical, RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice")));
+        assertEquals(ResourcePolicyDecision.ALLOW, resourceDecision(canonical, RequestPrincipal.roleSession(
+                "arn:aws:sts::123456789012:assumed-role/App/s", "arn:aws:iam::123456789012:role/team/App")));
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(canonical, RequestPrincipal.iam("arn:aws:iam::210987654321:user/alice")));
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(canonical, RequestPrincipal.service("sns.amazonaws.com")));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(canonical, RequestPrincipal.anonymous()));
+    }
+
+    @Test
+    void onlyAGrantNamingTheUserExactlyIsDirect() {
+        // A grant names a user directly by its exact ARN, or by "*" with aws:PrincipalArn pinned to
+        // it. One that reaches the user through a pattern is not direct, and a Deny still wins.
+        RequestPrincipal alice = RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice");
+        Map<String, List<String>> ctx = Map.of("aws:PrincipalArn", List.of(alice.arn()));
+        String exact = resourcePolicy("Allow", "\"Principal\":{\"AWS\":\"arn:aws:iam::123456789012:user/alice\"}");
+        String pinned = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"*","Resource":"*",
+              "Condition":{"ArnEquals":{"aws:PrincipalArn":"arn:aws:iam::123456789012:user/alice"}}}]}""";
+        String pattern = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"*","Resource":"*",
+              "Condition":{"ArnLike":{"aws:PrincipalArn":"arn:aws:iam::123456789012:user/*"}}}]}""";
+        String pinnedDeny = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":"*","Action":"*","Resource":"*",
+               "Condition":{"StringEquals":{"aws:PrincipalArn":"arn:aws:iam::123456789012:user/alice"}}},
+              {"Effect":"Deny","Principal":"*","Action":"*","Resource":"*",
+               "Condition":{"ArnEquals":{"aws:PrincipalArn":"arn:aws:iam::123456789012:user/alice"}}}]}""";
+
+        assertEquals(ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
+                evaluator.evaluateResourcePolicyFor(List.of(exact), alice, "s3:GetObject", "*", ctx));
+        assertEquals(ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
+                evaluator.evaluateResourcePolicyFor(List.of(pinned), alice, "s3:GetObject", "*", ctx));
+        assertEquals(ResourcePolicyDecision.ALLOW,
+                evaluator.evaluateResourcePolicyFor(List.of(pattern), alice, "s3:GetObject", "*", ctx));
+        assertEquals(ResourcePolicyDecision.EXPLICIT_DENY,
+                evaluator.evaluateResourcePolicyFor(List.of(pinnedDeny), alice, "s3:GetObject", "*", ctx));
     }
 
     private static String resourcePolicy(String effect, String principal) {

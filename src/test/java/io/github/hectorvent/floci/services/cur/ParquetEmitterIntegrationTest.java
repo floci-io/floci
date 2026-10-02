@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cur;
 import io.github.hectorvent.floci.core.common.UsageLine;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -87,7 +88,7 @@ class ParquetEmitterIntegrationTest {
         assertThat(result.rowCount(), equalTo(2));
 
         // Confirm the Parquet object actually landed in S3.
-        var parquetObject = s3Service.getObject(destBucket, result.key());
+        S3Object parquetObject = s3Service.getObject(destBucket, result.key());
         assertNotNull(parquetObject);
         assertThat(parquetObject.getSize(), greaterThanOrEqualTo(1L));
 
@@ -126,7 +127,7 @@ class ParquetEmitterIntegrationTest {
         ParquetEmitter.Result result = emitter.emit("cleanup-report", destBucket, null, lines);
 
         // Staging bucket exists, but no staging objects should remain for this run.
-        var staging = s3Service.listObjects("floci-cur-staging",
+        List<S3Object> staging = s3Service.listObjects("floci-cur-staging",
                 "cur-staging/cleanup-report/" + result.runId(), null, Integer.MAX_VALUE);
         assertTrue(staging.isEmpty(),
                 "Expected no leftover staging objects, found: " + staging);

@@ -263,9 +263,9 @@ class SesContactV2IntegrationTest {
                 .body("__type", equalTo("BadRequestException"));
     }
 
-    // Type coercion — verified against real AWS (Jackson-backed), consistent with parseSendingEnabled:
-    // a JSON string coerces to the Boolean UnsubscribeAll (any string -> true), but a number is a
-    // SerializationException; AttributesData (String) rejects non-string types the same way.
+    // Type coercion, verified against real AWS: a JSON string coerces to the Boolean UnsubscribeAll
+    // only when it names a boolean, and a number is a SerializationException; AttributesData
+    // (String) rejects non-string types the same way.
 
     @Test
     @Order(21)
@@ -296,13 +296,25 @@ class SesContactV2IntegrationTest {
 
     @Test
     @Order(24)
-    void createContact_unsubscribeAllString_coercesToTrue() {
-        // AWS coerces ANY JSON string to true for the Boolean field (unlike a number, which is rejected).
-        post(CONTACTS, "{\"EmailAddress\":\"type-d@example.com\",\"UnsubscribeAll\":\"no\"}")
+    void createContact_unsubscribeAllString_coercesByText() {
+        post(CONTACTS, "{\"EmailAddress\":\"type-d@example.com\",\"UnsubscribeAll\":\"yes\"}")
         .then().statusCode(200);
         given().header("Authorization", SES_AUTH)
         .when().get(CONTACTS + "/type-d@example.com")
         .then().statusCode(200).body("UnsubscribeAll", equalTo(true));
+
+        given().contentType("application/json").header("Authorization", SES_AUTH)
+                .body("{\"UnsubscribeAll\":\"no\"}")
+        .when().put(CONTACTS + "/type-d@example.com")
+        .then().statusCode(200);
+        given().header("Authorization", SES_AUTH)
+        .when().get(CONTACTS + "/type-d@example.com")
+        .then().statusCode(200).body("UnsubscribeAll", equalTo(false));
+
+        post(CONTACTS, "{\"EmailAddress\":\"type-e@example.com\",\"UnsubscribeAll\":\"abc\"}")
+        .then().statusCode(400)
+                .body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("STRING_VALUE can not be converted to an Boolean"));
     }
 
     @Test

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
@@ -83,16 +84,16 @@ class ApiGatewaySqsPathIntegrationTest {
                 .then().statusCode(201);
 
         // PUT integration
-        var integrationNode = mapper.createObjectNode();
+        ObjectNode integrationNode = mapper.createObjectNode();
         integrationNode.put("type", "AWS");
         integrationNode.put("httpMethod", "POST");
         integrationNode.put("uri", "arn:aws:apigateway:eu-west-1:sqs:path/" + ACCOUNT_ID + "/" + QUEUE_NAME);
         
-        var requestParameters = mapper.createObjectNode();
+        ObjectNode requestParameters = mapper.createObjectNode();
         requestParameters.put("integration.request.header.Content-Type", "'application/x-www-form-urlencoded'");
         integrationNode.set("requestParameters", requestParameters);
 
-        var reqTemplates = mapper.createObjectNode();
+        ObjectNode reqTemplates = mapper.createObjectNode();
         String vtl = "Action=SendMessage&QueueUrl=$util.urlEncode(\"http://localhost:4566/" + ACCOUNT_ID + "/" + QUEUE_NAME + "\")&MessageBody=$util.urlEncode($input.body)";
         reqTemplates.put("application/json", vtl);
         integrationNode.set("requestTemplates", reqTemplates);

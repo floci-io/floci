@@ -139,7 +139,7 @@ class KinesisJsonHandlerTest {
     }
 
     private void assertPlainDecimalTimestamp(ObjectNode description, String expected) throws Exception {
-        var timestamp = description.get("StreamCreationTimestamp");
+        JsonNode timestamp = description.get("StreamCreationTimestamp");
         assertTrue(timestamp.isNumber());
         assertEquals(new BigDecimal(expected), timestamp.decimalValue());
 

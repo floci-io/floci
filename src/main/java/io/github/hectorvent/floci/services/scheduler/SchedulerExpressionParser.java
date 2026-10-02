@@ -11,6 +11,7 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.format.ResolverStyle;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -19,10 +20,11 @@ import java.util.regex.Pattern;
  *
  * Supported forms (matches the AWS API):
  * <ul>
- *   <li>{@code at(YYYY-MM-DDTHH:mm:ss)} — one-time fire at the given instant
+ *   <li>{@code at(YYYY-MM-DDTHH:mm:ss)}: one-time fire at the given instant
  *       (interpreted in {@code scheduleExpressionTimezone}, default UTC).</li>
- *   <li>{@code rate(N unit)} — repeating fire every N minutes/hours/days/weeks.</li>
- *   <li>{@code cron(fields)} — six-field AWS EventBridge cron (minute hour DOM month DOW year).</li>
+ *   <li>{@code rate(N unit)}: repeating fire every N minutes/hours/days;
+ *       previously persisted week-based schedules remain readable.</li>
+ *   <li>{@code cron(fields)}: six-field AWS EventBridge cron (minute hour DOM month DOW year).</li>
  * </ul>
  */
 public final class SchedulerExpressionParser {
@@ -35,12 +37,17 @@ public final class SchedulerExpressionParser {
             "^rate\\(\\s*(\\d+)\\s+(minutes?|hours?|days?|weeks?)\\s*\\)$",
             Pattern.CASE_INSENSITIVE);
 
+    private static final Pattern AWS_RATE_PATTERN = Pattern.compile(
+            "^rate\\(\\s*(\\d+)\\s+(minutes?|hours?|days?)\\s*\\)$",
+            Pattern.CASE_INSENSITIVE);
+
     private static final Pattern CRON_PATTERN = Pattern.compile(
             "^cron\\((.+)\\)$",
             Pattern.CASE_INSENSITIVE);
 
     private static final DateTimeFormatter AT_FORMATTER =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+            DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss")
+                    .withResolverStyle(ResolverStyle.STRICT);
 
     private static final CronParser CRON_PARSER = AwsCronDefinitions.newParser();
 
@@ -57,6 +64,30 @@ public final class SchedulerExpressionParser {
         if (RATE_PATTERN.matcher(trimmed).matches()) return Kind.RATE;
         if (CRON_PATTERN.matcher(trimmed).matches()) return Kind.CRON;
         throw new IllegalArgumentException("Unsupported schedule expression: " + expression);
+    }
+
+    /** Checks the complete expression before a schedule is persisted. */
+    public static void validate(String expression, String timezone) {
+        switch (classify(expression)) {
+            case AT -> parseAt(expression, timezone);
+            case RATE -> {
+                Matcher rate = AWS_RATE_PATTERN.matcher(expression.trim());
+                if (!rate.matches()) {
+                    throw new IllegalArgumentException("Week-based rates are not supported by Scheduler");
+                }
+                parseRateMillis(expression);
+                long value = Long.parseLong(rate.group(1));
+                String unit = rate.group(2);
+                boolean plural = unit.endsWith("s") || unit.endsWith("S");
+                if ((value == 1) == plural) {
+                    throw new IllegalArgumentException("Rate unit must be singular for 1 and plural for values greater than 1");
+                }
+            }
+            case CRON -> {
+                parseCron(expression);
+                resolveZone(timezone);
+            }
+        }
     }
 
     /**
@@ -81,16 +112,16 @@ public final class SchedulerExpressionParser {
         if (!m.matches()) {
             throw new IllegalArgumentException("Not a valid rate() expression: " + expression);
         }
-        int value = Integer.parseInt(m.group(1));
+        long value = Long.parseLong(m.group(1));
         if (value < 1) {
             throw new IllegalArgumentException("Rate value must be >= 1, got: " + value);
         }
         String unit = m.group(2).toLowerCase();
         return switch (unit) {
-            case "minute", "minutes" -> value * 60_000L;
-            case "hour", "hours" -> value * 3_600_000L;
-            case "day", "days" -> value * 86_400_000L;
-            case "week", "weeks" -> value * 604_800_000L;
+            case "minute", "minutes" -> Math.multiplyExact(value, 60_000L);
+            case "hour", "hours" -> Math.multiplyExact(value, 3_600_000L);
+            case "day", "days" -> Math.multiplyExact(value, 86_400_000L);
+            case "week", "weeks" -> Math.multiplyExact(value, 604_800_000L);
             default -> throw new IllegalArgumentException("Unknown rate unit: " + unit);
         };
     }
@@ -100,6 +131,18 @@ public final class SchedulerExpressionParser {
      * evaluated in {@code timezone} (default UTC).
      */
     public static Instant nextCronFire(String expression, Instant from, String timezone) {
+        Cron cron = parseCron(expression);
+        ExecutionTime exec = ExecutionTime.forCron(cron);
+
+        ZoneId zone = resolveZone(timezone);
+        ZonedDateTime zdt = from.atZone(zone);
+        return exec.nextExecution(zdt)
+                .map(ZonedDateTime::toInstant)
+                .orElseThrow(() -> new IllegalStateException(
+                        "No next fire time for cron expression: " + expression));
+    }
+
+    private static Cron parseCron(String expression) {
         Matcher m = CRON_PATTERN.matcher(expression.trim());
         if (!m.matches()) {
             throw new IllegalArgumentException("Not a valid cron() expression: " + expression);
@@ -113,14 +156,7 @@ public final class SchedulerExpressionParser {
         }
         Cron cron = CRON_PARSER.parse("0 " + cronFields);
         cron.validate();
-        ExecutionTime exec = ExecutionTime.forCron(cron);
-
-        ZoneId zone = resolveZone(timezone);
-        ZonedDateTime zdt = from.atZone(zone);
-        return exec.nextExecution(zdt)
-                .map(ZonedDateTime::toInstant)
-                .orElseThrow(() -> new IllegalStateException(
-                        "No next fire time for cron expression: " + expression));
+        return cron;
     }
 
     private static ZoneId resolveZone(String timezone) {

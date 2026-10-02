@@ -65,6 +65,14 @@ public class NativeDynamoDbTableService {
                               List<String> replicaAdds, List<String> replicaRemoves, List<String> replicaUpdates,
                               TableSettings settings) {}
 
+    /**
+     * What one Enable or Disable call applied. The values are the ones the call itself wrote, not a
+     * read-back of the stored {@link KinesisStreamingDestination}: that object is shared across
+     * requests, so reading it again could report a status a concurrent call wrote in the meantime.
+     */
+    record KinesisDestination(String tableName, String streamArn, String destinationStatus,
+                              String approximateCreationDateTimePrecision) {}
+
     private final DynamoDbService dynamoDbService;
     private final DynamoDbStreamService streamService;
     private final KinesisService kinesisService;
@@ -279,9 +287,9 @@ public class NativeDynamoDbTableService {
      * when one exists.
      *
      * @param precision an already validated ApproximateCreationDateTimePrecision
-     * @return the resolved (canonical) table name
+     * @return a snapshot of what this call left on the destination, with the canonical table name
      */
-    String enableKinesisStreamingDestination(String tableName, String streamArn, String precision, String region) {
+    KinesisDestination enableKinesisStreamingDestination(String tableName, String streamArn, String precision, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         String resolvedTableName = table.getTableName();
 
@@ -299,26 +307,33 @@ public class NativeDynamoDbTableService {
                     "Table already has an active Kinesis streaming destination with this stream ARN", 400);
         }
 
+        KinesisStreamingDestination destination;
         if (existing.isPresent()) {
-            existing.get().setDestinationStatus("ACTIVE");
-            existing.get().setDestinationStatusDescription("Kinesis streaming is enabled for this table");
-            existing.get().setApproximateCreationDateTimePrecision(precision);
+            destination = existing.get();
+            // The precision goes in before the status. A concurrent Disable gets past its
+            // already-disabled check only once the status reads ACTIVE, so writing the status last
+            // means that call can no longer read the precision this one is replacing.
+            destination.setApproximateCreationDateTimePrecision(precision);
+            destination.setDestinationStatusDescription("Kinesis streaming is enabled for this table");
+            destination.setDestinationStatus("ACTIVE");
         } else {
-            table.getKinesisStreamingDestinations().add(new KinesisStreamingDestination(streamArn, precision));
+            destination = new KinesisStreamingDestination(streamArn, precision);
+            table.getKinesisStreamingDestinations().add(destination);
         }
+        KinesisDestination enabled = new KinesisDestination(resolvedTableName, streamArn, "ACTIVE", precision);
 
         // DynamoDB Streams is left as the caller configured it: Kinesis forwarding does not depend on it, and
         // turning it on here showed up as stream_enabled drift on aws_dynamodb_table that never converged.
         dynamoDbService.persistTable(resolvedTableName, table, region);
-        return resolvedTableName;
+        return enabled;
     }
 
     /**
      * Turns off forwarding to a Kinesis stream and stops the forwarder draining it.
      *
-     * @return the resolved (canonical) table name
+     * @return a snapshot of what this call left on the destination, with the canonical table name
      */
-    String disableKinesisStreamingDestination(String tableName, String streamArn, String region) {
+    KinesisDestination disableKinesisStreamingDestination(String tableName, String streamArn, String region) {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         String resolvedTableName = table.getTableName();
 
@@ -333,12 +348,16 @@ public class NativeDynamoDbTableService {
                     "Kinesis streaming destination is already disabled for stream: " + streamArn, 400);
         }
 
-        existing.get().setDestinationStatus("DISABLED");
-        existing.get().setDestinationStatusDescription("Kinesis streaming is disabled for this table");
+        KinesisStreamingDestination destination = existing.get();
+        // Disable does not take a precision, so the destination's own is read once, here.
+        String precision = destination.getApproximateCreationDateTimePrecision();
+        destination.setDestinationStatus("DISABLED");
+        destination.setDestinationStatusDescription("Kinesis streaming is disabled for this table");
+        KinesisDestination disabled = new KinesisDestination(resolvedTableName, streamArn, "DISABLED", precision);
         dynamoDbService.persistTable(resolvedTableName, table, region);
         // Stop forwarding and discard buffered CDC records for this now-disabled destination.
         dynamoDbService.onKinesisStreamingDestinationDisabled(resolvedTableName, streamArn, region);
-        return resolvedTableName;
+        return disabled;
     }
 
     /** The AWS managed key a table reports when SSE is KMS and no customer key was given. */

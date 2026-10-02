@@ -5,8 +5,11 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
+import io.github.hectorvent.floci.services.ec2.model.PrefixList;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
@@ -1258,9 +1261,9 @@ class Ec2ServiceTest {
     @SuppressWarnings("unchecked")
     private static <T> void putViaReflection(Ec2Service service, String fieldName, String key, T value)
             throws Exception {
-        var field = Ec2Service.class.getDeclaredField(fieldName);
+        Field field = Ec2Service.class.getDeclaredField(fieldName);
         field.setAccessible(true);
-        var backend = (io.github.hectorvent.floci.core.storage.StorageBackend<String, T>) field.get(service);
+        StorageBackend<String, T> backend = (StorageBackend<String, T>) field.get(service);
         backend.put(key, value);
     }
 
@@ -2747,7 +2750,7 @@ class Ec2ServiceTest {
     void legacyDescribePrefixListsProjectsTheSameAwsManagedData() {
         Ec2Service service = prefixListService();
 
-        var legacy = service.describePrefixLists("us-east-1", List.of(),
+        List<PrefixList> legacy = service.describePrefixLists("us-east-1", List.of(),
                 Map.of("prefix-list-name", List.of("com.amazonaws.us-east-1.s3")));
 
         assertEquals(1, legacy.size());
@@ -4897,5 +4900,53 @@ class Ec2ServiceTest {
 
         // Provider remains untouched
         assertEquals(1, nodeInstance.getTags().size());
+    }
+
+    // The host is released after runInstances' unlocked availability check and before its instances
+    // are stored. The instance-type catalog lookup sits between the two, so it stands in for the
+    // concurrent ReleaseHosts. Only the re-check under hostLock can still reject the launch.
+    @Test
+    void launchOntoAHostReleasedAfterTheUnlockedCheckIsRejected() {
+        Ec2Service[] holder = new Ec2Service[1];
+        String[] hostId = new String[1];
+        boolean[] released = {false};
+        Ec2InstanceTypeCatalog releasingCatalog = new Ec2InstanceTypeCatalog() {
+            @Override
+            public Optional<CatalogInstanceType> find(String instanceType) {
+                if (hostId[0] != null && !released[0]) {
+                    released[0] = true;
+                    holder[0].releaseHost("us-east-1", hostId[0]);
+                }
+                return super.find(instanceType);
+            }
+        };
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), new AmiImageResolver(imageCatalog), imageCatalog,
+                releasingCatalog, new InMemoryStorageFactory());
+        holder[0] = service;
+        hostId[0] = service.allocateHosts("us-east-1", "us-east-1a", "m5.large", null, 1,
+                null, null, null, null, null).get(0).getHostId();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
+                "ami-ubuntu2404-amd64", "m5.large", 1, 1, null, List.of(), null, null, List.of(), null, null,
+                null, null, 0, null, null, null, null, false, hostId[0], null));
+
+        assertTrue(released[0], "the hook must have released the host between the two checks");
+        assertEquals("InvalidHostID.NotFound", e.getErrorCode());
+        assertTrue(service.hostInstances("us-east-1", hostId[0]).isEmpty());
+    }
+
+    @Test
+    void allocateHostsAcceptsModelledZoneWithNoSubnet() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        service.describeSubnets("us-east-1", List.of(), Map.of()).stream()
+                .filter(sn -> "us-east-1c".equals(sn.getAvailabilityZone()))
+                .forEach(sn -> service.deleteSubnet("us-east-1", sn.getSubnetId()));
+
+        assertEquals(1, service.allocateHosts("us-east-1", "us-east-1c", "m5.large", null, 1,
+                null, null, null, null, null).size());
     }
 }

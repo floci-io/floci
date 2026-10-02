@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -370,7 +371,7 @@ public class IotService {
     private void issueFromLocalCa(IotCertificate certificate) {
         CertificateGenerator.GeneratedCertificate issued = certificateAuthority.issueClientCertificate("AWS IoT Certificate");
         try {
-            fill(certificate, new CertificateGenerator().parseCertificate(issued.certificatePem()));
+            fill(certificate, Pem.parseCertificate(issued.certificatePem()));
             certificate.setPrivateKey(issued.privateKeyPem());
         } catch (Exception e) {
             throw new AwsException("InternalFailureException", "Could not issue device certificate: " + e.getMessage(), 500);

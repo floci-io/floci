@@ -22,6 +22,7 @@ import software.amazon.awssdk.services.bedrock.model.TooManyTagsException;
 import software.amazon.awssdk.services.bedrock.model.UpdateGuardrailResponse;
 import software.amazon.awssdk.services.bedrock.model.ValidationException;
 import software.amazon.awssdk.services.kms.KmsClient;
+import software.amazon.awssdk.services.kms.model.KeyMetadata;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -47,7 +48,7 @@ class BedrockGuardrailTest {
         name = "sdk-test-guardrail-" + System.currentTimeMillis();
         kmsAlias = "alias/sdk-test-guardrail-" + System.currentTimeMillis();
         try (KmsClient kms = TestFixtures.kmsClient()) {
-            var key = kms.createKey(r -> r.description("sdk compatibility guardrail key")).keyMetadata();
+            KeyMetadata key = kms.createKey(r -> r.description("sdk compatibility guardrail key")).keyMetadata();
             kmsKeyId = key.keyId();
             kmsKeyArn = key.arn();
             kms.createAlias(r -> r.aliasName(kmsAlias).targetKeyId(kmsKeyId));

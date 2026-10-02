@@ -149,9 +149,10 @@ class SesAccountDetailsV2IntegrationTest {
     void putDetails_nonBooleanProductionAccess_returnsBadRequest() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"MailType\":\"TRANSACTIONAL\",\"WebsiteURL\":\"https://example.com\","
-                        + "\"ProductionAccessEnabled\":\"yes\"}")
+                        + "\"ProductionAccessEnabled\":\"abc\"}")
         .when().post("/v2/email/account/details").then().statusCode(400)
-                .body("__type", equalTo("SerializationException"));
+                .body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("STRING_VALUE can not be converted to an Boolean"));
     }
 
     @Test

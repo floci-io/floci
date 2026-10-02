@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -54,15 +55,15 @@ public class SAMLTrustPolicyEvaluator {
         if (!condition.isObject()) {
             return false;
         }
-        var operators = condition.fields();
+        Iterator<Map.Entry<String, JsonNode>> operators = condition.fields();
         while (operators.hasNext()) {
-            var operator = operators.next();
+            Map.Entry<String, JsonNode> operator = operators.next();
             if (!operator.getValue().isObject()) {
                 return false;
             }
-            var entries = operator.getValue().fields();
+            Iterator<Map.Entry<String, JsonNode>> entries = operator.getValue().fields();
             while (entries.hasNext()) {
-                var entry = entries.next();
+                Map.Entry<String, JsonNode> entry = entries.next();
                 String key = entry.getKey();
                 int colon = key.indexOf(':');
                 String claimName = colon < 0 ? key : key.substring(colon + 1);

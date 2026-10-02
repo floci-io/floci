@@ -8,6 +8,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -101,6 +102,14 @@ public class Cluster {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String nodeInstanceType;
 
+    /**
+     * Caller-supplied k3s arguments passed at creation via reserved floci tags.
+     * Internal persisted metadata omitted from AWS API responses.
+     */
+    @JsonProperty("clusterArgs")
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<String> clusterArgs;
+
     private AccessConfig accessConfig;
 
     public AccessConfig getAccessConfig() { return accessConfig; }
@@ -153,6 +162,9 @@ public class Cluster {
     public String getNodeInstanceType() { return nodeInstanceType; }
     public void setNodeInstanceType(String nodeInstanceType) { this.nodeInstanceType = nodeInstanceType; }
 
+    public List<String> getClusterArgs() { return clusterArgs; }
+    public void setClusterArgs(List<String> clusterArgs) { this.clusterArgs = clusterArgs; }
+
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
 
@@ -202,6 +214,7 @@ public class Cluster {
         c.explicitVersion = this.explicitVersion;
         c.dockerName = this.dockerName;
         c.nodeInstanceType = this.nodeInstanceType;
+        c.clusterArgs = this.clusterArgs != null ? new ArrayList<>(this.clusterArgs) : null;
         c.accessConfig = this.accessConfig;
         return c;
     }

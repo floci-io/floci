@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
@@ -19,6 +20,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Suppression: the account-level suppression attributes and the per-address suppression list,
@@ -172,20 +174,39 @@ public class SesSuppressionService {
         return Optional.empty();
     }
 
+    /**
+     * SES binds the token to the filter it was taken with, so a token replayed with other reasons is
+     * refused; its own order is not stable between calls, so Floci keeps oldest first.
+     */
+    public PaginatedResult<SuppressedDestination> listSuppressedDestinations(
+            String region, List<String> reasonFilters, SesListPaging paging, Integer pageSize, String nextToken) {
+        Set<String> filters = validateReasonFilters(reasonFilters);
+        String prefix = "suppression::" + region + "::";
+        return paging.page(region, tokenScope("", filters),
+                oldestFirst(suppressionStore.scan(k -> k.startsWith(prefix)), filters),
+                SesSuppressionService::cursor, pageSize, nextToken);
+    }
+
+    private static String tokenScope(String tenantId, Set<String> filters) {
+        return tenantId + "/" + String.join(",", new TreeSet<>(filters));
+    }
+
+    private static String cursor(SuppressedDestination destination) {
+        return SesListPaging.oldestFirst(destination.getLastUpdateTime(), destination.getEmailAddress());
+    }
+
+    private static List<SuppressedDestination> oldestFirst(List<SuppressedDestination> entries,
+                                                           Set<String> filters) {
+        return entries.stream()
+                .filter(s -> filters.isEmpty() || filters.contains(s.getReason()))
+                .sorted(Comparator.comparing(SesSuppressionService::cursor))
+                .toList();
+    }
+
     public List<SuppressedDestination> listSuppressedDestinations(String region, List<String> reasonFilters) {
         Set<String> filters = validateReasonFilters(reasonFilters);
         String prefix = "suppression::" + region + "::";
-        List<SuppressedDestination> all = new ArrayList<>(suppressionStore.scan(k -> k.startsWith(prefix)));
-        all.sort(Comparator.comparing(SuppressedDestination::getLastUpdateTime,
-                        Comparator.nullsLast(Comparator.naturalOrder()))
-                .thenComparing(SuppressedDestination::getEmailAddress,
-                        Comparator.nullsLast(Comparator.naturalOrder())));
-        if (filters.isEmpty()) {
-            return all;
-        }
-        return all.stream()
-                .filter(s -> filters.contains(s.getReason()))
-                .toList();
+        return oldestFirst(suppressionStore.scan(k -> k.startsWith(prefix)), filters);
     }
 
     private static String suppressionKey(String region, String emailAddress) {
@@ -230,22 +251,21 @@ public class SesSuppressionService {
         LOG.infov("Removed tenant suppression entry for {0} in region {1}", normalized, region);
     }
 
+    public PaginatedResult<SuppressedDestination> listTenantSuppressedDestinations(
+            String region, String tenantId, List<String> reasonFilters, SesListPaging paging, Integer pageSize,
+            String nextToken) {
+        Set<String> filters = validateReasonFilters(reasonFilters);
+        String prefix = tenantSuppressionKeyPrefix(region, tenantId);
+        return paging.page(region, tokenScope(tenantId, filters),
+                oldestFirst(tenantSuppressionStore.scan(k -> k.startsWith(prefix)), filters),
+                SesSuppressionService::cursor, pageSize, nextToken);
+    }
+
     public List<SuppressedDestination> listTenantSuppressedDestinations(String region, String tenantId,
                                                                         List<String> reasonFilters) {
         Set<String> filters = validateReasonFilters(reasonFilters);
         String prefix = tenantSuppressionKeyPrefix(region, tenantId);
-        List<SuppressedDestination> all =
-                new ArrayList<>(tenantSuppressionStore.scan(k -> k.startsWith(prefix)));
-        all.sort(Comparator.comparing(SuppressedDestination::getLastUpdateTime,
-                        Comparator.nullsLast(Comparator.naturalOrder()))
-                .thenComparing(SuppressedDestination::getEmailAddress,
-                        Comparator.nullsLast(Comparator.naturalOrder())));
-        if (filters.isEmpty()) {
-            return all;
-        }
-        return all.stream()
-                .filter(s -> filters.contains(s.getReason()))
-                .toList();
+        return oldestFirst(tenantSuppressionStore.scan(k -> k.startsWith(prefix)), filters);
     }
 
     /** DeleteTenant's cascade for this domain, run from inside the tenant lock. */

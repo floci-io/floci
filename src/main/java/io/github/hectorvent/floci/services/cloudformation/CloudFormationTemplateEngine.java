@@ -209,16 +209,16 @@ public class CloudFormationTemplateEngine {
                 return TextNode.valueOf(resolve(node));
             }
             // Plain object — resolve each field
-            var resolved = objectMapper.createObjectNode();
+            ObjectNode resolved = objectMapper.createObjectNode();
             Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
             while (fields.hasNext()) {
-                var entry = fields.next();
+                Map.Entry<String, JsonNode> entry = fields.next();
                 resolved.set(entry.getKey(), resolveNode(entry.getValue()));
             }
             return resolved;
         }
         if (node.isArray()) {
-            var arr = objectMapper.createArrayNode();
+            ArrayNode arr = objectMapper.createArrayNode();
             for (JsonNode item : node) {
                 arr.add(resolveNode(item));
             }

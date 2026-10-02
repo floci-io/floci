@@ -542,6 +542,24 @@ through `payment-pending`/`assessing`. `DescribeCapacityReservations` supports t
 `instance-type`, `state` and `tenancy` filters alongside the shared `tag:`, `tag-key` and
 `tag-value` filters.
 
+### Dedicated Hosts
+
+| Action | Description |
+|--------|-------------|
+| AllocateHosts | Allocates `Quantity` (default `1`) Dedicated Hosts, `available` immediately, with `dedicated-host` tags from `TagSpecification`. |
+| DescribeHosts | Lists or returns stored hosts, including the instances placed on each. |
+| ModifyHosts | Updates `AutoPlacement`, `HostRecovery`, `HostMaintenance`, `InstanceType` or `InstanceFamily`. |
+| ReleaseHosts | Marks hosts `released`; they stay visible in `DescribeHosts`, as on AWS. |
+
+`AvailabilityZone` and exactly one of `InstanceType` or `InstanceFamily` are required.
+`AutoPlacement` and `HostRecovery` default to `off` and `HostMaintenance` to `on`.
+`DescribeHosts` with an unknown id fails with `InvalidHostID.NotFound`. `ModifyHosts` and
+`ReleaseHosts` report each host separately: an unknown or already released host, or a host
+still carrying instances on release, goes to `unsuccessful` instead of failing the call.
+`RunInstances` accepts `Placement.HostId` and `Placement.Tenancy`; naming a host defaults the
+tenancy to `host` and, without a subnet, the zone to the host's. `hostProperties` reports a
+fixed socket/core/vCPU shape rather than one derived from the instance family.
+
 ### Elastic IPs
 
 | Action | Description |

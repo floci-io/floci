@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -394,7 +395,7 @@ public class AcmService implements ResourceProvider {
         // Parse and validate certificate
         X509Certificate x509Cert;
         try {
-            x509Cert = certificateGenerator.parseCertificate(certificatePem);
+            x509Cert = Pem.parseCertificate(certificatePem);
             certificateGenerator.validateCertificate(x509Cert);
         } catch (Exception e) {
             throw new AwsException("ValidationException", "Invalid certificate: " + e.getMessage(), 400);
@@ -402,7 +403,7 @@ public class AcmService implements ResourceProvider {
 
         // Parse and validate private key
         try {
-            certificateGenerator.parsePrivateKey(privateKeyPem);
+            Pem.parsePrivateKey(privateKeyPem);
         } catch (Exception e) {
             throw new AwsException("ValidationException", "Invalid private key: " + e.getMessage(), 400);
         }

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -200,7 +201,7 @@ public class KinesisEventSourcePoller implements Resettable {
 
     private String buildKinesisEvent(List<KinesisRecord> records, EventSourceMapping esm, String shardId) {
         try {
-            var recordsArray = objectMapper.createArrayNode();
+            ArrayNode recordsArray = objectMapper.createArrayNode();
             for (KinesisRecord rec : records) {
                 ObjectNode kinesisNode = objectMapper.createObjectNode();
                 kinesisNode.put("kinesisSchemaVersion", "1.0");

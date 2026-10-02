@@ -45,7 +45,7 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void hostnameStyleManifestWriteUsesInternalRegistryNamespace() {
-        var request = EcrRegistryDataPlane.requestFor(
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor(
                 "000000000000.dkr.ecr.us-east-1.localhost:4566",
                 "/v2/platform/api/manifests/v1", null, "hostname").orElseThrow();
 
@@ -101,7 +101,7 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void digestManifestWriteDoesNotAcquireAnImmutableTagLock() {
-        var request = EcrRegistryDataPlane.requestFor(
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor(
                 "000000000000.dkr.ecr.us-east-1.localhost:4566",
                 "/v2/platform/api/manifests/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 null, "hostname").orElseThrow();
@@ -111,7 +111,7 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void pathStyleRequestRetainsItsExistingInternalNamespace() {
-        var request = EcrRegistryDataPlane.requestFor("localhost:4566",
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor("localhost:4566",
                 "/v2/000000000000/us-east-1/platform/api/blobs/uploads/", "mount=sha256:abc", "path").orElseThrow();
 
         assertEquals("platform/api", request.repositoryName());
@@ -121,7 +121,7 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void mirrorNamespaceRoutesAnInNetworkK3sPullThroughTheSameDataPlane() {
-        var request = EcrRegistryDataPlane.requestFor("floci:4566", "/v2/platform/api/manifests/v1",
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor("floci:4566", "/v2/platform/api/manifests/v1",
                 "ns=000000000000.dkr.ecr.us-east-1.localhost%3A4566", "hostname").orElseThrow();
 
         assertEquals("000000000000", request.accountId());
@@ -162,9 +162,9 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void registryPingDoesNotAcquireARepositoryNamespace() {
-        var hostnameRequest = EcrRegistryDataPlane.requestFor(
+        EcrRegistryDataPlane.RegistryRequest hostnameRequest = EcrRegistryDataPlane.requestFor(
                 "000000000000.dkr.ecr.us-east-1.localhost:4566", "/v2/", null, "hostname").orElseThrow();
-        var pathRequest = EcrRegistryDataPlane.requestFor("localhost:4566", "/v2/", null, "path").orElseThrow();
+        EcrRegistryDataPlane.RegistryRequest pathRequest = EcrRegistryDataPlane.requestFor("localhost:4566", "/v2/", null, "path").orElseThrow();
 
         assertEquals("/v2/", hostnameRequest.backendUri());
         assertEquals("/v2/", pathRequest.backendUri());
@@ -172,7 +172,7 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void uploadContinuationRetainsTheClientRepositoryNamespace() {
-        var request = EcrRegistryDataPlane.requestFor(
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor(
                 "000000000000.dkr.ecr.us-east-1.localhost:4566",
                 "/v2/platform/api/blobs/uploads/", null, "hostname").orElseThrow();
 

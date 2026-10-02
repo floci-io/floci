@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.ses.model.Tag;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Helpers shared by the SES v2 REST JSON controllers: body and member shape checks that answer
@@ -119,14 +120,20 @@ final class SesV2Json {
         return node.asText();
     }
 
-    // AWS-verified Jackson coercion for a SES v2 boolean field: a JSON string coerces to true,
-    // while a number/null/array/object is a SerializationException.
+    // AWS-verified coercion for a SES v2 boolean field: a JSON string coerces only when it names a
+    // boolean (case-insensitive, untrimmed); any other string, a number, null, an array or an object
+    // is a SerializationException.
     static boolean coerceBoolean(JsonNode node) {
         if (node.isBoolean()) {
             return node.booleanValue();
         }
         if (node.isTextual()) {
-            return true;
+            return switch (node.textValue().toLowerCase(Locale.ROOT)) {
+                case "true", "yes", "y", "t", "1" -> true;
+                case "false", "no", "n", "f", "0" -> false;
+                default -> throw new AwsException("SerializationException",
+                        "STRING_VALUE can not be converted to an Boolean", 400);
+            };
         }
         if (node.isNull()) {
             throw new AwsException("SerializationException", null, 400);
@@ -239,13 +246,13 @@ final class SesV2Json {
     }
 
     /**
-     * Reproduces the AWS deserialization behavior for {@code SendingEnabled}
-     * (verified against real AWS SES V2 on 2026-06-13): a missing member
-     * defaults to {@code false}, any string coerces to {@code true}, and
-     * explicit {@code null} or non-boolean scalars fail with
-     * {@code SerializationException}.
+     * An optional SES v2 boolean member whose absence means {@code false}: a missing member is
+     * {@code false}, and a present value, {@code null} included, goes through
+     * {@link #coerceBoolean(JsonNode)}. AWS-verified for the account's and a configuration set's
+     * SendingEnabled, SigningEnabled, EmailForwardingEnabled, ReputationMetricsEnabled and an event
+     * destination's Enabled.
      */
-    static boolean parseSendingEnabled(JsonNode enabledNode) {
+    static boolean coerceBooleanOrFalse(JsonNode enabledNode) {
         if (enabledNode.isMissingNode()) {
             return false;
         }

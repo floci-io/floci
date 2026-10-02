@@ -4,12 +4,17 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.configservice.model.AggregationAuthorization;
+import io.github.hectorvent.floci.services.configservice.model.ComplianceByConfigRule;
+import io.github.hectorvent.floci.services.configservice.model.ComplianceByResource;
 import io.github.hectorvent.floci.services.configservice.model.ConfigEvaluation;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
+import io.github.hectorvent.floci.services.configservice.model.ConfigRuleEvaluationStatus;
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorder;
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorderStatus;
 import io.github.hectorvent.floci.services.configservice.model.ConformancePack;
+import io.github.hectorvent.floci.services.configservice.model.ConformancePackStatusDetail;
 import io.github.hectorvent.floci.services.configservice.model.DeliveryChannel;
+import io.github.hectorvent.floci.services.configservice.model.EvaluationResult;
 import io.github.hectorvent.floci.services.configservice.model.RetentionConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -97,7 +102,7 @@ public class ConfigServiceJsonHandler {
     }
 
     private Response describeComplianceByConfigRule(JsonNode req, String region) {
-        var page = service.describeComplianceByConfigRule(region,
+        AwsConfigService.Paged<ComplianceByConfigRule> page = service.describeComplianceByConfigRule(region,
                 extractStringList(req, "ConfigRuleNames"),
                 extractStringList(req, "ComplianceTypes"),
                 extractNextToken(req));
@@ -105,7 +110,7 @@ public class ConfigServiceJsonHandler {
     }
 
     private Response describeComplianceByResource(JsonNode req, String region) {
-        var page = service.describeComplianceByResource(region,
+        AwsConfigService.Paged<ComplianceByResource> page = service.describeComplianceByResource(region,
                 req.path("ResourceType").asText(null),
                 req.path("ResourceId").asText(null),
                 extractStringList(req, "ComplianceTypes"),
@@ -114,7 +119,7 @@ public class ConfigServiceJsonHandler {
     }
 
     private Response describeConfigRuleEvaluationStatus(JsonNode req, String region) {
-        var page = service.describeConfigRuleEvaluationStatus(region,
+        AwsConfigService.Paged<ConfigRuleEvaluationStatus> page = service.describeConfigRuleEvaluationStatus(region,
                 extractStringList(req, "ConfigRuleNames"),
                 extractLimit(req, "Limit"), extractNextToken(req));
         return Response.ok(pagedResponse("ConfigRulesEvaluationStatus", page)).build();
@@ -157,7 +162,7 @@ public class ConfigServiceJsonHandler {
     }
 
     private Response getComplianceDetailsByConfigRule(JsonNode req, String region) {
-        var page = service.getComplianceDetailsByConfigRule(region,
+        AwsConfigService.Paged<EvaluationResult> page = service.getComplianceDetailsByConfigRule(region,
                 req.path("ConfigRuleName").asText(null),
                 extractStringList(req, "ComplianceTypes"),
                 extractLimit(req, "Limit"), extractNextToken(req));
@@ -165,7 +170,7 @@ public class ConfigServiceJsonHandler {
     }
 
     private Response getComplianceDetailsByResource(JsonNode req, String region) {
-        var page = service.getComplianceDetailsByResource(region,
+        AwsConfigService.Paged<EvaluationResult> page = service.getComplianceDetailsByResource(region,
                 req.path("ResourceType").asText(null),
                 req.path("ResourceId").asText(null),
                 extractStringList(req, "ComplianceTypes"),
@@ -290,14 +295,14 @@ public class ConfigServiceJsonHandler {
     }
 
     private Response describeConformancePacks(JsonNode req, String region) {
-        var page = service.describeConformancePacksPaged(region,
+        AwsConfigService.Paged<ConformancePack> page = service.describeConformancePacksPaged(region,
                 extractStringList(req, "ConformancePackNames"),
                 extractLimit(req, "Limit"), extractNextToken(req));
         return Response.ok(pagedResponse("ConformancePackDetails", page)).build();
     }
 
     private Response describeConformancePackStatus(JsonNode req, String region) {
-        var page = service.describeConformancePackStatus(region,
+        AwsConfigService.Paged<ConformancePackStatusDetail> page = service.describeConformancePackStatus(region,
                 extractStringList(req, "ConformancePackNames"),
                 extractLimit(req, "Limit"), extractNextToken(req));
         return Response.ok(pagedResponse("ConformancePackStatusDetails", page)).build();

@@ -12,11 +12,17 @@ import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.apigatewayv2.model.ApiGatewayV2Exception;
 import software.amazon.awssdk.services.apigatewayv2.model.AuthorizerType;
 import software.amazon.awssdk.services.apigatewayv2.model.CreateApiRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.CreateApiResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.CreateAuthorizerRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.CreateAuthorizerResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.CreateDeploymentRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.CreateDeploymentResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.CreateIntegrationRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.CreateIntegrationResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.CreateRouteRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.CreateRouteResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.CreateStageRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.CreateStageResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.DeleteApiRequest;
 import software.amazon.awssdk.services.apigatewayv2.model.DeleteAuthorizerRequest;
 import software.amazon.awssdk.services.apigatewayv2.model.DeleteDeploymentRequest;
@@ -24,17 +30,28 @@ import software.amazon.awssdk.services.apigatewayv2.model.DeleteIntegrationReque
 import software.amazon.awssdk.services.apigatewayv2.model.DeleteRouteRequest;
 import software.amazon.awssdk.services.apigatewayv2.model.DeleteStageRequest;
 import software.amazon.awssdk.services.apigatewayv2.model.GetApiRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.GetApiResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetApisResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetAuthorizerRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.GetAuthorizerResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetAuthorizersRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.GetAuthorizersResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetDeploymentRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.GetDeploymentResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetDeploymentsRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.GetDeploymentsResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetIntegrationRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.GetIntegrationResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetIntegrationsRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.GetIntegrationsResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetRouteRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.GetRouteResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetRoutesRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.GetRoutesResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetStageRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.GetStageResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetStagesRequest;
+import software.amazon.awssdk.services.apigatewayv2.model.GetStagesResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.IntegrationType;
 import software.amazon.awssdk.services.apigatewayv2.model.NotFoundException;
 import software.amazon.awssdk.services.apigatewayv2.model.ProtocolType;
@@ -99,7 +116,7 @@ class ApiGatewayV2ManagementTest {
     @Test
     @Order(1)
     void createApi() {
-        var response = apigwv2.createApi(CreateApiRequest.builder()
+        CreateApiResponse response = apigwv2.createApi(CreateApiRequest.builder()
                 .name(TestFixtures.uniqueName("http-api"))
                 .protocolType(ProtocolType.HTTP)
                 .build());
@@ -117,7 +134,7 @@ class ApiGatewayV2ManagementTest {
     @Order(2)
     void getApi() {
         requireApi();
-        var response = apigwv2.getApi(GetApiRequest.builder()
+        GetApiResponse response = apigwv2.getApi(GetApiRequest.builder()
                 .apiId(apiId)
                 .build());
 
@@ -140,7 +157,7 @@ class ApiGatewayV2ManagementTest {
     @Order(4)
     void createAuthorizer() {
         requireApi();
-        var response = apigwv2.createAuthorizer(CreateAuthorizerRequest.builder()
+        CreateAuthorizerResponse response = apigwv2.createAuthorizer(CreateAuthorizerRequest.builder()
                 .apiId(apiId)
                 .name(TestFixtures.uniqueName("jwt-auth"))
                 .authorizerType(AuthorizerType.JWT)
@@ -164,14 +181,14 @@ class ApiGatewayV2ManagementTest {
     void getAndListAuthorizers() {
         requireApi();
         requireAuthorizer();
-        var getResponse = apigwv2.getAuthorizer(GetAuthorizerRequest.builder()
+        GetAuthorizerResponse getResponse = apigwv2.getAuthorizer(GetAuthorizerRequest.builder()
                 .apiId(apiId)
                 .authorizerId(authorizerId)
                 .build());
 
         assertThat(getResponse.authorizerId()).isEqualTo(authorizerId);
 
-        var listResponse = apigwv2.getAuthorizers(GetAuthorizersRequest.builder()
+        GetAuthorizersResponse listResponse = apigwv2.getAuthorizers(GetAuthorizersRequest.builder()
                 .apiId(apiId)
                 .build());
 
@@ -184,7 +201,7 @@ class ApiGatewayV2ManagementTest {
     @Order(6)
     void createIntegration() {
         requireApi();
-        var response = apigwv2.createIntegration(CreateIntegrationRequest.builder()
+        CreateIntegrationResponse response = apigwv2.createIntegration(CreateIntegrationRequest.builder()
                 .apiId(apiId)
                 .integrationType(IntegrationType.AWS_PROXY)
                 .integrationUri("arn:aws:lambda:us-east-1:000000000000:function:phase2-handler")
@@ -204,14 +221,14 @@ class ApiGatewayV2ManagementTest {
     void getAndListIntegrations() {
         requireApi();
         requireIntegration();
-        var getResponse = apigwv2.getIntegration(GetIntegrationRequest.builder()
+        GetIntegrationResponse getResponse = apigwv2.getIntegration(GetIntegrationRequest.builder()
                 .apiId(apiId)
                 .integrationId(integrationId)
                 .build());
 
         assertThat(getResponse.integrationId()).isEqualTo(integrationId);
 
-        var listResponse = apigwv2.getIntegrations(GetIntegrationsRequest.builder()
+        GetIntegrationsResponse listResponse = apigwv2.getIntegrations(GetIntegrationsRequest.builder()
                 .apiId(apiId)
                 .build());
 
@@ -226,7 +243,7 @@ class ApiGatewayV2ManagementTest {
         requireApi();
         requireAuthorizer();
         requireIntegration();
-        var response = apigwv2.createRoute(CreateRouteRequest.builder()
+        CreateRouteResponse response = apigwv2.createRoute(CreateRouteRequest.builder()
                 .apiId(apiId)
                 .routeKey("GET /phase2")
                 .authorizationType("JWT")
@@ -247,14 +264,14 @@ class ApiGatewayV2ManagementTest {
     void getAndListRoutes() {
         requireApi();
         requireRoute();
-        var getResponse = apigwv2.getRoute(GetRouteRequest.builder()
+        GetRouteResponse getResponse = apigwv2.getRoute(GetRouteRequest.builder()
                 .apiId(apiId)
                 .routeId(routeId)
                 .build());
 
         assertThat(getResponse.routeId()).isEqualTo(routeId);
 
-        var listResponse = apigwv2.getRoutes(GetRoutesRequest.builder()
+        GetRoutesResponse listResponse = apigwv2.getRoutes(GetRoutesRequest.builder()
                 .apiId(apiId)
                 .build());
 
@@ -267,7 +284,7 @@ class ApiGatewayV2ManagementTest {
     @Order(10)
     void createDeployment() {
         requireApi();
-        var response = apigwv2.createDeployment(CreateDeploymentRequest.builder()
+        CreateDeploymentResponse response = apigwv2.createDeployment(CreateDeploymentRequest.builder()
                 .apiId(apiId)
                 .description("phase2 deployment")
                 .build());
@@ -285,7 +302,7 @@ class ApiGatewayV2ManagementTest {
     void getAndListDeployments() {
         requireApi();
         requireDeployment();
-        var getResponse = apigwv2.getDeployment(GetDeploymentRequest.builder()
+        GetDeploymentResponse getResponse = apigwv2.getDeployment(GetDeploymentRequest.builder()
                 .apiId(apiId)
                 .deploymentId(deploymentId)
                 .build());
@@ -293,7 +310,7 @@ class ApiGatewayV2ManagementTest {
         assertThat(getResponse.deploymentId()).isEqualTo(deploymentId);
         assertThat(getResponse.description()).isEqualTo("phase2 deployment");
 
-        var listResponse = apigwv2.getDeployments(GetDeploymentsRequest.builder()
+        GetDeploymentsResponse listResponse = apigwv2.getDeployments(GetDeploymentsRequest.builder()
                 .apiId(apiId)
                 .build());
 
@@ -307,7 +324,7 @@ class ApiGatewayV2ManagementTest {
     void createStage() {
         requireApi();
         requireDeployment();
-        var response = apigwv2.createStage(CreateStageRequest.builder()
+        CreateStageResponse response = apigwv2.createStage(CreateStageRequest.builder()
                 .apiId(apiId)
                 .stageName(stageName)
                 .deploymentId(deploymentId)
@@ -331,7 +348,7 @@ class ApiGatewayV2ManagementTest {
     void getAndListStages() {
         requireApi();
         requireStage();
-        var getResponse = apigwv2.getStage(GetStageRequest.builder()
+        GetStageResponse getResponse = apigwv2.getStage(GetStageRequest.builder()
                 .apiId(apiId)
                 .stageName(stageName)
                 .build());
@@ -342,7 +359,7 @@ class ApiGatewayV2ManagementTest {
                 .containsEntry("environment", "test")
                 .containsEntry("owner", "platform");
 
-        var listResponse = apigwv2.getStages(GetStagesRequest.builder()
+        GetStagesResponse listResponse = apigwv2.getStages(GetStagesRequest.builder()
                 .apiId(apiId)
                 .build());
 

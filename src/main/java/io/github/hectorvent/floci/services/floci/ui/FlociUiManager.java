@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.floci.ui;
 
 import java.io.Closeable;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.util.ArrayList;
@@ -658,7 +659,7 @@ public class FlociUiManager {
                 return new RuntimeProbe(true, null);
             }
             JsonNode health;
-            try (var input = conn.getInputStream()) {
+            try (InputStream input = conn.getInputStream()) {
                 health = objectMapper.readTree(input);
             }
             String reported = health.path(console.healthReadyField()).asText("");

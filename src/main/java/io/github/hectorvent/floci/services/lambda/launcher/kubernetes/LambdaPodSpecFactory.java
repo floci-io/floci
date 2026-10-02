@@ -73,12 +73,12 @@ public class LambdaPodSpecFactory {
                         ImageConfig imageConfig,
                         int memoryMb,
                         Optional<String> caConfigMapName) {
-        var hasCode = codeDownloadUrl != null;
-        var hasLayers = !layerDownloadUrls.isEmpty();
-        var nodes = JsonNodeFactory.instance;
+        boolean hasCode = codeDownloadUrl != null;
+        boolean hasLayers = !layerDownloadUrls.isEmpty();
+        JsonNodeFactory nodes = JsonNodeFactory.instance;
 
-        var volumes = nodes.arrayNode();
-        var runtimeMounts = nodes.arrayNode();
+        ArrayNode volumes = nodes.arrayNode();
+        ArrayNode runtimeMounts = nodes.arrayNode();
         if (hasCode) {
             volumes.add(emptyDirVolume(nodes, "task"));
             runtimeMounts.add(mount(nodes, "task", TASK_DIR));
@@ -90,7 +90,7 @@ public class LambdaPodSpecFactory {
         // The provided.* base images exec /var/runtime/bootstrap with no /var/task
         // fallback, and their /var/runtime ships empty, so masking it with an emptyDir
         // that the init container copies bootstrap into is safe and required.
-        var needsRuntimeDir = providedRuntime && hasCode;
+        boolean needsRuntimeDir = providedRuntime && hasCode;
         if (needsRuntimeDir) {
             volumes.add(emptyDirVolume(nodes, "runtime"));
             runtimeMounts.add(mount(nodes, "runtime", RUNTIME_DIR));
@@ -105,12 +105,12 @@ public class LambdaPodSpecFactory {
                     .put("readOnly", true));
         });
 
-        var resources = nodes.objectNode();
-        var memory = memoryMb + "Mi";
+        ObjectNode resources = nodes.objectNode();
+        String memory = memoryMb + "Mi";
         resources.set("requests", nodes.objectNode().put("memory", memory));
         resources.set("limits", nodes.objectNode().put("memory", memory));
 
-        var runtime = nodes.objectNode()
+        ObjectNode runtime = nodes.objectNode()
                 .put("name", "runtime")
                 .put("image", image)
                 // Explicit IfNotPresent: the default for :latest/untagged is Always,
@@ -133,9 +133,9 @@ public class LambdaPodSpecFactory {
             runtime.put("workingDir", imageConfig.workingDirectory());
         }
 
-        var initContainers = nodes.arrayNode();
+        ArrayNode initContainers = nodes.arrayNode();
         if (hasCode) {
-            var initMounts = nodes.arrayNode();
+            ArrayNode initMounts = nodes.arrayNode();
             initMounts.add(mount(nodes, "task", TASK_DIR));
             if (hasLayers) {
                 initMounts.add(mount(nodes, "opt", OPT_DIR));
@@ -143,7 +143,7 @@ public class LambdaPodSpecFactory {
             if (needsRuntimeDir) {
                 initMounts.add(mount(nodes, "runtime", RUNTIME_DIR));
             }
-            var init = nodes.objectNode()
+            ObjectNode init = nodes.objectNode()
                     .put("name", "code-download")
                     .put("image", config.services().lambda().kubernetes().initImage())
                     .put("imagePullPolicy", "IfNotPresent");
@@ -153,19 +153,19 @@ public class LambdaPodSpecFactory {
             initContainers.add(init);
         }
 
-        var metadata = nodes.objectNode().put("name", podName);
-        var labels = nodes.objectNode();
+        ObjectNode metadata = nodes.objectNode().put("name", podName);
+        ObjectNode labels = nodes.objectNode();
         podLabels(functionName).forEach(labels::put);
         metadata.set("labels", labels);
 
-        var spec = nodes.objectNode()
+        ObjectNode spec = nodes.objectNode()
                 .put("restartPolicy", "Never")
                 .put("terminationGracePeriodSeconds", 5);
         spec.set("initContainers", initContainers);
         spec.set("containers", nodes.arrayNode().add(runtime));
         spec.set("volumes", volumes);
 
-        var pod = nodes.objectNode()
+        ObjectNode pod = nodes.objectNode()
                 .put("apiVersion", "v1")
                 .put("kind", "Pod");
         pod.set("metadata", metadata);
@@ -184,11 +184,11 @@ public class LambdaPodSpecFactory {
     String initScript(String codeDownloadUrl, List<String> layerDownloadUrls, boolean providedRuntime) {
         // Download URLs are always plain HTTP (see KubernetesFlociAddressResolver
         // .downloadBaseUrl): busybox wget's built-in TLS cannot handshake with Floci.
-        var wget = "wget -q";
-        var script = new StringBuilder("set -e\n");
+        String wget = "wget -q";
+        StringBuilder script = new StringBuilder("set -e\n");
         script.append(wget).append(" -O /tmp/code.zip '").append(codeDownloadUrl).append("'\n");
         script.append("unzip -oq /tmp/code.zip -d ").append(TASK_DIR).append("\n");
-        for (var i = 0; i < layerDownloadUrls.size(); i++) {
+        for (int i = 0; i < layerDownloadUrls.size(); i++) {
             script.append(wget).append(" -O /tmp/layer").append(i).append(".zip '")
                     .append(layerDownloadUrls.get(i)).append("'\n");
             script.append("unzip -oq /tmp/layer").append(i).append(".zip -d ").append(OPT_DIR).append("\n");
@@ -206,11 +206,11 @@ public class LambdaPodSpecFactory {
     }
 
     Map<String, String> podLabels(String functionName) {
-        var labels = new LinkedHashMap<String, String>();
+        LinkedHashMap<String, String> labels = new LinkedHashMap<>();
         config.services().lambda().kubernetes().labels().orElse(List.of()).forEach(entry -> {
-            var eq = entry.indexOf('=');
-            var key = eq > 0 ? entry.substring(0, eq).trim() : "";
-            var value = eq > 0 ? entry.substring(eq + 1).trim() : "";
+            int eq = entry.indexOf('=');
+            String key = eq > 0 ? entry.substring(0, eq).trim() : "";
+            String value = eq > 0 ? entry.substring(eq + 1).trim() : "";
             // Invalid entries are dropped, not sanitized: a silently rewritten label
             // would no longer match the NetworkPolicy/selector the user wrote it for,
             // and the API server would reject the pod at cold start otherwise.
@@ -239,9 +239,9 @@ public class LambdaPodSpecFactory {
      * suffix stays intact; the function name is truncated to fit.
      */
     static String podName(String functionName, String shortId) {
-        var prefix = "floci-lambda-";
-        var sanitized = functionName.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9-]", "-");
-        var budget = MAX_NAME_LENGTH - prefix.length() - shortId.length() - 1;
+        String prefix = "floci-lambda-";
+        String sanitized = functionName.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9-]", "-");
+        int budget = MAX_NAME_LENGTH - prefix.length() - shortId.length() - 1;
         if (sanitized.length() > budget) {
             sanitized = sanitized.substring(0, budget);
         }
@@ -254,7 +254,7 @@ public class LambdaPodSpecFactory {
 
     /** Label values allow [a-zA-Z0-9-_.], max 63 chars, alphanumeric at both ends. */
     static String sanitizeLabelValue(String value) {
-        var sanitized = value.replaceAll("[^a-zA-Z0-9-_.]", "-");
+        String sanitized = value.replaceAll("[^a-zA-Z0-9-_.]", "-");
         if (sanitized.length() > MAX_NAME_LENGTH) {
             sanitized = sanitized.substring(0, MAX_NAME_LENGTH);
         }
@@ -271,7 +271,7 @@ public class LambdaPodSpecFactory {
     }
 
     private static ArrayNode stringArray(JsonNodeFactory nodes, List<String> values) {
-        var array = nodes.arrayNode();
+        ArrayNode array = nodes.arrayNode();
         values.forEach(array::add);
         return array;
     }
@@ -287,11 +287,11 @@ public class LambdaPodSpecFactory {
     }
 
     private static ArrayNode toEnvVars(JsonNodeFactory nodes, List<String> env) {
-        var vars = nodes.arrayNode();
-        for (var entry : env) {
-            var eq = entry.indexOf('=');
-            var key = eq >= 0 ? entry.substring(0, eq) : entry;
-            var value = eq >= 0 ? entry.substring(eq + 1) : "";
+        ArrayNode vars = nodes.arrayNode();
+        for (String entry : env) {
+            int eq = entry.indexOf('=');
+            String key = eq >= 0 ? entry.substring(0, eq) : entry;
+            String value = eq >= 0 ? entry.substring(eq + 1) : "";
             // The API server rejects a pod whose env var has an empty name.
             if (key.isEmpty()) {
                 LOG.warnv("Skipping env entry with an empty name in the pod spec: ''{0}''", entry);

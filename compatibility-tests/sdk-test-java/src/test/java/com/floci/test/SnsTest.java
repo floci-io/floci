@@ -236,11 +236,11 @@ class SnsTest {
         assertThat(body).doesNotContain("\"Type\":\"Notification\"");
         assertThat(body).isEqualTo("raw-delivery-content");
 
-        var msgAttrs = rawRecv.messages().get(0).messageAttributes();
-        assertThat(msgAttrs).containsKey("color");
-        assertThat(msgAttrs.get("color").stringValue()).isEqualTo("blue");
-        assertThat(msgAttrs).containsKey("count");
-        assertThat(msgAttrs.get("count").dataType()).isEqualTo("Number");
+        Message rawMessage = rawRecv.messages().get(0);
+        assertThat(rawMessage.messageAttributes()).containsKey("color");
+        assertThat(rawMessage.messageAttributes().get("color").stringValue()).isEqualTo("blue");
+        assertThat(rawMessage.messageAttributes()).containsKey("count");
+        assertThat(rawMessage.messageAttributes().get("count").dataType()).isEqualTo("Number");
 
         // Cleanup
         sns.unsubscribe(UnsubscribeRequest.builder().subscriptionArn(rawSubArn).build());
@@ -559,20 +559,20 @@ class SnsTest {
 
         assertThat(batchRecv.messages()).hasSize(2);
 
-        var byBody = batchRecv.messages().stream()
+        Map<String, Message> byBody = batchRecv.messages().stream()
                 .collect(java.util.stream.Collectors.toMap(
                         software.amazon.awssdk.services.sqs.model.Message::body, m -> m));
 
-        var attrsA = byBody.get("batch-msg-a").messageAttributes();
-        assertThat(attrsA).containsKeys("ce-type", "ce-id");
-        assertThat(attrsA.get("ce-id").stringValue()).isEqualTo("id-a");
-        assertThat(attrsA.get("ce-type").stringValue()).isEqualTo("com.example.test");
+        Message messageA = byBody.get("batch-msg-a");
+        assertThat(messageA.messageAttributes()).containsKeys("ce-type", "ce-id");
+        assertThat(messageA.messageAttributes().get("ce-id").stringValue()).isEqualTo("id-a");
+        assertThat(messageA.messageAttributes().get("ce-type").stringValue()).isEqualTo("com.example.test");
 
-        var attrsB = byBody.get("batch-msg-b").messageAttributes();
-        assertThat(attrsB).containsKeys("ce-type", "ce-id", "count");
-        assertThat(attrsB.get("ce-id").stringValue()).isEqualTo("id-b");
-        assertThat(attrsB.get("count").dataType()).isEqualTo("Number");
-        assertThat(attrsB.get("count").stringValue()).isEqualTo("42");
+        Message messageB = byBody.get("batch-msg-b");
+        assertThat(messageB.messageAttributes()).containsKeys("ce-type", "ce-id", "count");
+        assertThat(messageB.messageAttributes().get("ce-id").stringValue()).isEqualTo("id-b");
+        assertThat(messageB.messageAttributes().get("count").dataType()).isEqualTo("Number");
+        assertThat(messageB.messageAttributes().get("count").stringValue()).isEqualTo("42");
 
         sns.unsubscribe(UnsubscribeRequest.builder().subscriptionArn(batchSubArn).build());
         sns.deleteTopic(DeleteTopicRequest.builder().topicArn(batchTopicArn).build());

@@ -128,7 +128,7 @@ class PipesServiceTest {
 
     @Test
     void createPipeWithSelfManagedKafkaSourceRequiresTopicParameters() throws Exception {
-        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        ObjectMapper mapper = new ObjectMapper();
         AwsException ex = assertThrows(AwsException.class, () ->
                 pipesService.createPipe("smk-pipe",
                         "smk://localhost:9092",

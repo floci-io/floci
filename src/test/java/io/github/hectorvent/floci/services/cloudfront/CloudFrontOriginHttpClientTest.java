@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsExchange;
 import com.sun.net.httpserver.HttpsServer;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.apache.hc.client5.http.DnsResolver;
@@ -221,9 +222,9 @@ class CloudFrontOriginHttpClientTest {
         CertificateGenerator generator = new CertificateGenerator();
         CertificateGenerator.GeneratedCertificate generated = generator.generateSelfSignedCertificate(
                 "origin.invalid", List.of("origin.invalid"), KeyAlgorithm.RSA_2048);
-        X509Certificate certificate = generator.parseCertificate(generated.certificatePem());
+        X509Certificate certificate = Pem.parseCertificate(generated.certificatePem());
         SSLContext serverContext = serverSslContext(
-                certificate, generator.parsePrivateKey(generated.privateKeyPem()));
+                certificate, Pem.parsePrivateKey(generated.privateKeyPem()));
         SSLContext clientContext = clientSslContext(certificate);
 
         AtomicReference<String> hostHeader = new AtomicReference<>();

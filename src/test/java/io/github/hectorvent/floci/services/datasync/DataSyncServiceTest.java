@@ -376,7 +376,7 @@ class DataSyncServiceTest {
                  "S3Config": {"BucketAccessRoleArn": "arn:aws:iam::000000000000:role/datasync"}}
                 """);
 
-        var page = service.listLocations(
+        DataSyncService.Page<DataSyncLocation> page = service.listLocations(
                 json("[{\"Name\": \"LocationType\", \"Values\": [\"Nfs\"], \"Operator\": \"Equals\"}]"), null, 0);
 
         assertEquals(List.of(nfs.getLocationArn()),
@@ -403,11 +403,11 @@ class DataSyncServiceTest {
             service.createAgent(json("{\"ActivationKey\": \"AAAAA-1AAAA-BB1CC-DDDDD-EEEEE\"}"), REGION);
         }
 
-        var first = service.listAgents(null, 2);
+        DataSyncService.Page<DataSyncAgent> first = service.listAgents(null, 2);
         assertEquals(2, first.items().size());
         assertEquals(first.items().get(1).getAgentArn(), first.nextToken());
 
-        var second = service.listAgents(first.nextToken(), 2);
+        DataSyncService.Page<DataSyncAgent> second = service.listAgents(first.nextToken(), 2);
         assertEquals(1, second.items().size());
         assertNull(second.nextToken());
     }

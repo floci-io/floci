@@ -43,7 +43,7 @@ public class LambdaRuntimeLauncherProducer {
     LambdaRuntimeLauncher launcher(EmulatorConfig config,
                                    Instance<ContainerLauncher> docker,
                                    Instance<KubernetesPodLauncher> kubernetes) {
-        var executor = requireValidExecutor(config);
+        String executor = requireValidExecutor(config);
         if (executor.equals("kubernetes")) {
             LOG.info("Lambda executor: kubernetes (environments run as pods)");
             return kubernetes.get();
@@ -52,7 +52,7 @@ public class LambdaRuntimeLauncherProducer {
     }
 
     private static String requireValidExecutor(EmulatorConfig config) {
-        var executor = config.services().lambda().executor().trim().toLowerCase(Locale.ROOT);
+        String executor = config.services().lambda().executor().trim().toLowerCase(Locale.ROOT);
         if (!executor.equals("docker") && !executor.equals("kubernetes")) {
             throw new IllegalArgumentException(
                     "Unknown floci.services.lambda.executor '" + executor

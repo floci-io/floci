@@ -846,6 +846,66 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
         assertEquals("Scheduler.ValidationException", result.path("caughtError").asText());
     }
 
+    @Test
+    @Order(27)
+    void schedulerValidationErrorsAreCatchableFromCreateAndUpdateTasks() throws Exception {
+        String[][] cases = {
+                {"createSchedule", "aws-sdk-invalid-expression", "cron(invalid)", ROLE_ARN},
+                {"createSchedule", "aws-sdk-invalid-role", "rate(1 hour)", "not-a-role-arn"},
+                {"updateSchedule", "aws-sdk-invalid-update", "cron(invalid)", ROLE_ARN}
+        };
+        given().contentType("application/json").body("""
+                {"ScheduleExpression":"rate(1 hour)",
+                 "FlexibleTimeWindow":{"Mode":"OFF"},
+                 "Target":{"Arn":"TARGET_ARN","RoleArn":"ROLE"}}
+                """.replace("TARGET_ARN", quickChildArn).replace("ROLE", ROLE_ARN))
+                .when().post("/schedules/aws-sdk-invalid-update")
+                .then().statusCode(200);
+
+        for (int i = 0; i < cases.length; i++) {
+            String[] testCase = cases[i];
+            String stateMachineArn = createStateMachine("aws-sdk-validation-" + i,
+                    catchingScheduleValidationTask(testCase[0], testCase[1], testCase[2], testCase[3]));
+            JsonNode result = mapper.readTree(succeedingOutputOf(stateMachineArn, "{}"));
+            assertEquals("Scheduler.ValidationException", result.path("caughtError").asText(),
+                    testCase[0] + ": " + testCase[2]);
+        }
+    }
+
+    private static String catchingScheduleValidationTask(String action, String scheduleName,
+                                                         String expression, String roleArn) {
+        return """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Schedule",
+                  "States": {
+                    "Schedule": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:scheduler:ACTION",
+                      "Arguments": {
+                        "Name": "SCHEDULE_NAME",
+                        "ScheduleExpression": "EXPRESSION",
+                        "FlexibleTimeWindow": {"Mode": "OFF"},
+                        "Target": {"Arn": "TARGET_ARN", "RoleArn": "ROLE"}
+                      },
+                      "Catch": [{
+                        "ErrorEquals": ["Scheduler.ValidationException"],
+                        "Next": "Recovered",
+                        "Output": {"caughtError": "{% $states.errorOutput.Error %}"}
+                      }],
+                      "End": true
+                    },
+                    "Recovered": {"Type": "Pass", "End": true}
+                  }
+                }
+                """
+                .replace("ACTION", action)
+                .replace("SCHEDULE_NAME", scheduleName)
+                .replace("EXPRESSION", expression)
+                .replace("TARGET_ARN", quickChildArn)
+                .replace("ROLE", roleArn);
+    }
+
     private static String deleteScheduleTask(String scheduleName, String groupName) {
         String groupArgument = groupName == null ? "" : ", \"GroupName\": \"" + groupName + "\"";
         return """

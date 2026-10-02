@@ -95,7 +95,7 @@ public class SnsQueryHandler {
     private Response handleListTopics(MultivaluedMap<String, String> params, String region) {
         List<Topic> topics = snsService.listTopics(region);
 
-        var xml = new XmlBuilder().start("Topics");
+        XmlBuilder xml = new XmlBuilder().start("Topics");
         for (Topic t : topics) {
             xml.start("member").elem("TopicArn", t.getTopicArn()).end("member");
         }
@@ -108,8 +108,8 @@ public class SnsQueryHandler {
         try {
             Map<String, String> attrs = snsService.getTopicAttributes(topicArn, region);
 
-            var xml = new XmlBuilder().start("Attributes");
-            for (var entry : attrs.entrySet()) {
+            XmlBuilder xml = new XmlBuilder().start("Attributes");
+            for (Map.Entry<String, String> entry : attrs.entrySet()) {
                 xml.start("entry")
                    .elem("key", entry.getKey())
                    .elem("value", entry.getValue())
@@ -202,7 +202,7 @@ public class SnsQueryHandler {
     }
 
     private Response buildSubscriptionListResponse(String action, List<Subscription> subs) {
-        var xml = new XmlBuilder().start("Subscriptions");
+        XmlBuilder xml = new XmlBuilder().start("Subscriptions");
         for (Subscription s : subs) {
             xml.start("member")
                .elem("TopicArn", s.getTopicArn())
@@ -267,8 +267,8 @@ public class SnsQueryHandler {
         String arn = getParam(params, "PlatformApplicationArn");
         try {
             Map<String, String> attrs = snsService.getPlatformApplicationAttributes(arn, region);
-            var xml = new XmlBuilder().start("Attributes");
-            for (var entry : attrs.entrySet()) {
+            XmlBuilder xml = new XmlBuilder().start("Attributes");
+            for (Map.Entry<String, String> entry : attrs.entrySet()) {
                 xml.start("entry").elem("key", entry.getKey()).elem("value", entry.getValue()).end("entry");
             }
             xml.end("Attributes");
@@ -291,10 +291,10 @@ public class SnsQueryHandler {
 
     private Response handleListPlatformApplications(String region) {
         List<PlatformApplication> apps = snsService.listPlatformApplications(region);
-        var xml = new XmlBuilder().start("PlatformApplications");
+        XmlBuilder xml = new XmlBuilder().start("PlatformApplications");
         for (PlatformApplication app : apps) {
             xml.start("member").elem("PlatformApplicationArn", app.getArn()).start("Attributes");
-            for (var entry : app.getAttributes().entrySet()) {
+            for (Map.Entry<String, String> entry : app.getAttributes().entrySet()) {
                 xml.start("entry").elem("key", entry.getKey()).elem("value", entry.getValue()).end("entry");
             }
             xml.end("Attributes").end("member");
@@ -327,8 +327,8 @@ public class SnsQueryHandler {
         String arn = getParam(params, "EndpointArn");
         try {
             Map<String, String> attrs = snsService.getEndpointAttributes(arn, region);
-            var xml = new XmlBuilder().start("Attributes");
-            for (var entry : attrs.entrySet()) {
+            XmlBuilder xml = new XmlBuilder().start("Attributes");
+            for (Map.Entry<String, String> entry : attrs.entrySet()) {
                 xml.start("entry").elem("key", entry.getKey()).elem("value", entry.getValue()).end("entry");
             }
             xml.end("Attributes");
@@ -353,10 +353,10 @@ public class SnsQueryHandler {
         String appArn = getParam(params, "PlatformApplicationArn");
         try {
             List<PlatformEndpoint> endpoints = snsService.listEndpointsByPlatformApplication(appArn, region);
-            var xml = new XmlBuilder().start("Endpoints");
+            XmlBuilder xml = new XmlBuilder().start("Endpoints");
             for (PlatformEndpoint ep : endpoints) {
                 xml.start("member").elem("EndpointArn", ep.getArn()).start("Attributes");
-                for (var entry : ep.getAttributes().entrySet()) {
+                for (Map.Entry<String, String> entry : ep.getAttributes().entrySet()) {
                     xml.start("entry").elem("key", entry.getKey()).elem("value", entry.getValue()).end("entry");
                 }
                 xml.end("Attributes").end("member");
@@ -398,7 +398,7 @@ public class SnsQueryHandler {
         try {
             SnsService.BatchPublishResult result = snsService.publishBatch(topicArn, entries, region);
 
-            var xml = new XmlBuilder().start("Successful");
+            XmlBuilder xml = new XmlBuilder().start("Successful");
             for (String[] s : result.successful()) {
                 xml.start("member").elem("Id", s[0]).elem("MessageId", s[1]).end("member");
             }
@@ -420,8 +420,8 @@ public class SnsQueryHandler {
         String subscriptionArn = getParam(params, "SubscriptionArn");
         try {
             Map<String, String> attrs = snsService.getSubscriptionAttributes(subscriptionArn, region);
-            var xml = new XmlBuilder().start("Attributes");
-            for (var entry : attrs.entrySet()) {
+            XmlBuilder xml = new XmlBuilder().start("Attributes");
+            for (Map.Entry<String, String> entry : attrs.entrySet()) {
                 xml.start("entry").elem("key", entry.getKey()).elem("value", entry.getValue()).end("entry");
             }
             xml.end("Attributes");
@@ -487,8 +487,8 @@ public class SnsQueryHandler {
         try {
             Map<String, String> tags = snsService.listTagsForResource(resourceArn, region);
 
-            var xml = new XmlBuilder().start("Tags");
-            for (var entry : tags.entrySet()) {
+            XmlBuilder xml = new XmlBuilder().start("Tags");
+            for (Map.Entry<String, String> entry : tags.entrySet()) {
                 xml.start("member")
                    .elem("Key", entry.getKey())
                    .elem("Value", entry.getValue())

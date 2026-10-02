@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.networkfirewall;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -87,7 +88,7 @@ class NetworkFirewallConcurrencyTest {
         create.put("FirewallName", NAME);
         create.put("VpcId", "vpc-0123456789abcdef0");
         create.put("SubnetChangeProtection", false);
-        var mappings = create.putArray("SubnetMappings");
+        ArrayNode mappings = create.putArray("SubnetMappings");
         for (int caller = 0; caller < CALLERS; caller++) {
             mappings.addObject().put("SubnetId", String.format("subnet-%017d", caller));
         }

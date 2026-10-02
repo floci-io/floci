@@ -6,6 +6,7 @@ import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
@@ -141,7 +142,7 @@ class ContainerCaBundleDockerIntegrationTest {
         static {
             try {
                 FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
-                var leaf = ca.issueServerCertificate("localhost",
+                CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("localhost",
                         List.of("localhost", "127.0.0.1", "host.docker.internal"), KeyAlgorithm.RSA_2048, null);
                 Files.writeString(CERT_FILE, leaf.certificatePem());
                 Files.writeString(KEY_FILE, leaf.privateKeyPem());

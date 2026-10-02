@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.MethodOrderer;
@@ -481,7 +482,7 @@ class ResourceExplorer2IntegrationTest {
 
         @Test
         void searchWithEmptyQueryReturnsAllResources() {
-            var response = given()
+            Response response = given()
                 .header("Authorization", AUTH)
                 .contentType("application/json")
                 .body("""
@@ -1308,7 +1309,7 @@ class ResourceExplorer2IntegrationTest {
                         : "{\"MaxResults\": 1, \"NextToken\": \"" + nextToken
                                 + "\", \"Filters\": {\"FilterString\": \"" + BOUNDED_SCOPE + "\"}}";
 
-                var response = given()
+                Response response = given()
                     .header("Authorization", AUTH)
                     .contentType("application/json")
                     .body(body)
@@ -1446,7 +1447,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .extract().path("Resources");
 
-            for (var resource : resources) {
+            for (Map<String, Object> resource : resources) {
                 assertNotNull(resource.get("Arn"), "Resource missing Arn: " + resource);
                 assertNotNull(resource.get("ResourceType"), "Resource missing ResourceType: " + resource);
                 assertNotNull(resource.get("Service"), "Resource missing Service: " + resource);
@@ -1484,7 +1485,7 @@ class ResourceExplorer2IntegrationTest {
             .then()
                 .extract().path("Resources");
 
-            for (var resource : resources) {
+            for (Map<String, Object> resource : resources) {
                 String service = (String) resource.get("Service");
                 String resourceType = (String) resource.get("ResourceType");
                 assertTrue(
@@ -1504,7 +1505,7 @@ class ResourceExplorer2IntegrationTest {
             .then()
                 .extract().path("Resources");
 
-            for (var resource : resources) {
+            for (Map<String, Object> resource : resources) {
                 String arn = (String) resource.get("Arn");
                 String service = (String) resource.get("Service");
                 Arn parsed = AwsArnUtils.parse(arn);

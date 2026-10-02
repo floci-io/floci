@@ -5,12 +5,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.identitystore.model.Group;
 import io.github.hectorvent.floci.services.identitystore.model.Membership;
 import io.github.hectorvent.floci.services.identitystore.model.User;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
+
+import java.time.Instant;
+import java.util.List;
 
 @ApplicationScoped
 public class IdentityStoreJsonHandler {
@@ -60,7 +64,7 @@ public class IdentityStoreJsonHandler {
     }
 
     private Response listGroups(JsonNode request) {
-        var page = service.listGroups(request);
+        PaginatedResult<Group> page = service.listGroups(request);
         ObjectNode out = mapper.createObjectNode();
         ArrayNode array = out.putArray("Groups");
         for (Group group : page.items()) {
@@ -95,7 +99,7 @@ public class IdentityStoreJsonHandler {
 
     private Response listUsers(JsonNode request) {
         boolean includeExtensions = includeExtensions(request);
-        var page = service.listUsers(request);
+        PaginatedResult<User> page = service.listUsers(request);
         ObjectNode out = mapper.createObjectNode();
         ArrayNode array = out.putArray("Users");
         for (User user : page.items()) {
@@ -132,7 +136,7 @@ public class IdentityStoreJsonHandler {
     }
 
     private Response listGroupMemberships(JsonNode request) {
-        var page = service.listGroupMemberships(request);
+        PaginatedResult<Membership> page = service.listGroupMemberships(request);
         ObjectNode out = mapper.createObjectNode();
         ArrayNode result = out.putArray("GroupMemberships");
         for (Membership membership : page.items()) {
@@ -145,7 +149,7 @@ public class IdentityStoreJsonHandler {
     }
 
     private Response listGroupMembershipsForMember(JsonNode request) {
-        var page = service.listGroupMembershipsForMember(request);
+        PaginatedResult<Membership> page = service.listGroupMembershipsForMember(request);
         ObjectNode out = mapper.createObjectNode();
         ArrayNode result = out.putArray("GroupMemberships");
         for (Membership membership : page.items()) {
@@ -160,7 +164,7 @@ public class IdentityStoreJsonHandler {
     private Response isMemberInGroups(JsonNode request) {
         String storeId = IdentityStoreService.required(request, "IdentityStoreId");
         String userId = IdentityStoreService.memberUserId(request.get("MemberId"));
-        var groupIds = service.validateGroupIds(request.get("GroupIds"));
+        List<String> groupIds = service.validateGroupIds(request.get("GroupIds"));
         ObjectNode out = mapper.createObjectNode();
         ArrayNode results = out.putArray("Results");
         for (String groupId : groupIds) {
@@ -238,7 +242,7 @@ public class IdentityStoreJsonHandler {
 
     private static void putTimestamp(ObjectNode target, String field, String timestamp) {
         if (timestamp != null) {
-            var instant = java.time.Instant.parse(timestamp);
+            Instant instant = Instant.parse(timestamp);
             double unixTimestamp = instant.getEpochSecond() + instant.getNano() / 1_000_000_000.0;
             target.put(field, unixTimestamp);
         }

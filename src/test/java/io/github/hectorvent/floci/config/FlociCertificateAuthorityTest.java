@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.config;
 
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -10,6 +11,7 @@ import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -133,7 +135,7 @@ class FlociCertificateAuthorityTest {
     @Test
     void keyThatDoesNotMatchTheCertificateIsRegenerated() throws Exception {
         FlociCertificateAuthority first = FlociCertificateAuthority.loadOrCreate(tempDir);
-        var stranger = new CertificateGenerator().generateCaCertificate("Other CA");
+        CertificateGenerator.GeneratedCertificate stranger = new CertificateGenerator().generateCaCertificate("Other CA");
         Files.writeString(tempDir.resolve("floci-root-ca.key"), stranger.privateKeyPem());
 
         FlociCertificateAuthority second = FlociCertificateAuthority.loadOrCreate(tempDir);
@@ -172,7 +174,7 @@ class FlociCertificateAuthorityTest {
 
     @Test
     void aLeafInPlaceOfTheCaIsRegenerated() throws Exception {
-        var leaf = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("another-ca"))
+        CertificateGenerator.GeneratedCertificate leaf = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("another-ca"))
                 .issueServerCertificate("localhost", List.of(), KeyAlgorithm.RSA_2048, null);
         Files.writeString(tempDir.resolve("floci-root-ca.crt"), leaf.certificatePem());
         Files.writeString(tempDir.resolve("floci-root-ca.key"), leaf.privateKeyPem());
@@ -238,7 +240,7 @@ class FlociCertificateAuthorityTest {
     @Test
     void deviceCertificateNeverOutlivesAShortLivedCa() throws Exception {
         CertificateGenerator gen = new CertificateGenerator();
-        var shortLived = gen.generateCaCertificate(FlociCertificateAuthority.COMMON_NAME,
+        CertificateGenerator.GeneratedCertificate shortLived = gen.generateCaCertificate(FlociCertificateAuthority.COMMON_NAME,
                 java.time.Instant.now().plus(30, java.time.temporal.ChronoUnit.DAYS));
         Files.writeString(tempDir.resolve("floci-root-ca.crt"), shortLived.certificatePem());
         Files.writeString(tempDir.resolve("floci-root-ca.key"), shortLived.privateKeyPem());
@@ -255,7 +257,7 @@ class FlociCertificateAuthorityTest {
     @Test
     void aSelfSignedLeafIsNotOurs() {
         FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
-        var stranger = new CertificateGenerator().generateSelfSignedCertificate(
+        CertificateGenerator.GeneratedCertificate stranger = new CertificateGenerator().generateSelfSignedCertificate(
                 "localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
 
         assertFalse(ca.isIssuedByUs(parse(stranger.certificatePem())));
@@ -264,11 +266,11 @@ class FlociCertificateAuthorityTest {
     @Test
     void aLeafNamingOurCaButSignedByAnotherKeyIsNotOurs() {
         FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
-        var impostor = new CertificateGenerator().generateCaCertificate(FlociCertificateAuthority.COMMON_NAME);
-        var generator = new CertificateGenerator();
-        var forged = generator.generateIssuedCertificate("localhost", List.of(), KeyAlgorithm.RSA_2048, null,
+        CertificateGenerator.GeneratedCertificate impostor = new CertificateGenerator().generateCaCertificate(FlociCertificateAuthority.COMMON_NAME);
+        CertificateGenerator generator = new CertificateGenerator();
+        CertificateGenerator.GeneratedCertificate forged = generator.generateIssuedCertificate("localhost", List.of(), KeyAlgorithm.RSA_2048, null,
                 new CertificateGenerator.Issuer(parse(impostor.certificatePem()),
-                        generator.parsePrivateKey(impostor.privateKeyPem())),
+                        Pem.parsePrivateKey(impostor.privateKeyPem())),
                 CertificateGenerator.LeafUsage.SERVER);
 
         assertFalse(ca.isIssuedByUs(parse(forged.certificatePem())), "same issuer name, wrong signature");
@@ -321,17 +323,17 @@ class FlociCertificateAuthorityTest {
     }
 
     private static String csrPem(String subject, KeyPair keyPair) throws Exception {
-        var csr = new JcaPKCS10CertificationRequestBuilder(
+        PKCS10CertificationRequest csr = new JcaPKCS10CertificationRequestBuilder(
                 new X500Name(subject), keyPair.getPublic())
                 .build(new JcaContentSignerBuilder("SHA256withRSA").build(keyPair.getPrivate()));
         StringWriter out = new StringWriter();
-        try (var writer = new JcaPEMWriter(out)) {
+        try (JcaPEMWriter writer = new JcaPEMWriter(out)) {
             writer.writeObject(csr);
         }
         return out.toString();
     }
 
     private static X509Certificate parse(String pem) {
-        return new CertificateGenerator().parseCertificate(pem);
+        return Pem.parseCertificate(pem);
     }
 }

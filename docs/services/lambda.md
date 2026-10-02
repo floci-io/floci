@@ -375,6 +375,8 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS` | `1000` | Event-source mapping poll interval (milliseconds) |
 | `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` | `60` | Wait before the first retry of a failed asynchronous invocation (seconds); the second waits twice this, `0` retries back to back |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` | `300` | Idle container shutdown timeout (seconds) |
+| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION` | `max(4, cpus)` | Maximum idle (warm) containers kept per function |
+| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL` | `0` | Maximum idle (warm) containers kept across all functions, LRU-evicted beyond it. `0` = unbounded. See the note below |
 | `FLOCI_SERVICES_LAMBDA_REGION_CONCURRENCY_LIMIT` | `1000` | Maximum concurrent executions per region |
 | `FLOCI_SERVICES_LAMBDA_UNRESERVED_CONCURRENCY_MIN` | `100` | Minimum unreserved capacity `PutFunctionConcurrency` must leave |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Enable bind-mount hot-reload via `S3Bucket=hot-reload` |
@@ -422,6 +424,30 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 
     Only first-time populates are gated. Warm containers, already-populated volumes, and
     functions under 32 MB are never serialised by this.
+
+!!! note "Bounding warm containers"
+    After an invocation the container stays warm so the next call skips the cold start, and is
+    reaped only after `container-idle-timeout-seconds` of inactivity. Each function keeps up to
+    `warm-pool-max-per-function` idle containers, but nothing limits the sum: a stack of many
+    functions that fan out through streams and triggers can accumulate one warm container per
+    function touched, and each runtime container holds its own memory. On a Docker Desktop with
+    a modest memory allocation that is enough to have Floci OOM-killed. `ephemeral: true` avoids
+    it by cold-starting every invocation, at a large latency cost.
+
+    `warm-pool-max-total` bounds the idle containers across all functions. When a release
+    would exceed it, the least-recently-used idle container of any function is stopped first,
+    so the function that just ran (the most likely to run again) keeps its container:
+
+    ```bash
+    FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL=24
+    ```
+
+    This bounds idle containers only, emulator-wide. Busy containers do not count toward it;
+    their ceiling is `region-concurrency-limit`, which applies independently in each region, so
+    peak container count is `warm-pool-max-total` plus the in-flight invocations across every
+    active region. A cap that is smaller than the number of functions invoked in a tight loop
+    trades some warm hits for the memory bound. A negative value is ignored with a warning and
+    leaves the total unbounded, like `0`.
 
 ### Runtime API host override
 
@@ -873,6 +899,8 @@ For DynamoDB Streams mappings, Floci retries failed batches with exponential bac
 
 For Kinesis mappings, a function error or throttle leaves the shard checkpoint in place and the same batch is read again on the next poll; there is no retry limit, backoff, or OnFailure destination. With `FunctionResponseTypes: ["ReportBatchItemFailures"]`, a partial batch response moves the checkpoint up to the lowest reported record, and a malformed response retries the whole batch. `FunctionResponseTypes` can be set or cleared on an existing mapping with `UpdateEventSourceMapping`.
 
+For SQS mappings, a function error returns every delivered message to the queue with the queue's `VisibilityTimeout`, so it is received again after that timeout and the queue's `RedrivePolicy` applies as usual. With `FunctionResponseTypes: ["ReportBatchItemFailures"]`, only the messages the function reports are returned and the rest are deleted; a malformed response returns the whole batch.
+
 A DynamoDB Streams mapping created with `StartingPosition: LATEST` delivers only records written after it is created, so a stream that is empty at creation delivers everything written later. After a restart it still resumes from the trim horizon, because native stream records are volatile. Deleting or disabling a mapping stops any poll that has not yet invoked the function. An invocation already running completes, but its checkpoint is not saved: a deleted mapping is never recreated and its result is dropped, and a disabled mapping re-reads that batch when it is enabled again.
 
 ```bash
@@ -1003,13 +1031,13 @@ of `{}` or with an empty `Filters` array clears any existing filters.
     where AWS matches when the record's own field is itself an array and any
     element satisfies the pattern, and Floci does not.
 
-!!! warning "Direct Lambda API only"
-    `FilterCriteria` is carried only by the direct Lambda
-    `CreateEventSourceMapping` / `UpdateEventSourceMapping` APIs (SDK, CLI,
-    Terraform). CloudFormation and SAM event-source-mapping resources do not yet
-    forward `FilterCriteria` (as they also do not forward `ScalingConfig` or
-    `DestinationConfig`); forwarding it through those paths is tracked as a
-    follow-up.
+!!! warning "SAM event sources"
+    CloudFormation `AWS::Lambda::EventSourceMapping` resources forward
+    `FilterCriteria`, `MaximumBatchingWindowInSeconds`, `ScalingConfig` and
+    `DestinationConfig`, so a stack-created mapping behaves as one created
+    through the Lambda API. SAM `SQS`, `Kinesis` and `DynamoDB` function events
+    forward only the queue or stream, `BatchSize` and `Enabled`, so any other
+    event property, `FilterCriteria` included, is dropped.
 
 ## Supported Runtimes
 

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -217,7 +218,7 @@ class SesBulkV1IntegrationTest {
     @Test
     @Order(8)
     void sendBulkTemplatedEmail_destinationsExceeds50_returnsMessageRejected() {
-        var spec = given()
+        RequestSpecification spec = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
@@ -266,7 +267,7 @@ class SesBulkV1IntegrationTest {
     @Order(10)
     void sendBulkTemplatedEmail_nonObjectTemplateData_returnsInvalidParameterValue(
             String label, String defaultTemplateData, String replacementTemplateData) {
-        var spec = given()
+        RequestSpecification spec = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
@@ -295,7 +296,7 @@ class SesBulkV1IntegrationTest {
     @Test
     @Order(9)
     void sendBulkTemplatedEmail_recipientsExceeds50_returnsMessageRejected() {
-        var spec = given()
+        RequestSpecification spec = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")

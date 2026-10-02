@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -382,7 +383,7 @@ class S3WebsiteIntegrationTest {
         .then()
             .statusCode(200);
 
-        var getResponse = given()
+        Response getResponse = given()
             .header("Host", websiteHost())
         .when()
             .get("/missing-page");

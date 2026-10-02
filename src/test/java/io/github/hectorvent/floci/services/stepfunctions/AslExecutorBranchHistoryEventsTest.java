@@ -86,7 +86,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void parallelBranchesPublishTheirStatesOnChainsOfTheirOwn() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"P","States":{
                   "P":{"Type":"Parallel","Branches":[
                     {"StartAt":"A1","States":{"A1":{"Type":"Pass","Next":"A2"},"A2":{"Type":"Pass","End":true}}},
@@ -104,16 +104,16 @@ class AslExecutorBranchHistoryEventsTest {
                         "PassStateExited", "ExecutionSucceeded"),
                 typesOf(history.subList(11, 16)));
 
-        var started = eventOfType(history, "ParallelStateStarted");
+        HistoryEvent started = eventOfType(history, "ParallelStateStarted");
         assertEquals(2L, started.getPreviousEventId());
         assertNull(started.getDetails());
         // Each branch's first state starts from ParallelStateStarted, and the branch chains on from
         // there: A1 exited points at A1 entered, A2 entered at A1 exited.
         for (String branch : List.of("A", "B")) {
-            var firstEntered = stateEvent(history, "PassStateEntered", branch + "1");
-            var firstExited = stateEvent(history, "PassStateExited", branch + "1");
-            var secondEntered = stateEvent(history, "PassStateEntered", branch + "2");
-            var secondExited = stateEvent(history, "PassStateExited", branch + "2");
+            HistoryEvent firstEntered = stateEvent(history, "PassStateEntered", branch + "1");
+            HistoryEvent firstExited = stateEvent(history, "PassStateExited", branch + "1");
+            HistoryEvent secondEntered = stateEvent(history, "PassStateEntered", branch + "2");
+            HistoryEvent secondExited = stateEvent(history, "PassStateExited", branch + "2");
             assertEquals(started.getId(), firstEntered.getPreviousEventId());
             assertEquals(firstEntered.getId(), firstExited.getPreviousEventId());
             assertEquals(firstExited.getId(), secondEntered.getPreviousEventId());
@@ -122,8 +122,8 @@ class AslExecutorBranchHistoryEventsTest {
         // The Parallel continues from the last event a branch published. ParallelStateSucceeded
         // points at it and is passed by: ParallelStateExited points at it too.
         long lastBranchEvent = history.get(10).getId();
-        var succeeded = eventOfType(history, "ParallelStateSucceeded");
-        var exited = eventOfType(history, "ParallelStateExited");
+        HistoryEvent succeeded = eventOfType(history, "ParallelStateSucceeded");
+        HistoryEvent exited = eventOfType(history, "ParallelStateExited");
         assertEquals(lastBranchEvent, succeeded.getPreviousEventId());
         assertNull(succeeded.getDetails());
         assertEquals(lastBranchEvent, exited.getPreviousEventId());
@@ -134,7 +134,7 @@ class AslExecutorBranchHistoryEventsTest {
     /** The shape reported in issue #2868, with the branch that never fails left out. */
     @Test
     void runtimeErrorInABranchNamesTheBranchStateAndItsEnteredEvent() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"P","States":{
                   "P":{"Type":"Parallel","Branches":[
                     {"StartAt":"Fast","States":{"Fast":{"Type":"Pass","Parameters":{"m.$":"$.nope"},"End":true}}}
@@ -144,7 +144,7 @@ class AslExecutorBranchHistoryEventsTest {
         assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ParallelStateStarted",
                 "PassStateEntered", "ExecutionFailed"), typesOf(history));
         assertEquals(List.of(0L, 0L, 2L, 3L, 4L), previousEventIdsOf(history));
-        var failed = history.get(4);
+        HistoryEvent failed = history.get(4);
         assertEquals("States.Runtime", failed.getDetails().get("error"));
         assertEquals("An error occurred while executing the state 'Fast' (entered at the event id #4). "
                 + "The JSONPath '$.nope' specified for the field 'm.$' could not be found in the input '{\"x\":\"a\"}'",
@@ -153,7 +153,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void failStateInABranchPassesItsCauseThroughAndLeavesAParallelStateFailedEvent() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"P","States":{
                   "P":{"Type":"Parallel","Branches":[
                     {"StartAt":"Boom","States":{"Boom":{"Type":"Fail","Error":"MyError","Cause":"my cause"}}}
@@ -169,7 +169,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void caughtBranchFailureExitsTheParallelWithTheErrorOutput() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"QueryLanguage":"JSONata","StartAt":"P","States":{
                   "P":{"Type":"Parallel","Branches":[
                     {"StartAt":"Undef","States":{"Undef":{"Type":"Pass","Output":{"v":"{% $states.input.missing %}"},"End":true}}}
@@ -181,19 +181,19 @@ class AslExecutorBranchHistoryEventsTest {
                 "PassStateEntered", "EvaluationFailed", "ParallelStateFailed", "ParallelStateExited",
                 "PassStateEntered", "PassStateExited", "ExecutionSucceeded"), typesOf(history));
         assertEquals(List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L), previousEventIdsOf(history));
-        var cause = "An error occurred while executing the state 'Undef' (entered at the event id #4). "
+        String cause = "An error occurred while executing the state 'Undef' (entered at the event id #4). "
                 + "The JSONata expression '$states.input.missing' specified for the field 'Output/v' "
                 + "returned nothing (undefined).";
         assertEquals(Map.of("error", "States.QueryEvaluationError", "cause", cause, "location", "Output/v",
                 "state", "Undef"), history.get(4).getDetails());
-        var errorOutput = "{\"Error\":\"States.QueryEvaluationError\",\"Cause\":\"" + cause.replace("\"", "\\\"") + "\"}";
+        String errorOutput = "{\"Error\":\"States.QueryEvaluationError\",\"Cause\":\"" + cause.replace("\"", "\\\"") + "\"}";
         assertEquals(errorOutput, history.get(6).getDetails().get("output"));
         assertEquals(errorOutput, history.get(9).getDetails().get("output"));
     }
 
     @Test
     void retriedParallelStartsAgainAndFailsOnceItsRetryIsUsedUp() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"P","States":{
                   "P":{"Type":"Parallel","Branches":[
                     {"StartAt":"Boom","States":{"Boom":{"Type":"Fail","Error":"MyError","Cause":"my cause"}}}
@@ -208,7 +208,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void parallelOwnFailureIsAttributedToTheParallelAfterItsBranchesSucceeded() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"P","States":{
                   "P":{"Type":"Parallel","Branches":[
                     {"StartAt":"Ok","States":{"Ok":{"Type":"Pass","End":true}}}
@@ -226,9 +226,9 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void taskFailureEndingABranchIsRecordedAsAbortedAndPassesItsCauseThrough() {
-        var mocks = new MockedTestCase("branch-history-test", "Case", Map.of("Send", List.of(
+        MockedTestCase mocks = new MockedTestCase("branch-history-test", "Case", Map.of("Send", List.of(
                 new MockedResponseStep(0, 0, null, "SQS.QueueDoesNotExistException", "The specified queue does not exist."))));
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"P","States":{
                   "P":{"Type":"Parallel","Branches":[
                     {"StartAt":"Send","States":{"Send":{"Type":"Task","Resource":"arn:aws:states:::sqs:sendMessage",
@@ -249,7 +249,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void mapIterationsPublishTheirStatesUnderIterationEvents() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"M","States":{
                   "M":{"Type":"Map","ItemsPath":"$.items","ItemProcessor":{"ProcessorConfig":{"Mode":"INLINE"},
                     "StartAt":"I1","States":{"I1":{"Type":"Pass","Next":"I2"},"I2":{"Type":"Pass","End":true}}},
@@ -261,18 +261,18 @@ class AslExecutorBranchHistoryEventsTest {
         assertEquals(20, history.size(), typesOf(history).toString());
         assertIdsAreConsecutive(history);
         assertEquals(List.of("ExecutionStarted", "MapStateEntered", "MapStateStarted"), typesOf(history.subList(0, 3)));
-        var started = history.get(2);
+        HistoryEvent started = history.get(2);
         assertEquals(2L, started.getPreviousEventId());
         assertEquals(Map.of("length", 2), started.getDetails());
 
         for (int index = 0; index < 2; index++) {
-            var iterationStarted = iterationEvent(history, "MapIterationStarted", index);
-            var iterationSucceeded = iterationEvent(history, "MapIterationSucceeded", index);
-            var input = String.valueOf(index + 1);
-            var firstEntered = stateEventWithInput(history, "PassStateEntered", "I1", input);
-            var firstExited = stateEventWithOutput(history, "PassStateExited", "I1", input);
-            var secondEntered = stateEventWithInput(history, "PassStateEntered", "I2", input);
-            var secondExited = stateEventWithOutput(history, "PassStateExited", "I2", input);
+            HistoryEvent iterationStarted = iterationEvent(history, "MapIterationStarted", index);
+            HistoryEvent iterationSucceeded = iterationEvent(history, "MapIterationSucceeded", index);
+            String input = String.valueOf(index + 1);
+            HistoryEvent firstEntered = stateEventWithInput(history, "PassStateEntered", "I1", input);
+            HistoryEvent firstExited = stateEventWithOutput(history, "PassStateExited", "I1", input);
+            HistoryEvent secondEntered = stateEventWithInput(history, "PassStateEntered", "I2", input);
+            HistoryEvent secondExited = stateEventWithOutput(history, "PassStateExited", "I2", input);
             assertEquals(Map.of("name", "M", "index", index), iterationStarted.getDetails());
             assertEquals(started.getId(), iterationStarted.getPreviousEventId());
             assertEquals(iterationStarted.getId(), firstEntered.getPreviousEventId());
@@ -294,7 +294,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void mapOverNoItemsExitsFromItsStartedEvent() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"M","States":{
                   "M":{"Type":"Map","ItemsPath":"$.items",
                     "ItemProcessor":{"StartAt":"I","States":{"I":{"Type":"Pass","End":true}}},"End":true}}}
@@ -307,7 +307,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void runtimeErrorInABranchTaskLeavesNoAbortedEvent() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"P","States":{
                   "P":{"Type":"Parallel","Branches":[
                     {"StartAt":"Send","States":{"Send":{"Type":"Task","Resource":"arn:aws:states:::sqs:sendMessage",
@@ -322,7 +322,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void mapIterationFailureLeavesIterationAndStateFailedEventsBehind() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"QueryLanguage":"JSONata","StartAt":"M","States":{
                   "M":{"Type":"Map","Items":"{% $states.input.items %}","MaxConcurrency":1,
                     "ItemProcessor":{"ProcessorConfig":{"Mode":"INLINE"},"StartAt":"Undef",
@@ -336,7 +336,7 @@ class AslExecutorBranchHistoryEventsTest {
         // MapIterationFailed points at the iteration's last event and is passed by: MapStateFailed
         // points at that same event.
         assertEquals(List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L, 6L, 8L), previousEventIdsOf(history));
-        var cause = "An error occurred while executing the state 'Undef' (entered at the event id #5). "
+        String cause = "An error occurred while executing the state 'Undef' (entered at the event id #5). "
                 + "The JSONata expression '$states.input.missing' specified for the field 'Output/v' "
                 + "returned nothing (undefined).";
         assertEquals("Undef", history.get(5).getDetails().get("state"));
@@ -347,7 +347,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void runtimeErrorInAMapIterationLeavesNoFailedEvents() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"M","States":{
                   "M":{"Type":"Map","ItemsPath":"$.items","MaxConcurrency":1,
                     "ItemProcessor":{"ProcessorConfig":{"Mode":"INLINE"},"StartAt":"Fast",
@@ -365,7 +365,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void distributedMapNamesItsRunAndPublishesNoItemEvents() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"D","States":{
                   "D":{"Type":"Map","ItemsPath":"$.items","ItemProcessor":{
                     "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
@@ -377,14 +377,14 @@ class AslExecutorBranchHistoryEventsTest {
                 "MapRunSucceeded", "MapStateSucceeded", "MapStateExited", "ExecutionSucceeded"), typesOf(history));
         // The parent chain stays at MapRunStarted: MapStateExited points at it, past both Succeeded events.
         assertEquals(List.of(0L, 0L, 2L, 3L, 4L, 5L, 4L, 7L), previousEventIdsOf(history));
-        var mapRunArn = (String) history.get(3).getDetails().get("mapRunArn");
+        String mapRunArn = (String) history.get(3).getDetails().get("mapRunArn");
         assertTrue(mapRunArn.startsWith("arn:aws:states:us-east-1:000000000000:mapRun:branch-history-test/"), mapRunArn);
         assertEquals("[1,2]", history.get(6).getDetails().get("output"));
     }
 
     @Test
     void nestedMapInsideAParallelBranchChainsToTheBranch() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"P","States":{
                   "P":{"Type":"Parallel","Branches":[
                     {"StartAt":"M","States":{"M":{"Type":"Map","ItemsPath":"$.items","ItemProcessor":{
@@ -397,11 +397,11 @@ class AslExecutorBranchHistoryEventsTest {
         assertEquals("SUCCEEDED", status(history), typesOf(history).toString());
         assertEquals(20, history.size(), typesOf(history).toString());
         assertIdsAreConsecutive(history);
-        var parallelStarted = eventOfType(history, "ParallelStateStarted");
-        var mapEntered = eventOfType(history, "MapStateEntered");
-        var mapStarted = eventOfType(history, "MapStateStarted");
-        var mapSucceeded = eventOfType(history, "MapStateSucceeded");
-        var mapExited = eventOfType(history, "MapStateExited");
+        HistoryEvent parallelStarted = eventOfType(history, "ParallelStateStarted");
+        HistoryEvent mapEntered = eventOfType(history, "MapStateEntered");
+        HistoryEvent mapStarted = eventOfType(history, "MapStateStarted");
+        HistoryEvent mapSucceeded = eventOfType(history, "MapStateSucceeded");
+        HistoryEvent mapExited = eventOfType(history, "MapStateExited");
         assertEquals(parallelStarted.getId(), mapEntered.getPreviousEventId());
         assertEquals(parallelStarted.getId(), stateEvent(history, "PassStateEntered", "B1").getPreviousEventId());
         assertEquals(mapEntered.getId(), mapStarted.getPreviousEventId());
@@ -412,7 +412,7 @@ class AslExecutorBranchHistoryEventsTest {
                 iterationEvent(history, "MapIterationSucceeded", 1).getId());
         assertEquals(lastIterationEvent, mapSucceeded.getPreviousEventId());
         assertEquals(lastIterationEvent, mapExited.getPreviousEventId());
-        var parallelExited = eventOfType(history, "ParallelStateExited");
+        HistoryEvent parallelExited = eventOfType(history, "ParallelStateExited");
         long lastBranchEvent = Math.max(mapExited.getId(), stateEvent(history, "PassStateExited", "B1").getId());
         assertEquals(lastBranchEvent, eventOfType(history, "ParallelStateSucceeded").getPreviousEventId());
         assertEquals(lastBranchEvent, parallelExited.getPreviousEventId());
@@ -421,7 +421,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void jsonataFailureRecordsAnEvaluationFailedEventPerAttempt() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"QueryLanguage":"JSONata","StartAt":"Send","States":{
                   "Send":{"Type":"Task","Resource":"arn:aws:states:::sqs:sendMessage",
                     "Arguments":{"QueueUrl":"https://sqs.us-east-1.amazonaws.com/000000000000/q","MessageBody":"{% $states.input.missing %}"},
@@ -431,10 +431,10 @@ class AslExecutorBranchHistoryEventsTest {
         assertEquals(List.of("ExecutionStarted", "TaskStateEntered", "EvaluationFailed", "EvaluationFailed",
                 "ExecutionFailed"), typesOf(history));
         assertEquals(List.of(0L, 0L, 2L, 3L, 4L), previousEventIdsOf(history));
-        var cause = "An error occurred while executing the state 'Send' (entered at the event id #2). "
+        String cause = "An error occurred while executing the state 'Send' (entered at the event id #2). "
                 + "The JSONata expression '$states.input.missing' specified for the field 'Arguments/MessageBody' "
                 + "returned nothing (undefined).";
-        var expected = Map.of("error", "States.QueryEvaluationError", "cause", cause,
+        Map<String, String> expected = Map.of("error", "States.QueryEvaluationError", "cause", cause,
                 "location", "Arguments/MessageBody", "state", "Send");
         assertEquals(expected, history.get(2).getDetails());
         assertEquals(expected, history.get(3).getDetails());
@@ -443,7 +443,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void mapItemsExpressionFailureIsRecordedBeforeTheMapStarts() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"QueryLanguage":"JSONata","StartAt":"Fan","States":{
                   "Fan":{"Type":"Map","Items":"{% $states.input.missing %}",
                     "ItemProcessor":{"ProcessorConfig":{"Mode":"INLINE"},"StartAt":"I","States":{"I":{"Type":"Pass","End":true}}},
@@ -462,7 +462,7 @@ class AslExecutorBranchHistoryEventsTest {
      */
     @Test
     void catchClauseOutputFailureIsRecordedFromBeforeTheStateFailedEvent() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"QueryLanguage":"JSONata","StartAt":"P","States":{
                   "P":{"Type":"Parallel","Branches":[
                     {"StartAt":"Boom","States":{"Boom":{"Type":"Fail","Error":"MyError","Cause":"my cause"}}}
@@ -475,7 +475,7 @@ class AslExecutorBranchHistoryEventsTest {
         assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ParallelStateStarted", "FailStateEntered",
                 "ParallelStateFailed", "EvaluationFailed", "ParallelStateFailed", "ExecutionFailed"), typesOf(history));
         assertEquals(List.of(0L, 0L, 2L, 3L, 4L, 4L, 6L, 7L), previousEventIdsOf(history));
-        var cause = "An error occurred while executing the state 'P' (entered at the event id #2). "
+        String cause = "An error occurred while executing the state 'P' (entered at the event id #2). "
                 + "The JSONata expression '$states.input.missing' specified for the field 'Catch[1]/Output/v' "
                 + "returned nothing (undefined).";
         assertEquals(Map.of("error", "States.QueryEvaluationError", "cause", cause,
@@ -485,7 +485,7 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void choiceWithNoMatchingRuleAndNoDefaultFailsAsAwsDoes() {
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"C","States":{
                   "C":{"Type":"Choice","Choices":[{"Variable":"$.x","StringEquals":"never","Next":"Done"}]},
                   "Done":{"Type":"Pass","End":true}}}
@@ -500,9 +500,9 @@ class AslExecutorBranchHistoryEventsTest {
 
     @Test
     void catchInsideABranchTakesItsNextEvenOnAnEndState() {
-        var mocks = new MockedTestCase("branch-history-test", "Case", Map.of("Send", List.of(
+        MockedTestCase mocks = new MockedTestCase("branch-history-test", "Case", Map.of("Send", List.of(
                 new MockedResponseStep(0, 0, null, "MyError", "boom"))));
-        var history = run("""
+        List<HistoryEvent> history = run("""
                 {"StartAt":"P","States":{
                   "P":{"Type":"Parallel","Branches":[
                     {"StartAt":"Send","States":{
@@ -519,7 +519,7 @@ class AslExecutorBranchHistoryEventsTest {
     }
 
     private static String status(List<HistoryEvent> history) {
-        var last = history.get(history.size() - 1).getType();
+        String last = history.get(history.size() - 1).getType();
         return switch (last) {
             case "ExecutionSucceeded" -> "SUCCEEDED";
             case "ExecutionFailed" -> "FAILED";
@@ -536,10 +536,10 @@ class AslExecutorBranchHistoryEventsTest {
     }
 
     private static void assertIdsAreConsecutive(List<HistoryEvent> history) {
-        for (var i = 0; i < history.size(); i++) {
+        for (int i = 0; i < history.size(); i++) {
             assertEquals(i + 1L, history.get(i).getId(), "unexpected id at index " + i);
         }
-        var referenced = history.stream().map(HistoryEvent::getPreviousEventId).collect(Collectors.toSet());
+        Set<Long> referenced = history.stream().map(HistoryEvent::getPreviousEventId).collect(Collectors.toSet());
         referenced.remove(0L);
         assertTrue(referenced.stream().allMatch(id -> id < history.size()),
                 "previousEventId points past the history: " + Set.copyOf(referenced));
@@ -590,21 +590,21 @@ class AslExecutorBranchHistoryEventsTest {
 
     /** Runs the definition the way StartExecution does: the history already holds ExecutionStarted as event 1. */
     private List<HistoryEvent> run(String definition, String input, MockedTestCase mocks) {
-        var stateMachine = new StateMachine();
+        StateMachine stateMachine = new StateMachine();
         stateMachine.setName("branch-history-test");
         stateMachine.setStateMachineArn("arn:aws:states:%s:%s:stateMachine:branch-history-test".formatted(REGION, ACCOUNT));
         stateMachine.setRoleArn("arn:aws:iam::%s:role/test-role".formatted(ACCOUNT));
         stateMachine.setDefinition(definition);
 
-        var execution = new Execution();
+        Execution execution = new Execution();
         execution.setName("branch-history-execution");
         execution.setExecutionArn(
                 "arn:aws:states:%s:%s:execution:branch-history-test:branch-history-execution".formatted(REGION, ACCOUNT));
         execution.setStateMachineArn(stateMachine.getStateMachineArn());
         execution.setInput(input);
 
-        var history = new ArrayList<HistoryEvent>();
-        var started = new HistoryEvent();
+        ArrayList<HistoryEvent> history = new ArrayList<>();
+        HistoryEvent started = new HistoryEvent();
         started.setId(1L);
         started.setPreviousEventId(0L);
         started.setType("ExecutionStarted");

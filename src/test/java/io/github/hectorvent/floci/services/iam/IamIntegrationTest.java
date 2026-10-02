@@ -1389,5 +1389,175 @@ class IamIntegrationTest {
                             + ".member.find { it.EvalActionName == 'dynamodb:GetItem' }.EvalDecision",
                     equalTo("allowed"));
     }
-}
 
+    // =========================================================================
+    // PermissionsBoundary round-trip (CreateRole/CreateUser accept it; Get* return it; List* don't)
+    // =========================================================================
+
+    private static final String IAM_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20261001/us-east-1/iam/aws4_request";
+
+    private static String createBoundaryPolicy(String name) {
+        return given()
+            .formParam("Action", "CreatePolicy")
+            .formParam("PolicyName", name)
+            .formParam("PolicyDocument", POLICY_DOCUMENT)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(200)
+            .extract().path("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
+    }
+
+    @Test
+    @Order(80)
+    void createRoleWithPermissionsBoundaryIsReturnedByGetRole() {
+        String boundary = createBoundaryPolicy("pb-create-role-boundary");
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "pb-create-role")
+            .formParam("Path", "/pb-list/")
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .formParam("PermissionsBoundary", boundary)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("CreateRoleResponse.CreateRoleResult.Role.PermissionsBoundary.PermissionsBoundaryArn",
+                    equalTo(boundary));
+
+        given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", "pb-create-role")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("GetRoleResponse.GetRoleResult.Role.PermissionsBoundary.PermissionsBoundaryArn",
+                    equalTo(boundary))
+            .body("GetRoleResponse.GetRoleResult.Role.PermissionsBoundary.PermissionsBoundaryType",
+                    equalTo("Policy"));
+    }
+
+    @Test
+    @Order(81)
+    void putRolePermissionsBoundaryIsReturnedByGetRole() {
+        String boundary = createBoundaryPolicy("pb-put-role-boundary");
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "pb-put-role")
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .formParam("Action", "PutRolePermissionsBoundary")
+            .formParam("RoleName", "pb-put-role")
+            .formParam("PermissionsBoundary", boundary)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", "pb-put-role")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("GetRoleResponse.GetRoleResult.Role.PermissionsBoundary.PermissionsBoundaryArn",
+                    equalTo(boundary));
+    }
+
+    @Test
+    @Order(82)
+    void createUserWithPermissionsBoundaryIsReturnedByGetUser() {
+        String boundary = createBoundaryPolicy("pb-create-user-boundary");
+        given()
+            .formParam("Action", "CreateUser")
+            .formParam("UserName", "pb-create-user")
+            .formParam("Path", "/pb-list/")
+            .formParam("PermissionsBoundary", boundary)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("CreateUserResponse.CreateUserResult.User.PermissionsBoundary.PermissionsBoundaryArn",
+                    equalTo(boundary));
+
+        given()
+            .formParam("Action", "GetUser")
+            .formParam("UserName", "pb-create-user")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("GetUserResponse.GetUserResult.User.PermissionsBoundary.PermissionsBoundaryArn",
+                    equalTo(boundary));
+    }
+
+    @Test
+    @Order(83)
+    void putUserPermissionsBoundaryIsReturnedByGetUser() {
+        String boundary = createBoundaryPolicy("pb-put-user-boundary");
+        given()
+            .formParam("Action", "CreateUser")
+            .formParam("UserName", "pb-put-user")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .formParam("Action", "PutUserPermissionsBoundary")
+            .formParam("UserName", "pb-put-user")
+            .formParam("PermissionsBoundary", boundary)
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .formParam("Action", "GetUser")
+            .formParam("UserName", "pb-put-user")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("GetUserResponse.GetUserResult.User.PermissionsBoundary.PermissionsBoundaryArn",
+                    equalTo(boundary));
+    }
+
+    @Test
+    @Order(84)
+    void listRolesAndListUsersOmitPermissionsBoundary() {
+        // Orders 80 and 82 created a bounded role and user under /pb-list/. ListRoles and
+        // ListUsers document that they do not return PermissionsBoundary.
+        given()
+            .formParam("Action", "ListRoles")
+            .formParam("PathPrefix", "/pb-list/")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("ListRolesResponse.ListRolesResult.Roles.member.RoleName", equalTo("pb-create-role"))
+            .body(not(containsString("PermissionsBoundary")));
+
+        given()
+            .formParam("Action", "ListUsers")
+            .formParam("PathPrefix", "/pb-list/")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("ListUsersResponse.ListUsersResult.Users.member.UserName", equalTo("pb-create-user"))
+            .body(not(containsString("PermissionsBoundary")));
+    }
+
+    @Test
+    @Order(85)
+    void createRoleWithUnknownPermissionsBoundaryCreatesNothing() {
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "pb-bad-role")
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .formParam("PermissionsBoundary", "arn:aws:iam::000000000000:policy/pb-does-not-exist")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(404)
+            .body(containsString("NoSuchEntity"));
+
+        given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", "pb-bad-role")
+            .header("Authorization", IAM_AUTH)
+        .when().post("/").then()
+            .statusCode(404);
+    }
+}

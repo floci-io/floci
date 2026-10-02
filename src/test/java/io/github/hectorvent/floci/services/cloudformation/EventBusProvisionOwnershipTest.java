@@ -195,7 +195,7 @@ class EventBusProvisionOwnershipTest {
     }
 
     private JsonNode props(boolean withPolicy) {
-        var node = MAPPER.createObjectNode();
+        ObjectNode node = MAPPER.createObjectNode();
         node.put("Name", BUS);
         if (withPolicy) {
             node.set("Policy", MAPPER.createObjectNode().put("Version", "2012-10-17"));

@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentMatchers;
+import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.Mockito;
@@ -41,7 +42,7 @@ class InitializationHooksRunnerTest {
 
         initializationHooksRunner.run("startup", hookDirectory);
 
-        var inOrder = Mockito.inOrder(hookScriptExecutorMock);
+        InOrder inOrder = Mockito.inOrder(hookScriptExecutorMock);
         inOrder.verify(hookScriptExecutorMock).run(hookDirectory, "10-first.sh");
         inOrder.verify(hookScriptExecutorMock).run(hookDirectory, "15-second.sh");
         inOrder.verify(hookScriptExecutorMock).run(hookDirectory, "20-third.sh");
@@ -118,7 +119,7 @@ class InitializationHooksRunnerTest {
         IllegalStateException exception = Assertions.assertThrows(IllegalStateException.class, () -> initializationHooksRunner.run("startup", hookDirectory));
         Assertions.assertSame(illegalStateException, exception);
 
-        var inOrder = Mockito.inOrder(hookScriptExecutorMock);
+        InOrder inOrder = Mockito.inOrder(hookScriptExecutorMock);
         inOrder.verify(hookScriptExecutorMock).run(hookDirectory, "10-first.sh");
         inOrder.verify(hookScriptExecutorMock).run(hookDirectory, "20-failing.sh");
         inOrder.verifyNoMoreInteractions();
@@ -222,7 +223,7 @@ class InitializationHooksRunnerTest {
         initializationHooksRunner.run(hook);
 
         // 01-seed.sh from primaryDir wins; 02-extra.sh from compatDir is included
-        var inOrder = Mockito.inOrder(hookScriptExecutorMock);
+        InOrder inOrder = Mockito.inOrder(hookScriptExecutorMock);
         inOrder.verify(hookScriptExecutorMock).run(primaryDir.resolve("01-seed.sh").toFile());
         inOrder.verify(hookScriptExecutorMock).run(compatDir.resolve("02-extra.sh").toFile());
         inOrder.verifyNoMoreInteractions();

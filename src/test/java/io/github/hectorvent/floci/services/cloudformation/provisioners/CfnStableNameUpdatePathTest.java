@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.ecr.EcrService;
@@ -83,10 +85,10 @@ class CfnStableNameUpdatePathTest {
                 .thenReturn("arn:aws:firehose:us-east-1:000000000000:deliverystream/created");
         FirehoseCfnProvisioner provisioner = new FirehoseCfnProvisioner(firehose);
 
-        var props = mapper.createObjectNode();
+        ObjectNode props = mapper.createObjectNode();
         props.set("S3DestinationConfiguration",
                 mapper.createObjectNode().put("BucketARN", "arn:aws:s3:::bucket"));
-        var createTags = props.putArray("Tags");
+        ArrayNode createTags = props.putArray("Tags");
         createTags.addObject().put("Key", "env").put("Value", "dev");
         createTags.addObject().put("Key", "team").put("Value", "a");
 
@@ -101,7 +103,7 @@ class CfnStableNameUpdatePathTest {
         existing.getTags().add(new DeliveryStreamDescription.Tag("team", "a"));
         when(firehose.describeDeliveryStream(generatedName)).thenReturn(existing);
 
-        var updateProps = mapper.createObjectNode();
+        ObjectNode updateProps = mapper.createObjectNode();
         updateProps.set("S3DestinationConfiguration",
                 mapper.createObjectNode().put("BucketARN", "arn:aws:s3:::bucket"));
         updateProps.putArray("Tags").addObject().put("Key", "env").put("Value", "prod");
@@ -137,7 +139,7 @@ class CfnStableNameUpdatePathTest {
                 anyString())).thenReturn(updatedPipe);
         PipesCfnProvisioner provisioner = new PipesCfnProvisioner(pipes, mapper);
 
-        var props = mapper.createObjectNode()
+        ObjectNode props = mapper.createObjectNode()
                 .put("Source", "arn:aws:sqs:us-east-1:000000000000:src")
                 .put("Target", "arn:aws:sqs:us-east-1:000000000000:dst")
                 .put("RoleArn", "arn:aws:iam::000000000000:role/r");
@@ -325,7 +327,7 @@ class CfnStableNameUpdatePathTest {
                 .thenReturn(existingRepo);
         EcrCfnProvisioner provisioner = new EcrCfnProvisioner(ecr);
 
-        var createProps = mapper.createObjectNode().put("ImageTagMutability", "MUTABLE");
+        ObjectNode createProps = mapper.createObjectNode().put("ImageTagMutability", "MUTABLE");
         createProps.set("LifecyclePolicy", mapper.createObjectNode().put("LifecyclePolicyText", "{}"));
         createProps.put("RepositoryPolicyText", "{}");
         StackResource created = resource("AWS::ECR::Repository", "Repo");
@@ -335,7 +337,7 @@ class CfnStableNameUpdatePathTest {
                 .thenReturn(Map.of("env", "dev", "team", "a"));
 
         // The update changes mutability and one tag, drops the other tag and both policies.
-        var updateProps = mapper.createObjectNode().put("ImageTagMutability", "IMMUTABLE");
+        ObjectNode updateProps = mapper.createObjectNode().put("ImageTagMutability", "IMMUTABLE");
         updateProps.putArray("Tags").addObject().put("Key", "env").put("Value", "prod");
         StackResource updated = resource("AWS::ECR::Repository", "Repo");
         provisioner.provision(updated, updateProps, ctx(generatedName));

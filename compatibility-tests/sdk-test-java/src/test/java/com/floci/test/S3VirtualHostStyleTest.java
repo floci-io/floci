@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
@@ -102,7 +103,7 @@ class S3VirtualHostStyleTest {
     @Test
     @Order(6)
     void getObject() throws Exception {
-        var response = s3.getObject(GetObjectRequest.builder()
+        ResponseInputStream<GetObjectResponse> response = s3.getObject(GetObjectRequest.builder()
                 .bucket(BUCKET).key(KEY).build());
         String downloaded = new String(response.readAllBytes(), StandardCharsets.UTF_8);
 
@@ -129,7 +130,7 @@ class S3VirtualHostStyleTest {
 
         assertThat(response.copyObjectResult().eTag()).isNotNull();
 
-        var getResponse = s3.getObject(GetObjectRequest.builder()
+        ResponseInputStream<GetObjectResponse> getResponse = s3.getObject(GetObjectRequest.builder()
                 .bucket(BUCKET).key(COPIED_KEY).build());
         String downloaded = new String(getResponse.readAllBytes(), StandardCharsets.UTF_8);
         assertThat(downloaded).isEqualTo(CONTENT);

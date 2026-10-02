@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.pipes;
 
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -160,7 +161,7 @@ public class PipesController {
                     desiredState, currentState, region);
 
             ObjectNode response = objectMapper.createObjectNode();
-            var pipesArray = response.putArray("Pipes");
+            ArrayNode pipesArray = response.putArray("Pipes");
             for (Pipe pipe : pipes) {
                 pipesArray.add(buildPipeListEntry(pipe));
             }

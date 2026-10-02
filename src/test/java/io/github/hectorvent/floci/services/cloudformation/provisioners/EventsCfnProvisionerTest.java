@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.stubbing.OngoingStubbing;
 
 import java.util.HashMap;
 import java.util.List;
@@ -343,7 +344,7 @@ class EventsCfnProvisionerTest {
     /** Successive answers from ListTargetsByRule, in the order the run asks for them. */
     @SafeVarargs
     private void stubTargetSequence(List<Target> first, List<Target>... rest) {
-        var stub = when(events.listTargetsByRule(anyString(), any(), anyString())).thenReturn(first);
+        OngoingStubbing<List<Target>> stub = when(events.listTargetsByRule(anyString(), any(), anyString())).thenReturn(first);
         for (List<Target> answer : rest) {
             stub = stub.thenReturn(answer);
         }

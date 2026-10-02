@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.organizations;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -275,7 +276,7 @@ class OrganizationsIntegrationTest {
     @Test
     @Order(20)
     void createAccount() {
-        var response = organizations("CreateAccount",
+        JsonPath response = organizations("CreateAccount",
                 "{\"Email\":\"dev@example.com\",\"AccountName\":\"Dev\"}")
         .when()
             .post("/")

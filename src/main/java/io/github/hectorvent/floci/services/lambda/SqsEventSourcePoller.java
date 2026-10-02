@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -377,7 +378,7 @@ public class SqsEventSourcePoller implements Resettable {
         }
         Set<String> receivedIds = received.stream().map(Message::getMessageId).collect(Collectors.toSet());
         try {
-            var failures = objectMapper.readTree(result.getPayload()).get("batchItemFailures");
+            JsonNode failures = objectMapper.readTree(result.getPayload()).get("batchItemFailures");
             if (failures == null || failures.isNull()) {
                 return Set.of();
             }
@@ -385,8 +386,8 @@ public class SqsEventSourcePoller implements Resettable {
                 return failWholeBatch(esm, receivedIds, "batchItemFailures is not an array");
             }
             Set<String> failedIds = new HashSet<>();
-            for (var item : failures) {
-                var id = item.get("itemIdentifier");
+            for (JsonNode item : failures) {
+                JsonNode id = item.get("itemIdentifier");
                 if (id == null || id.isNull() || id.asText().isEmpty()) {
                     return failWholeBatch(esm, receivedIds, "entry has a missing, null or empty itemIdentifier");
                 }
@@ -410,7 +411,7 @@ public class SqsEventSourcePoller implements Resettable {
 
     String buildSqsEvent(List<Message> messages, EventSourceMapping esm) {
         try {
-            var records = objectMapper.createArrayNode();
+            ArrayNode records = objectMapper.createArrayNode();
             for (Message msg : messages) {
                 records.add(buildSqsRecordNode(msg, esm));
             }

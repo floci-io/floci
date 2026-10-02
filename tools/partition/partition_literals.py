@@ -107,6 +107,24 @@ CATEGORIES: tuple[Category, ...] = (
         "use Arn.global with the resource's or the request's partition",
         "code",
     ),
+    Category(
+        "aws-partition-compare",
+        re.compile(
+            r'"aws"\s*\.\s*equals(?:IgnoreCase)?\s*\('
+            r'|\.\s*equals(?:IgnoreCase)?\s*\(\s*"aws"\s*\)'
+            # Objects.equals with "aws" as either argument; the other argument may hold one level of
+            # nested calls, and the match ends at this call's own closing parenthesis.
+            r'|Objects\.equals\(\s*"aws"\s*,'
+            r'|Objects\.equals\(\s*(?:[^(),;"]|"[^"]*"|\([^()]*\))*,\s*"aws"\s*\)'
+            # A switch label naming "aws", alone or in a list (case "aws" ->, case "x", "aws":).
+            r'|\bcase\s+(?:"[^"]*"\s*,\s*)*"aws"\s*(?:->|:|,)'
+        ),
+        True,
+        "a value compared with, or switched on, the literal \"aws\", which as a partition check holds only "
+        "in the commercial partition; compare with AwsRegions.partitionFor(region) or the stored ARN's own "
+        "partition, or escape a non-partition use (an account, a command name)",
+        "code",
+    ),
 )
 
 CATEGORY_BY_NAME = {category.name: category for category in CATEGORIES}
@@ -378,22 +396,23 @@ def format_audit(findings: list[Finding], baseline: Counter) -> str:
             per_package[package_of(finding.path)][finding.category] += 1
             totals[finding.category] += 1
     width = max([len("package"), len("total")] + [len(p) for p in per_package]) + 2
-    header = f"{'package':<{width}}" + "".join(f"{name:>19}" for name in names) + f"{'total':>8}"
+    column = max(19, max(len(name) for name in names) + 2)
+    header = f"{'package':<{width}}" + "".join(f"{name:>{column}}" for name in names) + f"{'total':>8}"
     out = [header, "-" * len(header)]
     for package, counter in sorted(per_package.items(), key=lambda item: (-sum(item[1].values()), item[0])):
         out.append(
             f"{package:<{width}}"
-            + "".join(f"{counter.get(name, 0):>19}" for name in names)
+            + "".join(f"{counter.get(name, 0):>{column}}" for name in names)
             + f"{sum(counter.values()):>8}"
         )
     out.append("-" * len(header))
     out.append(
         f"{'total':<{width}}"
-        + "".join(f"{totals.get(name, 0):>19}" for name in names)
+        + "".join(f"{totals.get(name, 0):>{column}}" for name in names)
         + f"{sum(totals.values()):>8}"
     )
     gate = "".join(
-        f"{'gated' if category.gated else 'report-only':>19}" for category in CATEGORIES
+        f"{'gated' if category.gated else 'report-only':>{column}}" for category in CATEGORIES
     )
     out.append(f"{'':<{width}}{gate}")
     if baseline:

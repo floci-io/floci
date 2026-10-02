@@ -5,6 +5,7 @@ import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.openssl.PEMParser;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 import java.io.IOException;
@@ -157,7 +158,7 @@ public final class ContainerCaBundle {
         TrustManagerFactory factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
         factory.init((KeyStore) null);
         List<X509Certificate> roots = new ArrayList<>();
-        for (var manager : factory.getTrustManagers()) {
+        for (TrustManager manager : factory.getTrustManagers()) {
             if (manager instanceof X509TrustManager x509) {
                 roots.addAll(List.of(x509.getAcceptedIssuers()));
             }

@@ -122,8 +122,8 @@ Floci serves every AWS partition, not only the commercial one, so a literal that
 `aws` into a code path is a bug in a GovCloud, China, ISO or EUSC deployment even when it
 prints correctly in `us-east-1`. `make partition-check` (CI: Partition Literals) inventories
 `src/main/java` for `arn:aws:` prefixes, `amazonaws.com` hosts, Route 53 hosted-zone ids,
-hand-rolled `arn:aws[a-z-]*:` regexes and `Arn.of(...)` calls with a blank region against
-`tools/partition/baseline.tsv`, per file. The baseline is empty, so any new one fails.
+hand-rolled `arn:aws[a-z-]*:` regexes, `Arn.of(...)` calls with a blank region and comparisons
+with the literal `"aws"` against `tools/partition/baseline.tsv`, per file. The baseline is empty, so any new one fails.
 A literal in a new file fails, growth in an existing file fails, and a drop fails until you
 run `make partition-baseline` and commit the smaller baseline.
 
@@ -134,6 +134,12 @@ run `make partition-baseline` and commit the smaller baseline.
   `Arn.of(service, "", ...)`, which silently means `aws`: use `RegionResolver.buildGlobalArn`
   for the request's partition, or `Arn.global(partition, ...)` with the resource's own
   (`AwsRegions.partitionFor(region)` for a bucket or a stack's region).
+- Never compare a partition with a literal: `"aws".equals(arn.partition())` is commercial-only
+  logic that fails silently in every other partition. Compare with the partition the resource
+  belongs to, `AwsRegions.partitionFor(region)` for a regional resource or the stored ARN's own
+  partition for a global one, and accept any published partition with `AwsPartitions.find(...)`
+  when only the shape matters. `"aws"` as an account (managed policies) or a command name is not
+  a partition: end that line with `// partition-literal: <reason>`.
 - A service principal is `ServicePrincipals.of("<service>")`, never a literal: it is
   `<service>.amazonaws.com` in every partition, and `ServicePrincipals.canonical` folds the
   legacy per-partition forms a policy may still use before matching.
