@@ -162,7 +162,7 @@ class IotMqttBrokerServiceTest {
         when(config.tls().enabled()).thenReturn(true);
         when(registry.getDefault()).thenReturn(Optional.of(tls));
         when(tls.getKeyStoreOptions()).thenReturn(pem(bootLeaf));
-        broker = new IotMqttBrokerService(config, vertx, iotService, registry);
+        broker = new IotMqttBrokerService(config, vertx, iotService, mock(IotCustomAuthorizer.class), registry);
     }
 
     @AfterEach
@@ -479,6 +479,51 @@ class IotMqttBrokerServiceTest {
         } finally {
             disconnect(subscriber);
         }
+    }
+
+    /**
+     * Fleet indexing connectivity is per account and region: a plaintext session counts in the
+     * default account, so switching that default stands in for a second account. Account A's
+     * recorded disconnect survives a session of the same client id in account B, while B's session
+     * is live and after it ends.
+     */
+    @Test
+    void connectivityHistoryOfAClientIdIsKeptPerAccountAndRegion() {
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        AtomicReference<Handler<Void>> disconnectInA = new AtomicReference<>();
+        broker.handleEndpoint(endpointCapturing("device-1", disconnectInA, new AtomicReference<>()), false);
+        disconnectInA.get().handle(null);
+
+        when(config.defaultAccountId()).thenReturn("222222222222");
+        AtomicReference<Handler<Void>> closeInB = new AtomicReference<>();
+        broker.handleEndpoint(endpointCapturing("device-1", new AtomicReference<>(), closeInB), false);
+
+        assertEquals("CLIENT_INITIATED_DISCONNECT",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("222222222222", "us-east-1", "device-1").orElseThrow().connected());
+        closeInB.get().handle(null);
+        assertEquals("CLIENT_INITIATED_DISCONNECT",
+                broker.connectivity("111111111111", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertEquals("CONNECTION_LOST",
+                broker.connectivity("222222222222", "us-east-1", "device-1").orElseThrow().disconnectReason());
+        assertTrue(broker.connectivity("111111111111", "eu-west-1", "device-1").isEmpty());
+    }
+
+    private static MqttEndpoint endpointCapturing(String clientId, AtomicReference<Handler<Void>> disconnect,
+                                                  AtomicReference<Handler<Void>> close) {
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn(clientId);
+        when(endpoint.isConnected()).thenReturn(true);
+        when(endpoint.disconnectHandler(any())).thenAnswer(invocation -> {
+            disconnect.set(invocation.getArgument(0));
+            return endpoint;
+        });
+        when(endpoint.closeHandler(any())).thenAnswer(invocation -> {
+            close.set(invocation.getArgument(0));
+            return endpoint;
+        });
+        return endpoint;
     }
 
     /**
