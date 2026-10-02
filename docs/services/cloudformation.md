@@ -120,8 +120,10 @@ or `UserPoolId` replaces the server; changing `Name` or `Scopes` updates it in p
 Failed in-place restoration keeps the prior name and scopes for retry while the stack still
 allows `UpdateStack`. If a later update skips that resource, pending restoration can leave the
 stack in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`, which blocks another update. `DeleteStack` removes
-the managed server and retains its tracking if deletion fails. Old-server cleanup after a
-committed replacement remains retryable without rolling back the committed server.
+the managed server and retains its tracking if deletion fails. Committed replacements honor
+`UpdateReplacePolicy: Retain`. Otherwise, old-server deletion uses at most three attempts; after
+three failures the old server leaves stack management and must be deleted through Cognito.
+Failed rollback replacements remain tracked for deletion retries. The committed server stays current.
 `ContinueUpdateRollback` remains unsupported.
 
 ## Supported Resource Types

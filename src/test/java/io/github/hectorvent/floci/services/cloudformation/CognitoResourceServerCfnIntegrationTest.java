@@ -13,6 +13,8 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -30,6 +32,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 @QuarkusTest
 class CognitoResourceServerCfnIntegrationTest {
@@ -98,6 +102,41 @@ class CognitoResourceServerCfnIntegrationTest {
         updateStack(template(pool, IDENTIFIER, "No scopes", null), "UPDATE_COMPLETE");
 
         assertEquals(0, server(pool, IDENTIFIER).path("Scopes").size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void laterStackOperationsDoNotDeleteAnOldServerAbandonedAfterThreeFailures(boolean anotherUpdate)
+            throws Exception {
+        String originalPool = createPool();
+        String replacementPool = createPool();
+        createStack(template(originalPool, IDENTIFIER, "Original API", "read"));
+        doThrow(new AwsException("InternalErrorException", "temporary old server delete failure", 500))
+                .when(cognitoService).deleteResourceServer(originalPool, IDENTIFIER);
+        try {
+            updateStack(template(replacementPool, IDENTIFIER, "Replacement API", "write"), "UPDATE_COMPLETE");
+            verify(cognitoService, times(3)).deleteResourceServer(originalPool, IDENTIFIER);
+            assertServer(originalPool, IDENTIFIER, "Original API", "read");
+            assertServer(replacementPool, IDENTIFIER, "Replacement API", "write");
+        } finally {
+            doCallRealMethod().when(cognitoService).deleteResourceServer(originalPool, IDENTIFIER);
+        }
+
+        ObjectNode outsideStack = mapper.createObjectNode().put("UserPoolId", originalPool)
+                .put("Identifier", IDENTIFIER).put("Name", "Managed outside stack");
+        outsideStack.putArray("Scopes").addObject().put("ScopeName", "read").put("ScopeDescription", "Access");
+        cognitoAction("UpdateResourceServer", outsideStack.toString()).then().statusCode(200);
+        if (anotherUpdate) {
+            updateStack(template(replacementPool, IDENTIFIER, "Later API", "admin"), "UPDATE_COMPLETE");
+            assertServer(replacementPool, IDENTIFIER, "Later API", "admin");
+            assertServer(originalPool, IDENTIFIER, "Managed outside stack", "read");
+        }
+        cloudFormation("DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        createdStack = false;
+        assertServerGone(replacementPool, IDENTIFIER);
+        assertServer(originalPool, IDENTIFIER, "Managed outside stack", "read");
+        verify(cognitoService, times(3)).deleteResourceServer(originalPool, IDENTIFIER);
     }
 
     @Test

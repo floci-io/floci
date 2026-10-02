@@ -366,7 +366,7 @@ class CognitoResourceServerCfnProvisionerTest {
     }
 
     @Test
-    void committedReplacementStaysCurrentAfterExhaustedCleanupAndAnotherUpdate() throws Exception {
+    void committedReplacementAbandonsOldServerAfterThreeCleanupFailures() throws Exception {
         when(cognito.describeResourceServer(POOL, IDENTIFIER)).thenReturn(server(POOL, IDENTIFIER, "Old API"));
         StackResource resource = resource(IDENTIFIER, POOL);
         provisioner.provision(resource, properties(NEW_POOL, IDENTIFIER, "New API"), ctx(IDENTIFIER));
@@ -379,11 +379,10 @@ class CognitoResourceServerCfnProvisionerTest {
             assertEquals(attempt, result.attempts());
         }
         provisioner.clearUpdate(resource);
-        assertTrue(resource.getAttributes().containsKey("__FlociResourceServerCleanup"));
+        assertFalse(resource.getAttributes().containsKey("__FlociResourceServerCleanup"));
         assertFalse(provisioner.retainsFailedUpdateState(resource),
-                "A committed replacement awaiting cleanup must not be rolled back by a later update");
+                "A committed replacement must not be rolled back by a later update");
 
-        doNothing().when(cognito).deleteResourceServer(POOL, IDENTIFIER);
         when(cognito.describeResourceServer(NEW_POOL, IDENTIFIER))
                 .thenReturn(server(NEW_POOL, IDENTIFIER, "New API"));
         provisioner.provision(resource, properties(NEW_POOL, IDENTIFIER, "Third API"), ctx(IDENTIFIER));
@@ -396,7 +395,7 @@ class CognitoResourceServerCfnProvisionerTest {
         assertFalse(resource.getAttributes().containsKey("__FlociResourceServerCleanup"));
         assertEquals(NEW_POOL, resource.getAttributes().get("__FlociResourceServerPoolId"));
         assertEquals(IDENTIFIER, resource.getPhysicalId());
-        verify(cognito, times(4)).deleteResourceServer(POOL, IDENTIFIER);
+        verify(cognito, times(3)).deleteResourceServer(POOL, IDENTIFIER);
         verify(cognito, never()).deleteResourceServer(NEW_POOL, IDENTIFIER);
         verify(cognito, never()).createResourceServer(eq(POOL), any(), any(), any());
         verify(cognito).createResourceServer(NEW_POOL, IDENTIFIER, "New API", List.of());
@@ -408,6 +407,31 @@ class CognitoResourceServerCfnProvisionerTest {
         assertEquals("read", restored.getValue().getFirst().getScopeName());
         assertEquals(NEW_POOL, resource.getAttributes().get("__FlociResourceServerPoolId"));
         verify(cognito, never()).deleteResourceServer(NEW_POOL, IDENTIFIER);
+    }
+
+    @Test
+    void abandonedUpdateCleanupDoesNotDiscardFailedRollbackOrDeleteResponsibility() {
+        when(cognito.describeResourceServer(POOL, IDENTIFIER)).thenReturn(server(POOL, IDENTIFIER, "Old API"));
+        StackResource resource = resource(IDENTIFIER, POOL);
+        provisioner.provision(resource, properties(NEW_POOL, IDENTIFIER, "New API"), ctx(IDENTIFIER));
+        doThrow(new AwsException("InternalError", "storage unavailable", 500))
+                .when(cognito).deleteResourceServer(NEW_POOL, IDENTIFIER);
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(resource));
+
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            UpdateCleanupResult result = provisioner.completeDeleteCleanup(resource);
+            assertFalse(result.complete());
+            assertEquals(attempt, result.attempts());
+        }
+        provisioner.clearDeleteCleanup(resource);
+        provisioner.clearUpdate(resource);
+        assertTrue(resource.getAttributes().containsKey("__FlociResourceServerCleanup"));
+        assertEquals(POOL, resource.getAttributes().get("__FlociResourceServerPoolId"));
+
+        doNothing().when(cognito).deleteResourceServer(NEW_POOL, IDENTIFIER);
+        assertTrue(provisioner.completeDeleteCleanup(resource).complete());
+        assertFalse(resource.getAttributes().containsKey("__FlociResourceServerCleanup"));
+        verify(cognito, never()).deleteResourceServer(POOL, IDENTIFIER);
     }
 
     @Test

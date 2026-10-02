@@ -296,6 +296,11 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
     @Override
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(UPDATE_ATTR);
+        ObjectNode cleanup = read(resource, CLEANUP_ATTR);
+        // AWS stops managing a committed replacement's old server after three failed deletions.
+        if (cleanup != null && cleanup.path("retainable").asBoolean() && cleanup.path("attempts").asInt() >= 3) {
+            resource.getAttributes().remove(CLEANUP_ATTR);
+        }
     }
 
     @Override
