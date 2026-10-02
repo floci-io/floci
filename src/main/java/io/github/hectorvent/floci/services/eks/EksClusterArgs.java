@@ -302,10 +302,14 @@ public final class EksClusterArgs {
 
     private static String extractFlagName(String flag) {
         int eqIndex = flag.indexOf('=');
-        if (eqIndex >= 0) {
-            return flag.substring(0, eqIndex).trim();
+        String name = (eqIndex >= 0) ? flag.substring(0, eqIndex).trim() : flag.trim();
+        while (name.startsWith("-")) {
+            name = name.substring(1).trim();
         }
-        return flag.trim();
+        while (name.endsWith("+") || name.endsWith("-")) {
+            name = name.substring(0, name.length() - 1).trim();
+        }
+        return name;
     }
 
     private static boolean hasControlCharacters(String s) {

@@ -207,7 +207,7 @@ The supported component prefixes correspond to k3s server argument flags:
 
 ### Collision rules and Floci-managed arguments
 
-Floci manages a specific set of flags required for container networking, IAM authentication, audit logging, and topology emulation. Passing a conflicting value for any of these flags causes `CreateCluster` to reject the request with `InvalidParameterException` (HTTP 400).
+Floci manages a specific set of flags required for container networking, IAM authentication, audit logging, and topology emulation. Passing a conflicting value or modifier (such as `+=` or `-=`) for any of these flags causes `CreateCluster` to reject the request with `InvalidParameterException` (HTTP 400).
 
 Floci manages the following 16 flags:
 - Kubelet:

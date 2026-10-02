@@ -100,6 +100,17 @@ class EksClusterArgsTest {
         assertTrue(args.contains("--kube-scheduler-arg=leader-elect=false"));
     }
 
+    @Test
+    void preservesModifierSuffixOnValidArguments() {
+        Map<String, String> tags = Map.of(
+                "floci:kubelet-arg:max-pods+=10", "true",
+                "floci:kube-apiserver-arg:feature-gates+=CSIStorageCapacity=true", "true"
+        );
+        List<String> args = EksClusterArgs.parseAndValidateClusterArgs(tags, "demo");
+        assertTrue(args.contains("--kubelet-arg=max-pods+=10"));
+        assertTrue(args.contains("--kube-apiserver-arg=feature-gates+=CSIStorageCapacity=true"));
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {
             "provider-id",
@@ -109,7 +120,9 @@ class EksClusterArgsTest {
             "eviction-hard",
             "--provider-id=custom-id",
             "providerId=custom-id",
-            "node-labels=topology.kubernetes.io/zone=custom"
+            "node-labels=topology.kubernetes.io/zone=custom",
+            "provider-id+=aws:///custom-id",
+            "node-labels-=zone=custom"
     })
     void rejectsCollidingKubeletArguments(String collidingFlag) {
         Map<String, String> tags = Map.of("floci:kubelet-arg:" + collidingFlag, "true");
@@ -133,7 +146,9 @@ class EksClusterArgsTest {
             "audit-log-maxbackup",
             "audit-log-maxsize",
             "--service-account-issuer=https://override.example.com",
-            "auditPolicyFile=/custom/path"
+            "auditPolicyFile=/custom/path",
+            "audit-policy-file+=/custom/path",
+            "audit-policy-file-=/custom/path"
     })
     void rejectsCollidingKubeApiserverArguments(String collidingFlag) {
         Map<String, String> tags = Map.of("floci:kube-apiserver-arg:" + collidingFlag, "true");
@@ -149,7 +164,11 @@ class EksClusterArgsTest {
             "etcd-servers",
             "authorization-mode",
             "authorization-mode=AlwaysAllow",
+            "authorization-mode+=AlwaysAllow",
+            "authorization-mode-=AlwaysAllow",
+            "authorization-mode+",
             "storage-backend=etcd3",
+            "storage-backend+=etcd3",
             "etcd-servers=https://127.0.0.1:2379"
     })
     void rejectsRefusedApiserverArguments(String refusedFlag) {
