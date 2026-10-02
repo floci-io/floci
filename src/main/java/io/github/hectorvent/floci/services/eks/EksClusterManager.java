@@ -819,7 +819,7 @@ public class EksClusterManager
             String expectedNodeName = deriveClusterNodeInstanceId(cluster);
             ContainerExec.Result nodeResult = execInContainerForResult(containerId,
                     new String[]{"kubectl", "get", "nodes", "-o",
-                            "jsonpath={range .items[*]}{.metadata.name}{\" \"}{range .status.conditions[?(@.type==\"Ready\")]}{.status}{\"\\n\"}{end}{end}"}, 10);
+                            "jsonpath={range .items[*]}{.metadata.name}{\" \"}{range .status.conditions[?(@.type==\"Ready\")]}{.status}{end}{\"\\n\"}{end}"}, 10);
             if (nodeResult.exitCode() == 0 && nodeResult.stdout() != null && !nodeResult.stdout().isBlank()) {
                 for (String line : nodeResult.stdout().split("\\r?\\n")) {
                     String[] parts = line.trim().split("\\s+");
