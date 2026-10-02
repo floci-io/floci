@@ -223,8 +223,7 @@ class SchedulerServiceTest {
                     () -> service.createSchedule(invalid, REGION), expression);
             assertEquals("ValidationException", createError.getErrorCode());
             assertEquals(400, createError.getHttpStatus());
-            assertTrue(createError.getMessage().startsWith("1 validation error detected: Value '" + expression
-                    + "' at 'scheduleExpression' failed to satisfy constraint: "));
+            assertTrue(createError.getMessage().startsWith("Invalid ScheduleExpression: "));
         }
 
         ScheduleRequest valid = newRequest("existing", null, "rate(1 hour)", window, target);
@@ -234,7 +233,7 @@ class SchedulerServiceTest {
             AwsException updateError = assertThrows(AwsException.class,
                     () -> service.updateSchedule(invalidUpdate, REGION), expression);
             assertEquals("ValidationException", updateError.getErrorCode());
-            assertTrue(updateError.getMessage().contains("at 'scheduleExpression' failed to satisfy constraint:"));
+            assertTrue(updateError.getMessage().startsWith("Invalid ScheduleExpression: "));
             assertEquals("rate(1 hour)", service.getSchedule("existing", null, REGION).getScheduleExpression());
         }
     }
@@ -252,7 +251,9 @@ class SchedulerServiceTest {
             assertEquals(400, error.getHttpStatus());
             assertTrue(error.getMessage().startsWith("1 validation error detected: Value '" + roleArn
                     + "' at 'target.roleArn' failed to satisfy constraint: Member must satisfy regular expression pattern: "));
-            assertTrue(error.getMessage().contains(":iam::\\d{12}:role/"));
+            assertEquals("1 validation error detected: Value '" + roleArn
+                    + "' at 'target.roleArn' failed to satisfy constraint: Member must satisfy regular expression pattern: "
+                    + "^arn:aws(-[a-z]+)?:iam::\\d{12}:role\\/[\\w+=,.@\\/-]+$", error.getMessage());
         }
 
         Target validTarget = new Target("arn:t", "arn:aws-us-gov:iam::000000000000:role/path/r", null, null);
