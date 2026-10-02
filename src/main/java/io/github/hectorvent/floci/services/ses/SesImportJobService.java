@@ -30,6 +30,7 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executor;
@@ -370,7 +371,7 @@ public class SesImportJobService implements Resettable {
     /** The filter is checked before the page size and token, and a token is bound to it, as on the tenant lists. */
     public PaginatedResult<ImportJob> listImportJobs(String region, String destinationType,
                                                      SesListPaging paging, Integer pageSize, String nextToken) {
-        return paging.page(region, "/" + destinationType, listImportJobs(region, destinationType),
+        return paging.page(region, Objects.toString(destinationType, ""), listImportJobs(region, destinationType),
                 SesImportJobService::cursor, pageSize, nextToken);
     }
 

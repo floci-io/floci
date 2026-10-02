@@ -177,7 +177,9 @@ public enum SesListPaging {
 
     /**
      * {@code scope} names what else the request selected, a tenant or a filter, for the lists whose
-     * tokens SES refuses once that changes.
+     * tokens SES refuses once that changes. The token carries the scope's length, so a scope that
+     * merely starts with another, which a name holding the token's own separator can do, is not
+     * taken for it.
      */
     <T> PaginatedResult<T> page(String region, String scope, List<T> all, Function<T, String> cursorOf,
                                 Integer pageSize, String nextToken) {
@@ -190,7 +192,8 @@ public enum SesListPaging {
         if (emptyToken) {
             throw invalidToken.apply(nextToken);
         }
-        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace + "@" + region + scope,
+        String boundTo = scope.isEmpty() ? "" : "#" + scope.length() + "#" + scope;
+        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace + "@" + region + boundTo,
                 invalidToken);
     }
 
