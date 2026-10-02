@@ -51,6 +51,7 @@ public class CloudFormationQueryHandler {
             case "CreateStack" -> createStack(params, region);
             case "UpdateStack" -> updateStack(params, region);
             case "DeleteStack" -> deleteStack(params, region);
+            case "ContinueUpdateRollback" -> continueUpdateRollback(params, region);
             case "UpdateTerminationProtection" -> updateTerminationProtection(params, region);
             case "CreateChangeSet" -> createChangeSet(params, region);
             case "DescribeChangeSet" -> describeChangeSet(params, region);
@@ -180,6 +181,27 @@ public class CloudFormationQueryHandler {
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
+    }
+
+    // ── ContinueUpdateRollback ───────────────────────────────────────────────
+
+    private Response continueUpdateRollback(MultivaluedMap<String, String> params, String region) {
+        String stackName = params.getFirst("StackName");
+        List<String> resourcesToSkip = extractList(params, "ResourcesToSkip.member.");
+        // RoleARN and ClientRequestToken are accepted and have no effect: Floci assumes no role
+        // for stack operations and does not deduplicate retried requests.
+        try {
+            cfnService.continueUpdateRollback(stackName, resourcesToSkip, region);
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+        String xml = new XmlBuilder()
+                .start("ContinueUpdateRollbackResponse", CF_NS)
+                .raw("<ContinueUpdateRollbackResult/>")
+                .raw(AwsQueryResponse.responseMetadata())
+                .end("ContinueUpdateRollbackResponse")
+                .build();
+        return Response.ok(xml).type("text/xml").build();
     }
 
     // ── UpdateTerminationProtection ─────────────────────────────────────────────
@@ -431,6 +453,7 @@ public class CloudFormationQueryHandler {
                     .elem("PhysicalResourceId", res.getPhysicalId())
                     .elem("ResourceType", res.getResourceType())
                     .elem("ResourceStatus", res.getStatus())
+                    .elem("ResourceStatusReason", res.getStatusReason())
                     .elem("LastUpdatedTimestamp", ISO.format(res.getTimestamp()))
                     .end("StackResourceDetail")
                     .end("DescribeStackResourceResult")

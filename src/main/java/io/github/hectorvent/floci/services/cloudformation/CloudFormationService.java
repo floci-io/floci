@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.model.StackUpdateSnapshot;
 import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
@@ -66,6 +67,20 @@ public class CloudFormationService implements ResourceProvider {
 
     private static final int MAX_OPERATION_THREADS = 16;
     private static final int MAX_QUEUED_OPERATIONS = 128;
+
+    // Texts a client may match on, kept here so each has one place to change. All but
+    // SKIP_NESTED_UNSUPPORTED are the texts real CloudFormation emits, measured against a real
+    // account; that one is Floci's own, for a skip AWS accepts and Floci does not support.
+    private static final String UPDATE_REFUSED = "Stack:%s is in %s state and can not be updated.";
+    private static final String CONTINUE_ROLLBACK_REFUSED =
+            "RollbackUpdatedStack cannot be called from current stack status";
+    private static final String SKIP_NOT_UPDATE_FAILED =
+            "Only the resources in UPDATE_FAILED state are allowed to be skipped";
+    private static final String SKIP_NOT_IN_STACK = "Resources with logicalIds [%s] do not belong to stack %s";
+    private static final String SKIP_NESTED_STACK_MISSING = "Stack [%s] does not exist";
+    private static final String SKIP_NESTED_UNSUPPORTED =
+            "Skipping a resource of a nested stack is not supported by Floci: %s";
+    private static final String SKIPPED_RESOURCE_REASON = "Resource skipped during UpdateRollback";
 
     private final ConcurrentHashMap<String, Stack> stacks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, DeletedStackEntry> deletedStacks = new ConcurrentHashMap<>();
@@ -236,10 +251,15 @@ public class CloudFormationService implements ResourceProvider {
      * rather than by suffix, because {@code UPDATE_ROLLBACK_COMPLETE} ends the same way and is a
      * perfectly updatable stack: it is where an update that failed and rolled back settles, and
      * retrying the update is how it is repaired.
+     *
+     * <p>{@code UPDATE_ROLLBACK_FAILED} is refused because the rollback of the last update left
+     * resources in an unknown state, and an update would build on them. ContinueUpdateRollback
+     * finishes that rollback, and DeleteStack removes the stack; both stay allowed.
      */
     static boolean refusesUpdate(String status) {
         return status != null
-                && (status.endsWith("_IN_PROGRESS") || "ROLLBACK_COMPLETE".equals(status));
+                && (status.endsWith("_IN_PROGRESS") || "ROLLBACK_COMPLETE".equals(status)
+                        || "UPDATE_ROLLBACK_FAILED".equals(status));
     }
 
     // ── CreateChangeSet ───────────────────────────────────────────────────────
@@ -377,8 +397,7 @@ public class CloudFormationService implements ResourceProvider {
                 // on this string.
                 if (!isCreateType && refusesUpdate(existing.getStatus())) {
                     throw new AwsException("ValidationError",
-                            "Stack:" + existing.getStackId() + " is in " + existing.getStatus()
-                                    + " state and can not be updated.", 400);
+                            UPDATE_REFUSED.formatted(existing.getStackId(), existing.getStatus()), 400);
                 }
                 target = existing;
             }
@@ -1008,6 +1027,50 @@ public class CloudFormationService implements ResourceProvider {
         } catch (AwsException e) {
             if ("LimitExceededException".equals(e.getErrorCode())) {
                 Stack restored = restoreStack(accountId, stack.getStackName(), region, snapshot);
+                if (restored != null) {
+                    persistStack(restored);
+                }
+            }
+            throw e;
+        }
+    }
+
+    // ── ContinueUpdateRollback ────────────────────────────────────────────────
+
+    /**
+     * Retries the rollback of a stack in {@code UPDATE_ROLLBACK_FAILED}, the only status AWS accepts
+     * it from; any other status is refused here, before anything changes. The status check and the
+     * move to {@code UPDATE_ROLLBACK_IN_PROGRESS} are one step under the stack's lock, so a racing
+     * update or second retry is refused. Everything else, the {@code resourcesToSkip} checks
+     * included, runs on the operation executor, because AWS accepts the call and reports a bad
+     * skip as the reason the rollback failed again.
+     */
+    public Future<?> continueUpdateRollback(String stackNameOrArn, List<String> resourcesToSkip, String region) {
+        String accountId = currentAccount();
+        String stackName = getStackOrThrow(stackNameOrArn, region, accountId).getStackName();
+        List<String> skips = List.copyOf(resourcesToSkip);
+        StackMutationSnapshot[] snapshot = new StackMutationSnapshot[1];
+        Stack stack = stacks.compute(stackKey(accountId, stackName, region), (k, existing) -> {
+            if (existing == null) {
+                throw new AwsException("ValidationError",
+                        "Stack with id " + stackNameOrArn + " does not exist", 400);
+            }
+            if (!"UPDATE_ROLLBACK_FAILED".equals(existing.getStatus())) {
+                throw new AwsException("ValidationError", CONTINUE_ROLLBACK_REFUSED, 400);
+            }
+            snapshot[0] = snapshot(existing);
+            existing.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+            addEvent(existing, existing.getStackName(), existing.getStackId(),
+                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_IN_PROGRESS", "User Initiated");
+            return existing;
+        });
+        try {
+            persistStack(stack);
+            return submitOperation(() -> runUnderScope(accountId, region,
+                    () -> resumeUpdateRollback(stack, skips, region)));
+        } catch (AwsException e) {
+            if ("LimitExceededException".equals(e.getErrorCode())) {
+                Stack restored = restoreStack(accountId, stackName, region, snapshot[0]);
                 if (restored != null) {
                     persistStack(restored);
                 }
@@ -1962,6 +2025,85 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
+    /**
+     * The body of ContinueUpdateRollback, on a stack already moved to UPDATE_ROLLBACK_IN_PROGRESS:
+     * checks {@code resourcesToSkip}, reports each skipped resource UPDATE_COMPLETE, runs the
+     * rollback walker again over the resources still owed a rollback, and finishes as the rollback
+     * of the failed update does. A bad skip touches no resource: the stack returns to
+     * UPDATE_ROLLBACK_FAILED with the reason, keeping what a later retry needs.
+     */
+    void resumeUpdateRollback(Stack stack, List<String> resourcesToSkip, String region) {
+        String invalidSkip = invalidSkipReason(stack, resourcesToSkip);
+        if (invalidSkip != null) {
+            // Reason and event before the status, which is the volatile publishing write.
+            stack.setStatusReason(invalidSkip);
+            addEvent(stack, stack.getStackName(), stack.getStackId(),
+                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_FAILED", invalidSkip);
+            stack.setStatus("UPDATE_ROLLBACK_FAILED");
+            persistStack(stack);
+            LOG.warnv("Stack {0} update rollback not continued: {1}", stack.getStackName(), invalidSkip);
+            return;
+        }
+        StackUpdateSnapshot previousState = stack.getUpdateRollbackSnapshot();
+        List<String> owedResourceIds = stack.getUpdateRollbackResourceIds();
+        if (previousState == null || owedResourceIds == null) {
+            // A stack stored before the snapshot was kept: every UPDATE_FAILED resource is owed a
+            // rollback, and the template the stack holds now is the one it keeps.
+            previousState = snapshotForUpdate(stack);
+            owedResourceIds = new ArrayList<>();
+            for (StackResource previous : previousState.resources().values()) {
+                if ("UPDATE_FAILED".equals(previous.getStatus())) {
+                    owedResourceIds.add(previous.getLogicalId());
+                    previous.setStatus("UPDATE_COMPLETE");
+                    previous.setStatusReason(null);
+                }
+            }
+        }
+        Set<String> owed = new LinkedHashSet<>(owedResourceIds);
+        for (String logicalId : resourcesToSkip) {
+            StackResource resource = stack.getResources().get(logicalId);
+            resource.setStatus("UPDATE_COMPLETE");
+            resource.setStatusReason(SKIPPED_RESOURCE_REASON);
+            addEvent(stack, logicalId, resource.getPhysicalId(), resource.getResourceType(),
+                    "UPDATE_COMPLETE", SKIPPED_RESOURCE_REASON);
+            owed.remove(logicalId);
+        }
+        List<String> rollbackFailures = rollbackUpdatedResources(
+                stack, previousState.resources(), owed, region);
+        finishUpdateRollback(stack, region, previousState, rollbackFailures);
+    }
+
+    /**
+     * Why AWS would fail the rollback over {@code resourcesToSkip}, or {@code null} when every
+     * skip is an UPDATE_FAILED resource of this stack. AWS names a nested stack's resource
+     * {@code NestedStackName.ResourceLogicalID}; Floci does not support skipping one.
+     */
+    private static String invalidSkipReason(Stack stack, List<String> resourcesToSkip) {
+        List<String> notInStack = new ArrayList<>();
+        boolean notUpdateFailed = false;
+        for (String logicalId : resourcesToSkip) {
+            int dot = logicalId.indexOf('.');
+            if (dot >= 0) {
+                String nestedStackId = logicalId.substring(0, dot);
+                StackResource nested = stack.getResources().get(nestedStackId);
+                if (nested == null || !"AWS::CloudFormation::Stack".equals(nested.getResourceType())) {
+                    return SKIP_NESTED_STACK_MISSING.formatted(nestedStackId);
+                }
+                return SKIP_NESTED_UNSUPPORTED.formatted(logicalId);
+            }
+            StackResource resource = stack.getResources().get(logicalId);
+            if (resource == null) {
+                notInStack.add(logicalId);
+            } else if (!"UPDATE_FAILED".equals(resource.getStatus())) {
+                notUpdateFailed = true;
+            }
+        }
+        if (!notInStack.isEmpty()) {
+            return SKIP_NOT_IN_STACK.formatted(String.join(", ", notInStack), stack.getStackName());
+        }
+        return notUpdateFailed ? SKIP_NOT_UPDATE_FAILED : null;
+    }
+
     private void rollbackFailedUpdate(
             Stack stack,
             String region,
@@ -1975,6 +2117,21 @@ public class CloudFormationService implements ResourceProvider {
 
         List<String> rollbackFailures = rollbackUpdatedResources(
                 stack, previousState.resources(), attemptedResourceIds, region);
+        finishUpdateRollback(stack, region, previousState, rollbackFailures);
+    }
+
+    /**
+     * Ends an update rollback, the first one and every ContinueUpdateRollback retry alike: restores
+     * the parameters, outputs and exports, and the template once every resource rolled back, then
+     * settles the stack in UPDATE_ROLLBACK_COMPLETE or UPDATE_ROLLBACK_FAILED. A rollback that
+     * fails keeps the snapshot and the resources still owed a rollback on the stack for a retry.
+     */
+    private void finishUpdateRollback(
+            Stack stack,
+            String region,
+            StackUpdateSnapshot previousState,
+            List<String> rollbackFailures) {
+        List<String> owedResourceIds = List.copyOf(rollbackFailures);
         // Parameters are independent of resource-rollback outcome - always restore them to the last
         // successfully deployed values, even when resource rollback itself fails and the stack lands
         // in UPDATE_ROLLBACK_FAILED, so DescribeStacks and later change-set previews don't keep
@@ -1999,6 +2156,8 @@ public class CloudFormationService implements ResourceProvider {
         }
         stack.setLastUpdatedTime(now());
         if (rollbackFailures.isEmpty()) {
+            stack.setUpdateRollbackSnapshot(null);
+            stack.setUpdateRollbackResourceIds(null);
             stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
             stack.setStatusReason(null);
             addEvent(stack, stack.getStackName(), stack.getStackId(),
@@ -2008,6 +2167,8 @@ public class CloudFormationService implements ResourceProvider {
         } else {
             String reason = "The following resource(s) failed to roll back: ["
                     + String.join(", ", rollbackFailures) + "].";
+            stack.setUpdateRollbackSnapshot(previousState);
+            stack.setUpdateRollbackResourceIds(owedResourceIds);
             stack.setStatus("UPDATE_ROLLBACK_FAILED");
             stack.setStatusReason(reason);
             addEvent(stack, stack.getStackName(), stack.getStackId(),
@@ -2162,17 +2323,6 @@ public class CloudFormationService implements ResourceProvider {
         copy.setTimestamp(source.getTimestamp());
         copy.setAttributes(new HashMap<>(source.getAttributes()));
         return copy;
-    }
-
-    private record StackUpdateSnapshot(
-            String templateBody,
-            String originalTemplateBody,
-            Map<String, String> parameters,
-            Map<String, String> resolvedParameters,
-            Map<String, String> outputs,
-            Map<String, String> exports,
-            Map<String, String> outputExportNames,
-            Map<String, StackResource> resources) {
     }
 
     private record UpdateCleanupFailure(
@@ -2373,6 +2523,8 @@ public class CloudFormationService implements ResourceProvider {
                 throw new IllegalStateException(reason);
             }
 
+            stack.setUpdateRollbackSnapshot(null);
+            stack.setUpdateRollbackResourceIds(null);
             // Before the status, never after. Status is the volatile publishing write, so a reader
             // that observes DELETE_COMPLETE is guaranteed to observe every write that preceded it.
             // Assigned afterwards, a concurrent DescribeStacks can report the terminal status with
