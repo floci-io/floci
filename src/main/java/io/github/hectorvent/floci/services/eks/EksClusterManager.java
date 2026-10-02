@@ -433,7 +433,7 @@ public class EksClusterManager
         }
 
         try {
-            String nodeName = deriveClusterNodeInstanceId(cluster);
+            String nodeName = deriveClusterNodePrivateDnsName(cluster);
             serverArgs.add("--node-name=" + nodeName);
         } catch (Exception e) {
             String clusterName = cluster != null ? cluster.getName() : "unknown";
@@ -816,7 +816,7 @@ public class EksClusterManager
 
     private void pruneLegacyClusterNodes(Cluster cluster, String containerId) {
         try {
-            String expectedNodeName = deriveClusterNodeInstanceId(cluster);
+            String expectedNodeName = deriveClusterNodePrivateDnsName(cluster);
             ContainerExec.Result nodeResult = execInContainerForResult(containerId,
                     new String[]{"kubectl", "get", "nodes", "-o",
                             "jsonpath={range .items[*]}{.metadata.name}{\" \"}{range .status.conditions[?(@.type==\"Ready\")]}{.status}{end}{\"\\n\"}{end}"}, 10);
@@ -2336,6 +2336,27 @@ public class EksClusterManager
         return deriveClusterNodeProviderId(cluster, region, accountId);
     }
 
+    String deriveClusterNodePrivateDnsDomain(String region) {
+        String safeRegion = (region != null && !region.isBlank()) ? region : "us-east-1"; // partition-literal: fallback for domain derivation
+        return "us-east-1".equals(safeRegion) // partition-literal: ec2.internal is us-east-1's own search domain
+                ? "ec2.internal"
+                : safeRegion + ".compute.internal";
+    }
+
+    String deriveClusterNodePrivateDnsName(Cluster cluster, String region, String accountId) {
+        String safeRegion = (region != null && !region.isBlank())
+                ? region
+                : clusterRegion(cluster);
+        String instanceId = deriveClusterNodeInstanceId(cluster, safeRegion, accountId);
+        return instanceId + "." + deriveClusterNodePrivateDnsDomain(safeRegion);
+    }
+
+    String deriveClusterNodePrivateDnsName(Cluster cluster) {
+        String accountId = resolveClusterAccountId(cluster);
+        String region = clusterRegion(cluster);
+        return deriveClusterNodePrivateDnsName(cluster, region, accountId);
+    }
+
     Instance synthesizeClusterNodeInstance(Cluster cluster, String containerIp, String region, String accountId) {
         Instance inst = new Instance();
         String safeClusterName = (cluster != null && cluster.getName() != null && !cluster.getName().isBlank())
@@ -2350,6 +2371,7 @@ public class EksClusterManager
 
         String instanceId = deriveClusterNodeInstanceId(cluster, safeRegion, safeAccountId);
         String az = deriveClusterNodeAvailabilityZone(cluster, safeRegion);
+        String privateDnsName = deriveClusterNodePrivateDnsName(cluster, safeRegion, safeAccountId);
 
         inst.setInstanceId(instanceId);
         inst.setImageId("ami-eks-k3s");
@@ -2360,7 +2382,7 @@ public class EksClusterManager
 
         String ip = (containerIp != null && !containerIp.isBlank()) ? containerIp : "10.0.0.1";
         inst.setPrivateIpAddress(ip);
-        inst.setPrivateDnsName("ip-" + ip.replace('.', '-') + "." + safeRegion + ".compute.internal");
+        inst.setPrivateDnsName(privateDnsName);
 
         // AWS EKS nodes receive credentials from a node IAM role through an EC2 instance profile,
         // never from the cluster control-plane role (cluster.getRoleArn()). Synthesize a distinct

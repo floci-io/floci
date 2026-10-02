@@ -192,45 +192,53 @@ class EksClusterNodeInstanceIntegrationTest {
         cluster1.setName(clusterName1);
         cluster1.setArn("arn:aws:eks:us-east-1:" + account + ":cluster/" + clusterName1);
 
-        String nodeName1 = eksClusterManager.deriveClusterNodeInstanceId(cluster1);
+        String nodeName1 = eksClusterManager.deriveClusterNodePrivateDnsName(cluster1);
+        String instanceId1 = eksClusterManager.deriveClusterNodeInstanceId(cluster1);
         String providerId1 = eksClusterManager.deriveClusterNodeProviderId(cluster1);
         String az1 = eksClusterManager.deriveClusterNodeAvailabilityZone(cluster1);
 
         // Verify AWS format and agreement between node name, provider ID and AZ
-        assertTrue(nodeName1.matches("^i-[0-9a-f]{17}$"));
-        assertEquals("aws:///" + az1 + "/" + nodeName1, providerId1);
+        assertTrue(instanceId1.matches("^i-[0-9a-f]{17}$"));
+        assertEquals(instanceId1 + ".ec2.internal", nodeName1);
+        assertEquals("aws:///" + az1 + "/" + instanceId1, providerId1);
 
         // Initial node registration
         eksClusterManager.registerClusterNodeInstance(cluster1, "container-gen-1");
         Instance instGen1 = eksClusterManager.getRegisteredClusterNodeInstance(cluster1);
-        assertEquals(nodeName1, instGen1.getInstanceId());
+        assertEquals(instanceId1, instGen1.getInstanceId());
+        assertEquals(nodeName1, instGen1.getPrivateDnsName());
 
         try {
-            // DescribeInstances returns the node instance matching nodeName
+            // DescribeInstances returns the node instance matching nodeName and instanceId
             given().header("Authorization", auth(account, "ec2"))
                     .formParam("Action", "DescribeInstances")
-                    .formParam("InstanceId.1", nodeName1)
+                    .formParam("InstanceId.1", instanceId1)
                     .post("/")
                     .then()
                     .statusCode(200)
                     .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceId",
+                            equalTo(instanceId1))
+                    .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.privateDnsName",
                             equalTo(nodeName1));
 
             // Subsequent registration with a new container ID produces the exact same node name and instance ID
             eksClusterManager.registerClusterNodeInstance(cluster1, "container-gen-2");
-            String nodeNameAfterRecreate = eksClusterManager.deriveClusterNodeInstanceId(cluster1);
+            String nodeNameAfterRecreate = eksClusterManager.deriveClusterNodePrivateDnsName(cluster1);
             assertEquals(nodeName1, nodeNameAfterRecreate);
 
             Instance instGen2 = eksClusterManager.getRegisteredClusterNodeInstance(cluster1);
-            assertEquals(nodeName1, instGen2.getInstanceId());
+            assertEquals(instanceId1, instGen2.getInstanceId());
+            assertEquals(nodeName1, instGen2.getPrivateDnsName());
 
             given().header("Authorization", auth(account, "ec2"))
                     .formParam("Action", "DescribeInstances")
-                    .formParam("InstanceId.1", nodeName1)
+                    .formParam("InstanceId.1", instanceId1)
                     .post("/")
                     .then()
                     .statusCode(200)
                     .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceId",
+                            equalTo(instanceId1))
+                    .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.privateDnsName",
                             equalTo(nodeName1));
 
             // Distinct cluster gets a distinct node name
@@ -239,7 +247,7 @@ class EksClusterNodeInstanceIntegrationTest {
             cluster2.setName(clusterName2);
             cluster2.setArn("arn:aws:eks:us-east-1:" + account + ":cluster/" + clusterName2);
 
-            String nodeName2 = eksClusterManager.deriveClusterNodeInstanceId(cluster2);
+            String nodeName2 = eksClusterManager.deriveClusterNodePrivateDnsName(cluster2);
             assertNotEquals(nodeName1, nodeName2);
         } finally {
             eksClusterManager.unregisterMetadataEndpoint(cluster1);

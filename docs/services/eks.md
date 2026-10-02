@@ -429,7 +429,7 @@ backups after upgrading.
 
 #### Cluster node naming, provider ID, and topology labels
 
-In real mode, cluster nodes are named after their backing EC2 instance using AWS resource-based naming. Real EKS nodes take their Kubernetes name in one of two formats depending on the subnet: IP-based naming (`ip-<dashed-ip>.<region>.compute.internal`, or `ip-<dashed-ip>.ec2.internal` in `us-east-1`) or resource-based naming (`i-<instance-id>`). Floci implements resource-based naming by deriving the instance ID deterministically from the cluster name, account ID, and region, and passing `--node-name=<instanceId>` to k3s before startup. This keeps the node name stable across container restarts and recreations.
+In real mode, cluster nodes are named after their backing EC2 instance's private DNS name using AWS resource-based naming. Real EKS nodes take their Kubernetes name from the instance's private DNS name (`system:node:{{EC2PrivateDNSName}}`). Under resource-based naming, this hostname includes the domain: `i-<instance-id>.ec2.internal` in `us-east-1`, or `i-<instance-id>.<region>.compute.internal` in other regions. Floci implements resource-based naming by deriving the instance ID and domain deterministically from the cluster identity, passing `--node-name=<privateDnsName>` to k3s before startup, and assigning the same `PrivateDnsName` to the synthetic EC2 node instance. This keeps the node name stable across container restarts and recreations, and ensures agreement between Kubernetes node queries and EC2 `DescribeInstances`.
 
 Cluster nodes also carry a Kubernetes `spec.providerID` matching the AWS format:
 
@@ -446,7 +446,7 @@ Cluster nodes also carry standard Kubernetes topology labels:
 
 Floci derives the availability zone from the cluster region (for example, `<region>a` for `us-east-1`, yielding `us-east-1a`), rather than from node group subnets as real EKS does. The zone matches the availability zone in the node's `spec.providerID` and synthetic EC2 node instance. These labels enable topology-aware scheduling and allow controllers such as the AWS EBS CSI driver to discover the node's availability zone.
 
-The node name, the instance ID in `spec.providerID`, and the synthetic EC2 instance ID all describe the same instance. This enables controllers that reconcile nodes against EC2 (such as CSI drivers) to look up the node instance via `DescribeInstances`.
+The node name, the instance ID in `spec.providerID`, and the synthetic EC2 instance (`InstanceId` and `PrivateDnsName`) all describe the same instance. This enables controllers that reconcile nodes against EC2 (such as CSI drivers) to look up the node instance via `DescribeInstances`.
 
 ## Configuration
 

@@ -213,8 +213,8 @@ class EksIrsaDockerIntegrationTest {
         ContainerExec.Result nodeNameResult = execInContainerWithExitCode(containerId,
                 new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[0].metadata.name}"});
         assertEquals(0, nodeNameResult.exitCode(), "kubectl get nodes failed");
-        assertEquals(eksClusterManager.deriveClusterNodeInstanceId(cluster), nodeNameResult.stdout().trim(),
-                "Node name must match the derived cluster node instance ID");
+        assertEquals(eksClusterManager.deriveClusterNodePrivateDnsName(cluster), nodeNameResult.stdout().trim(),
+                "Node name must match the derived cluster node private DNS name");
 
         ContainerExec.Result zoneResult = execInContainerWithExitCode(containerId,
                 new String[]{"kubectl", "get", "nodes", "-o",
@@ -351,7 +351,7 @@ class EksIrsaDockerIntegrationTest {
         ContainerExec.Result recreatedNodeResult = execInContainerWithExitCode(recreatedContainerId,
                 new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[*].metadata.name}"});
         assertEquals(0, recreatedNodeResult.exitCode(), "kubectl get nodes failed on recreated cluster");
-        assertEquals(eksClusterManager.deriveClusterNodeInstanceId(cluster), recreatedNodeResult.stdout().trim(),
+        assertEquals(eksClusterManager.deriveClusterNodePrivateDnsName(cluster), recreatedNodeResult.stdout().trim(),
                 "Recreated cluster must keep the same node name without leaving duplicate or stale nodes");
     }
 

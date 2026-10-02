@@ -1158,7 +1158,7 @@ class EksClusterManagerTest {
             assertEquals("us-west-2a", instance.getPlacement().getAvailabilityZone());
             assertEquals("us-west-2", instance.getRegion());
             assertEquals("172.17.0.2", instance.getPrivateIpAddress());
-            assertEquals("ip-172-17-0-2.us-west-2.compute.internal", instance.getPrivateDnsName());
+            assertEquals("i-0e413a1bfb5c3cd79.us-west-2.compute.internal", instance.getPrivateDnsName());
             assertEquals("arn:aws:iam::123456789012:instance-profile/prod-cluster-node-profile", instance.getIamInstanceProfileArn());
             assertNotEquals(cluster.getRoleArn(), instance.getIamInstanceProfileArn());
             assertEquals("running", instance.getState().getName());
@@ -1175,6 +1175,8 @@ class EksClusterManagerTest {
             assertNotNull(inst1);
             assertNotNull(inst2);
             assertNotEquals(inst1.getInstanceId(), inst2.getInstanceId());
+            assertEquals(inst1.getInstanceId() + ".ec2.internal", inst1.getPrivateDnsName());
+            assertEquals(inst2.getInstanceId() + ".us-west-2.compute.internal", inst2.getPrivateDnsName());
         }
 
         @Test
@@ -1239,8 +1241,8 @@ class EksClusterManagerTest {
             cluster2.setName("cluster-beta");
             cluster2.setArn("arn:aws:eks:us-west-2:123456789012:cluster/cluster-beta");
 
-            String name1 = manager.deriveClusterNodeInstanceId(cluster1);
-            String name2 = manager.deriveClusterNodeInstanceId(cluster2);
+            String name1 = manager.deriveClusterNodePrivateDnsName(cluster1);
+            String name2 = manager.deriveClusterNodePrivateDnsName(cluster2);
 
             assertNotEquals(name1, name2);
         }
@@ -1251,10 +1253,29 @@ class EksClusterManagerTest {
             cluster.setName("prod-cluster");
             cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
 
-            String initialName = manager.deriveClusterNodeInstanceId(cluster);
-            String recreatedName = manager.deriveClusterNodeInstanceId(cluster);
+            String initialName = manager.deriveClusterNodePrivateDnsName(cluster);
+            String recreatedName = manager.deriveClusterNodePrivateDnsName(cluster);
 
             assertEquals(initialName, recreatedName);
+        }
+
+        @Test
+        void derivesClusterNodePrivateDnsDomainForUsEast1AndOtherRegions() {
+            assertEquals("ec2.internal", manager.deriveClusterNodePrivateDnsDomain("us-east-1"));
+            assertEquals("us-west-2.compute.internal", manager.deriveClusterNodePrivateDnsDomain("us-west-2"));
+            assertEquals("eu-central-1.compute.internal", manager.deriveClusterNodePrivateDnsDomain("eu-central-1"));
+        }
+
+        @Test
+        void derivesClusterNodePrivateDnsNameMatchingExpectedAwsFormat() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+
+            String dnsNameUsEast1 = manager.deriveClusterNodePrivateDnsName(cluster, "us-east-1", "123456789012");
+            assertTrue(dnsNameUsEast1.matches("^i-[0-9a-f]{17}\\.ec2\\.internal$"));
+
+            String dnsNameUsWest2 = manager.deriveClusterNodePrivateDnsName(cluster, "us-west-2", "123456789012");
+            assertEquals("i-0e413a1bfb5c3cd79.us-west-2.compute.internal", dnsNameUsWest2);
         }
 
         @Test
@@ -1824,8 +1845,8 @@ class EksClusterManagerTest {
             verify(builder).withCmd(cmdCaptor.capture());
             List<String> cmd = cmdCaptor.getValue();
 
-            String expectedNodeName = manager.deriveClusterNodeInstanceId(cluster);
-            assertEquals("i-0e413a1bfb5c3cd79", expectedNodeName);
+            String expectedNodeName = manager.deriveClusterNodePrivateDnsName(cluster);
+            assertEquals("i-0e413a1bfb5c3cd79.us-west-2.compute.internal", expectedNodeName);
             assertTrue(cmd.contains("--node-name=" + expectedNodeName));
         }
 
@@ -1833,7 +1854,7 @@ class EksClusterManagerTest {
         void startClusterContinuesWhenNodeNameDerivationFails() {
             EksClusterManager spyManager = Mockito.spy(manager);
             Mockito.doThrow(new RuntimeException("derivation failure"))
-                    .when(spyManager).deriveClusterNodeInstanceId(any());
+                    .when(spyManager).deriveClusterNodePrivateDnsName(any());
 
             Cluster cluster = new Cluster();
             cluster.setName("fail-cluster");
@@ -1876,7 +1897,9 @@ class EksClusterManagerTest {
             String[] parts = providerId.split("/");
             String providerInstanceId = parts[parts.length - 1];
 
-            assertEquals(providerInstanceId, nodeName);
+            assertEquals(providerInstanceId, manager.deriveClusterNodeInstanceId(cluster));
+            assertEquals(nodeName, manager.deriveClusterNodePrivateDnsName(cluster));
+            assertTrue(nodeName.startsWith(providerInstanceId + "."));
         }
 
         @Test
