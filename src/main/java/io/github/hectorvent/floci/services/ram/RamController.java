@@ -129,7 +129,7 @@ public class RamController {
     @Consumes(MediaType.WILDCARD)
     public Response deleteResourceShare(@QueryParam("resourceShareArn") String resourceShareArn,
                                         @QueryParam("clientToken") String clientToken) {
-        service.deleteResourceShare(resourceShareArn, regionResolver.getAccountId());
+        service.deleteResourceShare(resourceShareArn, regionResolver.getAccountId(), regionResolver.getRegion());
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("returnValue", true);
@@ -151,7 +151,7 @@ public class RamController {
                 request.hasNonNull("name") ? request.path("name").asText() : null,
                 request.hasNonNull("allowExternalPrincipals")
                         ? request.path("allowExternalPrincipals").asBoolean() : null,
-                regionResolver.getAccountId());
+                regionResolver.getAccountId(), regionResolver.getRegion());
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("resourceShare", shareNode(updated));
@@ -167,7 +167,8 @@ public class RamController {
         List<String> resourceArns = stringList(request.path("resourceArns"));
         List<String> principals = stringList(request.path("principals"));
         ResourceShare updated = service.associateResourceShare(
-                resourceShareArn, resourceArns, principals, regionResolver.getAccountId());
+                resourceShareArn, resourceArns, principals, regionResolver.getAccountId(),
+                regionResolver.getRegion());
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("resourceShareAssociations",
@@ -184,7 +185,8 @@ public class RamController {
         List<String> resourceArns = stringList(request.path("resourceArns"));
         List<String> principals = stringList(request.path("principals"));
         ResourceShare updated = service.disassociateResourceShare(
-                resourceShareArn, resourceArns, principals, regionResolver.getAccountId());
+                resourceShareArn, resourceArns, principals, regionResolver.getAccountId(),
+                regionResolver.getRegion());
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("resourceShareAssociations",
@@ -226,7 +228,7 @@ public class RamController {
         Map<String, String> tags = new LinkedHashMap<>();
         request.path("tags").forEach(tag -> tags.put(tag.path("key").asText(), tag.path("value").asText()));
         service.tagResource(request.path("resourceShareArn").asText(), tags,
-                regionResolver.getAccountId());
+                regionResolver.getAccountId(), regionResolver.getRegion());
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -236,7 +238,7 @@ public class RamController {
     public Response untagResource(String body) {
         JsonNode request = readTree(body);
         service.untagResource(request.path("resourceShareArn").asText(),
-                stringList(request.path("tagKeys")), regionResolver.getAccountId());
+                stringList(request.path("tagKeys")), regionResolver.getAccountId(), regionResolver.getRegion());
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -265,7 +267,8 @@ public class RamController {
         JsonNode request = readTree(body);
         String clientToken = request.hasNonNull("clientToken") ? request.path("clientToken").asText() : null;
         ResourceShareInvitation invitation = service.acceptResourceShareInvitation(
-                request.path("resourceShareInvitationArn").asText(), regionResolver.getAccountId());
+                request.path("resourceShareInvitationArn").asText(), regionResolver.getAccountId(),
+                regionResolver.getRegion());
         return invitationResponse(invitation, clientToken);
     }
 
@@ -276,7 +279,8 @@ public class RamController {
         JsonNode request = readTree(body);
         String clientToken = request.hasNonNull("clientToken") ? request.path("clientToken").asText() : null;
         ResourceShareInvitation invitation = service.rejectResourceShareInvitation(
-                request.path("resourceShareInvitationArn").asText(), regionResolver.getAccountId());
+                request.path("resourceShareInvitationArn").asText(), regionResolver.getAccountId(),
+                regionResolver.getRegion());
         return invitationResponse(invitation, clientToken);
     }
 

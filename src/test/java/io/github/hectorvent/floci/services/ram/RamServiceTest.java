@@ -65,7 +65,7 @@ class RamServiceTest {
         // share through ListResources or ListPrincipals.
         ResourceShare share = service.createResourceShare(
                 "delete-me", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
-        service.deleteResourceShare(share.getResourceShareArn(), OWNER);
+        service.deleteResourceShare(share.getResourceShareArn(), OWNER, "us-east-1");
 
         assertTrue(service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
         assertTrue(service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
@@ -123,6 +123,43 @@ class RamServiceTest {
         assertTrue(service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "us-east-1").isEmpty());
     }
 
+    /**
+     * Mutations resolve a share in the request's region like the listings do: a share that
+     * GetResourceShares in us-east-1 does not show cannot be deleted, changed or retagged from
+     * there, and an invitation to it cannot be answered there.
+     */
+    @Test
+    void mutationsInAnotherRegionDoNotReachTheShare() {
+        ResourceShare share = service.createResourceShare(
+                "eu-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "eu-west-1", OWNER);
+        String arn = share.getResourceShareArn();
+        String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "eu-west-1")
+                .get(0).resourceShareInvitationArn();
+
+        for (Runnable wrongRegion : List.<Runnable>of(
+                () -> service.deleteResourceShare(arn, OWNER, "us-east-1"),
+                () -> service.updateResourceShare(arn, "renamed", null, OWNER, "us-east-1"),
+                () -> service.associateResourceShare(arn, List.of(), List.of("333333333333"), OWNER, "us-east-1"),
+                () -> service.disassociateResourceShare(arn, List.of(TGW_ARN), List.of(), OWNER, "us-east-1"),
+                () -> service.tagResource(arn, Map.of("env", "test"), OWNER, "us-east-1"),
+                () -> service.untagResource(arn, List.of("env"), OWNER, "us-east-1"))) {
+            AwsException ex = assertThrows(AwsException.class, wrongRegion::run);
+            assertEquals("UnknownResourceException", ex.getErrorCode());
+        }
+        for (Runnable wrongRegion : List.<Runnable>of(
+                () -> service.acceptResourceShareInvitation(invitationArn, ACCEPTER, "us-east-1"),
+                () -> service.rejectResourceShareInvitation(invitationArn, ACCEPTER, "us-east-1"))) {
+            AwsException ex = assertThrows(AwsException.class, wrongRegion::run);
+            assertEquals("ResourceShareInvitationArnNotFoundException", ex.getErrorCode());
+        }
+
+        ResourceShare unchanged = service.getResourceShares(OWNER, "SELF", "eu-west-1").get(0);
+        assertEquals("eu-share", unchanged.getName());
+        assertEquals("ACTIVE", unchanged.getStatus());
+        assertEquals(List.of(TGW_ARN), unchanged.getResourceArns());
+        assertEquals("ACCEPTED", service.acceptResourceShareInvitation(invitationArn, ACCEPTER, "eu-west-1").status());
+    }
+
     /** A resource share is regional: the listing operations answer for the request's region only. */
     @Test
     void listingsAnswerForTheRequestsRegionOnly() {
@@ -165,7 +202,7 @@ class RamServiceTest {
         String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
                 .getFirst().resourceShareInvitationArn();
 
-        service.rejectResourceShareInvitation(invitationArn, ACCEPTER);
+        service.rejectResourceShareInvitation(invitationArn, ACCEPTER, "us-east-1");
 
         assertTrue(service.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "us-east-1").isEmpty());
         assertTrue(service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
@@ -216,12 +253,14 @@ class RamServiceTest {
                 "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
         String arn = share.getResourceShareArn();
 
-        assertUnknownResource(() -> service.deleteResourceShare(arn, ACCEPTER));
-        assertUnknownResource(() -> service.updateResourceShare(arn, "hijacked", null, ACCEPTER));
-        assertUnknownResource(() -> service.associateResourceShare(arn, List.of(TGW_ARN), List.of(), ACCEPTER));
-        assertUnknownResource(() -> service.disassociateResourceShare(arn, List.of(TGW_ARN), List.of(), ACCEPTER));
-        assertUnknownResource(() -> service.tagResource(arn, Map.of("Owner", "attacker"), ACCEPTER));
-        assertUnknownResource(() -> service.untagResource(arn, List.of("Owner"), ACCEPTER));
+        assertUnknownResource(() -> service.deleteResourceShare(arn, ACCEPTER, "us-east-1"));
+        assertUnknownResource(() -> service.updateResourceShare(arn, "hijacked", null, ACCEPTER, "us-east-1"));
+        assertUnknownResource(() -> service.associateResourceShare(arn, List.of(TGW_ARN), List.of(), ACCEPTER,
+                "us-east-1"));
+        assertUnknownResource(() -> service.disassociateResourceShare(arn, List.of(TGW_ARN), List.of(), ACCEPTER,
+                "us-east-1"));
+        assertUnknownResource(() -> service.tagResource(arn, Map.of("Owner", "attacker"), ACCEPTER, "us-east-1"));
+        assertUnknownResource(() -> service.untagResource(arn, List.of("Owner"), ACCEPTER, "us-east-1"));
 
         ResourceShare untouched = service.getResourceShares(OWNER, "SELF", "us-east-1").get(0);
         assertEquals("us-east-1-tgw-share", untouched.getName());
@@ -236,10 +275,10 @@ class RamServiceTest {
                 "us-east-1-tgw-share", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
         String arn = share.getResourceShareArn();
 
-        assertEquals("renamed", service.updateResourceShare(arn, "renamed", null, OWNER).getName());
-        service.tagResource(arn, Map.of("Owner", "network"), OWNER);
+        assertEquals("renamed", service.updateResourceShare(arn, "renamed", null, OWNER, "us-east-1").getName());
+        service.tagResource(arn, Map.of("Owner", "network"), OWNER, "us-east-1");
         assertEquals("network", service.getResourceShares(OWNER, "SELF", "us-east-1").get(0).getTags().get("Owner"));
-        assertEquals("DELETED", service.deleteResourceShare(arn, OWNER).getStatus());
+        assertEquals("DELETED", service.deleteResourceShare(arn, OWNER, "us-east-1").getStatus());
     }
 
     /**
@@ -268,14 +307,16 @@ class RamServiceTest {
         ResourceShare share = service.createResourceShare(
                 "gone", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
         String arn = share.getResourceShareArn();
-        service.deleteResourceShare(arn, OWNER);
+        service.deleteResourceShare(arn, OWNER, "us-east-1");
 
-        assertUnknownResource(() -> service.updateResourceShare(arn, "renamed", null, OWNER));
-        assertUnknownResource(() -> service.associateResourceShare(arn, List.of(TGW_ARN), List.of(), OWNER));
-        assertUnknownResource(() -> service.disassociateResourceShare(arn, List.of(TGW_ARN), List.of(), OWNER));
-        assertUnknownResource(() -> service.tagResource(arn, Map.of("k", "v"), OWNER));
-        assertUnknownResource(() -> service.untagResource(arn, List.of("k"), OWNER));
-        assertUnknownResource(() -> service.deleteResourceShare(arn, OWNER));
+        assertUnknownResource(() -> service.updateResourceShare(arn, "renamed", null, OWNER, "us-east-1"));
+        assertUnknownResource(() -> service.associateResourceShare(arn, List.of(TGW_ARN), List.of(), OWNER,
+                "us-east-1"));
+        assertUnknownResource(() -> service.disassociateResourceShare(arn, List.of(TGW_ARN), List.of(), OWNER,
+                "us-east-1"));
+        assertUnknownResource(() -> service.tagResource(arn, Map.of("k", "v"), OWNER, "us-east-1"));
+        assertUnknownResource(() -> service.untagResource(arn, List.of("k"), OWNER, "us-east-1"));
+        assertUnknownResource(() -> service.deleteResourceShare(arn, OWNER, "us-east-1"));
 
         // Still readable with DELETED status: mutation rejection must not hide it from reads.
         assertEquals("DELETED", service.getResourceShares(OWNER, "SELF", "us-east-1").get(0).getStatus());
@@ -313,7 +354,7 @@ class RamServiceTest {
         service.createResourceShare("live", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
         ResourceShare doomed = service.createResourceShare(
                 "gone", List.of(OU_ARN), List.of(TGW_ARN), false, "us-east-1", OWNER);
-        service.deleteResourceShare(doomed.getResourceShareArn(), OWNER);
+        service.deleteResourceShare(doomed.getResourceShareArn(), OWNER, "us-east-1");
 
         List<ResourceShare> active = service.getResourceShares(OWNER, "SELF", null, List.of(), "ACTIVE", "us-east-1");
         assertEquals(1, active.size());
@@ -340,11 +381,11 @@ class RamServiceTest {
         String arn = created.getResourceShareArn();
         assertFalse(created.getLastUpdatedTime().isBefore(created.getCreationTime()));
 
-        ResourceShare renamed = service.updateResourceShare(arn, "renamed", null, OWNER);
+        ResourceShare renamed = service.updateResourceShare(arn, "renamed", null, OWNER, "us-east-1");
         assertTrue(renamed.getLastUpdatedTime().isAfter(created.getLastUpdatedTime()));
         assertEquals(created.getCreationTime(), renamed.getCreationTime());
 
-        service.tagResource(arn, Map.of("Owner", "network"), OWNER);
+        service.tagResource(arn, Map.of("Owner", "network"), OWNER, "us-east-1");
         ResourceShare tagged = service.getResourceShares(OWNER, "SELF", "us-east-1").get(0);
         assertTrue(tagged.getLastUpdatedTime().isAfter(renamed.getLastUpdatedTime()));
         assertEquals(created.getCreationTime(), tagged.getCreationTime());
@@ -396,12 +437,12 @@ class RamServiceTest {
         assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").size());
 
         // Re-associating the same principal must not spawn a second invitation.
-        service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER);
+        service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER, "us-east-1");
         assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").size());
 
         // A genuinely new principal gets its own.
         String other = "333333333333";
-        service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(other), OWNER);
+        service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(other), OWNER, "us-east-1");
         assertEquals(1, service.getResourceShareInvitations(other, List.of(), List.of(), "us-east-1").size());
         assertEquals(1, service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").size());
     }
@@ -413,13 +454,13 @@ class RamServiceTest {
         String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
                 .get(0).resourceShareInvitationArn();
 
-        ResourceShareInvitation accepted = service.acceptResourceShareInvitation(invitationArn, ACCEPTER);
+        ResourceShareInvitation accepted = service.acceptResourceShareInvitation(invitationArn, ACCEPTER, "us-east-1");
         assertEquals("ACCEPTED", accepted.status());
         assertEquals("ACCEPTED",
                 service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1").get(0).status());
 
         AwsException repeat = assertThrows(AwsException.class,
-                () -> service.acceptResourceShareInvitation(invitationArn, ACCEPTER));
+                () -> service.acceptResourceShareInvitation(invitationArn, ACCEPTER, "us-east-1"));
         assertEquals("ResourceShareInvitationAlreadyAcceptedException", repeat.getErrorCode());
     }
 
@@ -430,11 +471,11 @@ class RamServiceTest {
         String invitationArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
                 .get(0).resourceShareInvitationArn();
 
-        ResourceShareInvitation rejected = service.rejectResourceShareInvitation(invitationArn, ACCEPTER);
+        ResourceShareInvitation rejected = service.rejectResourceShareInvitation(invitationArn, ACCEPTER, "us-east-1");
         assertEquals("REJECTED", rejected.status());
 
         AwsException repeat = assertThrows(AwsException.class,
-                () -> service.rejectResourceShareInvitation(invitationArn, ACCEPTER));
+                () -> service.rejectResourceShareInvitation(invitationArn, ACCEPTER, "us-east-1"));
         assertEquals("ResourceShareInvitationAlreadyRejectedException", repeat.getErrorCode());
     }
 
@@ -444,13 +485,14 @@ class RamServiceTest {
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
         String firstArn = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
                 .get(0).resourceShareInvitationArn();
-        service.rejectResourceShareInvitation(firstArn, ACCEPTER);
+        service.rejectResourceShareInvitation(firstArn, ACCEPTER, "us-east-1");
 
         // Disassociate and re-associate, same as a Terraform apply that removes then re-adds
         // the principal: real AWS sends a fresh invitation rather than leaving the account
         // permanently locked out by an old rejection.
-        service.disassociateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER);
-        service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER);
+        service.disassociateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER,
+                "us-east-1");
+        service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER, "us-east-1");
 
         List<ResourceShareInvitation> invitations =
                 service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1");
@@ -474,11 +516,11 @@ class RamServiceTest {
                 .get(0).resourceShareInvitationArn();
 
         AwsException bySender = assertThrows(AwsException.class,
-                () -> service.acceptResourceShareInvitation(invitationArn, OWNER));
+                () -> service.acceptResourceShareInvitation(invitationArn, OWNER, "us-east-1"));
         assertEquals("OperationNotPermittedException", bySender.getErrorCode());
 
         AwsException byStranger = assertThrows(AwsException.class,
-                () -> service.rejectResourceShareInvitation(invitationArn, "444444444444"));
+                () -> service.rejectResourceShareInvitation(invitationArn, "444444444444", "us-east-1"));
         assertEquals("OperationNotPermittedException", byStranger.getErrorCode());
     }
 
@@ -486,7 +528,8 @@ class RamServiceTest {
     void unknownInvitationArnFailsWithNotFoundException() {
         AwsException error = assertThrows(AwsException.class, () ->
                 service.acceptResourceShareInvitation(
-                        "arn:aws:ram:us-east-1:222222222222:resource-share-invitation/does-not-exist", ACCEPTER));
+                        "arn:aws:ram:us-east-1:222222222222:resource-share-invitation/does-not-exist", ACCEPTER,
+                                "us-east-1"));
         assertEquals("ResourceShareInvitationArnNotFoundException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
     }
@@ -494,7 +537,7 @@ class RamServiceTest {
     @Test
     void malformedInvitationArnFailsWithMalformedArnException() {
         AwsException error = assertThrows(AwsException.class, () ->
-                service.acceptResourceShareInvitation("not-an-arn", ACCEPTER));
+                service.acceptResourceShareInvitation("not-an-arn", ACCEPTER, "us-east-1"));
         assertEquals("MalformedArnException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
 
@@ -540,7 +583,7 @@ class RamServiceTest {
                     ready.countDown();
                     assertTrue(start.await(5, TimeUnit.SECONDS));
                     try {
-                        service.acceptResourceShareInvitation(invitationArn, ACCEPTER);
+                        service.acceptResourceShareInvitation(invitationArn, ACCEPTER, "us-east-1");
                         return true;
                     } catch (AwsException e) {
                         assertEquals("ResourceShareInvitationAlreadyAcceptedException", e.getErrorCode());
@@ -578,7 +621,8 @@ class RamServiceTest {
                 results.add(executor.submit(() -> {
                     ready.countDown();
                     assertTrue(start.await(5, TimeUnit.SECONDS));
-                    service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER);
+                    service.associateResourceShare(share.getResourceShareArn(), List.of(), List.of(ACCEPTER), OWNER,
+                            "us-east-1");
                     return null;
                 }));
             }
