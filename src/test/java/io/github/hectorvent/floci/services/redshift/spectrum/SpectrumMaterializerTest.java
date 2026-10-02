@@ -9,8 +9,8 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -24,13 +24,17 @@ import static org.mockito.Mockito.when;
 class SpectrumMaterializerTest {
 
     @Test
-    void materializesRowsWithGeneratedIdentifierAndCopyFraming() throws Exception {
+    void materializesRowsAndSetsSurplusVarcharValuesToNull() throws Exception {
         try (ServerSocket listener = new ServerSocket(0); Socket backend = new Socket("localhost", listener.getLocalPort())) {
             ExecutorService executor = Executors.newSingleThreadExecutor();
             Future<BackendCapture> captured = executor.submit(() -> serve(listener));
             SpectrumS3Reader reader = mock(SpectrumS3Reader.class);
             when(reader.read(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
-                    .thenReturn(Stream.of(new SpectrumRow(Arrays.asList("1", null)), new SpectrumRow(List.of("two", "x"))));
+                    .thenReturn(Stream.of(new SpectrumRow(Arrays.asList("1", null)),
+                            new SpectrumRow(List.of("two", "x")),
+                            new SpectrumRow(List.of("3", "v".repeat(256))),
+                            new SpectrumRow(List.of("4", "v".repeat(257))),
+                            new SpectrumRow(List.of("5", "é".repeat(129)))));
             SpectrumExternalTable table = new SpectrumExternalTable("000000000000", "dev", "analytics", "events",
                     List.of(new SpectrumColumn("id", SpectrumColumn.Type.INTEGER),
                             new SpectrumColumn("value", SpectrumColumn.Type.VARCHAR)),
@@ -44,7 +48,9 @@ class SpectrumMaterializerTest {
             assertTrue(materialization.identifier().startsWith("spectrum_tmp_"));
             assertFalse(materialization.identifier().contains("events"));
             assertTrue(capture.createSql().contains("\"value\" VARCHAR(256)"));
-            assertTrue(new String(capture.copyRows(), StandardCharsets.UTF_8).contains("1\t\\N\ntwo\tx\n"));
+            String copyRows = new String(capture.copyRows(), StandardCharsets.UTF_8);
+            assertTrue(copyRows.contains("1\t\\N\ntwo\tx\n"));
+            assertTrue(copyRows.contains("3\t" + "v".repeat(256) + "\n4\t\\N\n5\t\\N\n"));
             executor.shutdownNow();
         }
     }
