@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.codepipeline;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
@@ -24,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -110,16 +113,20 @@ class CodePipelineV2ConditionsTest {
         return rule.putObject("configuration");
     }
 
-    private void createPipeline(String name, ObjectNode... stages) {
+    private ObjectNode pipelineDeclaration(String name, ObjectNode... stages) {
         ObjectNode declaration = mapper.createObjectNode();
         declaration.put("name", name);
         declaration.put("roleArn", "arn:aws:iam::000000000000:role/cp");
         declaration.putObject("artifactStore").put("type", "S3").put("location", "bucket");
-        var stageArray = declaration.putArray("stages");
+        ArrayNode stageArray = declaration.putArray("stages");
         for (ObjectNode stage : stages) {
             stageArray.add(stage);
         }
-        service.handle("CreatePipeline", mapper.createObjectNode().set("pipeline", declaration),
+        return declaration;
+    }
+
+    private void createPipeline(String name, ObjectNode... stages) {
+        service.handle("CreatePipeline", mapper.createObjectNode().set("pipeline", pipelineDeclaration(name, stages)),
                 REGION, ACCOUNT);
     }
 
@@ -188,7 +195,10 @@ class CodePipelineV2ConditionsTest {
                 .put("Variable", "#{variables.env}").put("Value", "a".repeat(257)).put("Operator", "MATCHES");
         createPipeline("matches-overlong", sourceStage(), deploy);
 
-        String executionId = startExecution("matches-overlong");
+        ObjectNode start = mapper.createObjectNode().put("name", "matches-overlong");
+        start.putArray("variables").addObject().put("name", "env").put("value", "prod");
+        String executionId = service.handle("StartPipelineExecution", start, REGION, ACCOUNT)
+                .path("pipelineExecutionId").asText();
         awaitStatus("matches-overlong", executionId, "Failed");
         JsonNode rules = ruleExecutions("matches-overlong");
         assertEquals(1, rules.size());
@@ -268,7 +278,7 @@ class CodePipelineV2ConditionsTest {
         // Catches: ListRuleTypes returning an empty page instead of the AWS rule providers.
         JsonNode result = service.handle("ListRuleTypes", mapper.createObjectNode(), REGION, ACCOUNT);
         List<String> providers = result.path("ruleTypes").findValuesAsText("provider");
-        assertEquals(List.of("LambdaInvoke", "VariableCheck", "Commands", "DeployWindow"), providers);
+        assertEquals(List.of("LambdaInvoke", "VariableCheck", "Commands", "DeploymentWindow", "CloudWatchAlarm"), providers);
     }
 
     @Test
@@ -289,6 +299,78 @@ class CodePipelineV2ConditionsTest {
         assertEquals("Succeeded", detail.path("status").asText());
         assertEquals("LambdaInvoke", detail.path("input").path("ruleTypeId").path("provider").asText());
         assertEquals(executionId, detail.path("pipelineExecutionId").asText());
+    }
+
+    @Test
+    void onSuccessSkipConditionFailsTheStageBecauseTheStageAlreadyRan() {
+        // Catches: a failed onSuccess condition with result SKIP being recorded as a Succeeded stage.
+        ObjectNode deploy = lambdaStage("Deploy");
+        addRule(deploy, "onSuccess", "SKIP", "VariableCheck")
+                .put("Variable", "#{variables.go}").put("Value", "yes").put("Operator", "EQ");
+        createPipeline("on-success-skip", sourceStage(), deploy);
+
+        String executionId = startExecution("on-success-skip");
+        JsonNode failed = awaitStatus("on-success-skip", executionId, "Failed");
+        assertEquals("Condition ON_SUCCESS failed in stage Deploy.", failed.path("statusSummary").asText());
+    }
+
+    @Test
+    void variableCheckUsesTheDeclaredDefaultWhenTheStartRequestOmitsTheVariable() {
+        // Catches: a pipeline variable's declared default being ignored by VariableCheck.
+        ObjectNode deploy = lambdaStage("Deploy");
+        addRule(deploy, "beforeEntry", "FAIL", "VariableCheck")
+                .put("Variable", "#{variables.env}").put("Value", "prod").put("Operator", "EQ");
+        ObjectNode declaration = pipelineDeclaration("defaulted", sourceStage(), deploy);
+        declaration.putArray("variables").addObject().put("name", "env").put("defaultValue", "prod");
+        service.handle("CreatePipeline", mapper.createObjectNode().set("pipeline", declaration), REGION, ACCOUNT);
+
+        String executionId = startExecution("defaulted");
+        awaitStatus("defaulted", executionId, "Succeeded");
+    }
+
+    @Test
+    void variableCheckNotEqualsDoesNotPassOnAnUnresolvedReference() {
+        // Catches: an unresolved variable reference comparing as its placeholder text, so NE passes.
+        ObjectNode deploy = lambdaStage("Deploy");
+        addRule(deploy, "beforeEntry", "FAIL", "VariableCheck")
+                .put("Variable", "#{variables.missing}").put("Value", "x").put("Operator", "NE");
+        createPipeline("unresolved", sourceStage(), deploy);
+
+        String executionId = startExecution("unresolved");
+        awaitStatus("unresolved", executionId, "Failed");
+        assertEquals("Failed", ruleExecutions("unresolved").get(0).path("status").asText());
+    }
+
+    @Test
+    void overrideIsRejectedWhenThePipelineChangedAfterTheExecutionFailed() {
+        // Catches: an override resuming an older execution against a newer pipeline declaration.
+        ObjectNode deploy = lambdaStage("Deploy");
+        addRule(deploy, "onSuccess", "FAIL", "VariableCheck")
+                .put("Variable", "#{variables.env}").put("Value", "prod").put("Operator", "EQ");
+        createPipeline("versioned", sourceStage(), deploy);
+        String executionId = startExecution("versioned");
+        awaitStatus("versioned", executionId, "Failed");
+
+        ObjectNode changed = pipelineDeclaration("versioned", sourceStage(), lambdaStage("Deploy"));
+        service.handle("UpdatePipeline", mapper.createObjectNode().set("pipeline", changed), REGION, ACCOUNT);
+
+        AwsException thrown = assertThrows(AwsException.class, () -> service.handle("OverrideStageCondition",
+                mapper.createObjectNode().put("pipelineName", "versioned")
+                        .put("pipelineExecutionId", executionId).put("stageName", "Deploy")
+                        .put("conditionType", "ON_SUCCESS"), REGION, ACCOUNT));
+        assertEquals("StageNotRetryableException", thrown.getErrorCode());
+    }
+
+    @Test
+    void getPipelineExecutionDoesNotExposeInternalConditionState() {
+        // Catches: ruleExecutions and conditionOverrides leaking into the GetPipelineExecution response.
+        ObjectNode deploy = lambdaStage("Deploy");
+        addRule(deploy, "onSuccess", "FAIL", "LambdaInvoke").put("FunctionName", "gate-fn");
+        createPipeline("clean-response", sourceStage(), deploy);
+        String executionId = startExecution("clean-response");
+        JsonNode execution = awaitStatus("clean-response", executionId, "Succeeded");
+        assertFalse(execution.has("ruleExecutions"));
+        assertFalse(execution.has("conditionOverrides"));
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {

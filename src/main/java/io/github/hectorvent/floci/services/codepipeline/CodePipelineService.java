@@ -549,7 +549,7 @@ public class CodePipelineService {
         execution.setLastUpdateTime(execution.getStartTime());
         execution.setSourceRevisions(new ArrayList<>());
         execution.setSourceRevisionOverrides(sourceRevisionOverrides(request, pipeline));
-        execution.setVariables(variableList(request.path("variables")));
+        execution.setVariables(variableList(request.path("variables"), pipeline.getDeclaration().path("variables")));
         Map<String, String> trigger = new LinkedHashMap<>();
         trigger.put("triggerType", triggerType);
         trigger.put("triggerDetail", triggerDetail);
@@ -950,6 +950,10 @@ public class CodePipelineService {
         JsonNode stage = stageByName(pipeline, stageName);
         CodePipelineExecution execution = requireExecution(
                 account, region, pipelineName, text(request, "pipelineExecutionId"));
+        if (!Objects.equals(execution.getPipelineVersion(), pipeline.getVersion())) {
+            throw new AwsException("StageNotRetryableException",
+                    "The pipeline structure changed after this execution started", 400);
+        }
         // A run that failed on this very condition resumes from the overridden stage, skipping the
         // stage's already-succeeded actions; admission shares the retry path's lock and run tracking.
         // The run marks itself Failed slightly before it leaves activeRuns; an override landing in that
@@ -994,6 +998,15 @@ public class CodePipelineService {
                 }
             }
         } while (runStillFinishing[0] && System.nanoTime() - finishDeadline < 0);
+        if (runStillFinishing[0]) {
+            synchronized (execution) {
+                execution.getConditionOverrides().remove(stageName + "/" + conditionType);
+                putExecution(execution);
+            }
+            throw new AwsException("ConflictException",
+                    "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
+                            + "Try again later.", 400);
+        }
         Map<String, String> resumeStatuses = resumed;
         if (resumeStatuses != null) {
             try {
@@ -1079,9 +1092,12 @@ public class CodePipelineService {
         ruleTypes.add(ruleTypeNode("Commands",
                 "Runs shell commands (accepted but not evaluated by the emulator)",
                 List.of("Commands")));
-        ruleTypes.add(ruleTypeNode("DeployWindow",
+        ruleTypes.add(ruleTypeNode("DeploymentWindow",
                 "Restricts deployments to a time window (accepted but not evaluated by the emulator)",
                 List.of("Cron", "TimeZone")));
+        ruleTypes.add(ruleTypeNode("CloudWatchAlarm",
+                "Passes when a CloudWatch alarm is in the expected state (accepted but not evaluated by the emulator)",
+                List.of("AlarmName", "AlarmStates")));
         return response;
     }
 
@@ -1412,7 +1428,9 @@ public class CodePipelineService {
             return false;
         }
 
-        if (evaluateConditions(execution, stage, "ON_SUCCESS") == ConditionOutcome.FAIL) {
+        // A SKIP result only makes sense before entry; after the stage ran it cannot be skipped, so a
+        // failed onSuccess condition fails the stage whatever its declared result.
+        if (evaluateConditions(execution, stage, "ON_SUCCESS") != ConditionOutcome.PASS) {
             failForCondition(execution, stageName, "ON_SUCCESS");
             execution.getStageExecutionStatuses().put(stageName, "Failed");
             return false;
@@ -1452,7 +1470,7 @@ public class CodePipelineService {
                 }
             }
             if (!passed) {
-                return "SKIP".equals(condition.path("result").asText("FAIL"))
+                return "SKIP".equals(condition.path("result").asText("FAIL")) && "BEFORE_ENTRY".equals(conditionType)
                         ? ConditionOutcome.SKIP_STAGE : ConditionOutcome.FAIL;
             }
         }
@@ -1490,7 +1508,7 @@ public class CodePipelineService {
             passed = switch (provider) {
                 case "LambdaInvoke" -> lambdaRulePasses(execution, rule);
                 case "VariableCheck" -> variableCheckPasses(execution, rule);
-                // Commands / DeployWindow and unknown providers pass permissively.
+                // Commands / DeploymentWindow / CloudWatchAlarm and unknown providers pass permissively.
                 default -> true;
             };
             summary = passed ? "Rule passed." : "Rule condition was not met.";
@@ -1600,7 +1618,9 @@ public class CodePipelineService {
                 return variable.getOrDefault("resolvedValue", "");
             }
         }
-        return reference;
+        // An unresolved reference must fail the rule, not compare as its own placeholder text.
+        throw new AwsException("ValidationException",
+                "VariableCheck variable " + reference + " could not be resolved", 400);
     }
 
     private void failForCondition(CodePipelineExecution execution, String stageName, String conditionType) {
@@ -2529,7 +2549,7 @@ public class CodePipelineService {
         node.remove(List.of("accountId", "region", "startTime", "lastUpdateTime",
                 "sourceRevisions", "sourceRevisionOverrides", "actionExecutions", "currentStage",
                 "stopRequested", "abandon", "rollbackTargetPipelineExecutionId", "stageExecutionStatuses",
-                "artifactsReleased"));
+                "artifactsReleased", "ruleExecutions", "conditionOverrides"));
         if (execution.getRollbackTargetPipelineExecutionId() != null) {
             node.putObject("rollbackMetadata").put(
                     "rollbackTargetPipelineExecutionId", execution.getRollbackTargetPipelineExecutionId());
@@ -2744,13 +2764,24 @@ public class CodePipelineService {
         execution.getSourceRevisions().add(sourceRevision);
     }
 
-    private List<Map<String, String>> variableList(JsonNode node) {
+    /** The request's variables, plus the declared default of every pipeline variable it omits. */
+    private List<Map<String, String>> variableList(JsonNode node, JsonNode declared) {
         List<Map<String, String>> result = new ArrayList<>();
+        Set<String> supplied = new HashSet<>();
         if (node != null && node.isArray()) {
             for (JsonNode variable : node) {
+                supplied.add(variable.path("name").asText());
                 result.add(Map.of(
                         "name", variable.path("name").asText(),
                         "resolvedValue", variable.path("value").asText()));
+            }
+        }
+        if (declared != null && declared.isArray()) {
+            for (JsonNode variable : declared) {
+                String name = variable.path("name").asText();
+                if (!supplied.contains(name) && variable.hasNonNull("defaultValue")) {
+                    result.add(Map.of("name", name, "resolvedValue", variable.path("defaultValue").asText()));
+                }
             }
         }
         return result;
