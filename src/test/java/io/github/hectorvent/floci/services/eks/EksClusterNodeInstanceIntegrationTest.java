@@ -185,7 +185,7 @@ class EksClusterNodeInstanceIntegrationTest {
     }
 
     @Test
-    void nodeNameProviderIdAndEc2DescribeInstancesAgreeAcrossContainerRecreations() {
+    void nodeNameProviderIdAndEc2DescribeInstancesAgreeAcrossReRegistration() {
         String account = "123456789012";
         String clusterName1 = "node-aggr-" + UUID.randomUUID().toString().substring(0, 8);
         Cluster cluster1 = new Cluster();
@@ -200,7 +200,7 @@ class EksClusterNodeInstanceIntegrationTest {
         assertTrue(nodeName1.matches("^i-[0-9a-f]{17}$"));
         assertEquals("aws:///" + az1 + "/" + nodeName1, providerId1);
 
-        // Generation 1 container registration
+        // Initial node registration
         eksClusterManager.registerClusterNodeInstance(cluster1, "container-gen-1");
         Instance instGen1 = eksClusterManager.getRegisteredClusterNodeInstance(cluster1);
         assertEquals(nodeName1, instGen1.getInstanceId());
@@ -216,7 +216,7 @@ class EksClusterNodeInstanceIntegrationTest {
                     .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceId",
                             equalTo(nodeName1));
 
-            // Generation 2: recreating the container produces the exact same node name and instance ID
+            // Subsequent registration with a new container ID produces the exact same node name and instance ID
             eksClusterManager.registerClusterNodeInstance(cluster1, "container-gen-2");
             String nodeNameAfterRecreate = eksClusterManager.deriveClusterNodeInstanceId(cluster1);
             assertEquals(nodeName1, nodeNameAfterRecreate);

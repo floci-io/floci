@@ -805,10 +805,31 @@ public class EksClusterManager
                 cluster.setCertificateAuthority(new CertificateAuthority(caData.trim()));
             }
 
+            pruneLegacyClusterNodes(cluster, containerId);
+
             LOG.infov("Finalized EKS cluster {0} with CA data extracted", cluster.getName());
         } catch (Exception e) {
             LOG.warnv("Could not extract kubeconfig for cluster {0}: {1}",
                     cluster.getName(), e.getMessage());
+        }
+    }
+
+    private void pruneLegacyClusterNodes(Cluster cluster, String containerId) {
+        try {
+            String expectedNodeName = deriveClusterNodeInstanceId(cluster);
+            ContainerExec.Result nodeResult = execInContainerForResult(containerId,
+                    new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[*].metadata.name}"}, 10);
+            if (nodeResult.exitCode() == 0 && nodeResult.stdout() != null && !nodeResult.stdout().isBlank()) {
+                for (String node : nodeResult.stdout().trim().split("\\s+")) {
+                    if (!node.isBlank() && !node.equals(expectedNodeName)) {
+                        execInContainerForResult(containerId,
+                                new String[]{"kubectl", "delete", "node", node}, 10);
+                        LOG.infov("Removed legacy node {0} from EKS cluster {1}", node, cluster.getName());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not prune legacy nodes for cluster {0}: {1}", cluster.getName(), e.getMessage());
         }
     }
 
