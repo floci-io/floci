@@ -134,6 +134,7 @@ public class CognitoService implements ResourceProvider {
     private final StorageBackend<String, UserPool> poolStore;
     private final StorageBackend<String, UserPoolClient> clientStore;
     private final StorageBackend<String, ResourceServer> resourceServerStore;
+    private final Object resourceServerLock = new Object();
     private final StorageBackend<String, UserPoolDomain> domainStore;
     private final StorageBackend<String, IdentityProvider> identityProviderStore;
     private final StorageBackend<String, CognitoUser> userStore;
@@ -775,6 +776,12 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void deleteUserPool(String id) {
+        synchronized (resourceServerLock) {
+            deleteUserPoolUnderResourceServerLock(id);
+        }
+    }
+
+    private void deleteUserPoolUnderResourceServerLock(String id) {
         // Deletion protection is the pool's own guard against this call: with it ACTIVE, AWS
         // refuses until an UpdateUserPool switches it to INACTIVE (developer guide, "User pool
         // deletion protection"), and a CloudFormation delete of the pool reports DELETE_FAILED.
@@ -1268,6 +1275,13 @@ public class CognitoService implements ResourceProvider {
 
     public ResourceServer createResourceServer(String userPoolId, String identifier, String name,
                                                List<ResourceServerScope> scopes) {
+        synchronized (resourceServerLock) {
+            return createResourceServerUnderLock(userPoolId, identifier, name, scopes);
+        }
+    }
+
+    private ResourceServer createResourceServerUnderLock(String userPoolId, String identifier, String name,
+                                                        List<ResourceServerScope> scopes) {
         describeUserPool(userPoolId);
         if (identifier == null || identifier.isBlank()) {
             throw new AwsException("InvalidParameterException", "Identifier is required", 400);
@@ -1282,6 +1296,7 @@ public class CognitoService implements ResourceProvider {
         }
 
         ResourceServer server = new ResourceServer();
+        server.setIncarnationId(UUID.randomUUID().toString());
         server.setUserPoolId(userPoolId);
         server.setIdentifier(identifier);
         server.setName(name);
@@ -1304,6 +1319,22 @@ public class CognitoService implements ResourceProvider {
 
     public ResourceServer updateResourceServer(String userPoolId, String identifier, String name,
                                                List<ResourceServerScope> scopes) {
+        synchronized (resourceServerLock) {
+            return updateResourceServerUnderLock(userPoolId, identifier, name, scopes);
+        }
+    }
+
+    public ResourceServer updateResourceServer(String userPoolId, String identifier, String name,
+                                               List<ResourceServerScope> scopes, String expectedIncarnationId) {
+        synchronized (resourceServerLock) {
+            ResourceServer server = describeResourceServer(userPoolId, identifier);
+            requireResourceServerOwnership(server, expectedIncarnationId);
+            return updateResourceServer(userPoolId, identifier, name, scopes);
+        }
+    }
+
+    private ResourceServer updateResourceServerUnderLock(String userPoolId, String identifier, String name,
+                                                        List<ResourceServerScope> scopes) {
         if (userPoolId == null || userPoolId.isBlank()) {
             throw new AwsException("InvalidParameterException", "UserPoolId is required", 400);
         }
@@ -1323,8 +1354,43 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void deleteResourceServer(String userPoolId, String identifier) {
-        describeResourceServer(userPoolId, identifier);
-        resourceServerStore.delete(resourceServerKey(userPoolId, identifier));
+        synchronized (resourceServerLock) {
+            describeResourceServer(userPoolId, identifier);
+            resourceServerStore.delete(resourceServerKey(userPoolId, identifier));
+        }
+    }
+
+    /**
+     * Deletes only the recorded incarnation. A false result releases stale CloudFormation cleanup
+     * responsibility after the address is reused; missing ownership evidence fails closed.
+     */
+    public boolean deleteResourceServer(String userPoolId, String identifier, String expectedIncarnationId) {
+        synchronized (resourceServerLock) {
+            ResourceServer server = resourceServerStore.get(resourceServerKey(userPoolId, identifier)).orElse(null);
+            if (server == null) {
+                return true;
+            }
+            requireResourceServerOwnershipProof(server, expectedIncarnationId);
+            if (!expectedIncarnationId.equals(server.getIncarnationId())) {
+                return false;
+            }
+            deleteResourceServer(userPoolId, identifier);
+            return true;
+        }
+    }
+
+    private static void requireResourceServerOwnership(ResourceServer server, String expectedIncarnationId) {
+        requireResourceServerOwnershipProof(server, expectedIncarnationId);
+        if (!expectedIncarnationId.equals(server.getIncarnationId())) {
+            throw new AwsException("ResourceConflictException", "Resource server ownership has changed", 400);
+        }
+    }
+
+    private static void requireResourceServerOwnershipProof(ResourceServer server, String expectedIncarnationId) {
+        if (expectedIncarnationId == null || expectedIncarnationId.isBlank()
+                || server.getIncarnationId() == null || server.getIncarnationId().isBlank()) {
+            throw new IllegalStateException("Cannot verify Cognito resource server ownership");
+        }
     }
 
     // ──────────────────────────── Identity Providers ────────────────────────────

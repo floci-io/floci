@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -23,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -43,6 +45,29 @@ class CognitoResourceServerCfnProvisionerTest {
     private final CognitoService cognito = mock(CognitoService.class);
     private final CognitoResourceServerCfnProvisioner provisioner = new CognitoResourceServerCfnProvisioner(cognito);
     private final ObjectMapper mapper = new ObjectMapper();
+
+    @BeforeEach
+    void configureOwnedServiceCalls() {
+        doAnswer(invocation -> server(invocation.getArgument(0), invocation.getArgument(1), invocation.getArgument(2)))
+                .when(cognito).createResourceServer(anyString(), anyString(), anyString(), any());
+        doAnswer(invocation -> {
+            String poolId = invocation.getArgument(0);
+            String identifier = invocation.getArgument(1);
+            assertEquals(incarnation(poolId, identifier), invocation.getArgument(4));
+            return cognito.updateResourceServer(poolId, identifier, invocation.getArgument(2), invocation.getArgument(3));
+        }).when(cognito).updateResourceServer(anyString(), anyString(), anyString(), any(), anyString());
+        doAnswer(invocation -> {
+            String poolId = invocation.getArgument(0);
+            String identifier = invocation.getArgument(1);
+            assertEquals(incarnation(poolId, identifier), invocation.getArgument(2));
+            cognito.deleteResourceServer(poolId, identifier);
+            return true;
+        }).when(cognito).deleteResourceServer(anyString(), anyString(), anyString());
+    }
+
+    private static String incarnation(String poolId, String identifier) {
+        return poolId + ":" + identifier + ":incarnation";
+    }
 
     private ProvisionContext ctx(String priorId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -83,6 +108,7 @@ class CognitoResourceServerCfnProvisionerTest {
         resource.setAttributes(new HashMap<>());
         if (poolId != null) {
             resource.getAttributes().put("__FlociResourceServerPoolId", poolId);
+            resource.getAttributes().put("__FlociResourceServerIncarnationId", incarnation(poolId, identifier));
         }
         return resource;
     }
@@ -92,6 +118,7 @@ class CognitoResourceServerCfnProvisionerTest {
         server.setUserPoolId(poolId);
         server.setIdentifier(identifier);
         server.setName(name);
+        server.setIncarnationId(incarnation(poolId, identifier));
         ResourceServerScope scope = new ResourceServerScope();
         scope.setScopeName("read");
         scope.setScopeDescription("Read access");
@@ -120,6 +147,7 @@ class CognitoResourceServerCfnProvisionerTest {
         assertEquals("Read access", scopes.getValue().getFirst().getScopeDescription());
         assertEquals(IDENTIFIER, resource.getPhysicalId());
         assertEquals(POOL, resource.getAttributes().get("__FlociResourceServerPoolId"));
+        assertEquals(incarnation(POOL, IDENTIFIER), resource.getAttributes().get("__FlociResourceServerIncarnationId"));
         assertFalse(resource.getAttributes().containsKey("Identifier"));
         assertFalse(resource.getAttributes().containsKey("Name"));
         assertFalse(resource.getAttributes().containsKey("UserPoolId"));
@@ -486,5 +514,37 @@ class CognitoResourceServerCfnProvisionerTest {
         }
         assertThrows(AwsException.class, () -> provisioner.provision(resource(null, null), tooMany, ctx(null)));
         verifyNoInteractions(cognito);
+    }
+
+    @Test
+    void anUpdateCannotAdoptARecreatedServerOrInventLegacyOwnership() {
+        ResourceServer foreign = server(POOL, IDENTIFIER, "Foreign API");
+        foreign.setIncarnationId("foreign-incarnation");
+        when(cognito.describeResourceServer(POOL, IDENTIFIER)).thenReturn(foreign);
+        StackResource resource = resource(IDENTIFIER, POOL);
+        assertThrows(AwsException.class, () -> provisioner.provision(resource,
+                properties(POOL, IDENTIFIER, "Attempted API"), ctx(IDENTIFIER)));
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
+
+        resource.getAttributes().remove("__FlociResourceServerIncarnationId");
+        assertThrows(IllegalStateException.class, () -> provisioner.provision(resource,
+                properties(NEW_POOL, IDENTIFIER, "Replacement API"), ctx(IDENTIFIER)));
+        verify(cognito, never()).createResourceServer(any(), any(), any(), any());
+        verify(cognito, never()).updateResourceServer(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void snapshotRestorationKeepsItsOwnershipProofAfterTheAddressIsReused() {
+        when(cognito.describeResourceServer(POOL, IDENTIFIER)).thenReturn(server(POOL, IDENTIFIER, "Old API"));
+        StackResource resource = resource(IDENTIFIER, POOL);
+        provisioner.provision(resource, properties(POOL, IDENTIFIER, "New API"), ctx(IDENTIFIER));
+        String snapshot = resource.getAttributes().get("__FlociResourceServerUpdate");
+        doThrow(new AwsException("ResourceConflictException", "ownership changed", 400)).when(cognito)
+                .updateResourceServer(eq(POOL), eq(IDENTIFIER), eq("Old API"), any(), eq(incarnation(POOL, IDENTIFIER)));
+
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(resource));
+
+        assertEquals(snapshot, resource.getAttributes().get("__FlociResourceServerUpdate"));
+        assertEquals(incarnation(POOL, IDENTIFIER), resource.getAttributes().get("__FlociResourceServerIncarnationId"));
     }
 }
