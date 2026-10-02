@@ -113,6 +113,11 @@ class LambdaMicrovmsCfnProvisionerTest {
         connector.id = id;
         connector.name = name;
         connector.arn = "arn:aws:lambda:us-east-1:000000000000:network-connector:" + id;
+        connector.subnetIds = List.of("subnet-1");
+        connector.securityGroupIds = List.of("sg-1");
+        connector.operatorRole = OPERATOR_ROLE;
+        connector.networkProtocol = "IPv4";
+        connector.associatedComputeResourceTypes = List.of("MICROVM");
         return connector;
     }
 
@@ -214,8 +219,9 @@ class LambdaMicrovmsCfnProvisionerTest {
         StackResource created = resource(CONNECTOR_TYPE);
         provisioner.provision(created, connectorProps(null, "subnet-1"), ctx(null));
         String name = created.getAttributes().get("Name");
-        when(service.updateConnector(REGION, created.getPhysicalId(), List.of("subnet-2"), List.of("sg-1")))
-                .thenReturn(connector("nc-1", name));
+        when(service.getConnector(REGION, created.getPhysicalId())).thenReturn(connector("nc-1", name));
+        when(service.updateConnector(REGION, created.getPhysicalId(), List.of("subnet-2"), List.of("sg-1"),
+                OPERATOR_ROLE, "IPv4", List.of("MICROVM"))).thenReturn(connector("nc-1", name));
 
         StackResource updated = updateOf(created);
         provisioner.provision(updated, connectorProps(null, "subnet-2"), ctx(created.getPhysicalId()));
@@ -224,7 +230,61 @@ class LambdaMicrovmsCfnProvisionerTest {
         assertFalse(provisioner.hasReplacementUpdate(updated));
         verify(service, times(1)).createConnector(anyString(), anyString(), anyString(), any(), any(), any(),
                 anyString(), any(), any());
-        verify(service).updateConnector(REGION, created.getPhysicalId(), List.of("subnet-2"), List.of("sg-1"));
+        verify(service).updateConnector(REGION, created.getPhysicalId(), List.of("subnet-2"), List.of("sg-1"),
+                OPERATOR_ROLE, "IPv4", List.of("MICROVM"));
+    }
+
+    @Test
+    void anInPlaceConnectorUpdateAppliesEverySettingAndRollsBackFromItsSnapshot() {
+        String arn = connector("nc-1", "nc").arn;
+        StackResource prior = resource(CONNECTOR_TYPE);
+        prior.setPhysicalId(arn);
+        prior.getAttributes().put("Name", "nc");
+        when(service.getConnector(REGION, arn)).thenReturn(connector("nc-1", "nc"));
+        when(service.updateConnector(anyString(), anyString(), any(), any(), any(), any(), any()))
+                .thenReturn(connector("nc-1", "nc"));
+        ObjectNode props = connectorProps("nc", "subnet-2");
+        props.put("OperatorRole", "arn:aws:iam::000000000000:role/operator-v2");
+        ObjectNode vpc = (ObjectNode) props.path("Configuration").path("VpcEgressConfiguration");
+        vpc.put("NetworkProtocol", "DUAL_STACK");
+
+        StackResource updated = updateOf(prior);
+        provisioner.provision(updated, props, ctx(arn));
+
+        verify(service).updateConnector(REGION, arn, List.of("subnet-2"), List.of("sg-1"),
+                "arn:aws:iam::000000000000:role/operator-v2", "DUAL_STACK", List.of("MICROVM"));
+        assertTrue(provisioner.rollbackUpdate(updated));
+        verify(service).updateConnector(REGION, arn, List.of("subnet-1"), List.of("sg-1"), OPERATOR_ROLE, "IPv4",
+                List.of("MICROVM"));
+        assertFalse(updated.getAttributes().containsKey(CfnRollback.NETWORK_CONNECTOR_UPDATE_SNAPSHOT_ATTR),
+                "the snapshot is spent");
+    }
+
+    @Test
+    void droppingAnExplicitConnectorNameReplacesTheConnector() {
+        when(service.createConnector(anyString(), anyString(), anyString(), any(), any(), any(), anyString(), any(),
+                any())).thenAnswer(inv -> connector("nc-2", inv.getArgument(2)));
+        String arn = connector("nc-1", "explicit-name").arn;
+        StackResource prior = resource(CONNECTOR_TYPE);
+        prior.setPhysicalId(arn);
+        prior.getAttributes().put("Name", "explicit-name");
+
+        StackResource updated = updateOf(prior);
+        provisioner.provision(updated, connectorProps(null, "subnet-1"), ctx(arn));
+
+        String name = updated.getAttributes().get("Name");
+        assertTrue(name.startsWith("my-stack-Res-"), name);
+        assertEquals(arn, provisioner.updateCleanupPhysicalId(updated));
+        verify(service, never()).updateConnector(anyString(), anyString(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void onlyANameWithTheGeneratedShapeCountsAsGenerated() {
+        assertTrue(LambdaMicrovmsCfnProvisioner.wasGenerated("my-stack-Res-0123456789ab", "my-stack", "Res"));
+        assertTrue(LambdaMicrovmsCfnProvisioner.wasGenerated("my-sta-0123456789ab", "my-stack", "Res"),
+                "a truncated prefix still counts");
+        assertFalse(LambdaMicrovmsCfnProvisioner.wasGenerated("explicit-name", "my-stack", "Res"));
+        assertFalse(LambdaMicrovmsCfnProvisioner.wasGenerated("other-stack-Res-0123456789ab", "my-stack", "Res"));
     }
 
     @Test
@@ -243,13 +303,14 @@ class LambdaMicrovmsCfnProvisionerTest {
         assertEquals(created.getPhysicalId(), provisioner.updateCleanupPhysicalId(updated));
         assertTrue(provisioner.completeUpdate(updated).complete());
         verify(service).deleteConnector(REGION, created.getPhysicalId());
-        verify(service, never()).updateConnector(anyString(), anyString(), any(), any());
+        verify(service, never()).updateConnector(anyString(), anyString(), any(), any(), any(), any(), any());
     }
 
     @Test
     void aConnectorFromAStackThatStoredItsIdIsReusedAndOnlyItsIdMovesToTheArn() {
-        when(service.updateConnector(REGION, "nc-1", List.of("subnet-1"), List.of("sg-1")))
-                .thenReturn(connector("nc-1", "nc"));
+        when(service.getConnector(REGION, "nc-1")).thenReturn(connector("nc-1", "nc"));
+        when(service.updateConnector(REGION, "nc-1", List.of("subnet-1"), List.of("sg-1"), OPERATOR_ROLE, "IPv4",
+                List.of("MICROVM"))).thenReturn(connector("nc-1", "nc"));
         StackResource legacy = resource(CONNECTOR_TYPE);
         legacy.setPhysicalId("nc-1");
         legacy.getAttributes().put("Name", "nc");
