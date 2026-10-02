@@ -315,8 +315,7 @@ public class SesContactController {
     }
 
     // UnsubscribeAll is a Boolean; AWS coerces it the same way as any other SES v2 boolean
-    // (see parseSendingEnabled): a JSON string coerces to true, a number/null/array/object is a
-    // SerializationException. Absent leaves it unset.
+    // (see coerceBoolean). Absent leaves it unset.
     private static Boolean parseUnsubscribeAll(JsonNode request) {
         if (!request.has("UnsubscribeAll")) {
             return null;
