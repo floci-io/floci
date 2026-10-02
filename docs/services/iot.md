@@ -45,7 +45,7 @@ Current MVP 2 limitations:
 - `SendDirectMessage` publishes to the requested MQTT topic through the embedded broker. Unlike AWS IoT Core, it does not yet bypass subscription matching to deliver to a client that is not subscribed to that topic.
 - `GetConnection` and `ListSubscriptions` report live in-memory broker state only; offline persistent session subscription reporting is not modeled yet.
 - Jobs reserved MQTT topics remain follow-up scope; Jobs Data HTTP APIs are implemented first.
-- Dynamic thing groups, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled. Fleet indexing has its configuration only, see [Fleet Indexing](#fleet-indexing).
+- Dynamic thing groups, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled. Fleet indexing has its configuration and a bounded `SearchIndex` subset, see [Fleet Indexing](#fleet-indexing).
 
 ## Domain Configurations
 
@@ -104,7 +104,7 @@ Current limitations:
 
 ## Fleet Indexing
 
-Status: configuration only.
+Status: configuration and a bounded SearchIndex subset.
 
 `UpdateIndexingConfiguration` and `GetIndexingConfiguration` (`/indexing/config`) and `DescribeIndex` (`/indices/{indexName}`) are served on the REST-JSON paths the AWS SDKs use, with the AWS shapes, error codes and validation messages:
 
@@ -114,9 +114,55 @@ Status: configuration only.
 - The thing configuration's `customFields` and `filter` (named shadow names, geolocations, socket information) are stored and returned as sent.
 - `DescribeIndex` reports `AWS_Things` and `AWS_ThingGroups` with the schema the modes select. The index is `ACTIVE` as soon as it is enabled: Floci has no `BUILDING` or `REBUILDING` window. A disabled index is `ResourceNotFoundException`, any other index name `InvalidRequestException`.
 
+### SearchIndex
+
+`SearchIndex` (`POST /indices/search`) searches the things of the caller's account and region in the `AWS_Things` index, the default index name. Floci evaluates this part of the query language:
+
+- `field:value`. Values match case-insensitively, field names exactly: `attributes.Site:north` matches nothing when the attribute is named `site`.
+- `*` (any run of characters) and `?` (one character) inside a value, and `\` to escape one character. A quoted value such as `thingName:"x"` matches literally.
+- `field:*` matches the things that have the field. A bare `*` matches every thing.
+- `AND`, `OR` and `NOT` in upper case, their forms `&&`, `||` and `!`, a leading `-` for negation, and parentheses.
+- Precedence as measured on AWS: `NOT` binds tightest, then `AND`, then `OR`. Whitespace is an `AND` that binds looser than `OR`, so `a OR b c` means `(a OR b) AND c`.
+
+The fields are `thingName`, `thingId`, `thingTypeName`, `thingGroupNames` (direct memberships), `attributes.<name>`, `connectivity.connected`, `connectivity.clientId` and `connectivity.disconnectReason`.
+
+Errors follow AWS, with AWS's messages. The request members are checked first, then the index, then the query, then `nextToken`:
+
+- `InvalidRequestException` for a missing or empty `queryString`, a `maxResults` below 1, an empty `indexName`, a `queryVersion` other than `2017-09-30`, an unknown index name and an invalid `nextToken`.
+- `ResourceNotFoundException` for an index that is not enabled.
+- `InvalidQueryException` for invalid syntax, an invalid field name, the `+` operator, and fuzzy, regular expression and boost queries.
+- `InvalidRequestException` for a `connectivity.*`, `shadow.*` or `deviceDefender.*` field while that indexing is off.
+
+Syntax AWS accepts but Floci does not evaluate is refused with `InvalidQueryException` and the message `Floci does not support <construct> in fleet index queries, query string: <query>`. It never answers with an empty result. This covers:
+
+- range queries (`field:[a TO b]`, `field:{a TO b}`)
+- comparisons (`>`, `<`, `>=`, `<=`)
+- free text terms without a field, including lower case `and`, `or` and `not`
+- field grouping (`field:(a OR b)`)
+- every `shadow.*` and `deviceDefender.*` field, and the other `connectivity.*` fields (`timestamp`, `keepAliveDuration`, `cleanSession`, `sessionExpiry`, `version`)
+
+Searching `AWS_ThingGroups` is refused with `InvalidRequestException` and `Floci does not support searching AWS_ThingGroups` while that index is enabled. While it is disabled the answer is AWS's `ResourceNotFoundException`.
+
+Results:
+
+- A thing has `thingName` and `thingId`, and `thingTypeName`, `thingGroupNames` and `attributes` only when it has them. `shadow` and `deviceDefender` are never returned: Floci keeps no indexed shadow document.
+- Things come in thing name order. AWS does not specify an order.
+- `maxResults` and `nextToken` page the results. Without `maxResults` every match comes in one page. The token is the offset Floci's other IoT list operations use.
+- An index answers at once: a thing is searchable as soon as it is created, where AWS takes a few seconds.
+
+`connectivity` is returned while `thingConnectivityIndexingMode` is `STATUS`. It reports the embedded MQTT broker session whose client id is the thing name:
+
+- Connected: `connected` `true`, `timestamp` (the connect time in epoch milliseconds), `keepAliveDuration`, `cleanSession` and `clientId`.
+- After the session ended: `connected` `false`, `timestamp` (the disconnect time), `disconnectReason`, `keepAliveDuration`, `cleanSession` and `clientId`. The reason is `CLIENT_INITIATED_DISCONNECT` after an MQTT DISCONNECT packet and `CONNECTION_LOST` for any other end, including `DeleteConnection`.
+- Never connected: `{"clientId": "<thingName>", "connected": false, "timestamp": 0}`.
+- A plaintext session, including MQTT over WebSocket, counts in the default account and region, as the broker's shadow topics do. A session on the TLS listener counts in the account and region of its device certificate.
+- The state is in memory only. A restart loses it, and a state reset forgets how sessions ended; a live session stays connected.
+
 Current limitations:
 
-- `SearchIndex`, `ListIndices` and the statistics and aggregation APIs (`GetStatistics`, `GetCardinality`, `GetPercentiles`, `GetBucketsAggregation`) are not modeled yet.
+- `ListIndices` and the statistics and aggregation APIs (`GetStatistics`, `GetCardinality`, `GetPercentiles`, `GetBucketsAggregation`) are not modeled yet.
+- `customFields` types are not applied to search: attribute values are matched as strings.
+- `connectivity.sessionExpiry` and the socket information of `filter.connectivity.includeSocketInformation` are not reported.
 - `managedFields` and `customFields` sent in the thing group configuration are ignored.
 
 ## MQTT Broker

@@ -1412,18 +1412,18 @@ public class IotService {
         return "thing:" + region + ":" + thingName;
     }
 
-    private <T> Page<T> paginate(List<T> items, Integer maxResults, String nextToken) {
+    static <T> Page<T> paginate(List<T> items, Integer maxResults, String nextToken) {
         int start = parseNextToken(nextToken);
         if (start > items.size()) {
             start = items.size();
         }
         int limit = maxResults == null ? items.size() - start : Math.max(0, maxResults);
-        int end = Math.min(items.size(), start + limit);
+        int end = (int) Math.min(items.size(), (long) start + limit);
         String followingToken = end < items.size() ? Integer.toString(end) : null;
         return new Page<>(items.subList(start, end), followingToken);
     }
 
-    private int parseNextToken(String nextToken) {
+    private static int parseNextToken(String nextToken) {
         if (nextToken == null || nextToken.isBlank()) {
             return 0;
         }

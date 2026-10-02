@@ -2,26 +2,33 @@ package io.github.hectorvent.floci.services.iot;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iot.IotMqttBrokerService.Connectivity;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration.Field;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration.GeoLocation;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration.ThingIndexing;
+import io.github.hectorvent.floci.services.iot.model.IotThingGroup;
+import io.github.hectorvent.floci.services.iot.model.Thing;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * AWS IoT fleet indexing configuration: UpdateIndexingConfiguration, GetIndexingConfiguration and
- * DescribeIndex. One configuration per account and region; a region never updated is OFF.
+ * AWS IoT fleet indexing: UpdateIndexingConfiguration, GetIndexingConfiguration, DescribeIndex and
+ * a bounded SearchIndex. One configuration per account and region; a region never updated is OFF.
  */
 @ApplicationScoped
 public class IotFleetIndexingService {
@@ -77,17 +84,23 @@ public class IotFleetIndexingService {
             new Field("thingGroupId", "String"));
 
     private final StorageBackend<String, IotIndexingConfiguration> store;
+    private final IotService iotService;
+    private final IotMqttBrokerService mqttBrokerService;
     /** Guards the read-modify-write of an update that changes only one of the two configurations. */
     private final Object lock = new Object();
 
     @Inject
-    public IotFleetIndexingService(StorageFactory storageFactory) {
+    public IotFleetIndexingService(StorageFactory storageFactory, IotService iotService,
+                                   IotMqttBrokerService mqttBrokerService) {
         this(storageFactory.create("iot", "iot-indexing-configuration.json",
-                new TypeReference<Map<String, IotIndexingConfiguration>>() {}));
+                new TypeReference<Map<String, IotIndexingConfiguration>>() {}), iotService, mqttBrokerService);
     }
 
-    IotFleetIndexingService(StorageBackend<String, IotIndexingConfiguration> store) {
+    IotFleetIndexingService(StorageBackend<String, IotIndexingConfiguration> store, IotService iotService,
+                            IotMqttBrokerService mqttBrokerService) {
         this.store = store;
+        this.iotService = iotService;
+        this.mqttBrokerService = mqttBrokerService;
     }
 
     public void updateIndexingConfiguration(JsonNode request, String region) {
@@ -103,10 +116,7 @@ public class IotFleetIndexingService {
                 "thingIndexingConfiguration.managedFields", errors);
         String groupMode = present(groupNode) ? enumValue(groupNode, "thingGroupIndexingConfiguration",
                 "thingGroupIndexingMode", ON_OFF, true, errors) : null;
-        if (!errors.isEmpty()) {
-            throw invalid(errors.size() + (errors.size() == 1 ? " validation error" : " validation errors")
-                    + " detected: " + String.join("; ", errors));
-        }
+        rejectViolations(errors);
         if (thing != null) {
             thing = validateThing(thing, managedFields);
         }
@@ -124,16 +134,120 @@ public class IotFleetIndexingService {
 
     /** The schema of an enabled index. */
     public String describeIndex(String indexName, String region) {
-        IotIndexingConfiguration configuration = getIndexingConfiguration(region);
-        String schema = switch (indexName) {
-            case THINGS_INDEX -> thingsSchema(configuration.thing());
-            case THING_GROUPS_INDEX -> "OFF".equals(configuration.thingGroupIndexingMode()) ? null : "REGISTRY";
-            default -> throw invalid("Unrecognized indexName " + indexName);
-        };
+        String schema = schema(indexName, getIndexingConfiguration(region));
         if (schema == null) {
             throw new AwsException("ResourceNotFoundException", "Index " + indexName + " does not exist", 404);
         }
         return schema;
+    }
+
+    /**
+     * SearchIndex over the things of the caller's account and region, in thing name order. A
+     * request is checked in the order measured on AWS: member constraints, an empty index name, the
+     * query version, an unknown or disabled index, the query, then the page token.
+     */
+    public IotService.Page<ObjectNode> searchIndex(JsonNode request, String accountId, String region) {
+        String queryString = text(request.path("queryString"));
+        JsonNode maxResults = request.path("maxResults");
+        List<String> errors = new ArrayList<>();
+        if (queryString == null) {
+            errors.add("Value null at 'queryString' failed to satisfy constraint: Member must not be null");
+        } else if (queryString.isEmpty()) {
+            errors.add("Value '' at 'queryString' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1");
+        }
+        if (present(maxResults) && maxResults.asInt() < 1) {
+            errors.add("Value '" + maxResults.asText() + "' at 'maxResults' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 1");
+        }
+        rejectViolations(errors);
+        String indexName = request.path("indexName").asText(THINGS_INDEX);
+        if (indexName.isEmpty()) {
+            throw invalid("indexName cannot be empty.");
+        }
+        String queryVersion = text(request.path("queryVersion"));
+        if (queryVersion != null && !"2017-09-30".equals(queryVersion)) {
+            throw invalid("Invalid queryVersion. Expected one of: [2017-09-30]");
+        }
+        IotIndexingConfiguration configuration = getIndexingConfiguration(region);
+        if (schema(indexName, configuration) == null) {
+            throw new AwsException("ResourceNotFoundException", "Index " + indexName
+                    + " does not exist. Please enable index by calling UpdateIndexingConfiguration", 404);
+        }
+        if (THING_GROUPS_INDEX.equals(indexName)) {
+            // ponytail: thing group documents are not modeled; refusing beats an empty result.
+            throw invalid("Floci does not support searching AWS_ThingGroups");
+        }
+        ThingIndexing indexing = configuration.thing();
+        Predicate<JsonNode> query = IotFleetIndexQuery.parse(queryString, indexing);
+        boolean connectivityIndexed = "STATUS".equals(indexing.thingConnectivityIndexingMode());
+        Map<String, List<String>> thingGroupNames = thingGroupNames(region);
+        List<ObjectNode> matches = new ArrayList<>();
+        for (Thing thing : iotService.listThings(region)) {
+            String thingName = thing.getThingName();
+            ObjectNode document = document(thing, thingGroupNames.getOrDefault(thingName, List.of()));
+            if (connectivityIndexed) {
+                document.set("connectivity", mqttBrokerService.connectivity(accountId, region, thingName)
+                        .map(state -> connectivity(state, thingName))
+                        .orElseGet(() -> JsonNodeFactory.instance.objectNode()
+                                .put("clientId", thingName).put("connected", false).put("timestamp", 0)));
+            }
+            if (query.test(document)) {
+                matches.add(document);
+            }
+        }
+        return IotService.paginate(matches, present(maxResults) ? maxResults.asInt() : null,
+                text(request.path("nextToken")));
+    }
+
+    /** The thing groups each thing of the region is a direct member of, in group name order. */
+    private Map<String, List<String>> thingGroupNames(String region) {
+        Map<String, List<String>> groups = new HashMap<>();
+        for (IotThingGroup group : iotService.listThingGroups(region, null, null).items()) {
+            for (String thingName : iotService.listThingsInThingGroup(group.getThingGroupName(), region)) {
+                groups.computeIfAbsent(thingName, ignored -> new ArrayList<>()).add(group.getThingGroupName());
+            }
+        }
+        return groups;
+    }
+
+    /** A thing's index document; like AWS it leaves out a member the thing does not have. */
+    private static ObjectNode document(Thing thing, List<String> thingGroupNames) {
+        ObjectNode document = JsonNodeFactory.instance.objectNode();
+        document.put("thingName", thing.getThingName());
+        document.put("thingId", thing.getThingId());
+        if (thing.getThingTypeName() != null) {
+            document.put("thingTypeName", thing.getThingTypeName());
+        }
+        if (!thingGroupNames.isEmpty()) {
+            thingGroupNames.forEach(document.putArray("thingGroupNames")::add);
+        }
+        if (thing.getAttributes() != null && !thing.getAttributes().isEmpty()) {
+            ObjectNode attributes = document.putObject("attributes");
+            thing.getAttributes().forEach(attributes::put);
+        }
+        return document;
+    }
+
+    private static ObjectNode connectivity(Connectivity state, String clientId) {
+        ObjectNode connectivity = JsonNodeFactory.instance.objectNode()
+                .put("connected", state.connected())
+                .put("timestamp", state.timestamp());
+        if (state.disconnectReason() != null) {
+            connectivity.put("disconnectReason", state.disconnectReason());
+        }
+        return connectivity.put("keepAliveDuration", state.keepAliveDuration())
+                .put("cleanSession", state.cleanSession())
+                .put("clientId", clientId);
+    }
+
+    /** The schema of the named index, null while it is disabled. */
+    private static String schema(String indexName, IotIndexingConfiguration configuration) {
+        return switch (indexName) {
+            case THINGS_INDEX -> thingsSchema(configuration.thing());
+            case THING_GROUPS_INDEX -> "OFF".equals(configuration.thingGroupIndexingMode()) ? null : "REGISTRY";
+            default -> throw invalid("Unrecognized indexName " + indexName);
+        };
     }
 
     /** The managed fields AWS derives from the thing indexing modes; none while indexing is OFF. */
@@ -253,6 +367,13 @@ public class IotFleetIndexingService {
             errors.add(enumError(value, prefix + "." + member, allowed));
         }
         return value;
+    }
+
+    private static void rejectViolations(List<String> errors) {
+        if (!errors.isEmpty()) {
+            throw invalid(errors.size() + (errors.size() == 1 ? " validation error" : " validation errors")
+                    + " detected: " + String.join("; ", errors));
+        }
     }
 
     private static String enumError(String value, String path, List<String> allowed) {
