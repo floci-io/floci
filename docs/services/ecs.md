@@ -476,6 +476,28 @@ Known differences from AWS:
 - `SubmitTaskStateChange` / `SubmitContainerStateChange` remain ACK-only; Floci drives
   the task lifecycle itself rather than via agent submissions.
 
+#### Container Insights metrics
+
+A service on a cluster whose own `containerInsights` setting is `enabled` or `enhanced`, set
+through `CreateCluster`, `UpdateCluster`, `UpdateClusterSettings` or CloudFormation
+`ClusterSettings`, publishes its task counts to CloudWatch, one sample a minute, in both docker
+and mock mode.
+
+| Namespace | Metrics | Dimensions | Unit |
+|---|---|---|---|
+| `ECS/ContainerInsights` | `RunningTaskCount`, `PendingTaskCount`, `DesiredTaskCount` | `ClusterName`, `ServiceName` | `Count` |
+
+As on AWS, nothing is published while the service has no `RUNNING` task, so an alarm on
+`RunningTaskCount` sees missing data rather than a zero: set `TreatMissingData` to `breaching`
+to alarm on a stopped service.
+
+Known differences from AWS:
+
+- Only these three service task counts are published. CPU, memory, network and storage metrics,
+  the cluster and task dimension sets, and the performance log events are not.
+- The account default set with `PutAccountSettingDefault` does not turn metrics on for a cluster;
+  only the cluster's own setting does.
+
 #### Service discovery
 
 A service that declares `serviceRegistries` has each of its running tasks registered as a
