@@ -125,7 +125,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
                 r.getLogicalId(), TABLE_NAME_MAX_LENGTH, false);
         JsonNode ttlSpec = props != null ? engine.resolveNode(props.get("TimeToLiveSpecification")) : null;
         boolean ttlDeclared = ttlSpec != null && ttlSpec.isObject();
-        TimeToLive desiredTtl = ttlDeclared ? declaredTimeToLive(r, ttlSpec, engine) : TIME_TO_LIVE_OFF;
+        TimeToLive desiredTtl = ttlDeclared ? declaredTimeToLive(ttlSpec, engine) : TIME_TO_LIVE_OFF;
 
         List<KeySchemaElement> keySchema = new ArrayList<>();
         List<AttributeDefinition> attrDefs = new ArrayList<>();
@@ -316,25 +316,30 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    /** {@code Enabled} may arrive as the string {@code "true"}, so it goes through the engine. */
-    private static TimeToLive declaredTimeToLive(StackResource r, JsonNode spec,
-                                                 CloudFormationTemplateEngine engine) {
+    /**
+     * {@code Enabled} may arrive as the string {@code "true"}, so it goes through the engine. The
+     * failure carries the handler message and error code AWS CloudFormation reports.
+     */
+    private static TimeToLive declaredTimeToLive(JsonNode spec, CloudFormationTemplateEngine engine) {
         boolean enabled = spec.has("Enabled") && Boolean.parseBoolean(engine.resolve(spec.get("Enabled")));
         String attributeName = spec.has("AttributeName") ? engine.resolve(spec.get("AttributeName")) : null;
         if (enabled && (attributeName == null || attributeName.isBlank())) {
-            throw new AwsException("ValidationError", r.getResourceType() + " " + r.getLogicalId()
-                    + " TimeToLiveSpecification requires AttributeName when Enabled is true", 400);
+            throw new AwsException("InvalidRequest", "Invalid request provided: AttributeName property of"
+                    + " TimeToLiveSpecification is required when TTL status is enabled or when enabling TTL.", 400);
         }
         return new TimeToLive(enabled, attributeName);
     }
 
     /**
      * DynamoDB refuses to enable a second attribute while one is enabled, and CloudFormation
-     * renames one by disabling TTL in an update and enabling the new attribute in a later one.
+     * renames one by disabling TTL in an update and enabling the new attribute in a later one. The
+     * failure carries the handler message and error code AWS CloudFormation reports.
      */
     private static void requireTimeToLiveChangeAllowed(TimeToLive current, TimeToLive desired) {
         if (desired.enabled() && current.enabled() && !desired.attributeName().equals(current.attributeName())) {
-            throw new AwsException("ValidationException", "TimeToLive is active on a different AttributeName", 400);
+            throw new AwsException("InvalidRequest", "Invalid request provided: Cannot change time-to-live attribute"
+                    + " name. To update this property, you must first disable TTL then enable TTL with the new"
+                    + " attribute name.", 400);
         }
     }
 

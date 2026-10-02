@@ -431,8 +431,10 @@ class DynamoDbCfnProvisionerTest {
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
 
-        assertEquals("ValidationException", e.getErrorCode());
-        assertEquals("TimeToLive is active on a different AttributeName", e.getMessage());
+        assertEquals("InvalidRequest", e.getErrorCode());
+        assertEquals("Invalid request provided: Cannot change time-to-live attribute name. To update this property,"
+                + " you must first disable TTL then enable TTL with the new attribute name.", e.getMessage());
+        assertEquals(400, e.getHttpStatus());
         verify(dynamoDb, never()).updateTimeToLive(anyString(), any(), anyBoolean(), anyString());
         verify(dynamoDb, never()).tagResource(anyString(), any(), anyString());
         assertFalse(provisioner.retainsFailedUpdateState(r));
@@ -589,7 +591,10 @@ class DynamoDbCfnProvisionerTest {
 
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
 
-        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("InvalidRequest", e.getErrorCode());
+        assertEquals("Invalid request provided: AttributeName property of TimeToLiveSpecification is required"
+                + " when TTL status is enabled or when enabling TTL.", e.getMessage());
+        assertEquals(400, e.getHttpStatus());
         verifyNoInteractions(dynamoDb);
     }
 
