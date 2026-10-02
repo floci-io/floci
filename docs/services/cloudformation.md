@@ -198,6 +198,13 @@ committed update cleanup, which abandons an old schedule after three failed atte
 `UpdateReplacePolicy: Retain` keeps a name replacement's old schedule, but does not keep a group
 move's old address or an orphan created by a failed update.
 
+Schedule ownership uses a persisted internal incarnation identifier, not the reusable group and
+name or ARN. If another client removes a managed schedule and recreates that address, stack
+cleanup leaves the new schedule untouched. Snapshot restoration refuses to overwrite it and
+keeps the pending rollback for operator reconciliation. Older preview stack or schedule records
+without incarnation proof fail closed; their ownership must be reconciled before cleanup or
+restoration can finish.
+
 ## EventBridge Event Buses
 
 `AWS::Events::EventBus` creates a real custom EventBridge bus. `Name` is required, `Ref` returns

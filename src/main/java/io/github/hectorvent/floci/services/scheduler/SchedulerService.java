@@ -22,6 +22,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -117,7 +118,7 @@ public class SchedulerService {
                         "ScheduleGroup not found: " + effectiveName, 404));
     }
 
-    public void deleteScheduleGroup(String name, String region) {
+    public synchronized void deleteScheduleGroup(String name, String region) {
         validateName(name);
         if (DEFAULT_GROUP.equals(name)) {
             throw new AwsException("ValidationException",
@@ -182,7 +183,7 @@ public class SchedulerService {
 
     // ──────────────────────────── Schedules ────────────────────────────
 
-    public Schedule createSchedule(ScheduleRequest req, String region) {
+    public synchronized Schedule createSchedule(ScheduleRequest req, String region) {
         validateName(req.getName());
         validateScheduleRequest(req);
         String effectiveGroup = resolveAndValidateGroup(req.getGroupName());
@@ -212,6 +213,7 @@ public class SchedulerService {
         schedule.setCreationDate(now);
         schedule.setLastModificationDate(now);
         schedule.setAccountId(regionResolver.getAccountId());
+        schedule.setIncarnationId(UUID.randomUUID().toString());
 
         scheduleStore.put(key, schedule);
         LOG.infov("Created schedule: {0} in group {1}, region {2}", req.getName(), effectiveGroup, region);
@@ -226,7 +228,7 @@ public class SchedulerService {
                         "Schedule not found: " + name, 404));
     }
 
-    public Schedule updateSchedule(ScheduleRequest req, String region) {
+    public synchronized Schedule updateSchedule(ScheduleRequest req, String region) {
         validateName(req.getName());
         validateScheduleRequest(req);
         String effectiveGroup = resolveAndValidateGroup(req.getGroupName());
@@ -240,6 +242,7 @@ public class SchedulerService {
         updated.setName(req.getName());
         updated.setArn(existing.getArn());
         updated.setAccountId(existing.getAccountId());
+        updated.setIncarnationId(existing.getIncarnationId());
         updated.setGroupName(effectiveGroup);
         updated.setState(req.getState() != null ? req.getState() : "ENABLED");
         updated.setScheduleExpression(req.getScheduleExpression());
@@ -259,7 +262,53 @@ public class SchedulerService {
         return updated;
     }
 
-    public void deleteSchedule(String name, String groupName, String region) {
+    public synchronized Schedule updateSchedule(ScheduleRequest req, String region, String expectedIncarnation) {
+        Schedule existing = getSchedule(req.getName(), req.getGroupName(), region);
+        requireIncarnation(existing, expectedIncarnation);
+        return updateSchedule(req, region);
+    }
+
+    public synchronized boolean isScheduleIncarnationCurrent(String name, String groupName, String region,
+                                                             String expectedIncarnation) {
+        Schedule existing;
+        try {
+            existing = getSchedule(name, groupName, region);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                return false;
+            }
+            throw e;
+        }
+        if (expectedIncarnation == null || expectedIncarnation.isBlank()
+                || existing.getIncarnationId() == null || existing.getIncarnationId().isBlank()) {
+            throw new AwsException("ConflictException", "Schedule ownership cannot be verified: " + name, 409);
+        }
+        return expectedIncarnation.equals(existing.getIncarnationId());
+    }
+
+    public synchronized void deleteSchedule(String name, String groupName, String region,
+                                            String expectedIncarnation) {
+        Schedule existing = getSchedule(name, groupName, region);
+        if (expectedIncarnation == null || expectedIncarnation.isBlank()
+                || existing.getIncarnationId() == null || existing.getIncarnationId().isBlank()) {
+            throw new AwsException("ConflictException", "Schedule ownership cannot be verified: " + name, 409);
+        }
+        if (!expectedIncarnation.equals(existing.getIncarnationId())) {
+            LOG.debugv("Owned schedule incarnation already gone: {0} in group {1}", name, groupName);
+            return;
+        }
+        deleteSchedule(name, groupName, region);
+    }
+
+    private static void requireIncarnation(Schedule schedule, String expectedIncarnation) {
+        if (expectedIncarnation == null || expectedIncarnation.isBlank()
+                || !expectedIncarnation.equals(schedule.getIncarnationId())) {
+            throw new AwsException("ConflictException",
+                    "Schedule ownership cannot be verified: " + schedule.getName(), 409);
+        }
+    }
+
+    public synchronized void deleteSchedule(String name, String groupName, String region) {
         validateName(name);
         String effectiveGroup = resolveAndValidateGroup(groupName);
         String key = scheduleKey(region, effectiveGroup, name);
@@ -282,7 +331,7 @@ public class SchedulerService {
         return scheduleStore.scan(k -> k.startsWith("schedule:"));
     }
 
-    public void deleteScheduleForAccount(String accountId, String name, String groupName, String region) {
+    public synchronized void deleteScheduleForAccount(String accountId, String name, String groupName, String region) {
         String effectiveGroup = resolveAndValidateGroup(groupName);
         String key = scheduleKey(region, effectiveGroup, name);
         if (scheduleStore instanceof AccountAwareStorageBackend<Schedule> aware) {

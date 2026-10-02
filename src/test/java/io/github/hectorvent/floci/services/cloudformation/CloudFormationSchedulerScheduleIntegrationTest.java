@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -354,6 +355,207 @@ class CloudFormationSchedulerScheduleIntegrationTest {
                 .get("QueueArn").endsWith(":external-" + suffix));
         deleteGroup(group);
         sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+    }
+
+    @Test
+    void deletionRetryDoesNotDeleteAnotherStacksRecreatedSchedule() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-old-owner-" + suffix;
+        String otherStack = "cfn-schedule-new-owner-" + suffix;
+        String name = "recreated-" + suffix;
+        String group = "recreated-group-" + suffix;
+        createGroup(group);
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        cloudFormation(stack, "CreateStack", externalQueueTemplate("", queue), Map.of("Name", name));
+        outputs(stack, "CREATE_COMPLETE");
+        doThrow(new AwsException("InternalServerException", "orphan deletion unavailable", 500))
+                .when(scheduler).deleteSchedule(name, group, "us-east-1");
+
+        cloudFormation(stack, "UpdateStack", externalQueueTemplate(FAILURE, queue),
+                Map.of("Name", name, "Group", group));
+        outputs(stack, "UPDATE_ROLLBACK_FAILED");
+        Instant orphanCreation = scheduler.getSchedule(name, group, "us-east-1").getCreationDate();
+        cloudFormation(stack, "DeleteStack", null, Map.of());
+        outputs(stack, "DELETE_FAILED");
+        assertTrue(scheduleResource(stack).getAttributes().containsKey("__FlociReplacementCleanup"));
+
+        doCallRealMethod().when(scheduler).deleteSchedule(name, group, "us-east-1");
+        given().queryParam("groupName", group).delete("/schedules/" + name).then().statusCode(200);
+        cloudFormation(otherStack, "CreateStack", externalQueueTemplate("", queue),
+                Map.of("Name", name, "Group", group, "Payload", "foreign"));
+        outputs(otherStack, "CREATE_COMPLETE");
+        assertFalse(orphanCreation.equals(scheduler.getSchedule(name, group, "us-east-1").getCreationDate()));
+
+        try {
+            deleteStack(stack);
+            getSchedule(name, group).then().statusCode(200).body("Target.Input", equalTo("payload:foreign"));
+            assertEquals(name, outputs(otherStack, "CREATE_COMPLETE").get("ScheduleRef"));
+        } finally {
+            deleteStack(otherStack);
+            deleteGroup(group);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
+    }
+
+    @Test
+    void repeatedFailedReplacementTracksItsNewIncarnationAtTheSameAddress() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-reused-debt-" + suffix;
+        String originalName = "original-debt-" + suffix;
+        String replacementName = "replacement-debt-" + suffix;
+        String replacementAddress = "default/" + replacementName;
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        cloudFormation(stack, "CreateStack", externalQueueTemplate("", queue), Map.of("Name", originalName));
+        outputs(stack, "CREATE_COMPLETE");
+        String originalIncarnation = scheduler.getSchedule(originalName, "default", "us-east-1").getIncarnationId();
+        doThrow(new AwsException("InternalServerException", "replacement deletion unavailable", 500))
+                .when(scheduler).deleteSchedule(replacementName, "default", "us-east-1");
+
+        cloudFormation(stack, "UpdateStack", externalQueueTemplate(FAILURE, queue),
+                Map.of("Name", replacementName, "Payload", "first-failed"));
+        outputs(stack, "UPDATE_ROLLBACK_FAILED");
+        String retiredIncarnation = scheduler.getSchedule(replacementName, "default", "us-east-1").getIncarnationId();
+        assertEquals(retiredIncarnation,
+                scheduleResource(stack).getAttributes().get("__FlociSchedulerIncarnation:" + replacementAddress));
+        doCallRealMethod().when(scheduler).deleteSchedule(replacementName, "default", "us-east-1");
+        given().delete("/schedules/" + replacementName).then().statusCode(200);
+        doThrow(new AwsException("InternalServerException", "new incarnation deletion unavailable", 500))
+                .when(scheduler).deleteSchedule(replacementName, "default", "us-east-1");
+
+        // Change both resources so the engine actually retries the replacement and its failing dependent.
+        String repeatedFailure = FAILURE.replace("\"SecretString\":\"explicit\"",
+                "\"SecretString\":\"explicit-second\"");
+        cloudFormation(stack, "UpdateStack", externalQueueTemplate(repeatedFailure, queue),
+                Map.of("Name", replacementName, "Payload", "second-failed"));
+        outputs(stack, "UPDATE_ROLLBACK_FAILED");
+        String freshIncarnation = scheduler.getSchedule(replacementName, "default", "us-east-1").getIncarnationId();
+        assertFalse(retiredIncarnation.equals(freshIncarnation));
+        StackResource resource = scheduleResource(stack);
+        assertEquals(originalName, resource.getPhysicalId());
+        assertEquals(originalIncarnation,
+                resource.getAttributes().get("__FlociSchedulerIncarnation:default/" + originalName));
+        assertEquals(freshIncarnation,
+                resource.getAttributes().get("__FlociSchedulerIncarnation:" + replacementAddress));
+        JsonNode displaced = new ObjectMapper().readTree(resource.getAttributes().get("__FlociReplacementCleanup"))
+                .path("displaced");
+        assertEquals(1, displaced.size());
+        assertEquals(replacementAddress, displaced.get(0).path("physicalId").asText());
+        assertEquals(0, displaced.get(0).path("cleanupAttempts").asInt());
+        assertFalse(displaced.get(0).path("retainable").asBoolean());
+        getSchedule(originalName, "default").then().statusCode(200).body("Target.Input", equalTo("payload:first"));
+        getSchedule(replacementName, "default").then().statusCode(200)
+                .body("Target.Input", equalTo("payload:second-failed"));
+
+        doCallRealMethod().when(scheduler).deleteSchedule(replacementName, "default", "us-east-1");
+        deleteStack(stack);
+        getSchedule(originalName, "default").then().statusCode(404);
+        getSchedule(replacementName, "default").then().statusCode(404);
+        sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+    }
+
+    @Test
+    void stackDeletionDoesNotDeleteItsRecreatedCurrentSchedule() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-current-owner-" + suffix;
+        String otherStack = "cfn-schedule-current-foreign-" + suffix;
+        String name = "current-foreign-" + suffix;
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        cloudFormation(stack, "CreateStack", externalQueueTemplate("", queue), Map.of("Name", name));
+        outputs(stack, "CREATE_COMPLETE");
+        given().delete("/schedules/" + name).then().statusCode(200);
+        cloudFormation(otherStack, "CreateStack", externalQueueTemplate("", queue),
+                Map.of("Name", name, "Payload", "foreign"));
+        outputs(otherStack, "CREATE_COMPLETE");
+
+        try {
+            deleteStack(stack);
+            String body = getSchedule(name, "default").then().statusCode(200)
+                    .body("Target.Input", equalTo("payload:foreign")).extract().asString();
+            assertFalse(body.toLowerCase().contains("incarnation"));
+            String list = given().queryParam("ScheduleGroup", "default").queryParam("NamePrefix", name)
+                    .get("/schedules").then().statusCode(200).extract().asString();
+            assertFalse(list.toLowerCase().contains("incarnation"));
+        } finally {
+            deleteStack(otherStack);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
+    }
+
+    @Test
+    void pendingSnapshotCannotRestoreOverAnotherStacksRecreatedSchedule() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-snapshot-owner-" + suffix;
+        String otherStack = "cfn-schedule-snapshot-foreign-" + suffix;
+        String name = "snapshot-foreign-" + suffix;
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        prepareFailedRollback(stack, name, queue);
+        String snapshot = scheduleResource(stack).getAttributes().get("__FlociSchedulerUpdateSnapshot");
+        allowOriginalRestore(name);
+        given().delete("/schedules/" + name).then().statusCode(200);
+        cloudFormation(otherStack, "CreateStack", externalQueueTemplate("", queue),
+                Map.of("Name", name, "Expression", "rate(30 minutes)", "Payload", "foreign"));
+        outputs(otherStack, "CREATE_COMPLETE");
+
+        try {
+            cloudFormation(stack, "UpdateStack", externalQueueTemplate("", queue),
+                    Map.of("Name", name, "Expression", "rate(15 minutes)", "Payload", "new"));
+            outputs(stack, "UPDATE_ROLLBACK_FAILED");
+            getSchedule(name, "default").then().statusCode(200)
+                    .body("ScheduleExpression", equalTo("rate(30 minutes)"))
+                    .body("Target.Input", equalTo("payload:foreign"));
+            assertEquals(snapshot, scheduleResource(stack).getAttributes().get("__FlociSchedulerUpdateSnapshot"));
+            deleteStack(stack);
+            getSchedule(name, "default").then().statusCode(200).body("Target.Input", equalTo("payload:foreign"));
+        } finally {
+            deleteStack(otherStack);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
+    }
+
+    @Test
+    void pendingGroupMoveCannotDisableAnotherStacksRecreatedDestination() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-move-owner-" + suffix;
+        String otherStack = "cfn-schedule-move-foreign-" + suffix;
+        String name = "move-foreign-" + suffix;
+        String group = "move-foreign-group-" + suffix;
+        createGroup(group);
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        cloudFormation(stack, "CreateStack", externalQueueTemplate("", queue), Map.of("Name", name));
+        outputs(stack, "CREATE_COMPLETE");
+        doThrow(new AwsException("InternalServerException", "orphan deletion unavailable", 500))
+                .when(scheduler).deleteSchedule(name, group, "us-east-1");
+        doCallRealMethod().doThrow(new AwsException("InternalServerException", "original restore unavailable", 500))
+                .when(scheduler).updateSchedule(argThat(request -> name.equals(request.getName())
+                        && "default".equals(request.getGroupName())
+                        && "rate(5 minutes)".equals(request.getScheduleExpression())), eq("us-east-1"));
+        cloudFormation(stack, "UpdateStack", externalQueueTemplate(FAILURE, queue),
+                Map.of("Name", name, "Group", group));
+        outputs(stack, "UPDATE_ROLLBACK_FAILED");
+        assertTrue(scheduleResource(stack).getAttributes().containsKey("__FlociSchedulerUpdateSnapshot"));
+        doCallRealMethod().when(scheduler).deleteSchedule(name, group, "us-east-1");
+        allowOriginalRestore(name);
+        given().queryParam("groupName", group).delete("/schedules/" + name).then().statusCode(200);
+        String foreignTemplate = externalQueueTemplate("", queue)
+                .replace("\"State\":\"DISABLED\"", "\"State\":\"ENABLED\"");
+        cloudFormation(otherStack, "CreateStack", foreignTemplate,
+                Map.of("Name", name, "Group", group, "Payload", "foreign"));
+        outputs(otherStack, "CREATE_COMPLETE");
+
+        try {
+            cloudFormation(stack, "UpdateStack", externalQueueTemplate("", queue),
+                    Map.of("Name", name, "Expression", "rate(15 minutes)", "Payload", "new"));
+            outputs(stack, "UPDATE_ROLLBACK_FAILED");
+            getSchedule(name, group).then().statusCode(200)
+                    .body("State", equalTo("ENABLED")).body("Target.Input", equalTo("payload:foreign"));
+            assertTrue(scheduleResource(stack).getAttributes().containsKey("__FlociSchedulerUpdateSnapshot"));
+            deleteStack(stack);
+            getSchedule(name, group).then().statusCode(200).body("State", equalTo("ENABLED"));
+        } finally {
+            deleteStack(otherStack);
+            deleteGroup(group);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
     }
 
     private void prepareFailedRollback(String stack, String name, Queue queue) {
