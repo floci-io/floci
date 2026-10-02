@@ -392,12 +392,17 @@ AWS CDC envelope (`eventName`, `dynamodb.Keys`, `NewImage`/`OldImage`, `Approxim
 
 `ApproximateCreationDateTime` follows the destination's
 `EnableKinesisStreamingConfiguration.ApproximateCreationDateTimePrecision`: epoch milliseconds for
-`MILLISECOND` (the default) and epoch microseconds for `MICROSECOND`. The precision is returned by
-`DescribeKinesisStreamingDestination` and stamped on each record as
-`dynamodb.ApproximateCreationDateTimePrecision`.
+`MILLISECOND` (the default) and epoch microseconds for `MICROSECOND`. The precision is stamped on each
+record as `dynamodb.ApproximateCreationDateTimePrecision`, and reported by
+`DescribeKinesisStreamingDestination` as well as in the `EnableKinesisStreamingConfiguration` member of
+the `EnableKinesisStreamingDestination` and `DisableKinesisStreamingDestination` responses.
 
 Enabling a Kinesis streaming destination does not change the table's DynamoDB Streams setting.
 Kinesis forwarding works whether or not `StreamSpecification.StreamEnabled` is set.
+
+Both calls take effect at once, so `EnableKinesisStreamingDestination` answers `ACTIVE` and
+`DisableKinesisStreamingDestination` answers `DISABLED`. AWS reports the transitional `ENABLING` and
+`DISABLING` first, because it enables and disables the destination in the background.
 
 ### Delivery contract
 
