@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -809,8 +810,8 @@ class IotMqttBrokerServiceTest {
     private static KeyManager[] keyManagers(CertificateGenerator.GeneratedCertificate leaf) throws Exception {
         KeyStore keys = KeyStore.getInstance(KeyStore.getDefaultType());
         keys.load(null, null);
-        PrivateKey key = GENERATOR.parsePrivateKey(leaf.privateKeyPem());
-        keys.setKeyEntry("device", key, new char[0], new Certificate[] {GENERATOR.parseCertificate(leaf.certificatePem())});
+        PrivateKey key = Pem.parsePrivateKey(leaf.privateKeyPem());
+        keys.setKeyEntry("device", key, new char[0], new Certificate[] {Pem.parseCertificate(leaf.certificatePem())});
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         kmf.init(keys, new char[0]);
         return kmf.getKeyManagers();
@@ -823,7 +824,7 @@ class IotMqttBrokerServiceTest {
     }
 
     private static java.math.BigInteger serial(CertificateGenerator.GeneratedCertificate leaf) {
-        return GENERATOR.parseCertificate(leaf.certificatePem()).getSerialNumber();
+        return Pem.parseCertificate(leaf.certificatePem()).getSerialNumber();
     }
 
     private static boolean accepts(int port) {

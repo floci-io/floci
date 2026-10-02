@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -498,7 +499,7 @@ class TlsCertificateHostnameTest {
     private X509Certificate parseCertificate(Path certFile) throws Exception {
         String certPem = Files.readString(certFile);
         CertificateGenerator gen = new CertificateGenerator();
-        return gen.parseCertificate(certPem);
+        return Pem.parseCertificate(certPem);
     }
 
     private List<String> extractSansFromCertificate(X509Certificate cert) throws Exception {

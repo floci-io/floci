@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.quarkus.tls.CertificateUpdatedEvent;
 import io.quarkus.tls.TlsConfiguration;
@@ -98,7 +98,7 @@ abstract class TlsCertificateManagerFixture {
     }
 
     X509Certificate read(String name) throws Exception {
-        return new CertificateGenerator().parseCertificate(Files.readString(tlsDir.resolve(name)));
+        return Pem.parseCertificate(Files.readString(tlsDir.resolve(name)));
     }
 
     byte[] servedCertificate() throws Exception {
