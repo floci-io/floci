@@ -21,8 +21,6 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -36,7 +34,6 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
     private static final String NAME_MODE_ATTR = "FlociSchedulerNameMode";
     private static final String NAME_REPLACEMENT_ATTR = "__FlociSchedulerNameReplacement";
     private static final String SNAPSHOT_ATTR = "__FlociSchedulerUpdateSnapshot";
-    private static final String INCARNATION_PREFIX = "__FlociSchedulerIncarnation:";
     private static final ObjectMapper MAPPER = JsonMapper.builder()
             .enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES)
             .addModule(new JavaTimeModule())
@@ -56,7 +53,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
-        validateOutstandingOwnership(resource);
+        readCleanup(resource);
         if (ctx.isUpdate() && resource.getAttributes().containsKey(SNAPSHOT_ATTR)) {
             try {
                 rollbackUpdate(resource);
@@ -92,32 +89,29 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         Schedule schedule;
         ObjectNode moveSnapshot = null;
         if (sameAddress) {
-            Schedule current = ownedSchedule(resource, name, group, ctx.region());
+            Schedule current = schedulerService.getSchedule(name, group, ctx.region());
             snapshot(resource, current, ctx.region(), null, null);
             try {
-                schedule = schedulerService.updateSchedule(request, ctx.region(), current.getIncarnationId());
+                schedule = schedulerService.updateSchedule(request, ctx.region());
             } catch (RuntimeException failure) {
                 restoreAfterFailure(resource, failure);
                 throw failure;
             }
         } else if (groupMove) {
-            Schedule current = ownedSchedule(resource, name, priorGroup, ctx.region());
+            Schedule current = schedulerService.getSchedule(name, priorGroup, ctx.region());
             moveSnapshot = snapshot(resource, current, ctx.region(), name, group);
             ScheduleRequest paused = requestFrom(current);
             paused.setState("DISABLED");
             try {
                 // Keep a moving schedule from firing at both addresses while the stack update
                 // waits for its other resources. The original is restored if creation fails.
-                schedulerService.updateSchedule(paused, ctx.region(), current.getIncarnationId());
+                schedulerService.updateSchedule(paused, ctx.region());
                 schedule = schedulerService.createSchedule(request, ctx.region());
             } catch (RuntimeException failure) {
                 restoreAfterFailure(resource, failure);
                 throw failure;
             }
         } else {
-            if (ctx.isUpdate()) {
-                ownedSchedule(resource, ctx.priorPhysicalId(), priorGroup, ctx.region());
-            }
             schedule = schedulerService.createSchedule(request, ctx.region());
         }
         if (!sameAddress) {
@@ -127,8 +121,6 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         resource.getAttributes().put("Arn", schedule.getArn());
         resource.getAttributes().put(GROUP_ATTR, schedule.getGroupName());
         resource.getAttributes().put(NAME_MODE_ATTR, named ? "explicit" : "generated");
-        resource.getAttributes().put(INCARNATION_PREFIX + address(schedule.getGroupName(), schedule.getName()),
-                schedule.getIncarnationId());
         resource.getAttributes().put(NAME_REPLACEMENT_ATTR,
                 Boolean.toString(ctx.isUpdate() && !ctx.priorPhysicalId().equals(name)));
 
@@ -138,21 +130,9 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
                 ctx.stackName(), ctx.isUpdate() ? address(priorGroup, ctx.priorPhysicalId()) : null, ctx.progress());
         ReplacementCleanup.record(cleanupResource(resource), cleanupContext, attributesBefore);
         if (moveSnapshot != null) {
-            moveSnapshot.put("destinationOwned", true);
+            moveSnapshot.put("destinationCreated", true);
             resource.getAttributes().put(SNAPSHOT_ATTR, moveSnapshot.toString());
         }
-        pruneOwnership(resource);
-    }
-
-    private Schedule ownedSchedule(StackResource resource, String name, String group, String region) {
-        Schedule schedule = schedulerService.getSchedule(name, group, region);
-        String expected = resource.getAttributes().get(INCARNATION_PREFIX + address(group, name));
-        if (expected == null || expected.isBlank()
-                || schedule.getIncarnationId() == null || schedule.getIncarnationId().isBlank()
-                || !expected.equals(schedule.getIncarnationId())) {
-            throw new IllegalStateException("Schedule ownership cannot be verified: " + address(group, name));
-        }
-        return schedule;
     }
 
     private static ObjectNode snapshot(StackResource resource, Schedule current, String region,
@@ -162,7 +142,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         if (destinationName != null) {
             snapshot.put("destinationName", destinationName);
             snapshot.put("destinationGroup", destinationGroup);
-            snapshot.put("destinationOwned", false);
+            snapshot.put("destinationCreated", false);
         }
         resource.getAttributes().put(SNAPSHOT_ATTR, snapshot.toString());
         return snapshot;
@@ -262,24 +242,22 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void delete(StackResource resource, String region) {
-        deleteAddress(resource, address(resource.getAttributes().getOrDefault(GROUP_ATTR, "default"),
+        deleteAddress(address(resource.getAttributes().getOrDefault(GROUP_ATTR, "default"),
                 resource.getPhysicalId()), region);
         UpdateCleanupResult result = ReplacementCleanup.completeForDelete(cleanupResource(resource),
-                (type, id, cleanupRegion) -> deleteAddress(resource, id, cleanupRegion));
+                (type, id, cleanupRegion) -> deleteAddress(id, cleanupRegion));
         if (result.applicable() && !result.complete()) {
             throw new IllegalStateException(result.failureReason());
         }
         resource.getAttributes().remove(SNAPSHOT_ATTR);
-        pruneOwnership(resource);
     }
 
-    private void deleteAddress(StackResource resource, String physicalId, String region) {
+    private void deleteAddress(String physicalId, String region) {
         int separator = physicalId.indexOf('/');
         String group = physicalId.substring(0, separator);
         String name = physicalId.substring(separator + 1);
         CfnDeletes.safeDelete("Scheduler schedule", physicalId,
-                () -> schedulerService.deleteSchedule(name, group, region,
-                        resource.getAttributes().get(INCARNATION_PREFIX + physicalId)), "ResourceNotFoundException");
+                () -> schedulerService.deleteSchedule(name, group, region), "ResourceNotFoundException");
     }
 
     private static String address(String group, String name) {
@@ -319,19 +297,17 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         }
         resource.getAttributes().remove(SNAPSHOT_ATTR);
         UpdateCleanupResult result = ReplacementCleanup.complete(cleanupResource(resource),
-                (type, id, region) -> deleteAddress(resource, id, region));
+                (type, id, region) -> deleteAddress(id, region));
         if (!result.applicable() || result.complete()) {
             resource.getAttributes().remove(NAME_REPLACEMENT_ATTR);
         }
-        pruneOwnership(resource);
         return result;
     }
 
     @Override
     public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
         UpdateCleanupResult result = ReplacementCleanup.completeForDelete(cleanupResource(resource),
-                (type, id, region) -> deleteAddress(resource, id, region));
-        pruneOwnership(resource);
+                (type, id, region) -> deleteAddress(id, region));
         return result;
     }
 
@@ -341,7 +317,6 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         if (!ReplacementCleanup.hasReplacement(resource)) {
             resource.getAttributes().remove(NAME_REPLACEMENT_ATTR);
         }
-        pruneOwnership(resource);
     }
 
     @Override
@@ -349,15 +324,11 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         resource.getAttributes().remove(SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
         resource.getAttributes().remove(NAME_REPLACEMENT_ATTR);
-        pruneOwnership(resource);
     }
 
     @Override
     public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
-        ObjectNode source = validateOutstandingOwnership(attempted);
-        validateOutstandingOwnership(previous);
-        Map<String, String> transferred = new HashMap<>();
-        Set<String> retired = new HashSet<>();
+        ObjectNode source = readCleanup(attempted);
         if (source != null) {
             String currentAddress = cleanupResource(previous).getPhysicalId();
             for (JsonNode entry : source.path("displaced")) {
@@ -365,42 +336,12 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
                 if (physicalId.equals(currentAddress)) {
                     continue;
                 }
-                String key = INCARNATION_PREFIX + physicalId;
-                String value = attempted.getAttributes().get(key);
-                if (value == null) {
-                    continue;
-                }
-                String existing = previous.getAttributes().get(key);
-                if (existing != null && !existing.equals(value)) {
-                    int separator = physicalId.indexOf('/');
-                    String region = entry.path("region").asText(source.path("region").asText(null));
-                    if (schedulerService.isScheduleIncarnationCurrent(physicalId.substring(separator + 1),
-                            physicalId.substring(0, separator), region, existing)) {
-                        throw new IllegalStateException("Conflicting schedule ownership tracking: " + key);
-                    }
-                    retired.add(physicalId);
-                }
-                transferred.put(key, value);
+                // The attempted update can recreate an address whose earlier cleanup was exhausted.
+                // Preserve that attempt's current retry record when the engine restores the old resource.
+                retireDisplaced(previous, physicalId);
             }
         }
-        retired.forEach(physicalId -> retireDisplaced(previous, physicalId));
-        previous.getAttributes().putAll(transferred);
         ReplacementCleanup.mergeDisplaced(cleanupResource(previous), cleanupResource(attempted));
-        pruneOwnership(previous);
-    }
-
-    private static ObjectNode validateOutstandingOwnership(StackResource resource) {
-        ObjectNode cleanup = readCleanup(resource);
-        if (cleanup != null) {
-            for (JsonNode entry : cleanup.path("displaced")) {
-                String physicalId = entry.path("physicalId").asText(null);
-                String proof = resource.getAttributes().get(INCARNATION_PREFIX + physicalId);
-                if (physicalId == null || proof == null || proof.isBlank()) {
-                    throw new IllegalStateException("Schedule cleanup ownership cannot be verified: " + physicalId);
-                }
-            }
-        }
-        return cleanup;
     }
 
     private static ObjectNode readCleanup(StackResource resource) {
@@ -411,11 +352,11 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         try {
             JsonNode node = MAPPER.readTree(raw);
             if (!node.isObject() || (node.has("displaced") && !node.path("displaced").isArray())) {
-                throw new IllegalStateException("Invalid schedule ownership tracking");
+                throw new IllegalStateException("Invalid schedule replacement cleanup");
             }
             return (ObjectNode) node;
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Could not read schedule ownership tracking", e);
+            throw new IllegalStateException("Could not read schedule replacement cleanup", e);
         }
     }
 
@@ -441,15 +382,15 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public boolean rollbackUpdate(StackResource resource) {
         JsonNode snapshot = readSnapshot(resource);
-        if (snapshot != null && snapshot.path("destinationOwned").asBoolean(false)) {
+        if (snapshot != null && snapshot.path("destinationCreated").asBoolean(false)) {
             // Disable the move's destination before restoring an enabled original, even if deleting
-            // the destination fails. The cleanup helper retains ownership of that disabled orphan.
-            pauseDestination(resource, snapshot);
+            // the destination fails. The cleanup helper retains that disabled orphan's address.
+            pauseDestination(snapshot);
         }
         StackResource cleanup = cleanupResource(resource);
         RuntimeException cleanupFailure = null;
         try {
-            ReplacementCleanup.rollback(cleanup, (type, id, region) -> deleteAddress(resource, id, region));
+            ReplacementCleanup.rollback(cleanup, (type, id, region) -> deleteAddress(id, region));
         } catch (RuntimeException failure) {
             cleanupFailure = failure;
         } finally {
@@ -459,9 +400,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         if (snapshot != null) {
             try {
                 ScheduleRequest request = MAPPER.treeToValue(snapshot.get("request"), ScheduleRequest.class);
-                schedulerService.updateSchedule(request, snapshot.path("region").asText(),
-                        resource.getAttributes().get(INCARNATION_PREFIX
-                                + address(request.getGroupName(), request.getName())));
+                schedulerService.updateSchedule(request, snapshot.path("region").asText());
                 resource.getAttributes().remove(SNAPSHOT_ATTR);
             } catch (JsonProcessingException | RuntimeException restoreFailure) {
                 if (cleanupFailure != null && cleanupFailure != restoreFailure) {
@@ -473,7 +412,6 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         if (cleanupFailure != null) {
             throw cleanupFailure;
         }
-        pruneOwnership(resource);
         return true;
     }
 
@@ -494,15 +432,14 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private void pauseDestination(StackResource resource, JsonNode snapshot) {
+    private void pauseDestination(JsonNode snapshot) {
         String name = snapshot.path("destinationName").asText();
         String group = snapshot.path("destinationGroup").asText();
         String region = snapshot.path("region").asText();
         try {
             ScheduleRequest request = requestFrom(schedulerService.getSchedule(name, group, region));
             request.setState("DISABLED");
-            schedulerService.updateSchedule(request, region,
-                    resource.getAttributes().get(INCARNATION_PREFIX + address(group, name)));
+            schedulerService.updateSchedule(request, region);
         } catch (AwsException e) {
             if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw e;
@@ -511,33 +448,4 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private static void pruneOwnership(StackResource resource) {
-        Set<String> managed = new HashSet<>();
-        managed.add(address(resource.getAttributes().getOrDefault(GROUP_ATTR, "default"), resource.getPhysicalId()));
-        String cleanup = resource.getAttributes().get(CfnRollback.REPLACEMENT_CLEANUP_ATTR);
-        try {
-            if (cleanup != null) {
-                JsonNode record = MAPPER.readTree(cleanup);
-                for (JsonNode entry : record.path("displaced")) {
-                    managed.add(entry.path("physicalId").asText());
-                }
-                if (record.has("priorPhysicalId")) {
-                    managed.add(record.path("priorPhysicalId").asText());
-                }
-            }
-            JsonNode snapshot = readSnapshot(resource);
-            if (snapshot != null) {
-                JsonNode request = snapshot.path("request");
-                managed.add(address(request.path("groupName").asText(), request.path("name").asText()));
-                if (snapshot.path("destinationOwned").asBoolean(false)) {
-                    managed.add(address(snapshot.path("destinationGroup").asText(),
-                            snapshot.path("destinationName").asText()));
-                }
-            }
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Could not read schedule ownership tracking", e);
-        }
-        resource.getAttributes().keySet().removeIf(key -> key.startsWith(INCARNATION_PREFIX)
-                && !managed.contains(key.substring(INCARNATION_PREFIX.length())));
-    }
 }

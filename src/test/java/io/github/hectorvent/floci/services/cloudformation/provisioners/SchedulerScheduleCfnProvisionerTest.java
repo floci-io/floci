@@ -20,17 +20,15 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertAll;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -57,12 +55,6 @@ class SchedulerScheduleCfnProvisionerTest {
             return result;
         });
         when(scheduler.updateSchedule(any(), eq(REGION))).thenAnswer(inv -> schedule(inv.getArgument(0)));
-        when(scheduler.updateSchedule(any(), eq(REGION), any())).thenAnswer(inv ->
-                scheduler.updateSchedule(inv.getArgument(0), inv.getArgument(1)));
-        doAnswer(inv -> {
-            scheduler.deleteSchedule(inv.getArgument(0), inv.getArgument(1), inv.getArgument(2));
-            return null;
-        }).when(scheduler).deleteSchedule(any(), any(), eq(REGION), any());
     }
 
     @Test
@@ -160,129 +152,87 @@ class SchedulerScheduleCfnProvisionerTest {
         assertTrue(resource.getAttributes().get("Arn").endsWith("/a/old"));
         verify(scheduler).deleteSchedule("new", "b", REGION);
         verify(scheduler, never()).deleteSchedule("old", "a", REGION);
-        assertFalse(resource.getAttributes().containsKey("__FlociSchedulerIncarnation:b/new"));
-        assertEquals("incarnation:a/old", resource.getAttributes().get("__FlociSchedulerIncarnation:a/old"));
+        assertEquals("a", resource.getAttributes().get("FlociSchedulerGroupName"));
+        assertFalse(resource.getAttributes().containsKey("__FlociReplacementCleanup"));
     }
 
     @Test
-    void nameReplacementRejectsMissingCurrentOwnershipBeforeCreating() throws Exception {
-        assertReplacementRejectsCurrentProof(null, "incarnation:a/old", "Delete");
+    void inPlaceUpdateUsesRecreatedScheduleAtItsAddressAndRollsBackTheObservedConfiguration() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("same", "a"), context(null));
+        Schedule recreated = schedule(request("same", "a", "rate(30 minutes)"));
+        recreated.setState("DISABLED");
+        when(scheduler.getSchedule("same", "a", REGION)).thenReturn(recreated);
+
+        provisioner.provision(resource, properties("same", "a"), context("same"));
+
+        verify(scheduler).updateSchedule(argThat(request -> "rate(5 minutes)".equals(request.getScheduleExpression())
+                && "same".equals(request.getName()) && "a".equals(request.getGroupName())), eq(REGION));
+        assertTrue(provisioner.rollbackUpdate(resource));
+        verify(scheduler).updateSchedule(argThat(request -> "rate(30 minutes)".equals(request.getScheduleExpression())
+                && "DISABLED".equals(request.getState())), eq(REGION));
+        assertEquals("same", resource.getPhysicalId());
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
     }
 
     @Test
-    void nameReplacementRejectsBlankCurrentOwnershipEvenUnderRetain() throws Exception {
-        assertReplacementRejectsCurrentProof(" ", " ", "Retain");
-    }
-
-    @Test
-    void nameReplacementRejectsAnotherIncarnationAtItsCurrentAddress() throws Exception {
-        assertReplacementRejectsCurrentProof("incarnation:a/old", "foreign-incarnation", "Delete");
-    }
-
-    @Test
-    void nameReplacementRejectsMissingBackingIncarnation() throws Exception {
-        assertReplacementRejectsCurrentProof("incarnation:a/old", null, "Delete");
-    }
-
-    @Test
-    void nameReplacementRejectsBlankBackingIncarnation() throws Exception {
-        assertReplacementRejectsCurrentProof("incarnation:a/old", " ", "Delete");
-    }
-
-    @Test
-    void nameReplacementRejectsMissingCurrentScheduleBeforeCreatingDestination() throws Exception {
+    void nameReplacementCreatesDestinationWhenTheOldAddressIsAlreadyGone() throws Exception {
         StackResource resource = resource();
         provisioner.provision(resource, properties("old", "a"), context(null));
-        Map<String, String> before = Map.copyOf(resource.getAttributes());
         doThrow(new AwsException("ResourceNotFoundException", "current schedule absent", 404))
-                .when(scheduler).getSchedule("old", "a", REGION);
-        ObjectNode desired = properties("new", "b");
+                .when(scheduler).deleteSchedule("old", "a", REGION);
 
-        assertThrows(AwsException.class, () -> provisioner.provision(resource, desired, context("old")));
+        provisioner.provision(resource, properties("new", "b"), context("old"));
 
-        assertEquals("old", resource.getPhysicalId());
-        assertEquals(before, resource.getAttributes());
-        verify(scheduler, never()).createSchedule(argThat(request -> "new".equals(request.getName())), eq(REGION));
-        verify(scheduler, never()).updateSchedule(any(), eq(REGION));
-        verify(scheduler, never()).deleteSchedule(any(), any(), eq(REGION));
+        assertEquals("new", resource.getPhysicalId());
+        assertTrue(provisioner.completeUpdate(resource).complete());
+        verify(scheduler).createSchedule(argThat(request -> "new".equals(request.getName())), eq(REGION));
+        verify(scheduler).deleteSchedule("old", "a", REGION);
+        verify(scheduler, never()).getSchedule("old", "a", REGION);
     }
 
     @Test
-    void removingExplicitNameRejectsLegacyCurrentOwnershipBeforeCreatingGeneratedSchedule() throws Exception {
-        StackResource resource = resource();
-        provisioner.provision(resource, properties("old", "a"), context(null));
-        resource.getAttributes().remove("__FlociSchedulerIncarnation:a/old");
-        Map<String, String> before = Map.copyOf(resource.getAttributes());
-        ObjectNode desired = properties(null, "a");
-
-        assertThrows(IllegalStateException.class, () -> provisioner.provision(resource, desired, context("old")));
-
-        assertEquals("old", resource.getPhysicalId());
-        assertEquals(before, resource.getAttributes());
-        verify(scheduler, times(1)).createSchedule(any(), eq(REGION));
-        verify(scheduler, never()).updateSchedule(any(), eq(REGION));
-        verify(scheduler, never()).deleteSchedule(any(), any(), eq(REGION));
-    }
-
-    private void assertReplacementRejectsCurrentProof(String proof, String actual, String policy) throws Exception {
-        StackResource resource = resource();
-        provisioner.provision(resource, properties("old", "a"), context(null));
-        resource.setUpdateReplacePolicy(policy);
-        if (proof == null) {
-            resource.getAttributes().remove("__FlociSchedulerIncarnation:a/old");
-        } else {
-            resource.getAttributes().put("__FlociSchedulerIncarnation:a/old", proof);
-        }
-        Schedule current = schedule(request("old", "a", "rate(5 minutes)"));
-        current.setIncarnationId(actual);
-        when(scheduler.getSchedule("old", "a", REGION)).thenReturn(current);
-        Map<String, String> before = Map.copyOf(resource.getAttributes());
-        ObjectNode desired = properties("new", "b");
-
-        assertThrows(IllegalStateException.class, () -> provisioner.provision(resource, desired, context("old")));
-
-        assertEquals("old", resource.getPhysicalId());
-        assertEquals(before, resource.getAttributes());
-        verify(scheduler, never()).createSchedule(argThat(request -> "new".equals(request.getName())), eq(REGION));
-        verify(scheduler, never()).updateSchedule(any(), eq(REGION));
-        verify(scheduler, never()).deleteSchedule(any(), any(), eq(REGION));
-    }
-
-    @Test
-    void committedRetainReplacementRetiresTheOldIncarnationProof() throws Exception {
+    void committedRetainReplacementKeepsTheOldAddressAndClearsCleanupTracking() throws Exception {
         StackResource resource = resource();
         provisioner.provision(resource, properties("old", "a"), context(null));
         resource.setUpdateReplacePolicy("Retain");
         provisioner.provision(resource, properties("new", "b"), context("old"));
-        assertTrue(resource.getAttributes().containsKey("__FlociSchedulerIncarnation:a/old"));
+        JsonNode cleanup = mapper.readTree(resource.getAttributes().get("__FlociReplacementCleanup"));
+        assertEquals("a/old", cleanup.path("priorPhysicalId").asText());
+        assertTrue(cleanup.path("displaced").get(0).path("retainable").asBoolean());
+        assertNull(provisioner.updateCleanupPhysicalId(resource));
 
         assertTrue(provisioner.completeUpdate(resource).complete());
         provisioner.clearUpdate(resource);
 
-        assertFalse(resource.getAttributes().containsKey("__FlociSchedulerIncarnation:a/old"));
-        assertEquals("incarnation:b/new", resource.getAttributes().get("__FlociSchedulerIncarnation:b/new"));
+        assertFalse(resource.getAttributes().containsKey("__FlociReplacementCleanup"));
+        assertEquals("new", resource.getPhysicalId());
+        assertEquals("b", resource.getAttributes().get("FlociSchedulerGroupName"));
         verify(scheduler, never()).deleteSchedule("old", "a", REGION);
     }
 
     @Test
-    void failedReplacementMergeKeepsTheOrphansIncarnationProof() throws Exception {
+    void failedReplacementMergeKeepsTheOrphansAddressForDeletionRetry() throws Exception {
         StackResource previous = resource();
         provisioner.provision(previous, properties("old", "a"), context(null));
         StackResource attempted = resource();
         attempted.setPhysicalId(previous.getPhysicalId());
         attempted.setAttributes(new HashMap<>(previous.getAttributes()));
         provisioner.provision(attempted, properties("new", "b"), context("old"));
-        doThrow(new AwsException("InternalServerException", "owned deletion unavailable", 500))
+        doThrow(new AwsException("InternalServerException", "replacement deletion unavailable", 500))
                 .when(scheduler).deleteSchedule("new", "b", REGION);
         assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(attempted));
 
         provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
 
-        assertEquals("incarnation:a/old", previous.getAttributes().get("__FlociSchedulerIncarnation:a/old"));
-        assertEquals("incarnation:b/new", previous.getAttributes().get("__FlociSchedulerIncarnation:b/new"));
+        assertEquals("old", previous.getPhysicalId());
         assertEquals("b/new", provisioner.updateCleanupPhysicalId(previous));
         assertFalse(provisioner.completeDeleteCleanup(previous).complete());
-        assertTrue(previous.getAttributes().containsKey("__FlociSchedulerIncarnation:b/new"));
+        assertEquals("b/new", provisioner.updateCleanupPhysicalId(previous));
+        doNothing().when(scheduler).deleteSchedule("new", "b", REGION);
+        assertTrue(provisioner.completeDeleteCleanup(previous).complete());
+        verify(scheduler, times(3)).deleteSchedule("new", "b", REGION);
+        verify(scheduler, never()).deleteSchedule("old", "a", REGION);
     }
 
     @Test
@@ -290,103 +240,100 @@ class SchedulerScheduleCfnProvisionerTest {
         StackResource previous = resource();
         provisioner.provision(previous, properties("current", "default"), context(null));
         ReplacementCleanup.recordOrphan(previous, "default/reused", previous.getResourceType(), REGION);
-        previous.getAttributes().put("__FlociSchedulerIncarnation:default/reused", "retired-incarnation");
         ObjectNode oldCleanup = (ObjectNode) mapper.readTree(previous.getAttributes().get("__FlociReplacementCleanup"));
         ((ObjectNode) oldCleanup.path("displaced").get(0)).put("cleanupAttempts", 3);
         previous.getAttributes().put("__FlociReplacementCleanup", oldCleanup.toString());
         StackResource attempted = resource();
         attempted.setPhysicalId(previous.getPhysicalId());
         attempted.setAttributes(new HashMap<>(previous.getAttributes()));
-        Schedule replacement = schedule(request("reused", "default", "rate(5 minutes)"));
-        when(scheduler.createSchedule(argThat(request -> "reused".equals(request.getName())), eq(REGION)))
-                .thenReturn(replacement);
-        when(scheduler.getSchedule("reused", "default", REGION)).thenReturn(replacement);
         provisioner.provision(attempted, properties("reused", "default"), context("current"));
-        doThrow(new AwsException("InternalServerException", "new incarnation delete unavailable", 500))
+        doThrow(new AwsException("InternalServerException", "replacement delete unavailable", 500))
                 .when(scheduler).deleteSchedule("reused", "default", REGION);
         assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(attempted));
 
         JsonNode newCleanup = mapper.readTree(attempted.getAttributes().get("__FlociReplacementCleanup"));
-        assertAll(
-                () -> assertEquals(0, newCleanup.path("displaced").get(0).path("cleanupAttempts").asInt()),
-                () -> assertDoesNotThrow(() -> provisioner.mergeFailedUpdateResourceTracking(previous, attempted)));
-        assertEquals(replacement.getIncarnationId(),
-                previous.getAttributes().get("__FlociSchedulerIncarnation:default/reused"));
+        assertEquals(0, newCleanup.path("displaced").get(0).path("cleanupAttempts").asInt());
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+        JsonNode merged = mapper.readTree(previous.getAttributes().get("__FlociReplacementCleanup"));
+        assertEquals(1, merged.path("displaced").size());
+        assertEquals("default/reused", merged.path("displaced").get(0).path("physicalId").asText());
+        assertEquals(0, merged.path("displaced").get(0).path("cleanupAttempts").asInt());
         doNothing().when(scheduler).deleteSchedule("reused", "default", REGION);
         assertTrue(provisioner.completeDeleteCleanup(previous).complete());
-        verify(scheduler, times(2)).deleteSchedule("reused", "default", REGION, replacement.getIncarnationId());
+        verify(scheduler, times(2)).deleteSchedule("reused", "default", REGION);
     }
 
     @Test
-    void conflictingLiveIncarnationDoesNotPartiallyChangeCleanupTracking() throws Exception {
+    void mergingCopiedCleanupDebtPreservesItsExhaustedAttemptCount() throws Exception {
         StackResource previous = resource();
         provisioner.provision(previous, properties("current", "default"), context(null));
-        ReplacementCleanup.recordOrphan(previous, "default/gone", previous.getResourceType(), REGION);
-        ReplacementCleanup.recordOrphan(previous, "default/live", previous.getResourceType(), REGION);
-        previous.getAttributes().put("__FlociSchedulerIncarnation:default/gone", "old-gone");
-        previous.getAttributes().put("__FlociSchedulerIncarnation:default/live", "old-live");
-        StackResource attempted = resource();
-        attempted.setPhysicalId(previous.getPhysicalId());
-        attempted.setAttributes(new HashMap<>(previous.getAttributes()));
-        attempted.getAttributes().put("__FlociSchedulerIncarnation:default/gone", "new-gone");
-        attempted.getAttributes().put("__FlociSchedulerIncarnation:default/live", "new-live");
-        when(scheduler.isScheduleIncarnationCurrent("live", "default", REGION, "old-live")).thenReturn(true);
-        Map<String, String> before = Map.copyOf(previous.getAttributes());
-
-        assertThrows(IllegalStateException.class, () ->
-                provisioner.mergeFailedUpdateResourceTracking(previous, attempted));
-
-        assertEquals(before, previous.getAttributes());
-        verify(scheduler, never()).deleteSchedule(any(), any(), eq(REGION), any());
-    }
-
-    @Test
-    void outstandingLegacyDebtBlocksProvisionBeforeRestoringOrCreatingAnything() throws Exception {
-        for (String proof : new String[] {null, " "}) {
-            StackResource resource = resource();
-            provisioner.provision(resource, properties("current", "default"), context(null));
-            ReplacementCleanup.recordOrphan(resource, "default/legacy", resource.getResourceType(), REGION);
-            ObjectNode cleanup = (ObjectNode) mapper.readTree(resource.getAttributes().get("__FlociReplacementCleanup"));
-            ((ObjectNode) cleanup.path("displaced").get(0)).put("cleanupAttempts", 3);
-            resource.getAttributes().put("__FlociReplacementCleanup", cleanup.toString());
-            if (proof != null) {
-                resource.getAttributes().put("__FlociSchedulerIncarnation:default/legacy", proof);
-            }
-            resource.getAttributes().put("__FlociSchedulerUpdateSnapshot", """
-                    {"region":"us-east-1","request":{"name":"current","groupName":"default",
-                    "scheduleExpression":"rate(5 minutes)"}}
-                    """);
-            Map<String, String> before = Map.copyOf(resource.getAttributes());
-            ObjectNode desired = properties("new", "default");
-
-            assertThrows(IllegalStateException.class, () -> provisioner.provision(resource, desired, context("current")));
-
-            assertEquals(before, resource.getAttributes());
-            assertEquals("current", resource.getPhysicalId());
-        }
-        verify(scheduler, never()).createSchedule(argThat(request -> "new".equals(request.getName())), eq(REGION));
-        verify(scheduler, never()).updateSchedule(any(), eq(REGION), any());
-        verify(scheduler, never()).deleteSchedule(any(), any(), eq(REGION), any());
-    }
-
-    @Test
-    void legacyDebtCannotBeReinterpretedWhenMergingAFreshIncarnation() throws Exception {
-        StackResource previous = resource();
-        provisioner.provision(previous, properties("current", "default"), context(null));
-        ReplacementCleanup.recordOrphan(previous, "default/reused", previous.getResourceType(), REGION);
+        ReplacementCleanup.recordOrphan(previous, "default/unrelated", previous.getResourceType(), REGION);
         ObjectNode cleanup = (ObjectNode) mapper.readTree(previous.getAttributes().get("__FlociReplacementCleanup"));
         ((ObjectNode) cleanup.path("displaced").get(0)).put("cleanupAttempts", 3);
         previous.getAttributes().put("__FlociReplacementCleanup", cleanup.toString());
         StackResource attempted = resource();
         attempted.setPhysicalId(previous.getPhysicalId());
         attempted.setAttributes(new HashMap<>(previous.getAttributes()));
-        attempted.getAttributes().put("__FlociSchedulerIncarnation:default/reused", "fresh-incarnation");
+
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+
+        JsonNode merged = mapper.readTree(previous.getAttributes().get("__FlociReplacementCleanup"));
+        assertEquals(1, merged.path("displaced").size());
+        assertEquals("default/unrelated", merged.path("displaced").get(0).path("physicalId").asText());
+        assertEquals(3, merged.path("displaced").get(0).path("cleanupAttempts").asInt());
+        verify(scheduler, never()).deleteSchedule(any(), any(), eq(REGION));
+    }
+
+    @Test
+    void malformedCleanupRejectsReplacementBeforeCreatingADestination() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "default"), context(null));
+        resource.getAttributes().put("__FlociReplacementCleanup", "{\"displaced\":{}}");
+        Map<String, String> before = Map.copyOf(resource.getAttributes());
+        ObjectNode desired = properties("new", "default");
+
+        assertThrows(IllegalStateException.class, () -> provisioner.provision(resource, desired, context("current")));
+
+        assertEquals("current", resource.getPhysicalId());
+        assertEquals(before, resource.getAttributes());
+        verify(scheduler, never()).createSchedule(argThat(request -> "new".equals(request.getName())), eq(REGION));
+        verify(scheduler, never()).updateSchedule(any(), eq(REGION));
+        verify(scheduler, never()).deleteSchedule(any(), any(), eq(REGION));
+    }
+
+    @Test
+    void malformedCleanupRejectsInPlaceUpdateBeforeWritingTheSchedule() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "default"), context(null));
+        resource.getAttributes().put("__FlociReplacementCleanup", "{\"displaced\":{}}");
+        Map<String, String> before = Map.copyOf(resource.getAttributes());
+        ObjectNode desired = properties("current", "default").put("ScheduleExpression", "rate(10 minutes)");
+
+        assertThrows(IllegalStateException.class, () -> provisioner.provision(resource, desired, context("current")));
+
+        assertEquals("current", resource.getPhysicalId());
+        assertEquals(before, resource.getAttributes());
+        verify(scheduler, times(1)).createSchedule(any(), eq(REGION));
+        verify(scheduler, never()).updateSchedule(any(), eq(REGION));
+        verify(scheduler, never()).deleteSchedule(any(), any(), eq(REGION));
+    }
+
+    @Test
+    void malformedCleanupDoesNotPartiallyChangeThePreviousResourceOnMerge() throws Exception {
+        StackResource previous = resource();
+        provisioner.provision(previous, properties("current", "default"), context(null));
+        ReplacementCleanup.recordOrphan(previous, "default/orphan", previous.getResourceType(), REGION);
+        StackResource attempted = resource();
+        attempted.setPhysicalId(previous.getPhysicalId());
+        attempted.setAttributes(new HashMap<>(previous.getAttributes()));
+        attempted.getAttributes().put("__FlociReplacementCleanup", "{\"displaced\":{}}");
         Map<String, String> before = Map.copyOf(previous.getAttributes());
 
         assertThrows(IllegalStateException.class, () ->
                 provisioner.mergeFailedUpdateResourceTracking(previous, attempted));
 
         assertEquals(before, previous.getAttributes());
+        verify(scheduler, never()).deleteSchedule(any(), any(), eq(REGION));
     }
 
     @Test
@@ -882,7 +829,6 @@ class SchedulerScheduleCfnProvisionerTest {
         Schedule schedule = new Schedule();
         schedule.setName(request.getName());
         schedule.setGroupName(request.getGroupName());
-        schedule.setIncarnationId("incarnation:" + request.getGroupName() + "/" + request.getName());
         schedule.setArn("arn:aws:scheduler:us-east-1:000000000000:schedule/"
                 + request.getGroupName() + "/" + request.getName());
         schedule.setScheduleExpression(request.getScheduleExpression());

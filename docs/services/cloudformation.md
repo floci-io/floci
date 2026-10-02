@@ -202,13 +202,10 @@ committed update cleanup, which abandons an old schedule after three failed atte
 `UpdateReplacePolicy: Retain` keeps a name replacement's old schedule, but does not keep a group
 move's old address or an orphan created by a failed update.
 
-Schedule ownership uses a persisted internal incarnation identifier, not the reusable group and
-name or ARN. If another client removes a managed schedule and recreates that address, stack
-cleanup leaves the new schedule untouched. Snapshot restoration refuses to overwrite it and
-keeps the pending rollback for operator reconciliation. Older preview stack or schedule records
-without incarnation proof fail closed; their ownership must be reconciled before cleanup or
-restoration can finish. A name replacement, including removal of an explicit name, verifies
-the current schedule's ownership before creating its destination, even under `UpdateReplacePolicy: Retain`.
+Schedules are addressed by group and name, as in the Scheduler API. If another client removes a
+managed schedule and recreates the same address, an in-place stack update applies the template to
+the current schedule there. Stack deletion and replacement cleanup delete the current schedule
+at a tracked address, and rollback restores its saved configuration at that address.
 
 ## EventBridge Event Buses
 

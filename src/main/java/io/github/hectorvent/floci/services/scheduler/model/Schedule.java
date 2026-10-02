@@ -11,7 +11,6 @@ public class Schedule {
     private String arn;
     private String groupName;
     private String accountId;
-    private String incarnationId;
     private String state;
     private String scheduleExpression;
     private String scheduleExpressionTimezone;
@@ -32,9 +31,6 @@ public class Schedule {
 
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
-
-    public String getIncarnationId() { return incarnationId; }
-    public void setIncarnationId(String incarnationId) { this.incarnationId = incarnationId; }
 
     public String getArn() { return arn; }
     public void setArn(String arn) { this.arn = arn; }
