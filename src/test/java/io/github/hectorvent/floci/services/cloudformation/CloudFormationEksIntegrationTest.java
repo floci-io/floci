@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 
 /**
  * End-to-end check that CloudFormation provisions EKS resources for real (into EksService) rather
@@ -32,7 +33,8 @@ class CloudFormationEksIntegrationTest {
                       "Properties": {
                         "Name": "%s",
                         "Version": "1.29",
-                        "RoleArn": "arn:aws:iam::000000000000:role/eks-cluster-role"
+                        "RoleArn": "arn:aws:iam::000000000000:role/eks-cluster-role",
+                        "UpgradePolicy": {"SupportType": "STANDARD"}
                       }
                     },
                     "Nodes": {
@@ -83,7 +85,8 @@ class CloudFormationEksIntegrationTest {
             .get("/clusters/" + clusterName)
         .then()
             .statusCode(200)
-            .body(containsString(clusterName));
+            .body(containsString(clusterName))
+            .body("cluster.upgradePolicy.supportType", equalTo("STANDARD"));
 
         // The nodegroup was created under it (ClusterName resolved from Ref(Cluster)).
         given()

@@ -341,6 +341,11 @@ public class EksAddonService {
         }
     }
 
+    /** Keeps a cluster-level update (UpdateClusterConfig) next to add-on updates, so DescribeUpdate finds both. */
+    public void recordClusterUpdate(Cluster cluster, Update update) {
+        updatesStorage.put(prefix(cluster) + update.id(), new StoredUpdate(update, null));
+    }
+
     public Update describeUpdate(Cluster cluster, String updateId, String addonName) {
         requireActiveCluster(cluster);
         if (updateId == null || updateId.isBlank()) {

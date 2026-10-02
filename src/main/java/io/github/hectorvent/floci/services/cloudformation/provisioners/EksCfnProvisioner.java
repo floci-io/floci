@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
+import io.github.hectorvent.floci.services.eks.model.UpgradePolicy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -54,6 +55,10 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         request.setName(name);
         request.setVersion(ctx.resolveOptional(props, "Version"));
         request.setRoleArn(ctx.resolveOptional(props, "RoleArn"));
+        if (props != null && props.hasNonNull("UpgradePolicy")) {
+            JsonNode upgradePolicy = ctx.engine().resolveNode(props.get("UpgradePolicy"));
+            request.setUpgradePolicy(new UpgradePolicy(ctx.resolveOptional(upgradePolicy, "SupportType")));
+        }
 
         Cluster cluster = eksService.createCluster(request);
         r.setPhysicalId(cluster.getName());

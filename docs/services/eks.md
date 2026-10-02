@@ -13,6 +13,7 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 | `DescribeCluster` | Describe a cluster by name |
 | `ListClusters` | List all cluster names |
 | `DeleteCluster` | Delete a cluster |
+| `UpdateClusterConfig` | Update a cluster's upgrade policy, control-plane logging, or endpoint access |
 | `CreateAccessEntry` | Create STANDARD or EC2_LINUX access-entry metadata |
 | `DescribeAccessEntry` | Describe an access entry by IAM principal ARN |
 | `ListAccessEntries` | List principal ARNs with pagination |
@@ -26,7 +27,7 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 | `DescribeAddon` | Describe an addon by cluster and addon name |
 | `ListAddons` | List addon names installed in a cluster with pagination |
 | `UpdateAddon` | Update addon configuration, version, or service account role |
-| `DescribeUpdate` | Describe an update for an addon |
+| `DescribeUpdate` | Describe an update for a cluster or an addon |
 | `DeleteAddon` | Delete an addon from a cluster |
 | `DescribeAddonVersions` | Describe supported addon versions by Kubernetes version or addon name |
 | `CreateNodegroup` | Create node group metadata for a cluster |
@@ -127,6 +128,12 @@ The webhook URL uses the hostname containers reach Floci on. When Floci runs nat
 The webhook carries `failurePolicy: Ignore`, and Floci admits the pod unchanged on any internal error, so a webhook that cannot be registered or cannot be reached never prevents a pod from being created. Registration failures log a warning and leave the cluster running.
 
 The manifest is written into the cluster's k3s server manifests directory (`/var/lib/rancher/k3s/server/manifests`) before the container starts, so k3s applies it as the API server comes up.
+
+## Cluster configuration updates
+
+`UpdateClusterConfig` applies one kind of update per call, like AWS: the upgrade policy (`STANDARD` or `EXTENDED`; clusters default to `EXTENDED`, as on AWS), control-plane log types (only the named types change), or public/private endpoint access and public CIDRs (at least one endpoint stays enabled). The cluster must be `ACTIVE`. The update completes at once with status `Successful` and can be read back with `DescribeUpdate`.
+
+CloudFormation `AWS::EKS::Cluster` maps `UpgradePolicy.SupportType` on create.
 
 ## Addon management
 
@@ -996,7 +1003,8 @@ eks.deleteCluster(r -> r.name("my-cluster"));
 
 The following EKS features are not yet supported:
 
-- `UpdateClusterConfig` / `UpdateClusterVersion`
+- `UpdateClusterVersion`
+- `UpdateClusterConfig` for anything other than the upgrade policy, logging and endpoint access (subnets, security groups, access config, compute, zonal shift, …): refused with `InvalidParameterException`
 - `UpdateNodegroupConfig` / `UpdateNodegroupVersion`
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs

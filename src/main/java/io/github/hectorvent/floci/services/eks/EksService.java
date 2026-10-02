@@ -40,7 +40,13 @@ import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.Provider;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
+import io.github.hectorvent.floci.services.eks.model.Update;
+import io.github.hectorvent.floci.services.eks.model.UpdateClusterConfigRequest;
+import io.github.hectorvent.floci.services.eks.model.UpdateParam;
+import io.github.hectorvent.floci.services.eks.model.UpgradePolicy;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -57,6 +63,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -69,6 +76,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -80,6 +88,8 @@ public class EksService implements TagHandler, ResourceProvider {
 
     private record UserDataClaim(String userData, CompletableFuture<UserDataPipeline.ExecutionResult> future) {}
 
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final String DEFAULT_SUPPORT_TYPE = "EXTENDED";
     private static final List<String> ALL_LOG_TYPES = List.of(
             "api", "audit", "authenticator", "controllerManager", "scheduler"
     );
@@ -571,6 +581,7 @@ public class EksService implements TagHandler, ResourceProvider {
         cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig(), vpcCidr));
         cluster.setPodCidr(EksClusterManager.DEFAULT_POD_CIDR);
         cluster.setLogging(buildLogging(request.getLogging()));
+        cluster.setUpgradePolicy(upgradePolicy(request.getUpgradePolicy()));
         cluster.setEncryptionConfig(buildEncryptionConfig(request.getEncryptionConfig()));
         cluster.setStatus(ClusterStatus.CREATING);
         cluster.setPlatformVersion("eks.1");
@@ -636,7 +647,121 @@ public class EksService implements TagHandler, ResourceProvider {
         if (cluster.getLogging() == null) {
             cluster.setLogging(defaultLogging());
         }
+        if (cluster.getUpgradePolicy() == null) {
+            cluster.setUpgradePolicy(new UpgradePolicy(DEFAULT_SUPPORT_TYPE));
+        }
         return cluster;
+    }
+
+    /**
+     * Applies one UpdateClusterConfig change and returns its update, already Successful: Floci
+     * applies cluster configuration synchronously, like add-on updates.
+     */
+    public Update updateClusterConfig(String name, UpdateClusterConfigRequest request) {
+        Cluster cluster = describeCluster(name);
+        if (request == null) {
+            throw new AwsException("InvalidParameterException", "A cluster configuration to update is required", 400);
+        }
+        if (!request.getUnsupported().isEmpty()) {
+            throw new AwsException("InvalidParameterException", "Floci does not support updating "
+                    + String.join(", ", request.getUnsupported().keySet()) + " with UpdateClusterConfig yet", 400);
+        }
+        ResourcesVpcConfig vpc = request.getResourcesVpcConfig();
+        if (vpc != null && (vpc.getSubnetIds() != null || vpc.getSecurityGroupIds() != null)) {
+            throw new AwsException("InvalidParameterException",
+                    "Floci does not support changing a cluster's subnets or security groups yet", 400);
+        }
+        long kinds = Stream.of(vpc, request.getLogging(), request.getUpgradePolicy()).filter(Objects::nonNull).count();
+        if (kinds == 0) {
+            throw new AwsException("InvalidParameterException", "A cluster configuration to update is required", 400);
+        }
+        if (kinds > 1) {
+            throw new AwsException("InvalidParameterException", "Only one type of update can be allowed.", 400);
+        }
+        if (cluster.getStatus() != ClusterStatus.ACTIVE) {
+            throw new AwsException("ResourceInUseException",
+                    "Cluster " + name + " is " + cluster.getStatus() + "; it must be ACTIVE to update", 409);
+        }
+        String type;
+        List<UpdateParam> params = new ArrayList<>();
+        if (request.getUpgradePolicy() != null) {
+            if (request.getUpgradePolicy().supportType() == null) {
+                throw new AwsException("InvalidParameterException", "upgradePolicy.supportType is required", 400);
+            }
+            UpgradePolicy policy = upgradePolicy(request.getUpgradePolicy());
+            cluster.setUpgradePolicy(policy);
+            type = "UpgradePolicyUpdate";
+            params.add(new UpdateParam("UpgradePolicy", policy.supportType()));
+        } else if (request.getLogging() != null) {
+            List<LogSetup> merged = new ArrayList<>();
+            merged.add(new LogSetup(enabledLogTypes(cluster.getLogging()), true));
+            if (request.getLogging().getClusterLogging() != null) {
+                merged.addAll(request.getLogging().getClusterLogging());
+            }
+            Logging logging = buildLogging(new Logging(merged));
+            cluster.setLogging(logging);
+            type = "LoggingUpdate";
+            params.add(new UpdateParam("ClusterLogging", toJson(logging)));
+        } else {
+            ResourcesVpcConfig current = cluster.getResourcesVpcConfig();
+            ResourcesVpcConfig updated = new ResourcesVpcConfig();
+            updated.setSubnetIds(current.getSubnetIds());
+            updated.setSecurityGroupIds(current.getSecurityGroupIds());
+            updated.setClusterSecurityGroupId(current.getClusterSecurityGroupId());
+            updated.setVpcId(current.getVpcId());
+            updated.setEndpointPublicAccess(vpc.getEndpointPublicAccess() != null
+                    ? vpc.getEndpointPublicAccess() : current.getEndpointPublicAccess());
+            updated.setEndpointPrivateAccess(vpc.getEndpointPrivateAccess() != null
+                    ? vpc.getEndpointPrivateAccess() : current.getEndpointPrivateAccess());
+            updated.setPublicAccessCidrs(vpc.getPublicAccessCidrs() != null
+                    ? List.copyOf(vpc.getPublicAccessCidrs()) : current.getPublicAccessCidrs());
+            if (!Boolean.TRUE.equals(updated.getEndpointPublicAccess())
+                    && !Boolean.TRUE.equals(updated.getEndpointPrivateAccess())) {
+                throw new AwsException("InvalidParameterException",
+                        "Public and private endpoint access cannot both be disabled", 400);
+            }
+            cluster.setResourcesVpcConfig(updated);
+            type = "EndpointAccessUpdate";
+            params.add(new UpdateParam("EndpointPublicAccess", String.valueOf(updated.getEndpointPublicAccess())));
+            params.add(new UpdateParam("EndpointPrivateAccess", String.valueOf(updated.getEndpointPrivateAccess())));
+            if (vpc.getPublicAccessCidrs() != null) {
+                params.add(new UpdateParam("PublicAccessCidrs", toJson(updated.getPublicAccessCidrs())));
+            }
+        }
+        storage.put(cluster.getName(), cluster);
+        if ("LoggingUpdate".equals(type) && !config.services().eks().mock() && clusterManager != null) {
+            clusterManager.reattachClusterLogs(cluster);
+        }
+        return new Update(UUID.randomUUID().toString(), "Successful", type, params,
+                Instant.now().toEpochMilli() / 1000.0, List.of());
+    }
+
+    private static String toJson(Object value) {
+        try {
+            return JSON.writeValueAsString(value);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private static UpgradePolicy upgradePolicy(UpgradePolicy requested) {
+        if (requested == null || requested.supportType() == null) {
+            return new UpgradePolicy(DEFAULT_SUPPORT_TYPE);
+        }
+        if (!List.of("STANDARD", "EXTENDED").contains(requested.supportType())) {
+            throw new AwsException("InvalidParameterException",
+                    "upgradePolicy.supportType must be STANDARD or EXTENDED", 400);
+        }
+        return requested;
+    }
+
+    private static List<String> enabledLogTypes(Logging logging) {
+        if (logging == null || logging.getClusterLogging() == null) {
+            return List.of();
+        }
+        return logging.getClusterLogging().stream()
+                .filter(setup -> setup != null && Boolean.TRUE.equals(setup.getEnabled()) && setup.getTypes() != null)
+                .flatMap(setup -> setup.getTypes().stream()).toList();
     }
 
     public List<String> listClusters() {

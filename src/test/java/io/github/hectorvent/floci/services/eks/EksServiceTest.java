@@ -31,6 +31,10 @@ import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.FargateProfileStatus;
 import io.github.hectorvent.floci.services.eks.model.KubernetesNetworkConfig;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.UpdateParam;
+import io.github.hectorvent.floci.services.eks.model.Update;
+import io.github.hectorvent.floci.services.eks.model.UpdateClusterConfigRequest;
+import io.github.hectorvent.floci.services.eks.model.UpgradePolicy;
 import io.github.hectorvent.floci.services.eks.model.LogSetup;
 import io.github.hectorvent.floci.services.eks.model.Logging;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
@@ -62,6 +66,8 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -551,6 +557,154 @@ class EksServiceTest {
                         (StorageBackend<String, V>) backend, null, "000000000000");
             }
         };
+    }
+
+    @Test
+    void createClusterKeepsItsUpgradePolicyAndDefaultsToExtendedSupport() {
+        CreateClusterRequest standard = new CreateClusterRequest();
+        standard.setName("standard-support");
+        standard.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        standard.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+        eksService.createCluster(standard);
+        assertEquals(new UpgradePolicy("STANDARD"), eksService.describeCluster("standard-support").getUpgradePolicy());
+
+        createTestCluster("default-support");
+        assertEquals(new UpgradePolicy("EXTENDED"), eksService.describeCluster("default-support").getUpgradePolicy());
+
+        CreateClusterRequest invalid = new CreateClusterRequest();
+        invalid.setName("invalid-support");
+        invalid.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        invalid.setUpgradePolicy(new UpgradePolicy("LONG"));
+        assertEquals("InvalidParameterException",
+                assertThrows(AwsException.class, () -> eksService.createCluster(invalid)).getErrorCode());
+    }
+
+    @Test
+    void updateClusterConfigChangesTheUpgradePolicy() {
+        createTestCluster("upgrade-policy");
+        UpdateClusterConfigRequest request = new UpdateClusterConfigRequest();
+        request.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+        Update update = eksService.updateClusterConfig("upgrade-policy", request);
+        assertEquals("Successful", update.status());
+        assertEquals("UpgradePolicyUpdate", update.type());
+        assertEquals(List.of(new UpdateParam("UpgradePolicy", "STANDARD")), update.params());
+        assertEquals(new UpgradePolicy("STANDARD"), eksService.describeCluster("upgrade-policy").getUpgradePolicy());
+        request.setUpgradePolicy(new UpgradePolicy("standard"));
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                () -> eksService.updateClusterConfig("upgrade-policy", request)).getErrorCode());
+        request.setUpgradePolicy(new UpgradePolicy(null));
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                () -> eksService.updateClusterConfig("upgrade-policy", request)).getErrorCode());
+        assertEquals(new UpgradePolicy("STANDARD"), eksService.describeCluster("upgrade-policy").getUpgradePolicy());
+    }
+
+    @Test
+    void updateClusterConfigChangesOnlyTheLogTypesItNames() {
+        createTestCluster("logging");
+        UpdateClusterConfigRequest request = new UpdateClusterConfigRequest();
+        request.setLogging(new Logging(List.of(new LogSetup(List.of("api", "audit"), true))));
+        Update first = eksService.updateClusterConfig("logging", request);
+        assertEquals("LoggingUpdate", first.type());
+        assertEquals("ClusterLogging", first.params().getFirst().type());
+        assertTrue(EksClusterManager.hasLoggingEnabled(eksService.describeCluster("logging"), "api"));
+        assertTrue(EksClusterManager.hasLoggingEnabled(eksService.describeCluster("logging"), "audit"));
+        request.setLogging(new Logging(List.of(new LogSetup(List.of("api"), false))));
+        eksService.updateClusterConfig("logging", request);
+        Logging logging = eksService.describeCluster("logging").getLogging();
+        assertEquals(List.of("audit"), logging.getClusterLogging().stream()
+                .filter(setup -> Boolean.TRUE.equals(setup.getEnabled())).flatMap(setup -> setup.getTypes().stream())
+                .toList());
+    }
+
+    @Test
+    void updateClusterConfigChangesEndpointAccessButNeverClosesBoth() {
+        createTestCluster("endpoint");
+        UpdateClusterConfigRequest request = new UpdateClusterConfigRequest();
+        ResourcesVpcConfig privateOnly = new ResourcesVpcConfig();
+        privateOnly.setEndpointPrivateAccess(true);
+        privateOnly.setEndpointPublicAccess(false);
+        request.setResourcesVpcConfig(privateOnly);
+        Update update = eksService.updateClusterConfig("endpoint", request);
+        assertEquals("EndpointAccessUpdate", update.type());
+        assertEquals(List.of(new UpdateParam("EndpointPublicAccess", "false"),
+                new UpdateParam("EndpointPrivateAccess", "true")), update.params());
+        ResourcesVpcConfig stored = eksService.describeCluster("endpoint").getResourcesVpcConfig();
+        assertEquals(false, stored.getEndpointPublicAccess());
+        assertEquals(true, stored.getEndpointPrivateAccess());
+        assertEquals(List.of("0.0.0.0/0"), stored.getPublicAccessCidrs());
+
+        ResourcesVpcConfig closed = new ResourcesVpcConfig();
+        closed.setEndpointPrivateAccess(false);
+        request.setResourcesVpcConfig(closed);
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                () -> eksService.updateClusterConfig("endpoint", request)).getErrorCode());
+        assertEquals(true, eksService.describeCluster("endpoint").getResourcesVpcConfig().getEndpointPrivateAccess());
+    }
+
+    @Test
+    void updateClusterConfigRefusesWhatItCannotApply() {
+        createTestCluster("refused");
+        UpdateClusterConfigRequest two = new UpdateClusterConfigRequest();
+        two.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+        two.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+        assertEquals("Only one type of update can be allowed.", assertThrows(AwsException.class,
+                () -> eksService.updateClusterConfig("refused", two)).getMessage());
+
+        UpdateClusterConfigRequest unsupported = new UpdateClusterConfigRequest();
+        unsupported.setUnsupported("zonalShiftConfig", Map.of("enabled", true));
+        assertTrue(assertThrows(AwsException.class, () -> eksService.updateClusterConfig("refused", unsupported))
+                .getMessage().contains("zonalShiftConfig"));
+
+        UpdateClusterConfigRequest subnets = new UpdateClusterConfigRequest();
+        ResourcesVpcConfig vpc = new ResourcesVpcConfig();
+        vpc.setSubnetIds(List.of("subnet-1"));
+        subnets.setResourcesVpcConfig(vpc);
+        assertThrows(AwsException.class, () -> eksService.updateClusterConfig("refused", subnets));
+
+        assertThrows(AwsException.class, () -> eksService.updateClusterConfig("refused", new UpdateClusterConfigRequest()));
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> eksService.updateClusterConfig("absent", two)).getHttpStatus());
+        assertEquals(new UpgradePolicy("EXTENDED"), eksService.describeCluster("refused").getUpgradePolicy());
+
+        eksService.describeCluster("refused").setStatus(ClusterStatus.UPDATING);
+        UpdateClusterConfigRequest policy = new UpdateClusterConfigRequest();
+        policy.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+        assertEquals("ResourceInUseException", assertThrows(AwsException.class,
+                () -> eksService.updateClusterConfig("refused", policy)).getErrorCode());
+    }
+
+    @Test
+    void clusterConfigUpdateIsSavedAndARunningClusterFollowsTheNewLogTypes() {
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                spy(new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"));
+        Cluster running = new Cluster();
+        running.setName("running");
+        running.setStatus(ClusterStatus.ACTIVE);
+        clusterStore.putForAccount("000000000000", "running", running);
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksService real = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
+                new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        UpdateClusterConfigRequest policy = new UpdateClusterConfigRequest();
+        policy.setUpgradePolicy(new UpgradePolicy("STANDARD"));
+        real.updateClusterConfig("running", policy);
+        verify(clusterStore).put(eq("running"), argThat(cluster ->
+                new UpgradePolicy("STANDARD").equals(cluster.getUpgradePolicy())));
+        verify(clusterManager, never()).reattachClusterLogs(any());
+
+        UpdateClusterConfigRequest logging = new UpdateClusterConfigRequest();
+        logging.setLogging(new Logging(List.of(new LogSetup(List.of("audit"), true))));
+        real.updateClusterConfig("running", logging);
+        verify(clusterManager).reattachClusterLogs(argThat(cluster -> EksClusterManager.hasLoggingEnabled(cluster, "audit")));
+    }
+
+    @Test
+    void aClusterPersistedWithoutAnUpgradePolicyReadsAsExtendedSupport() {
+        createTestCluster("legacy");
+        eksService.describeCluster("legacy").setUpgradePolicy(null);
+        assertEquals(new UpgradePolicy("EXTENDED"), eksService.describeCluster("legacy").getUpgradePolicy());
     }
 
     @Test
