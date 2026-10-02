@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigatewayv2.proxy;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -104,7 +105,7 @@ class RequestParameterMapperTest {
 
     @Test
     void multipleParametersAppliedInOrder() {
-        var params = new java.util.LinkedHashMap<String, String>();
+        LinkedHashMap<String, String> params = new LinkedHashMap<>();
         params.put("overwrite:header.Host", "wallet.internal");
         params.put("append:header.x-user-id", "$context.authorizer.claims.userId");
         params.put("overwrite:path", "/public/$request.path.proxy");

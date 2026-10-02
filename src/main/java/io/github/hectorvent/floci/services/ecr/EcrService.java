@@ -33,6 +33,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -236,7 +237,7 @@ public class EcrService implements ResourceProvider {
             String defaultAccount = regionResolver.getAccountId();
             String defaultRegion = regionResolver.getDefaultRegion();
             String legacyKey = key(defaultRegion, defaultAccount, registryRepositoryName);
-            var legacyRepository = repoStore.get(legacyKey);
+            Optional<Repository> legacyRepository = repoStore.get(legacyKey);
             if (legacyRepository.isPresent()) {
                 Repository repo = legacyRepository.get();
                 repo.setRepositoryUri(registryManager.getRepositoryUri(
@@ -252,7 +253,7 @@ public class EcrService implements ResourceProvider {
             String region = namespaced ? parts[1] : defaultRegion;
             String repoName = namespaced ? parts[2] : registryRepositoryName;
             String key = key(region, account, repoName);
-            var existing = repoStore.get(key);
+            Optional<Repository> existing = repoStore.get(key);
             if (existing.isPresent()) {
                 Repository repo = existing.get();
                 repo.setRepositoryUri(registryManager.getRepositoryUri(account, region, repoName));

@@ -52,9 +52,9 @@ class KubernetesApiClientKubeconfigTest {
     @Test
     void insecureSkipTlsVerifyTrustsASelfSignedServerCert(@TempDir Path tempDir) throws Exception {
         startSelfSignedServer();
-        var kubeconfig = writeKubeconfig(tempDir, true);
+        Path kubeconfig = writeKubeconfig(tempDir, true);
 
-        var client = new KubernetesApiClient();
+        KubernetesApiClient client = new KubernetesApiClient();
         client.initializeFromKubeconfigForTest(kubeconfig);
 
         assertThat(client.getPod("default", "whatever")).isEmpty();
@@ -63,9 +63,9 @@ class KubernetesApiClientKubeconfigTest {
     @Test
     void withoutInsecureSkipTlsVerifyASelfSignedServerCertFailsTheHandshake(@TempDir Path tempDir) throws Exception {
         startSelfSignedServer();
-        var kubeconfig = writeKubeconfig(tempDir, false);
+        Path kubeconfig = writeKubeconfig(tempDir, false);
 
-        var client = new KubernetesApiClient();
+        KubernetesApiClient client = new KubernetesApiClient();
         client.initializeFromKubeconfigForTest(kubeconfig);
 
         assertThatThrownBy(() -> client.getPod("default", "whatever"))
@@ -73,18 +73,18 @@ class KubernetesApiClientKubeconfigTest {
     }
 
     private void startSelfSignedServer() throws Exception {
-        var generator = new CertificateGenerator();
-        var generated = generator.generateSelfSignedCertificate(
+        CertificateGenerator generator = new CertificateGenerator();
+        CertificateGenerator.GeneratedCertificate generated = generator.generateSelfSignedCertificate(
                 "127.0.0.1", List.of("127.0.0.1"), KeyAlgorithm.RSA_2048);
         X509Certificate cert = Pem.parseCertificate(generated.certificatePem());
         PrivateKey privateKey = Pem.parsePrivateKey(generated.privateKeyPem());
 
-        var keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
+        KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
         keyStore.load(null, null);
         keyStore.setKeyEntry("server", privateKey, new char[0], new Certificate[]{cert});
-        var keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         keyManagerFactory.init(keyStore, new char[0]);
-        var sslContext = SSLContext.getInstance("TLS");
+        SSLContext sslContext = SSLContext.getInstance("TLS");
         sslContext.init(keyManagerFactory.getKeyManagers(), null, null);
 
         server = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -97,8 +97,8 @@ class KubernetesApiClientKubeconfigTest {
     }
 
     private Path writeKubeconfig(Path tempDir, boolean insecureSkipTlsVerify) throws Exception {
-        var port = server.getAddress().getPort();
-        var config = """
+        int port = server.getAddress().getPort();
+        String config = """
                 apiVersion: v1
                 kind: Config
                 current-context: test
@@ -117,7 +117,7 @@ class KubernetesApiClientKubeconfigTest {
                     user:
                       token: test-token
                 """.formatted(port, insecureSkipTlsVerify);
-        var path = tempDir.resolve("config");
+        Path path = tempDir.resolve("config");
         Files.writeString(path, config);
         return path;
     }

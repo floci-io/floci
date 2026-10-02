@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import jakarta.inject.Inject;
 
@@ -39,7 +40,7 @@ class Ec2ModifyVpcEndpointTest {
                     + "\"Principal\":\"*\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
 
     private String ec2(String action, String... formParams) {
-        var req = given().formParam("Action", action).header("Authorization", AUTH_HEADER);
+        RequestSpecification req = given().formParam("Action", action).header("Authorization", AUTH_HEADER);
         for (int i = 0; i < formParams.length; i += 2) {
             req = req.formParam(formParams[i], formParams[i + 1]);
         }

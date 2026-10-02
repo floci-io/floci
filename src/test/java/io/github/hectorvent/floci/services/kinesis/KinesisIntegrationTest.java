@@ -121,7 +121,7 @@ class KinesisIntegrationTest {
             .statusCode(200)
             .extract().asString();
 
-        var matcher = CREATION_TIMESTAMP_PATTERN.matcher(responseBody);
+        Matcher matcher = CREATION_TIMESTAMP_PATTERN.matcher(responseBody);
         assertTrue(matcher.find(), "timestamp must be serialized as a plain JSON decimal: " + responseBody);
         String timestampLexeme = matcher.group(1);
         BigDecimal timestamp = new BigDecimal(timestampLexeme);

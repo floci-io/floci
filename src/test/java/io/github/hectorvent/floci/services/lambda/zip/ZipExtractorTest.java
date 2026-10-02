@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 import java.util.zip.CRC32;
 import java.util.zip.Deflater;
 import java.util.zip.ZipException;
@@ -446,7 +447,7 @@ class ZipExtractorTest {
     }
 
     private static void assertNoStagingArtefacts(Path codeStore) throws IOException {
-        try (var entries = Files.list(codeStore)) {
+        try (Stream<Path> entries = Files.list(codeStore)) {
             assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
                     "no staged archive or staging directory may survive extraction, successful or failed");
         }
@@ -536,7 +537,7 @@ class ZipExtractorTest {
         assertTrue(Files.isRegularFile(target.resolve("index.js")),
                 "a failed install must put the previous package back, not leave the function empty");
         assertEquals("v1", Files.readString(target.resolve("index.js")));
-        try (var entries = Files.list(codeStore)) {
+        try (Stream<Path> entries = Files.list(codeStore)) {
             assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
                     "the restored package must not leave a renamed copy behind");
         }
@@ -554,7 +555,7 @@ class ZipExtractorTest {
 
         assertEquals("v2", Files.readString(target.resolve("index.js")));
         assertFalse(Files.exists(target.resolve("removed.js")), "install must replace, not merge");
-        try (var entries = Files.list(codeStore)) {
+        try (Stream<Path> entries = Files.list(codeStore)) {
             assertEquals(List.of("fn"), entries.map(p -> p.getFileName().toString()).sorted().toList(),
                     "neither the staging tree nor the superseded package may survive");
         }
@@ -583,7 +584,7 @@ class ZipExtractorTest {
             assertEquals("v2", Files.readString(target.resolve("index.js")),
                     "the new package must be installed even though the old one could not be removed");
         } finally {
-            try (var stream = Files.list(codeStore)) {
+            try (Stream<Path> stream = Files.list(codeStore)) {
                 for (Path p : stream.toList()) {
                     Path stuck = p.resolve("locked");
                     if (Files.isDirectory(stuck)) {

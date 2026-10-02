@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -63,12 +64,32 @@ class SchedulerExpressionParserTest {
         assertEquals(3_600_000L, SchedulerExpressionParser.parseRateMillis("rate(1 hour)"));
         assertEquals(86_400_000L, SchedulerExpressionParser.parseRateMillis("rate(1 day)"));
         assertEquals(604_800_000L, SchedulerExpressionParser.parseRateMillis("rate(1 week)"));
+        assertEquals(1_209_600_000L, SchedulerExpressionParser.parseRateMillis("rate(2 weeks)"));
+        assertThrows(IllegalArgumentException.class,
+                () -> SchedulerExpressionParser.validate("rate(1 week)", null));
     }
 
     @Test
     void parseRateRejectsZero() {
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerExpressionParser.parseRateMillis("rate(0 minutes)"));
+    }
+
+    @Test
+    void validatesRateUnitAgreementWithoutChangingStoredExpressionParsing() {
+        for (String unit : List.of("minute", "hour", "day")) {
+            assertDoesNotThrow(() -> SchedulerExpressionParser.validate("rate(1 " + unit + ")", null));
+            assertDoesNotThrow(() -> SchedulerExpressionParser.validate("rate(5 " + unit + "s)", null));
+            assertThrows(IllegalArgumentException.class,
+                    () -> SchedulerExpressionParser.validate("rate(1 " + unit + "s)", null));
+            assertThrows(IllegalArgumentException.class,
+                    () -> SchedulerExpressionParser.validate("rate(5 " + unit + ")", null));
+        }
+        assertDoesNotThrow(() -> SchedulerExpressionParser.validate("RATE(1 HOUR)", null));
+        assertThrows(IllegalArgumentException.class,
+                () -> SchedulerExpressionParser.validate("RATE(1 HOURS)", null));
+        assertEquals(3_600_000L, SchedulerExpressionParser.parseRateMillis("rate(1 hours)"));
+        assertEquals(18_000_000L, SchedulerExpressionParser.parseRateMillis("rate(5 hour)"));
     }
 
     @Test

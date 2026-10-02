@@ -27,8 +27,8 @@ class KubernetesFlociAddressResolverTest {
 
     @BeforeEach
     void setUp() {
-        var services = mock(EmulatorConfig.ServicesConfig.class);
-        var lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
         kubernetes = mock(EmulatorConfig.LambdaServiceConfig.KubernetesExecutor.class);
         tls = mock(EmulatorConfig.TlsConfig.class);
         when(config.services()).thenReturn(services);

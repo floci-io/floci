@@ -50,7 +50,7 @@ public class FirehoseCfnProvisioner implements CfnResourceProvisioner {
             s3.setPrefix(blankToNull(ctx.engine().resolve(s3Node.path("Prefix"))));
             if (s3Node.has("BufferingHints")) {
                 JsonNode hints = s3Node.get("BufferingHints");
-                var bufferingHints = new DeliveryStreamDescription.BufferingHints();
+                DeliveryStreamDescription.BufferingHints bufferingHints = new DeliveryStreamDescription.BufferingHints();
                 bufferingHints.setSizeInMBs(parseIntProp(hints, "SizeInMBs", ctx, DEFAULT_BUFFER_SIZE_MB));
                 bufferingHints.setIntervalInSeconds(
                         parseIntProp(hints, "IntervalInSeconds", ctx, DEFAULT_BUFFER_INTERVAL_SECONDS));

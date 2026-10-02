@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -20,6 +21,7 @@ import java.util.function.Predicate;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -882,5 +884,25 @@ class SesReceiptRuleServiceTest {
                 () -> service.createReceiptFilter(filter("f101", "Block", "10.0.0.0/24"), REGION));
         assertEquals("LimitExceeded", e.getErrorCode());
         assertEquals("Too many filters", e.getMessage());
+    }
+
+    @Test
+    void listReceiptRuleSets_servesAHundredAPageAndResumesFromTheToken() {
+        for (int i = 0; i < 101; i++) {
+            service.createReceiptRuleSet("page-%03d".formatted(i), REGION);
+        }
+
+        PaginatedResult<ReceiptRuleSet> first = service.listReceiptRuleSets(REGION,
+                SesListPaging.V1_LIST_RECEIPT_RULE_SETS, null);
+        assertEquals(100, first.items().size());
+        PaginatedResult<ReceiptRuleSet> rest = service.listReceiptRuleSets(REGION,
+                SesListPaging.V1_LIST_RECEIPT_RULE_SETS, first.nextToken());
+        assertEquals(1, rest.items().size());
+        assertNull(rest.nextToken());
+
+        List<String> paged = new ArrayList<>();
+        first.items().forEach(ruleSet -> paged.add(ruleSet.getName()));
+        rest.items().forEach(ruleSet -> paged.add(ruleSet.getName()));
+        assertEquals(service.listReceiptRuleSets(REGION).stream().map(ReceiptRuleSet::getName).toList(), paged);
     }
 }

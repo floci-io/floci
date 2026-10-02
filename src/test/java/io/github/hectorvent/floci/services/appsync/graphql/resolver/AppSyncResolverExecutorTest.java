@@ -88,7 +88,7 @@ class AppSyncResolverExecutorTest {
         public JsEvaluation evaluate(String code, String handler, Map<String, Object> context) {
             calls.add(code + "#" + handler);
             contexts.add(context);
-            var script = scripts.get(code + "#" + handler);
+            BiFunction<String, Map<String, Object>, JsEvaluation> script = scripts.get(code + "#" + handler);
             if (script == null) {
                 // Nothing scripted stands for a module that does not export this handler, which is
                 // how a request-only function behaves.

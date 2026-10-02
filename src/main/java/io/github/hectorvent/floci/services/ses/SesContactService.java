@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.Contact;
@@ -149,6 +150,12 @@ public class SesContactService {
         // (probe-confirmed), unlike the CRUD "List with name: X doesn't exist."
         return new AwsException("NotFoundException",
                 "No ContactList present with name: " + name, 404);
+    }
+
+    public PaginatedResult<ContactList> listContactLists(String region, SesListPaging paging, Integer pageSize,
+                                                         String nextToken) {
+        return paging.page(region, listContactLists(region), ContactList::getContactListName, pageSize,
+                nextToken);
     }
 
     public List<ContactList> listContactLists(String region) {
@@ -351,14 +358,33 @@ public class SesContactService {
         return new ContactWithList(contact, list);
     }
 
+    public record ContactPage(PaginatedResult<Contact> contacts, ContactList list) {
+    }
+
+    /** SES reads the page size and the token before it looks the list up. */
+    public ContactPage listContacts(String listName, String region, SesListPaging paging, Integer pageSize,
+                                    String nextToken) {
+        ContactList list = contactListStore.get(contactListKey(region, listName)).orElse(null);
+        List<Contact> contacts = list == null ? List.of() : contactsOf(listName, region);
+        PaginatedResult<Contact> page = paging.page(region, contacts, Contact::getEmailAddress, pageSize,
+                nextToken);
+        if (list == null) {
+            throw contactListNotFound(listName);
+        }
+        return new ContactPage(page, list);
+    }
+
     public ContactsWithList listContacts(String listName, String region) {
         ContactList list = getContactList(listName, region);
+        return new ContactsWithList(contactsOf(listName, region), list);
+    }
+
+    private List<Contact> contactsOf(String listName, String region) {
         String prefix = "contact::" + region + "::" + listName + "::";
-        List<Contact> contacts = contactStore.scan(k -> k.startsWith(prefix)).stream()
+        return contactStore.scan(k -> k.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(Contact::getEmailAddress,
                         Comparator.nullsFirst(Comparator.naturalOrder())))
                 .toList();
-        return new ContactsWithList(contacts, list);
     }
 
     public Contact updateContact(String listName, String emailAddress, List<TopicPreference> topicPreferences,

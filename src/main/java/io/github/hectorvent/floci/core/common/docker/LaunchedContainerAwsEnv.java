@@ -120,17 +120,17 @@ public class LaunchedContainerAwsEnv {
     public List<String> sdkBaselineEnv(String region, Optional<String> awsConfigMountDir,
                                        String flociEndpoint, Optional<SessionCreds> injectedCredentials,
                                        String ownerAccountId) {
-        var env = new ArrayList<String>();
+        ArrayList<String> env = new ArrayList<>();
         env.add("AWS_DEFAULT_REGION=" + region);
         env.add("AWS_REGION=" + region);
         if (awsConfigMountDir.isPresent() && !awsConfigMountDir.get().isBlank()) {
             // ~/.aws is mounted, so don't inject credentials. Let the SDK discover them.
             // Set explicit file paths so discovery works regardless of container HOME.
-            var dir = awsConfigMountDir.get();
+            String dir = awsConfigMountDir.get();
             env.add("AWS_SHARED_CREDENTIALS_FILE=" + dir + "/credentials");
             env.add("AWS_CONFIG_FILE=" + dir + "/config");
         } else if (injectedCredentials.isPresent()) {
-            var credentials = injectedCredentials.get();
+            SessionCreds credentials = injectedCredentials.get();
             env.add("AWS_ACCESS_KEY_ID=" + credentials.accessKeyId());
             env.add("AWS_SECRET_ACCESS_KEY=" + credentials.secretAccessKey());
             env.add("AWS_SESSION_TOKEN=" + credentials.sessionToken());
@@ -138,9 +138,9 @@ public class LaunchedContainerAwsEnv {
             // The launched container is a distinct principal from the Floci server process, so
             // its identity comes from the workload's owning account when we know it; Floci's own
             // env vars are the fallback for launch paths that don't (ownerAccountId == null).
-            var ak = hostEnv.apply("AWS_ACCESS_KEY_ID");
-            var sk = hostEnv.apply("AWS_SECRET_ACCESS_KEY");
-            var st = hostEnv.apply("AWS_SESSION_TOKEN");
+            String ak = hostEnv.apply("AWS_ACCESS_KEY_ID");
+            String sk = hostEnv.apply("AWS_SECRET_ACCESS_KEY");
+            String st = hostEnv.apply("AWS_SESSION_TOKEN");
             boolean hasOwnerAccountId = ownerAccountId != null && ACCOUNT_ID_PATTERN.matcher(ownerAccountId).matches();
             if (!hasOwnerAccountId && (ak != null || sk != null || st != null)
                     && hostCredentialsWarned.compareAndSet(false, true)) {

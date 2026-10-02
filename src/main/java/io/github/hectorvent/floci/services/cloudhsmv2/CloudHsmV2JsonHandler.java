@@ -18,6 +18,7 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -568,9 +569,9 @@ public class CloudHsmV2JsonHandler {
             return null;
         }
         Map<String, String> map = new LinkedHashMap<>();
-        var fields = node.fields();
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
         while (fields.hasNext()) {
-            var entry = fields.next();
+            Map.Entry<String, JsonNode> entry = fields.next();
             map.put(entry.getKey(), entry.getValue().asText());
         }
         return map.isEmpty() ? null : map;

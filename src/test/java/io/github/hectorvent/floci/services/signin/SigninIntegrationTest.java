@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.signin;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
@@ -357,7 +358,7 @@ class SigninIntegrationTest {
         String location = authorize(verifier, state);
         String code = queryParams(URI.create(location).getRawQuery()).get("code");
 
-        var response = request()
+        Response response = request()
                 .contentType("application/json")
                 .body(Map.of(
                         "clientId", CLIENT_ID,
@@ -419,7 +420,7 @@ class SigninIntegrationTest {
                 .extract()
                 .path("refreshToken");
 
-        var firstRefresh = request()
+        Response firstRefresh = request()
                 .contentType("application/json")
                 .body(Map.of(
                         "clientId", CLIENT_ID,

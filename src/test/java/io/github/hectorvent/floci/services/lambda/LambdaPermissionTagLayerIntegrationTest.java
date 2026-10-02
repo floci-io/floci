@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
@@ -139,7 +140,7 @@ class LambdaPermissionTagLayerIntegrationTest {
         // Policy is a JSON string — parse it and verify statements
         ObjectMapper om = new ObjectMapper();
         String policyJson = om.readTree(response).get("Policy").asText();
-        var policy = om.readTree(policyJson);
+        JsonNode policy = om.readTree(policyJson);
         assert policy.get("Statement").size() == 2;
     }
 
@@ -177,7 +178,7 @@ class LambdaPermissionTagLayerIntegrationTest {
 
         ObjectMapper om = new ObjectMapper();
         String policyJson = om.readTree(response).get("Policy").asText();
-        var policy = om.readTree(policyJson);
+        JsonNode policy = om.readTree(policyJson);
         assert policy.get("Statement").size() == 1;
     }
 

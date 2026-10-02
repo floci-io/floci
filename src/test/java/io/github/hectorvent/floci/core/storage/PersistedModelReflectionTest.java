@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.GenericArrayType;
 import java.lang.reflect.Modifier;
@@ -132,7 +133,7 @@ class PersistedModelReflectionTest {
                     return true;
                 }
             }
-            for (var constructor : c.getDeclaredConstructors()) {
+            for (Constructor<?> constructor : c.getDeclaredConstructors()) {
                 for (Class<?> param : constructor.getParameterTypes()) {
                     if (param == StorageFactory.class) {
                         return true;

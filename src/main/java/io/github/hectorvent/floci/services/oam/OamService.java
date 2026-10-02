@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -301,14 +302,14 @@ public class OamService {
             return true;
         }
         List<String> allowed = new ArrayList<>();
-        var operators = condition.fields();
+        Iterator<Map.Entry<String, JsonNode>> operators = condition.fields();
         while (operators.hasNext()) {
             Map.Entry<String, JsonNode> operator = operators.next();
             JsonNode entries = operator.getValue();
             if (!entries.isObject()) {
                 return false;
             }
-            var conditions = entries.fields();
+            Iterator<Map.Entry<String, JsonNode>> conditions = entries.fields();
             while (conditions.hasNext()) {
                 Map.Entry<String, JsonNode> entry = conditions.next();
                 if (!"oam:ResourceTypes".equalsIgnoreCase(entry.getKey())) {

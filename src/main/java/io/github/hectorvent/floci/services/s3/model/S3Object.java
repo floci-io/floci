@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -163,9 +164,9 @@ public class S3Object {
 
     public static String computeETag(byte[] data) {
         try {
-            var md = java.security.MessageDigest.getInstance("MD5");
+            MessageDigest md = MessageDigest.getInstance("MD5");
             byte[] digest = md.digest(data);
-            var sb = new StringBuilder("\"");
+            StringBuilder sb = new StringBuilder("\"");
             for (byte b : digest) {
                 sb.append(String.format("%02x", b));
             }

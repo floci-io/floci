@@ -450,7 +450,7 @@ public class CloudFormationQueryHandler {
         String templateStage = params.getFirst("TemplateStage");
         try {
             String template = cfnService.getTemplate(stackName, templateStage, region);
-            var xml = new XmlBuilder()
+            XmlBuilder xml = new XmlBuilder()
                     .start("GetTemplateResponse", CF_NS)
                     .start("GetTemplateResult")
                     .elem("TemplateBody", template);
@@ -479,7 +479,7 @@ public class CloudFormationQueryHandler {
         try {
             TemplateSummary summary = cfnService.getTemplateSummary(stackName, templateBody, templateUrl, region);
 
-            var xml = new XmlBuilder()
+            XmlBuilder xml = new XmlBuilder()
                     .start("GetTemplateSummaryResponse", CF_NS)
                     .start("GetTemplateSummaryResult");
 
@@ -574,12 +574,12 @@ public class CloudFormationQueryHandler {
     // ── ListExports ─────────────────────────────────────────────────────────
 
     private Response listExports(MultivaluedMap<String, String> params, String region) {
-        var exportEntries = cfnService.listExports(region);
+        Map<String, CloudFormationService.ExportEntry> exportEntries = cfnService.listExports(region);
         XmlBuilder xml = new XmlBuilder()
                 .start("ListExportsResponse", CF_NS)
                 .start("ListExportsResult")
                 .start("Exports");
-        for (var entry : exportEntries.values()) {
+        for (CloudFormationService.ExportEntry entry : exportEntries.values()) {
             xml.start("member")
                .elem("ExportingStackId", entry.exportingStackId())
                .elem("Name", entry.name())

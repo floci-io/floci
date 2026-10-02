@@ -428,7 +428,7 @@ class CloudWatchLogsServiceTest {
         service.putLogEvents("/app/logs", "b-newest", List.of(Map.of("timestamp", 3000L, "message", "new")), REGION);
         service.putLogEvents("/app/logs", "c-middle", List.of(Map.of("timestamp", 2000L, "message", "mid")), REGION);
 
-        var result = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 1, null, REGION);
+        CloudWatchLogsService.DescribeLogStreamsResult result = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 1, null, REGION);
 
         assertEquals(1, result.logStreams().size());
         assertEquals("b-newest", result.logStreams().getFirst().getLogStreamName());
@@ -442,11 +442,11 @@ class CloudWatchLogsServiceTest {
         service.createLogStream("/app/logs", "a-active", REGION);
         service.putLogEvents("/app/logs", "a-active", List.of(Map.of("timestamp", 1000L, "message", "x")), REGION);
 
-        var descending = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 0, null, REGION);
+        CloudWatchLogsService.DescribeLogStreamsResult descending = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 0, null, REGION);
         assertEquals(List.of("a-active", "z-empty"),
                 descending.logStreams().stream().map(LogStream::getLogStreamName).toList());
 
-        var ascending = service.describeLogStreams("/app/logs", null, "LastEventTime", false, 0, null, REGION);
+        CloudWatchLogsService.DescribeLogStreamsResult ascending = service.describeLogStreams("/app/logs", null, "LastEventTime", false, 0, null, REGION);
         assertEquals(List.of("z-empty", "a-active"),
                 ascending.logStreams().stream().map(LogStream::getLogStreamName).toList());
     }
@@ -458,12 +458,12 @@ class CloudWatchLogsServiceTest {
         service.createLogStream("/app/logs", "stream-2", REGION);
         service.createLogStream("/app/logs", "stream-3", REGION);
 
-        var page1 = service.describeLogStreams("/app/logs", null, null, false, 2, null, REGION);
+        CloudWatchLogsService.DescribeLogStreamsResult page1 = service.describeLogStreams("/app/logs", null, null, false, 2, null, REGION);
         assertEquals(List.of("stream-1", "stream-2"),
                 page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
         assertNotNull(page1.nextToken());
 
-        var page2 = service.describeLogStreams("/app/logs", null, null, false, 2, page1.nextToken(), REGION);
+        CloudWatchLogsService.DescribeLogStreamsResult page2 = service.describeLogStreams("/app/logs", null, null, false, 2, page1.nextToken(), REGION);
         assertEquals(List.of("stream-3"),
                 page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
         assertNull(page2.nextToken());
@@ -507,13 +507,13 @@ class CloudWatchLogsServiceTest {
             service.createLogStream("/app/logs", "stream-" + i, REGION);
         }
 
-        var page1 = service.describeLogStreams("/app/logs", null, null, false, 2, null, REGION);
+        CloudWatchLogsService.DescribeLogStreamsResult page1 = service.describeLogStreams("/app/logs", null, null, false, 2, null, REGION);
         assertEquals(List.of("stream-1", "stream-2"),
                 page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
 
         service.deleteLogStream("/app/logs", "stream-1", REGION);
 
-        var page2 = service.describeLogStreams("/app/logs", null, null, false, 2, page1.nextToken(), REGION);
+        CloudWatchLogsService.DescribeLogStreamsResult page2 = service.describeLogStreams("/app/logs", null, null, false, 2, page1.nextToken(), REGION);
         assertEquals(List.of("stream-3", "stream-4"),
                 page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
         assertNull(page2.nextToken());
@@ -534,13 +534,13 @@ class CloudWatchLogsServiceTest {
         service.putLogEvents("/app/logs", "c", List.of(Map.of("timestamp", 3000L, "message", "x")), REGION);
         service.putLogEvents("/app/logs", "d", List.of(Map.of("timestamp", 4000L, "message", "x")), REGION);
 
-        var page1 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, null, REGION);
+        CloudWatchLogsService.DescribeLogStreamsResult page1 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, null, REGION);
         assertEquals(List.of("d", "c"),
                 page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
 
         service.putLogEvents("/app/logs", "d", List.of(Map.of("timestamp", 5000L, "message", "x")), REGION);
 
-        var page2 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, page1.nextToken(), REGION);
+        CloudWatchLogsService.DescribeLogStreamsResult page2 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, page1.nextToken(), REGION);
         assertEquals(List.of("b", "a"),
                 page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
         assertNull(page2.nextToken());
@@ -562,14 +562,14 @@ class CloudWatchLogsServiceTest {
         service.putLogEvents("/app/logs", "c", List.of(Map.of("timestamp", 3000L, "message", "x")), REGION);
         service.putLogEvents("/app/logs", "d", List.of(Map.of("timestamp", 4000L, "message", "x")), REGION);
 
-        var page1 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, null, REGION);
+        CloudWatchLogsService.DescribeLogStreamsResult page1 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, null, REGION);
         assertEquals(List.of("d", "c"),
                 page1.logStreams().stream().map(LogStream::getLogStreamName).toList());
 
         // b was not returned yet; this would now sort it ahead of c, the last returned stream.
         service.putLogEvents("/app/logs", "b", List.of(Map.of("timestamp", 9000L, "message", "x")), REGION);
 
-        var page2 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, page1.nextToken(), REGION);
+        CloudWatchLogsService.DescribeLogStreamsResult page2 = service.describeLogStreams("/app/logs", null, "LastEventTime", true, 2, page1.nextToken(), REGION);
         assertEquals(List.of("b", "a"),
                 page2.logStreams().stream().map(LogStream::getLogStreamName).toList());
         assertNull(page2.nextToken());

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.route53;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -516,7 +517,7 @@ class Route53VpcAssociationIntegrationTest {
                 .post("/2013-04-01/hostedzone/" + zoneId + "/associatevpc")
                 .then().statusCode(200);
 
-        var zone = service.listHostedZonesByVpc(spokeVpc, "us-east-1").stream()
+        HostedZone zone = service.listHostedZonesByVpc(spokeVpc, "us-east-1").stream()
                 .filter(candidate -> candidate.getId().equals(zoneId))
                 .findFirst().orElseThrow();
         zone.getVpcAssociations().stream()
@@ -544,7 +545,7 @@ class Route53VpcAssociationIntegrationTest {
         String zoneId = createPrivateZoneForAccount(
                 ZONE_ACCOUNT, "legacy-zone.internal.", "vpc-assoc-legacy-zone", zoneVpc);
 
-        var legacyZone = service.listHostedZonesByVpc(zoneVpc, "us-east-1").stream()
+        HostedZone legacyZone = service.listHostedZonesByVpc(zoneVpc, "us-east-1").stream()
                 .filter(candidate -> candidate.getId().equals(zoneId))
                 .findFirst().orElseThrow();
         legacyZone.setOwnerAccountId(null);

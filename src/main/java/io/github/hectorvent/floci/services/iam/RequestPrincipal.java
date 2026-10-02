@@ -28,6 +28,21 @@ public record RequestPrincipal(Type type, String arn, String roleArn, String ser
         return new RequestPrincipal(Type.IAM, sessionArn, roleArn, null);
     }
 
+    /**
+     * The caller an access key resolved to: a role session when its caller ARN and principal ARN
+     * differ, otherwise the IAM identity itself, and anonymous when nothing was resolved. A role
+     * session carries the ARN of the role it assumed, path included, because the session ARN alone
+     * names the role without its path.
+     */
+    public static RequestPrincipal caller(IamService.CallerArns callerArns) {
+        if (callerArns == null) {
+            return anonymous();
+        }
+        return callerArns.callerArn().equals(callerArns.principalArn())
+                ? iam(callerArns.callerArn())
+                : roleSession(callerArns.callerArn(), callerArns.principalArn());
+    }
+
     /** An AWS service acting on its own behalf, such as SNS delivering to a queue. */
     public static RequestPrincipal service(String servicePrincipal) {
         return new RequestPrincipal(Type.SERVICE, null, null, servicePrincipal);

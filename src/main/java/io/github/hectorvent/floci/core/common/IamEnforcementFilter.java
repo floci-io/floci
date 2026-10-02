@@ -413,7 +413,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             targetContexts.add(targetContext);
         }
 
-        RequestPrincipal principal = requestPrincipal(callerArns.orElse(null));
+        RequestPrincipal principal = RequestPrincipal.caller(callerArns.orElse(null));
         if (abortIfDenied(ctx, caller, principal, action, credentialScope, resources, targetContexts,
                 region, accountId, akid)) {
             return;
@@ -510,20 +510,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     private record ResolvedAuthorization(String credentialScope, String action) {
-    }
-
-    /**
-     * The caller as a resource policy's {@code Principal} sees it. A role session is matched by its
-     * session ARN and by the ARN of the role it assumed, path included, which a {@code Principal}
-     * naming the role identifies; the session ARN alone names the role without its path.
-     */
-    private static RequestPrincipal requestPrincipal(CallerArns callerArns) {
-        if (callerArns == null) {
-            return RequestPrincipal.anonymous();
-        }
-        return callerArns.callerArn().equals(callerArns.principalArn())
-                ? RequestPrincipal.iam(callerArns.callerArn())
-                : RequestPrincipal.roleSession(callerArns.callerArn(), callerArns.principalArn());
     }
 
     /** Floci's account-root principal, which is both the caller and the request's aws:PrincipalArn. */
@@ -779,7 +765,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             if (effectiveDecision == null) {
                 effectiveDecision = evaluator.evaluateResourcePolicyFor(
                         policyDocs.isEmpty() ? null : policyDocs,
-                        requestPrincipal(callerArns.orElse(null)), action, resource, effectiveContext);
+                        RequestPrincipal.caller(callerArns.orElse(null)), action, resource, effectiveContext);
             }
 
             ResourceAccountRelationship accountRelationship = effectiveOwnerAccountId == null

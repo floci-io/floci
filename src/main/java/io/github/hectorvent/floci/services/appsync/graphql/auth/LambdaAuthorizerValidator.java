@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -51,7 +52,7 @@ public class LambdaAuthorizerValidator {
             throw AppSyncAuth.unauthorized();
         }
 
-        var cached = cache.get(apiId, authorizationToken);
+        Optional<LambdaAuthorizerResult> cached = cache.get(apiId, authorizationToken);
         if (cached.isPresent()) {
             return requireAuthorized(cached.get());
         }

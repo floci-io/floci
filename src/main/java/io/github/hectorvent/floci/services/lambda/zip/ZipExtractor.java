@@ -11,7 +11,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Comparator;
+import java.util.Enumeration;
 import java.util.UUID;
+import java.util.stream.Stream;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipException;
@@ -81,7 +83,7 @@ public class ZipExtractor {
         try {
             Files.write(staged, zipBytes);
             try (ZipFile zip = new ZipFile(staged.toFile())) {
-                var entries = zip.entries();
+                Enumeration<? extends ZipEntry> entries = zip.entries();
                 int entryCount = 0;
                 long expandedBytes = 0;
                 while (entries.hasMoreElements()) {
@@ -224,7 +226,7 @@ public class ZipExtractor {
         if (!Files.exists(root)) {
             return;
         }
-        try (var paths = Files.walk(root)) {
+        try (Stream<Path> paths = Files.walk(root)) {
             for (Path p : paths.sorted(Comparator.reverseOrder()).toList()) {
                 Files.deleteIfExists(p);
             }

@@ -780,7 +780,7 @@ public class GlueJsonHandler {
         String dbName = request.path("DatabaseName").asText(null);
         String pattern = request.path("Pattern").asText(null);
         String functionType = request.path("FunctionType").asText(null);
-        var page = glueService.getUserDefinedFunctions(
+        GlueService.UserDefinedFunctionPage page = glueService.getUserDefinedFunctions(
                 dbName, pattern, functionType, readMaxResults(request), readNextToken(request));
         return Response.ok(pageResponse("UserDefinedFunctions", page.functions(), page.nextToken())).build();
     }
@@ -818,7 +818,7 @@ public class GlueJsonHandler {
     }
 
     private Response handleListRegistries(JsonNode request) {
-        var page = schemaRegistryService.listRegistries(readMaxResults(request), readNextToken(request));
+        GlueSchemaRegistryService.Page<Registry> page = schemaRegistryService.listRegistries(readMaxResults(request), readNextToken(request));
         return Response.ok(pageResponse("Registries", registryListItems(page.items()), page.nextToken())).build();
     }
 
@@ -869,7 +869,7 @@ public class GlueJsonHandler {
         Map<String, String> tags = request.has("Tags")
                 ? mapper.convertValue(request.get("Tags"), Map.class)
                 : null;
-        var result = schemaRegistryService.createSchema(
+        GlueSchemaRegistryService.SchemaWithFirstVersion result = schemaRegistryService.createSchema(
                 registryId, schemaName, dataFormat, compatibility, description, definition, tags, region);
         Schema schema = result.schema();
         SchemaVersion version = result.firstVersion();
@@ -958,14 +958,14 @@ public class GlueJsonHandler {
 
     private Response handleListSchemas(JsonNode request, String region) throws Exception {
         RegistryId registryId = readRegistryId(request);
-        var page = schemaRegistryService.listSchemas(
+        GlueSchemaRegistryService.Page<Schema> page = schemaRegistryService.listSchemas(
                 registryId, region, readMaxResults(request), readNextToken(request));
         return Response.ok(pageResponse("Schemas", schemaListItems(page.items()), page.nextToken())).build();
     }
 
     private Response handleListSchemaVersions(JsonNode request, String region) throws Exception {
         SchemaId schemaId = readSchemaId(request);
-        var page = schemaRegistryService.listSchemaVersions(
+        GlueSchemaRegistryService.Page<SchemaVersion> page = schemaRegistryService.listSchemaVersions(
                 schemaId, region, readMaxResults(request), readNextToken(request));
         return Response.ok(pageResponse("Schemas", schemaVersionListItems(page.items()), page.nextToken())).build();
     }
@@ -983,10 +983,10 @@ public class GlueJsonHandler {
     private Response handleDeleteSchemaVersions(JsonNode request, String region) throws Exception {
         SchemaId schemaId = readSchemaId(request);
         String versions = request.path("Versions").asText(null);
-        var results = schemaRegistryService.deleteSchemaVersions(schemaId, versions, region);
+        List<GlueSchemaRegistryService.VersionDeletionResult> results = schemaRegistryService.deleteSchemaVersions(schemaId, versions, region);
 
         List<Map<String, Object>> errors = new ArrayList<>();
-        for (var r : results) {
+        for (GlueSchemaRegistryService.VersionDeletionResult r : results) {
             if (r.errorCode() != null) {
                 Map<String, Object> err = new LinkedHashMap<>();
                 err.put("VersionNumber", r.versionNumber());
@@ -1013,7 +1013,7 @@ public class GlueJsonHandler {
     private Response handleCheckSchemaVersionValidity(JsonNode request) {
         String dataFormat = request.path("DataFormat").asText(null);
         String definition = request.path("SchemaDefinition").asText(null);
-        var result = schemaRegistryService.checkSchemaVersionValidity(dataFormat, definition);
+        GlueSchemaRegistryService.CheckValidityResult result = schemaRegistryService.checkSchemaVersionValidity(dataFormat, definition);
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("Valid", result.valid());
         if (result.error() != null) {
@@ -1119,7 +1119,7 @@ public class GlueJsonHandler {
         JsonNode kv = request.get("MetadataKeyValue");
         String key = kv != null ? kv.path("MetadataKey").asText(null) : null;
         String value = kv != null ? kv.path("MetadataValue").asText(null) : null;
-        var result = schemaRegistryService.putSchemaVersionMetadata(svId, key, value);
+        GlueSchemaRegistryService.MetadataPutResult result = schemaRegistryService.putSchemaVersionMetadata(svId, key, value);
         return Response.ok(buildMetadataPutResponse(result)).build();
     }
 
@@ -1128,7 +1128,7 @@ public class GlueJsonHandler {
         JsonNode kv = request.get("MetadataKeyValue");
         String key = kv != null ? kv.path("MetadataKey").asText(null) : null;
         String value = kv != null ? kv.path("MetadataValue").asText(null) : null;
-        var result = schemaRegistryService.removeSchemaVersionMetadata(svId, key, value);
+        GlueSchemaRegistryService.MetadataPutResult result = schemaRegistryService.removeSchemaVersionMetadata(svId, key, value);
         return Response.ok(buildMetadataPutResponse(result)).build();
     }
 

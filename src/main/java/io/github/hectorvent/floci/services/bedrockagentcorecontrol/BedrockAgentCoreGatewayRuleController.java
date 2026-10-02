@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import jakarta.inject.Inject;
@@ -83,9 +85,9 @@ public class BedrockAgentCoreGatewayRuleController {
         String region = regionResolver.resolveRegion(headers);
         try {
             Integer maxResults = Pagination.parseMaxResults(maxResultsParam, "ValidationException");
-            var result = service.list(gatewayId, maxResults, nextToken, region);
+            PaginatedResult<ObjectNode> result = service.list(gatewayId, maxResults, nextToken, region);
             ObjectNode response = objectMapper.createObjectNode();
-            var rules = response.putArray("gatewayRules");
+            ArrayNode rules = response.putArray("gatewayRules");
             for (ObjectNode rule : result.items()) {
                 ObjectNode copy = rule.deepCopy();
                 copy.remove("clientToken");

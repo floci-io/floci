@@ -189,7 +189,8 @@ class SchedulerTest {
                 .name(SCHEDULE_NAME)
                 .scheduleExpression("rate(1 hour)")
                 .flexibleTimeWindow(FlexibleTimeWindow.builder().mode(FlexibleTimeWindowMode.OFF).build())
-                .target(Target.builder().arn("arn:t").roleArn("arn:r").build())
+                .target(Target.builder().arn("arn:t")
+                        .roleArn("arn:aws:iam::000000000000:role/r").build())
                 .build()))
                 .isInstanceOf(ConflictException.class);
     }
@@ -482,7 +483,8 @@ class SchedulerTest {
                 .name("does-not-exist-schedule")
                 .scheduleExpression("rate(1 hour)")
                 .flexibleTimeWindow(FlexibleTimeWindow.builder().mode(FlexibleTimeWindowMode.OFF).build())
-                .target(Target.builder().arn("arn:t").roleArn("arn:r").build())
+                .target(Target.builder().arn("arn:t")
+                        .roleArn("arn:aws:iam::000000000000:role/r").build())
                 .build()))
                 .isInstanceOf(ResourceNotFoundException.class);
     }

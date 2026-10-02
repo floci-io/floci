@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import jakarta.inject.Inject;
@@ -21,6 +22,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.util.List;
@@ -121,23 +123,29 @@ public class SesSuppressionController {
     @Path("/suppression/addresses")
     public Response listSuppressedDestinations(@Context HttpHeaders headers,
                                                 @QueryParam("Reason") List<String> reasons,
-                                                @QueryParam("TenantName") String tenantName) {
+                                                @QueryParam("TenantName") String tenantName,
+                                                @QueryParam("PageSize") String pageSize,
+                                                @Context UriInfo uriInfo) {
         String region = regionResolver.resolveRegion(headers);
-        List<SuppressedDestination> entries;
+        String nextToken = SesListPaging.queryToken(uriInfo);
+        PaginatedResult<SuppressedDestination> page;
         try {
-            entries = sesService.listSuppressedDestinations(region, reasons, tenantName);
+            page = sesService.listSuppressedDestinations(region, reasons, tenantName,
+                    SesListPaging.V2_LIST_SUPPRESSED_DESTINATIONS, SesListPaging.parseQueryPageSize(pageSize),
+                    nextToken);
         } catch (AwsException e) {
             throw remapV1Exception(e);
         }
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode summaries = result.putArray("SuppressedDestinationSummaries");
-        for (SuppressedDestination s : entries) {
+        for (SuppressedDestination s : page.items()) {
             ObjectNode item = objectMapper.createObjectNode();
             item.put("EmailAddress", s.getEmailAddress());
             item.put("Reason", s.getReason());
             putTimestamp(item, "LastUpdateTime", s.getLastUpdateTime());
             summaries.add(item);
         }
+        result.put("NextToken", page.nextToken());
         return Response.ok(result).build();
     }
 }

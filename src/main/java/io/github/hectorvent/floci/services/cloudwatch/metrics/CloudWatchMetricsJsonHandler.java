@@ -100,7 +100,7 @@ public class CloudWatchMetricsJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode metricsArray = response.putArray("Metrics");
-        for (var m : metrics) {
+        for (CloudWatchMetricsService.MetricIdentity m : metrics) {
             ObjectNode mNode = metricsArray.addObject();
             mNode.put("Namespace", m.namespace());
             mNode.put("MetricName", m.metricName());
@@ -137,7 +137,7 @@ public class CloudWatchMetricsJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Label", metricName);
         ArrayNode dps = response.putArray("Datapoints");
-        for (var dp : datapoints) {
+        for (CloudWatchMetricsService.Datapoint dp : datapoints) {
             ObjectNode dpNode = dps.addObject();
             dpNode.put("Timestamp", dp.timestamp().getEpochSecond());
             if (statistics.contains("Average")) dpNode.put("Average", dp.average());
@@ -374,7 +374,7 @@ public class CloudWatchMetricsJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode resultsArray = response.putArray("MetricDataResults");
-        for (var r : results) {
+        for (CloudWatchMetricsService.MetricDataResult r : results) {
             ObjectNode rNode = resultsArray.addObject();
             rNode.put("Id", r.id());
             rNode.put("Label", r.label());
@@ -563,7 +563,7 @@ public class CloudWatchMetricsJsonHandler {
         for (MetricStreamStatisticsConfiguration configuration : configurations) {
             ObjectNode node = array.addObject();
             ArrayNode includeMetrics = node.putArray("IncludeMetrics");
-            for (var metric : configuration.getIncludeMetrics()) {
+            for (MetricStreamStatisticsConfiguration.IncludeMetric metric : configuration.getIncludeMetrics()) {
                 includeMetrics.addObject()
                         .put("Namespace", metric.namespace())
                         .put("MetricName", metric.metricName());

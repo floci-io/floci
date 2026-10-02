@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -77,7 +78,7 @@ class ApiGatewayCfnMockCorsIntegrationTest {
 
             for (String path : new String[]{"/execute-api/" + apiId + "/dev/items",
                     "/restapis/" + apiId + "/dev/_user_request_/items"}) {
-                var response = given().header("Origin", "https://example.com")
+                Response response = given().header("Origin", "https://example.com")
                         .header("Access-Control-Request-Method", "GET")
                         .when().options(path).then().statusCode(200)
                         .header("Access-Control-Allow-Origin", equalTo("*"))
