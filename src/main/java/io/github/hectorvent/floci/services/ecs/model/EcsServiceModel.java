@@ -26,8 +26,10 @@ public class EcsServiceModel {
     private Instant lastDeploymentAt;
     /** Current deployment identifier ("ecs-svc/<hex>"). Rolls on a task-definition change or forceNewDeployment. */
     private String deploymentId;
-    /** The deploymentId last observed to reach steady state; guards against re-emitting COMPLETED. */
+    /** Last completed deployment, persisted so a restart does not treat it as in progress. */
     private String lastCompletedDeploymentId;
+    /** Deployment whose completion event has been emitted. */
+    private String lastCompletionEventDeploymentId;
     /** The deploymentId the circuit breaker failed; persisted so a restart does not resume it. */
     private String failedDeploymentId;
     /** Last completed revision, retained so a rollback can survive a process restart. */
@@ -101,6 +103,11 @@ public class EcsServiceModel {
     public String getLastCompletedDeploymentId() { return lastCompletedDeploymentId; }
     public void setLastCompletedDeploymentId(String lastCompletedDeploymentId) {
         this.lastCompletedDeploymentId = lastCompletedDeploymentId;
+    }
+
+    public String getLastCompletionEventDeploymentId() { return lastCompletionEventDeploymentId; }
+    public void setLastCompletionEventDeploymentId(String lastCompletionEventDeploymentId) {
+        this.lastCompletionEventDeploymentId = lastCompletionEventDeploymentId;
     }
 
     public ServiceRevision getLastSuccessfulServiceRevision() { return lastSuccessfulServiceRevision; }

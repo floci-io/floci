@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -194,9 +195,11 @@ class EcsServiceRolloutTest {
                 LaunchType.FARGATE, List.of(), null, REGION);
         verify(publisher).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_STARTED"), any(), eq(REGION));
 
-        service.reconcileServices(); // task starts, still converging or converged same tick
-        service.reconcileServices(); // converged
-        verify(publisher, atLeastOnce())
+        service.reconcileServices(); // task starts and can become RUNNING in this tick
+        verify(publisher, never())
+                .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
+        service.reconcileServices(); // completion event is emitted on the next reconciliation
+        verify(publisher, times(1))
                 .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
 
         // COMPLETED is not re-emitted on further steady-state ticks.

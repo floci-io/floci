@@ -5015,8 +5015,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             String deploymentId = currentDeploymentId;
             boolean converged = current >= svc.getDesiredCount();
             if (converged) {
-                if (!deploymentId.equals(svc.getLastCompletedDeploymentId())) {
-                    svc.setLastCompletedDeploymentId(deploymentId);
+                if (!deploymentId.equals(svc.getLastCompletionEventDeploymentId())) {
+                    svc.setLastCompletionEventDeploymentId(deploymentId);
                     services.put(key, svc);
                     eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_COMPLETED",
                             "ECS deployment " + deploymentId + " completed.", region);
