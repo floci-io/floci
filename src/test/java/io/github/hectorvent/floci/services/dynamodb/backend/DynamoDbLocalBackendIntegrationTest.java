@@ -14,6 +14,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -29,6 +30,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -55,8 +57,12 @@ class DynamoDbLocalBackendIntegrationTest {
 
     private record Caller(String account, String region) {
         String authorization() {
+            return authorization("dynamodb");
+        }
+
+        String authorization(String service) {
             return "AWS4-HMAC-SHA256 Credential=" + account + "/20260215/" + region
-                    + "/dynamodb/aws4_request, SignedHeaders=host, Signature=abc";
+                    + "/" + service + "/aws4_request, SignedHeaders=host, Signature=abc";
         }
     }
 
@@ -218,6 +224,39 @@ class DynamoDbLocalBackendIntegrationTest {
     }
 
     @Test
+    void theTimeToLiveAStackEnablesIsWhatLocalReports() {
+        String table = tableName("ttl");
+        String stack = "local-it-ttl-" + UUID.randomUUID();
+        String template = """
+            {
+                "Resources": {
+                    "Orders": {
+                        "Type": "AWS::DynamoDB::Table",
+                        "Properties": {
+                            "TableName": "%s",
+                            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                            "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                            "BillingMode": "PAY_PER_REQUEST",
+                            "TimeToLiveSpecification": {"AttributeName": "expiresAt", "Enabled": true}
+                        }
+                    }
+                }
+            }
+            """.formatted(table);
+
+        cloudFormation(A_EAST, "CreateStack", stack, template);
+        // The stack stays in Floci; its table is removed from Local with the others.
+        created.add(new CreatedTable(A_EAST, table));
+        cloudFormation(A_EAST, "DescribeStacks", stack, null)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        dynamoDb(A_EAST, "DescribeTimeToLive", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(200)
+            .body("TimeToLiveDescription.TimeToLiveStatus", equalTo("ENABLED"))
+            .body("TimeToLiveDescription.AttributeName", equalTo("expiresAt"));
+    }
+
+    @Test
     void resetIsRefused() {
         given().when().post("/_floci/state/reset").then().statusCode(409);
     }
@@ -259,6 +298,18 @@ class DynamoDbLocalBackendIntegrationTest {
 
     private static ValidatableResponse scanCount(Caller caller, String table) {
         return dynamoDb(caller, "Scan", "{\"TableName\": \"" + table + "\"}").statusCode(200);
+    }
+
+    private static ValidatableResponse cloudFormation(Caller caller, String action, String stack, String template) {
+        RequestSpecification request = given()
+            .header("Authorization", caller.authorization("cloudformation"))
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", action)
+            .formParam("StackName", stack);
+        if (template != null) {
+            request.formParam("TemplateBody", template);
+        }
+        return request.when().post("/").then().statusCode(200);
     }
 
     private static ValidatableResponse dynamoDb(Caller caller, String action, String body) {
