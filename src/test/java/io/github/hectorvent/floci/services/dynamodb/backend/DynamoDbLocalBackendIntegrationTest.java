@@ -20,6 +20,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +29,7 @@ import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.endsWith;
@@ -201,6 +204,38 @@ class DynamoDbLocalBackendIntegrationTest {
         assertEquals("eu-west-1", record.path("awsRegion").asText());
         assertEquals("streamed", record.path("dynamodb").path("Keys").path("pk").path("S").asText());
         assertEquals(CheckpointLifetime.STREAM, streamReader.checkpointLifetime());
+    }
+
+    @Test
+    void aTtlDeletionReadsAsRemoveByTheDynamoDbService() {
+        String table = tableName("ttl");
+        String streamArn = createTable(A_WEST, table, STREAMED)
+            .statusCode(200)
+            .extract().path("TableDescription.LatestStreamArn");
+        dynamoDb(A_WEST, "UpdateTimeToLive", "{\"TableName\": \"" + table
+                + "\", \"TimeToLiveSpecification\": {\"Enabled\": true, \"AttributeName\": \"expireAt\"}}")
+            .statusCode(200);
+        long past = Instant.now().getEpochSecond() - 3600;
+        dynamoDb(A_WEST, "PutItem", "{\"TableName\": \"" + table + "\", \"Item\": {\"pk\": {\"S\": \"expired\"}, "
+                + "\"expireAt\": {\"N\": \"" + past + "\"}}}")
+            .statusCode(200);
+        String shardId = streams(A_WEST, "DescribeStream", "{\"StreamArn\": \"" + streamArn + "\"}")
+            .statusCode(200)
+            .extract().path("StreamDescription.Shards[0].ShardId");
+
+        // DynamoDB Local deleted an expired item within about 15 seconds when measured.
+        await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
+            String iterator = streams(A_WEST, "GetShardIterator", "{\"StreamArn\": \"" + streamArn
+                    + "\", \"ShardId\": \"" + shardId + "\", \"ShardIteratorType\": \"TRIM_HORIZON\"}")
+                .statusCode(200)
+                .extract().path("ShardIterator");
+            streams(A_WEST, "GetRecords", "{\"ShardIterator\": \"" + iterator + "\"}")
+                .statusCode(200)
+                .body("Records.eventName", contains("INSERT", "REMOVE"))
+                .body("Records[1].dynamodb.Keys.pk.S", equalTo("expired"))
+                .body("Records[1].userIdentity.Type", equalTo("Service"))
+                .body("Records[1].userIdentity.PrincipalId", equalTo("dynamodb.amazonaws.com"));
+        });
     }
 
     @Test

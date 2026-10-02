@@ -279,6 +279,32 @@ class DynamoDbLocalBackendTest {
     }
 
     @Test
+    void timeToLiveDeletionReadsAsRemoveByTheDynamoDbService() throws Exception {
+        answer(Api.DYNAMODB_STREAMS, "GetRecords", 200, "{\"Records\":[{\"eventName\":\"UNKNOWN_TO_SDK_VERSION\","
+                + "\"awsRegion\":\"ddblocal\",\"dynamodb\":{\"Keys\":{\"pk\":{\"S\":\"a\"}},"
+                + "\"OldImage\":{\"pk\":{\"S\":\"a\"}}}}]}");
+
+        Reply reply = execute(Api.DYNAMODB_STREAMS, "GetRecords", "{\"ShardIterator\":\"it\"}");
+
+        JsonNode record = reply.body().path("Records").path(0);
+        assertEquals("REMOVE", record.path("eventName").asText());
+        assertEquals(json("{\"Type\":\"Service\",\"PrincipalId\":\"dynamodb.amazonaws.com\"}"),
+                record.path("userIdentity"));
+        assertEquals("a", record.path("dynamodb").path("OldImage").path("pk").path("S").asText());
+    }
+
+    @Test
+    void writeRecordsKeepTheirEventNameAndCarryNoIdentity() throws Exception {
+        String records = "[{\"eventName\":\"INSERT\",\"dynamodb\":{}},{\"eventName\":\"MODIFY\",\"dynamodb\":{}},"
+                + "{\"eventName\":\"REMOVE\",\"dynamodb\":{}}]";
+        answer(Api.DYNAMODB_STREAMS, "GetRecords", 200, "{\"Records\":" + records + "}");
+
+        Reply reply = execute(Api.DYNAMODB_STREAMS, "GetRecords", "{\"ShardIterator\":\"it\"}");
+
+        assertEquals(json(records), reply.body().path("Records"));
+    }
+
+    @Test
     void arnLookingItemAttributeUntouched() throws Exception {
         String item = "{\"TableArn\":{\"S\":\"" + LOCAL + "table/x\"},"
                 + "\"StreamArn\":{\"S\":\"arn:aws:dynamodb:us-east-1:999999999999:" + STREAM_RESOURCE + "\"},"

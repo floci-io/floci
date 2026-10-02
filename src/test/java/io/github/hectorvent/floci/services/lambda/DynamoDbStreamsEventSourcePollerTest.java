@@ -544,6 +544,45 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     @Test
+    void userIdentityFilterDeliversOnlyTheTtlDeletion() {
+        stubTrimHorizon(List.of(
+                ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
+                removal("s2", false),
+                removal("s3", true)));
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        EventSourceMapping esm = filterEsm(
+                "{\"userIdentity\":{\"type\":[\"Service\"],\"principalId\":[\"dynamodb.amazonaws.com\"]}}");
+
+        pollerWith(mock(EsmStore.class)).pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        JsonNode records = readRecords(payload.getValue());
+        assertEquals(1, records.size());
+        assertEquals("s3", records.get(0).path("dynamodb").path("SequenceNumber").asText());
+        assertEquals("REMOVE", records.get(0).path("eventName").asText());
+        assertEquals(OBJECT_MAPPER.createObjectNode().put("type", "Service").put("principalId", "dynamodb.amazonaws.com"),
+                records.get(0).path("userIdentity"));
+    }
+
+    /**
+     * A REMOVE record as GetRecords returns it. One that time to live made carries the DynamoDB service
+     * identity with the Streams API's capitalised member names, as AWS writes it.
+     */
+    private DynamoDbStreamReader.Record removal(String seq, boolean byTtl) {
+        DynamoDbStreamReader.Record record = ddbRecord(seq, "REMOVE", "{\"status\":{\"S\":\"expired\"}}");
+        ObjectNode dynamodb = (ObjectNode) record.awsRecord().path("dynamodb");
+        dynamodb.set("OldImage", dynamodb.remove("NewImage"));
+        if (byTtl) {
+            ((ObjectNode) record.awsRecord()).putObject("userIdentity")
+                    .put("PrincipalId", "dynamodb.amazonaws.com")
+                    .put("Type", "Service");
+        }
+        return record;
+    }
+
+    @Test
     void partialBatchFailureCheckpointsBeforeLowestFailedRecord() {
         stubTrimHorizon(List.of(
                 ddbRecord("s1", "INSERT", "{}"),

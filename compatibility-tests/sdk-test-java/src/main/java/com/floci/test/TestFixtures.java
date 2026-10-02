@@ -49,6 +49,7 @@ import software.amazon.awssdk.services.datasync.DataSyncClient;
 import software.amazon.awssdk.services.detective.DetectiveClient;
 import software.amazon.awssdk.services.dlm.DlmClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.dynamodb.streams.DynamoDbStreamsClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
@@ -707,6 +708,14 @@ public final class TestFixtures {
 
     public static DynamoDbClient dynamoDbClient() {
         return DynamoDbClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static DynamoDbStreamsClient dynamoDbStreamsClient() {
+        return DynamoDbStreamsClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
