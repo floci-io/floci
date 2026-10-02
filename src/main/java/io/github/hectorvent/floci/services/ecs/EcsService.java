@@ -4152,6 +4152,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 deployment.setFinishedAt(now);
                 deployment.setUpdatedAt(now);
                 svc.setLastCompletedDeploymentId(deploymentId(svc));
+                String completedDeploymentId = deploymentId(svc);
+                if (eventPublisher != null
+                        && !completedDeploymentId.equals(svc.getLastCompletionEventDeploymentId())) {
+                    svc.setPendingCompletionEventDeploymentId(completedDeploymentId);
+                }
                 ServiceRevision revision = serviceRevisions.get(deployment.getTargetServiceRevisionArn());
                 if (revision != null) {
                     svc.setLastSuccessfulServiceRevision(revision);
@@ -5015,8 +5020,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             String deploymentId = currentDeploymentId;
             boolean converged = current >= svc.getDesiredCount();
             if (converged) {
-                if (!deploymentId.equals(svc.getLastCompletionEventDeploymentId())) {
+                boolean newlyCompleted = !deploymentId.equals(svc.getLastCompletedDeploymentId());
+                boolean completionEventPending = deploymentId.equals(svc.getPendingCompletionEventDeploymentId());
+                if ((newlyCompleted || completionEventPending)
+                        && !deploymentId.equals(svc.getLastCompletionEventDeploymentId())) {
+                    svc.setLastCompletedDeploymentId(deploymentId);
                     svc.setLastCompletionEventDeploymentId(deploymentId);
+                    svc.setPendingCompletionEventDeploymentId(null);
                     services.put(key, svc);
                     eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_COMPLETED",
                             "ECS deployment " + deploymentId + " completed.", region);

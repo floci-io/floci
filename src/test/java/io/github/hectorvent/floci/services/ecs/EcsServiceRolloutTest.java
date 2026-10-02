@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
@@ -191,7 +192,7 @@ class EcsServiceRolloutTest {
         service.createCluster("dep-cluster", REGION);
         registerTaskDef(service, "dep-fam", "app:1");
 
-        service.createService("dep-cluster", "dep-svc", "dep-fam", 1,
+        EcsServiceModel serviceModel = service.createService("dep-cluster", "dep-svc", "dep-fam", 1,
                 LaunchType.FARGATE, List.of(), null, REGION);
         verify(publisher).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_STARTED"), any(), eq(REGION));
 
@@ -203,6 +204,13 @@ class EcsServiceRolloutTest {
                 .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
 
         // COMPLETED is not re-emitted on further steady-state ticks.
+        service.reconcileServices();
+        verify(publisher, times(1))
+                .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
+
+        // Old persisted models used lastCompletedDeploymentId as the event deduplication marker.
+        serviceModel.setLastCompletionEventDeploymentId(null);
+        serviceModel.setPendingCompletionEventDeploymentId(null);
         service.reconcileServices();
         verify(publisher, times(1))
                 .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));

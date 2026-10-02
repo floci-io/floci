@@ -30,6 +30,8 @@ public class EcsServiceModel {
     private String lastCompletedDeploymentId;
     /** Deployment whose completion event has been emitted. */
     private String lastCompletionEventDeploymentId;
+    /** Newly completed deployment whose completion event still needs to be emitted. */
+    private String pendingCompletionEventDeploymentId;
     /** The deploymentId the circuit breaker failed; persisted so a restart does not resume it. */
     private String failedDeploymentId;
     /** Last completed revision, retained so a rollback can survive a process restart. */
@@ -108,6 +110,11 @@ public class EcsServiceModel {
     public String getLastCompletionEventDeploymentId() { return lastCompletionEventDeploymentId; }
     public void setLastCompletionEventDeploymentId(String lastCompletionEventDeploymentId) {
         this.lastCompletionEventDeploymentId = lastCompletionEventDeploymentId;
+    }
+
+    public String getPendingCompletionEventDeploymentId() { return pendingCompletionEventDeploymentId; }
+    public void setPendingCompletionEventDeploymentId(String pendingCompletionEventDeploymentId) {
+        this.pendingCompletionEventDeploymentId = pendingCompletionEventDeploymentId;
     }
 
     public ServiceRevision getLastSuccessfulServiceRevision() { return lastSuccessfulServiceRevision; }
