@@ -15,6 +15,8 @@ public class EmrInstanceGroup {
     private int requestedInstanceCount;
     private int runningInstanceCount;
     private String state;
+    /** The AutoScalingPolicy as given (Constraints and Rules), raw JSON; null when none is attached. */
+    private String autoScalingPolicy;
 
     public EmrInstanceGroup() {}
 
@@ -48,4 +50,7 @@ public class EmrInstanceGroup {
 
     public String getState() { return state; }
     public void setState(String state) { this.state = state; }
+
+    public String getAutoScalingPolicy() { return autoScalingPolicy; }
+    public void setAutoScalingPolicy(String autoScalingPolicy) { this.autoScalingPolicy = autoScalingPolicy; }
 }
