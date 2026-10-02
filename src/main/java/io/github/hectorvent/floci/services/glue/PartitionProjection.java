@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.glue.model.Table;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -42,6 +43,10 @@ public final class PartitionProjection {
             KEYWORD_BOUNDS.formatted(
                     "(?:GROUP|HAVING|ORDER|WINDOW|LIMIT|OFFSET|FETCH|UNION|INTERSECT|EXCEPT)"),
             Pattern.CASE_INSENSITIVE);
+
+    private static final Set<String> TABLE_ALIAS_KEYWORDS = Set.of("where", "join", "inner", "left", "right",
+            "full", "cross", "on", "group", "having", "order", "limit", "offset", "union", "intersect",
+            "except", "window", "qualify", "fetch", "using", "natural", "lateral", "tablesample");
 
     private PartitionProjection() {
     }
@@ -111,17 +116,13 @@ public final class PartitionProjection {
      *
      * <p>An injected column has no generatable range: its values come from the query, so Athena
      * requires a static equality condition on it in the {@code WHERE} clause and rejects the query
-     * otherwise. Deciding whether a condition is a <em>static equality</em> one needs the query's
-     * predicate tree, which is not available here, so this checks only whether the column is
-     * mentioned inside a {@code WHERE} clause - any of them, including a subquery's. That is
-     * strictly narrower than the real rule - a query filtering an injected column with, say, a
-     * range condition is rejected by Athena and accepted here - but it never rejects a query Athena
-     * would accept, and it catches the case that silently reads every partition.
+     * otherwise. Each source table alias is checked independently, and joins must qualify the
+     * partition column so a filter on one table cannot stand in for another table's filter.
      *
-     * <p>Scoping to the {@code WHERE} clause is what makes the check worth having. A mention
-     * anywhere in the query text also matches the column's own appearance in a {@code SELECT} list
-     * or a {@code GROUP BY}, so {@code SELECT tenant, count(*) FROM audit_events GROUP BY tenant}
-     * would pass while filtering nothing at all - exactly the case this exists to catch.
+     * <p>Scoping to the {@code WHERE} clause is what makes the check useful. A mention anywhere in
+     * the query text also matches the column's own appearance in a {@code SELECT} list or a
+     * {@code GROUP BY}, so {@code SELECT tenant, count(*) FROM audit_events GROUP BY tenant} would
+     * pass while filtering nothing at all.
      */
     public static void assertInjectedColumnsFiltered(String query, List<Table> tables) {
         if (query == null || tables == null) {
@@ -130,12 +131,15 @@ public final class PartitionProjection {
         // Literals and comments are not code: a column name inside either constrains nothing.
         String code = maskLiteralsAndComments(query);
         List<String> whereClauses = null;
+        List<String> allAliases = tables.stream().filter(table -> table != null && table.getName() != null)
+                .flatMap(table -> tableAliases(code, table.getName()).stream()).toList();
         for (Table table : tables) {
             if (!enabled(table) || table.getName() == null || table.getPartitionKeys() == null) {
                 continue;
             }
-            // A table the query never names cannot be constrained by it, and must not fail it.
-            if (!mentions(code, table.getName())) {
+            // A table the query never reads cannot be constrained by it, and must not fail it.
+            List<String> aliases = tableAliases(code, table.getName());
+            if (aliases.isEmpty()) {
                 continue;
             }
             for (Column key : table.getPartitionKeys()) {
@@ -149,7 +153,10 @@ public final class PartitionProjection {
                 if (whereClauses == null) {
                     whereClauses = whereClauses(code);
                 }
-                if (whereClauses.stream().anyMatch(clause -> mentions(clause, key.getName()))) {
+                boolean unqualifiedAllowed = allAliases.size() == 1;
+                List<String> clauses = whereClauses;
+                if (aliases.stream().allMatch(alias -> clauses.stream()
+                        .anyMatch(clause -> hasStaticEquality(clause, alias, key.getName(), unqualifiedAllowed)))) {
                     continue;
                 }
                 throw new AwsException("InvalidRequestException",
@@ -238,7 +245,8 @@ public final class PartitionProjection {
                 continue;
             }
             for (int k = i; k < end; k++) {
-                if (chars[k] != '\n') {
+                boolean literalBoundary = chars[i] == '\'' && (k == i || k == end - 1 && chars[k] == '\'');
+                if (chars[k] != '\n' && !literalBoundary) {
                     chars[k] = ' ';
                 }
             }
@@ -247,9 +255,52 @@ public final class PartitionProjection {
         return new String(chars);
     }
 
-    private static boolean mentions(String code, String identifier) {
-        return Pattern.compile("(?<![A-Za-z0-9_])" + Pattern.quote(identifier) + "(?![A-Za-z0-9_])",
-                Pattern.CASE_INSENSITIVE).matcher(code).find();
+    private static List<String> tableAliases(String code, String tableName) {
+        String identifier = identifierPattern(tableName);
+        String qualifiedName = "(?:" + IDENTIFIER + "\\s*\\.\\s*)*" + identifier;
+        Pattern source = Pattern.compile("(?i)" + KEYWORD_BOUNDS.formatted("(?:FROM|JOIN)") + "\\s+" + qualifiedName
+                + "(?:\\s+(?:AS\\s+)?(" + IDENTIFIER + "))?");
+        List<String> aliases = new ArrayList<>();
+        Matcher matcher = source.matcher(code);
+        while (matcher.find()) {
+            String alias = matcher.group(1);
+            String normalized = alias == null || TABLE_ALIAS_KEYWORDS.contains(unquoteIdentifier(alias).toLowerCase(Locale.ROOT))
+                    ? unquoteIdentifier(tableName).toLowerCase(Locale.ROOT) : unquoteIdentifier(alias).toLowerCase(Locale.ROOT);
+            aliases.add(normalized);
+        }
+        return aliases;
+    }
+
+    private static final String IDENTIFIER = "(?:[A-Za-z_][A-Za-z0-9_$]*|\"(?:\"\"|[^\"])+\"|`[^`]+`)";
+
+    private static String identifierPattern(String identifier) {
+        String unquoted = unquoteIdentifier(identifier);
+        String doubleQuoted = "\"" + unquoted.replace("\"", "\"\"") + "\"";
+        String backquoted = "`" + unquoted + "`";
+        return "(?:" + Pattern.quote(unquoted) + "|" + Pattern.quote(doubleQuoted) + "|"
+                + Pattern.quote(backquoted) + ")";
+    }
+
+    private static String unquoteIdentifier(String identifier) {
+        if (identifier.length() >= 2 && identifier.startsWith("\"") && identifier.endsWith("\"")) {
+            return identifier.substring(1, identifier.length() - 1).replace("\"\"", "\"");
+        }
+        if (identifier.length() >= 2 && identifier.startsWith("`") && identifier.endsWith("`")) {
+            return identifier.substring(1, identifier.length() - 1);
+        }
+        return identifier;
+    }
+
+    private static boolean hasStaticEquality(String clause, String alias, String column, boolean allowUnqualified) {
+        String qualified = identifierPattern(alias) + "\\s*\\.\\s*" + identifierPattern(column);
+        String left = allowUnqualified ? "(?:" + qualified + "|" + identifierPattern(column) + ")" : qualified;
+        String literal = "(?:'(?:''|[^'])*'|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][-+]?\\d+)?|TRUE|FALSE)";
+        // Athena accepts an IN list of literals for an injected column, up to 1,000 values
+        String literalList = "\\(\\s*" + literal + "(?:\\s*,\\s*" + literal + ")*\\s*\\)";
+        Pattern equality = Pattern.compile("(?i)(?<![A-Za-z0-9_$])(?:" + left + "\\s*(?<![<>=!])=(?!=)\\s*"
+                + literal + "|" + literal + "\\s*(?<![<>=!])=(?!=)\\s*" + left
+                + "|" + left + "\\s+IN\\s*" + literalList + ")(?![A-Za-z0-9_$])");
+        return equality.matcher(clause).find();
     }
 
     private static String stripTrailingSlash(String value) {
