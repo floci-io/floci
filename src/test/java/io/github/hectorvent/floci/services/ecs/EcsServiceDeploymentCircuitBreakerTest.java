@@ -273,6 +273,70 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 "a service restored to its previous revision still reports the failed rollout");
     }
 
+    @Test
+    void rollbackKeepsTheCurrentDesiredCountAfterAScaleChange() {
+        EcsService service = newService();
+        healthy = true;
+        createService(service, "cb-scale-rollback", 1, breaker(true, true));
+        service.reconcileServices();
+        service.updateService("cb-scale-rollback-cluster", "cb-scale-rollback", null, 2, null, REGION);
+        service.reconcileServices();
+        assertEquals(2, runningTasks(service).size());
+
+        healthy = false;
+        TaskDefinition broken = registerTaskDef(service, "cb-scale-rollback-fam", "app:broken");
+        String failedId = service.updateService("cb-scale-rollback-cluster", "cb-scale-rollback",
+                "cb-scale-rollback-fam:" + broken.getRevision(), null, null, REGION).getDeploymentId();
+        for (int i = 0; i < 2; i++) {
+            service.reconcileServices();
+        }
+
+        assertEquals("ROLLBACK_IN_PROGRESS", deploymentOf(service, "cb-scale-rollback", failedId).getStatus());
+        assertEquals(2, service.serviceByArn(deploymentOf(service, "cb-scale-rollback", failedId)
+                .getServiceArn()).getDesiredCount(),
+                "rollback must retain the desired count set independently of the failed deployment");
+        service.reconcileServices();
+        assertEquals("ROLLBACK_SUCCESSFUL", deploymentOf(service, "cb-scale-rollback", failedId).getStatus());
+    }
+
+    @Test
+    void rollbackWaitsUntilRunningTasksFromTheFailedRevisionAreDrained() {
+        CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("rollback-drain-alarm");
+        alarm.setStateValue("OK");
+        when(metricsService.describeAlarms(List.of("rollback-drain-alarm"), null, REGION))
+                .thenReturn(List.of(alarm));
+        EcsService service = newService(new InMemoryStorageFactory(), metricsService);
+        healthy = true;
+        EcsServiceModel model = createService(service, "cb-drain", 2, breaker(true, true));
+        model.setDeploymentConfiguration(Map.of(
+                "deploymentCircuitBreaker", breaker(true, true),
+                "alarms", Map.of("enable", true, "rollback", true,
+                        "alarmNames", List.of("rollback-drain-alarm"))));
+        service.reconcileServices();
+        assertEquals(2, runningTasks(service).size());
+
+        TaskDefinition next = registerTaskDef(service, "cb-drain-fam", "app:next");
+        String failedId = service.updateService("cb-drain-cluster", "cb-drain",
+                "cb-drain-fam:" + next.getRevision(), null, null, REGION).getDeploymentId();
+        launches.addAll(List.of(true, false));
+        service.reconcileServices();
+        assertEquals(3, runningTasks(service).size(), "old tasks and one new-revision task are still running");
+
+        alarm.setStateValue("ALARM");
+        service.reconcileServices();
+        assertEquals("ROLLBACK_IN_PROGRESS", deploymentOf(service, "cb-drain", failedId).getStatus());
+        service.reconcileServices();
+        assertEquals("ROLLBACK_IN_PROGRESS", deploymentOf(service, "cb-drain", failedId).getStatus(),
+                "rollback remains active while a task from its failed revision is still draining");
+        assertEquals(2, runningTasks(service).size());
+
+        service.reconcile();
+        service.reconcileServices();
+        assertEquals("ROLLBACK_SUCCESSFUL", deploymentOf(service, "cb-drain", failedId).getStatus());
+    }
+
     /** Only a task that failed to start counts; one a user stopped while it pulled did not fail. */
     @Test
     void aTaskAUserStopsDuringItsPullIsNotAFailure() {
@@ -461,6 +525,31 @@ class EcsServiceDeploymentCircuitBreakerTest {
         assertEquals("FAILED", liveDeployment(after, "cb-restart").getRolloutState());
     }
 
+    @Test
+    void anAlarmStillFailsAnInProgressDeploymentAfterARestart() {
+        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("restart-alarm");
+        alarm.setStateValue("ALARM");
+        when(metricsService.describeAlarms(List.of("restart-alarm"), null, REGION))
+                .thenReturn(List.of(alarm));
+        EcsService before = newService(storage, metricsService);
+        EcsServiceModel model = createServiceWithDeploymentConfiguration(before, "cb-alarm-restart", 1,
+                Map.of("alarms", Map.of("enable", true, "rollback", false,
+                        "alarmNames", List.of("restart-alarm"))));
+
+        EcsService after = newService(storage, metricsService);
+        after.reconcileServices();
+
+        ServiceDeployment deployment = deploymentOf(after, "cb-alarm-restart", model.getDeploymentId());
+        assertEquals("STOP_REQUESTED", deployment.getStatus());
+        assertTrue(deployment.getStatusReason().contains("restart-alarm"));
+        assertTrue(stoppedTasks(after).isEmpty(), "the alarm is checked before a task starts after restart");
+        after.reconcileServices();
+        assertEquals("STOPPED", deploymentOf(after, "cb-alarm-restart", model.getDeploymentId()).getStatus());
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private static Map<String, Object> breaker(boolean enable, boolean rollback) {
@@ -472,6 +561,14 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
     private static EcsServiceModel createService(EcsService service, String name, int desiredCount,
                                                  Map<String, Object> circuitBreaker) {
+        Map<String, Object> deploymentConfiguration = circuitBreaker == null ? null
+                : Map.of("deploymentCircuitBreaker", circuitBreaker);
+        return createServiceWithDeploymentConfiguration(service, name, desiredCount, deploymentConfiguration);
+    }
+
+    private static EcsServiceModel createServiceWithDeploymentConfiguration(EcsService service, String name,
+                                                                            int desiredCount,
+                                                                            Map<String, Object> deploymentConfiguration) {
         service.createCluster(name + "-cluster", REGION);
         registerTaskDef(service, name + "-fam", "app:1");
         CreateServiceRequest request = new CreateServiceRequest();
@@ -480,9 +577,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
         request.setTaskDefinition(name + "-fam");
         request.setDesiredCount(desiredCount);
         request.setLaunchType(LaunchType.FARGATE);
-        if (circuitBreaker != null) {
-            request.setDeploymentConfiguration(Map.of("deploymentCircuitBreaker", circuitBreaker));
-        }
+        request.setDeploymentConfiguration(deploymentConfiguration);
         return service.createService(request, REGION);
     }
 
@@ -535,6 +630,11 @@ class EcsServiceDeploymentCircuitBreakerTest {
         when(config.services().ecs().mock()).thenReturn(false);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        when(containerManager.stopTaskAndCollectExitCodes(any())).thenAnswer(invocation -> {
+            EcsTaskHandle handle = invocation.getArgument(0);
+            handle.getContainerIds().keySet().forEach(handle::recordContainerRemoved);
+            return Map.of("app", 0);
+        });
         when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
             Boolean scripted = launches.poll();
             if (scripted != null ? !scripted : !healthy) {

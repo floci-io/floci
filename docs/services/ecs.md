@@ -440,7 +440,8 @@ Known differences from AWS:
 - `deploymentConfiguration` is stored and reported as given. The deployment circuit breaker
   counts tasks that fail to start and moves a deployment through `STOP_REQUESTED` to `STOPPED`,
   or, with rollback enabled, through `ROLLBACK_IN_PROGRESS` to `ROLLBACK_SUCCESSFUL` or
-  `ROLLBACK_FAILED`. A rollback restores the most recent successful service revision. Enabled
+  `ROLLBACK_FAILED`. A rollback restores the most recent successful service revision while
+  retaining the service's current `desiredCount`. Enabled
   CloudWatch deployment alarms are also checked during reconciliation and fail the deployment
   when any configured alarm is in `ALARM`. `healthCheckGracePeriodSeconds`, `serviceRegistries`
   and placement constraints and strategies are stored and reported but are not enforced; task
