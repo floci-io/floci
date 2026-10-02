@@ -210,8 +210,17 @@ class EcsServiceRolloutTest {
 
         // Old persisted models used lastCompletedDeploymentId as the event deduplication marker.
         serviceModel.setLastSettledDeploymentId(null);
+        serviceModel.setLastCompletionEventDeploymentId(null);
+        serviceModel.setPendingCompletionEventDeploymentId(serviceModel.getDeploymentId());
         service.reconcileServices();
-        verify(publisher, times(1))
+        verify(publisher, times(2))
+                .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
+
+        // A legacy completion without a pending event remains deduplicated by lastCompletedDeploymentId.
+        serviceModel.setLastCompletionEventDeploymentId(null);
+        serviceModel.setPendingCompletionEventDeploymentId(null);
+        service.reconcileServices();
+        verify(publisher, times(2))
                 .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
     }
 

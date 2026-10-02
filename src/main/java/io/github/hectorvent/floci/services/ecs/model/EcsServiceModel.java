@@ -30,6 +30,10 @@ public class EcsServiceModel {
     private String lastCompletedDeploymentId;
     /** Last deployment to reach steady state, persisted to avoid resuming it after a restart. */
     private String lastSettledDeploymentId;
+    /** Legacy event state retained so service records from an earlier build remain readable. */
+    private String lastCompletionEventDeploymentId;
+    /** Legacy pending event state retained so service records from an earlier build remain readable. */
+    private String pendingCompletionEventDeploymentId;
     /** The deploymentId the circuit breaker failed; persisted so a restart does not resume it. */
     private String failedDeploymentId;
     /** Last completed revision, retained so a rollback can survive a process restart. */
@@ -108,6 +112,16 @@ public class EcsServiceModel {
     public String getLastSettledDeploymentId() { return lastSettledDeploymentId; }
     public void setLastSettledDeploymentId(String lastSettledDeploymentId) {
         this.lastSettledDeploymentId = lastSettledDeploymentId;
+    }
+
+    public String getLastCompletionEventDeploymentId() { return lastCompletionEventDeploymentId; }
+    public void setLastCompletionEventDeploymentId(String lastCompletionEventDeploymentId) {
+        this.lastCompletionEventDeploymentId = lastCompletionEventDeploymentId;
+    }
+
+    public String getPendingCompletionEventDeploymentId() { return pendingCompletionEventDeploymentId; }
+    public void setPendingCompletionEventDeploymentId(String pendingCompletionEventDeploymentId) {
+        this.pendingCompletionEventDeploymentId = pendingCompletionEventDeploymentId;
     }
 
     public ServiceRevision getLastSuccessfulServiceRevision() { return lastSuccessfulServiceRevision; }
