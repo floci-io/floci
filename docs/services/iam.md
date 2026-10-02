@@ -1166,8 +1166,9 @@ being bounded by SCPs (below): both forms of root enforcement now agree. A negat
 absent key cannot equal what the policy names, so the condition holds, and a `Deny` written
 that way applies when the key is missing.
 
-**Not yet supported**: `NotPrincipal`, resource-based policies (S3 bucket policy, Lambda resource
-policy), and `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems` and the
+**Not yet supported**: resource-based policies other than S3 bucket policies (the others, for example
+SQS queue, SNS topic, Lambda function and API Gateway REST API policies, are stored but not
+evaluated), and `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems` and the
 PartiQL operations.
 
 ### Assumed roles
