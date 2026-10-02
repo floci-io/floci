@@ -14,7 +14,7 @@ import static org.hamcrest.Matchers.nullValue;
 /**
  * ListContacts {@code Filter} on the wire: parsing, the SES v2 boolean coercion of
  * UseDefaultIfPreferenceUnavailable, exact filtered pages and the error statuses. The membership
- * rules and the full error precedence are covered by {@code SesContactFilterTest}.
+ * rules and the full error precedence are covered by {@code SesContactFilterServiceTest}.
  */
 @QuarkusTest
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)

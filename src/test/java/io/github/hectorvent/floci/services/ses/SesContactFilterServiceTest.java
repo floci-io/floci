@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * topic {@code tin} defaults to OPT_IN and {@code tout} to OPT_OUT, and every expected list below is
  * what SES returned for the same contacts and filter.
  */
-class SesContactFilterTest {
+class SesContactFilterServiceTest {
 
     private static final String REGION = "us-east-1";
     private static final String LIST = "filter-list";
