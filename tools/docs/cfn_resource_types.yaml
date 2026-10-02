@@ -182,6 +182,9 @@ notes:
 # Trailing prose appended to a row after its type list, for behaviour that belongs to the service
 # rather than to one type.
 row_notes:
+  AWS::AppSync: >-
+    `Ref` on `GraphQLApi` and `ApiKey` returns the id where AWS returns the ARN. See
+    [AppSync](appsync.md#cloudformation) for `Ref` and `Fn::GetAtt` compared with AWS.
   AWS::Lambda: >-
     Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module
     AWS injects for that code path, so Solutions-style custom-resource handlers work.
