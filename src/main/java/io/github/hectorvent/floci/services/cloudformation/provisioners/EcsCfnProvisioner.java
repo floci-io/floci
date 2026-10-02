@@ -158,9 +158,10 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         EcsCluster cluster = ecsService.createCluster(clusterName, ctx.region());
         List<ClusterSetting> settings = new ArrayList<>();
         JsonNode declared = props != null ? props.get("ClusterSettings") : null;
-        if (declared != null) {
-            for (JsonNode item : declared) {
-                settings.add(new ClusterSetting(ctx.resolveOptional(item, "Name"), ctx.resolveOptional(item, "Value")));
+        JsonNode resolved = declared != null ? ctx.engine().resolveNode(declared) : null;
+        if (resolved != null && resolved.isArray()) {
+            for (JsonNode item : resolved) {
+                settings.add(new ClusterSetting(item.path("Name").asText(null), item.path("Value").asText(null)));
             }
         }
         if (!settings.isEmpty() && !settings.equals(cluster.getSettings())) {
