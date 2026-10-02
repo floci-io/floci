@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
+import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import org.junit.jupiter.api.Test;
 
@@ -548,6 +549,70 @@ class EcsServiceDeploymentCircuitBreakerTest {
         assertTrue(stoppedTasks(after).isEmpty(), "the alarm is checked before a task starts after restart");
         after.reconcileServices();
         assertEquals("STOPPED", deploymentOf(after, "cb-alarm-restart", model.getDeploymentId()).getStatus());
+    }
+
+    @Test
+    void aCompletedDeploymentIsNotFailedByAnAlarmAfterARestart() {
+        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("completed-restart-alarm");
+        alarm.setStateValue("OK");
+        when(metricsService.describeAlarms(List.of("completed-restart-alarm"), null, REGION))
+                .thenReturn(List.of(alarm));
+        EcsService before = newService(storage, metricsService);
+        healthy = true;
+        EcsServiceModel model = createServiceWithDeploymentConfiguration(before, "cb-completed-restart", 1,
+                Map.of("alarms", Map.of("enable", true, "rollback", true,
+                        "alarmNames", List.of("completed-restart-alarm"))));
+        before.reconcileServices();
+        assertEquals(model.getDeploymentId(), model.getLastCompletedDeploymentId());
+
+        alarm.setStateValue("ALARM");
+        EcsService after = newService(storage, metricsService);
+        after.reconcileServices();
+
+        EcsServiceModel restarted = after.serviceByArn(model.getServiceArn());
+        assertEquals(model.getDeploymentId(), restarted.getLastCompletedDeploymentId());
+        assertNull(restarted.getFailedDeploymentId(), "a completed deployment is not reclassified by a later alarm");
+        assertEquals("COMPLETED", liveDeployment(after, "cb-completed-restart").getRolloutState());
+    }
+
+    @Test
+    void aRollbackAfterRestartUsesThePersistedSuccessfulRevision() {
+        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("restart-rollback-alarm");
+        alarm.setStateValue("OK");
+        when(metricsService.describeAlarms(List.of("restart-rollback-alarm"), null, REGION))
+                .thenReturn(List.of(alarm));
+        EcsService before = newService(storage, metricsService);
+        healthy = true;
+        EcsServiceModel model = createServiceWithDeploymentConfiguration(before, "cb-rollback-restart", 1,
+                Map.of("alarms", Map.of("enable", true, "rollback", true,
+                        "alarmNames", List.of("restart-rollback-alarm"))));
+        before.reconcileServices();
+        String successfulTaskDefinition = model.getTaskDefinition();
+
+        TaskDefinition next = registerTaskDef(before, "cb-rollback-restart-fam", "app:next");
+        String failedId = before.updateService("cb-rollback-restart-cluster", "cb-rollback-restart",
+                "cb-rollback-restart-fam:" + next.getRevision(), null, null, REGION).getDeploymentId();
+        alarm.setStateValue("ALARM");
+        EcsService after = newService(storage, metricsService);
+        after.reconcileServices();
+
+        ServiceDeployment failed = deploymentOf(after, "cb-rollback-restart", failedId);
+        assertEquals("ROLLBACK_IN_PROGRESS", failed.getStatus());
+        assertEquals(successfulTaskDefinition, after.serviceByArn(model.getServiceArn()).getTaskDefinition());
+        ServiceRevision recoveredRevision = after.describeServiceRevisions(
+                List.of(failed.getTargetServiceRevisionArn())).getFirst();
+        assertEquals(1, recoveredRevision.getContainerImages().size(),
+                "the recovered revision keeps its container image details");
+
+        after.reconcileServices();
+        after.reconcileServices();
+        assertEquals("ROLLBACK_SUCCESSFUL", deploymentOf(after, "cb-rollback-restart", failedId).getStatus());
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

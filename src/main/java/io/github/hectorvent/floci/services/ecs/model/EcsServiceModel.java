@@ -30,6 +30,8 @@ public class EcsServiceModel {
     private String lastCompletedDeploymentId;
     /** The deploymentId the circuit breaker failed; persisted so a restart does not resume it. */
     private String failedDeploymentId;
+    /** Last completed revision, retained so a rollback can survive a process restart. */
+    private ServiceRevision lastSuccessfulServiceRevision;
     private String namespace;
     private String deploymentController;
     private String schedulingStrategy;
@@ -99,6 +101,11 @@ public class EcsServiceModel {
     public String getLastCompletedDeploymentId() { return lastCompletedDeploymentId; }
     public void setLastCompletedDeploymentId(String lastCompletedDeploymentId) {
         this.lastCompletedDeploymentId = lastCompletedDeploymentId;
+    }
+
+    public ServiceRevision getLastSuccessfulServiceRevision() { return lastSuccessfulServiceRevision; }
+    public void setLastSuccessfulServiceRevision(ServiceRevision lastSuccessfulServiceRevision) {
+        this.lastSuccessfulServiceRevision = lastSuccessfulServiceRevision;
     }
 
     public String getFailedDeploymentId() { return failedDeploymentId; }

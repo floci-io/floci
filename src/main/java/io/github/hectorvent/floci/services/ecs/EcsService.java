@@ -4139,6 +4139,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     private ServiceDeployment settleStatus(ServiceDeployment deployment) {
         EcsServiceModel svc = serviceByArn(deployment.getServiceArn());
+        ServiceDeployment copy;
+        boolean completedNow = false;
         synchronized (deployment) {
             if (svc != null && deployment.getTargetServiceRevisionArn() != null
                     && deployment.getTargetServiceRevisionArn().endsWith("/" + taskSetId(svc))
@@ -4149,8 +4151,25 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 deployment.setStatus(DEPLOYMENT_STATUS_SUCCESSFUL);
                 deployment.setFinishedAt(now);
                 deployment.setUpdatedAt(now);
+                svc.setLastCompletedDeploymentId(deploymentId(svc));
+                ServiceRevision revision = serviceRevisions.get(deployment.getTargetServiceRevisionArn());
+                if (revision != null) {
+                    svc.setLastSuccessfulServiceRevision(revision);
+                }
+                completedNow = true;
             }
-            return copyOf(deployment);
+            copy = copyOf(deployment);
+        }
+        if (completedNow) {
+            persistServiceModel(svc);
+        }
+        return copy;
+    }
+
+    private void persistServiceModel(EcsServiceModel svc) {
+        EcsCluster cluster = resolveClusterByArn(svc.getClusterArn());
+        if (cluster != null) {
+            services.put(serviceKey(serviceRegion(svc), cluster.getClusterName(), svc.getServiceName()), svc);
         }
     }
 
@@ -4228,7 +4247,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             deployment.setStatusReason(reason);
             deployment.setUpdatedAt(Instant.now());
             if (rollback) {
-                ServiceRevision target = previousSuccessfulRevision(deployment);
+                ServiceRevision target = previousSuccessfulRevision(svc, deployment);
                 if (target != null) {
                     deployment.setRollbackTargetServiceRevisionArn(target.getServiceRevisionArn());
                     restoreServiceRevision(svc, target);
@@ -4237,8 +4256,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    private ServiceRevision previousSuccessfulRevision(ServiceDeployment failedDeployment) {
-        return serviceDeployments.values().stream()
+    private ServiceRevision previousSuccessfulRevision(EcsServiceModel svc, ServiceDeployment failedDeployment) {
+        ServiceRevision previous = serviceDeployments.values().stream()
                 .filter(candidate -> candidate != failedDeployment)
                 .filter(candidate -> failedDeployment.getServiceArn().equals(candidate.getServiceArn()))
                 .filter(candidate -> DEPLOYMENT_STATUS_SUCCESSFUL.equals(candidate.getStatus()))
@@ -4246,6 +4265,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                         Comparator.nullsFirst(Comparator.naturalOrder())))
                 .map(candidate -> serviceRevisions.get(candidate.getTargetServiceRevisionArn()))
                 .orElse(null);
+        if (previous != null) {
+            return previous;
+        }
+        ServiceRevision retained = svc.getLastSuccessfulServiceRevision();
+        return retained != null && svc.getServiceArn().equals(retained.getServiceArn())
+                && !Objects.equals(failedDeployment.getTargetServiceRevisionArn(),
+                retained.getServiceRevisionArn()) ? retained : null;
     }
 
     private void restoreServiceRevision(EcsServiceModel svc, ServiceRevision revision) {
@@ -5083,6 +5109,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         revision.setServiceArn(svc.getServiceArn());
         revision.setClusterArn(svc.getClusterArn());
         revision.setTaskDefinition(pinnedTaskDefinitionArn(svc, key, region));
+        revision.setContainerImages(containerImagesOf(revision.getTaskDefinition(), region));
         revision.setLaunchType(svc.getLaunchType());
         revision.setCapacityProviderStrategy(svc.getCapacityProviderStrategy());
         revision.setPlatformVersion(svc.getPlatformVersion());
