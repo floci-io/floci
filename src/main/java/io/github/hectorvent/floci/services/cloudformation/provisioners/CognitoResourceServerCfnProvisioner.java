@@ -22,7 +22,6 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
 
     private static final String TYPE = "AWS::Cognito::UserPoolResourceServer";
     private static final String POOL_ATTR = "__FlociResourceServerPoolId";
-    private static final String INCARNATION_ATTR = "__FlociResourceServerIncarnationId";
     private static final String UPDATE_ATTR = "__FlociResourceServerUpdate";
     private static final String CLEANUP_ATTR = "__FlociResourceServerCleanup";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -66,16 +65,13 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
                 && (!prior.poolId().equals(poolId) || !prior.identifier().equals(identifier));
         ResourceServer existing = prior == null ? null
                 : cognitoService.describeResourceServer(prior.poolId(), prior.identifier());
-        if (prior != null) {
-            requireOwnership(prior, existing);
-        }
         Identity target = prior;
         if (prior == null || replacement) {
-            ResourceServer created = cognitoService.createResourceServer(poolId, identifier, name, scopes);
-            target = new Identity(poolId, identifier, created.getIncarnationId());
+            cognitoService.createResourceServer(poolId, identifier, name, scopes);
+            target = new Identity(poolId, identifier);
         } else {
             resource.getAttributes().put(UPDATE_ATTR, snapshot(prior, existing, false).toString());
-            cognitoService.updateResourceServer(poolId, identifier, name, scopes, prior.incarnationId());
+            cognitoService.updateResourceServer(poolId, identifier, name, scopes);
         }
         if (replacement) {
             resource.getAttributes().put(UPDATE_ATTR, snapshot(prior, existing, true).toString());
@@ -136,7 +132,7 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         return !value.isEmpty() && value.length() <= 256;
     }
 
-    private record Identity(String poolId, String identifier, String incarnationId) {
+    private record Identity(String poolId, String identifier) {
     }
 
     private static Identity identity(StackResource resource, String identifier) {
@@ -144,37 +140,20 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         if (poolId == null || poolId.isBlank() || identifier == null || identifier.isBlank()) {
             throw new IllegalStateException("Missing Cognito resource server identity for " + resource.getLogicalId());
         }
-        return new Identity(poolId, identifier, resource.getAttributes().get(INCARNATION_ATTR));
+        return new Identity(poolId, identifier);
     }
 
     private static Identity identity(JsonNode node) {
-        return new Identity(node.path("poolId").asText(), node.path("identifier").asText(),
-                node.path("incarnationId").asText(null));
+        return new Identity(node.path("poolId").asText(), node.path("identifier").asText());
     }
 
     private static void setIdentity(StackResource resource, Identity identity) {
         resource.setPhysicalId(identity.identifier());
         resource.getAttributes().put(POOL_ATTR, identity.poolId());
-        if (identity.incarnationId() == null) {
-            resource.getAttributes().remove(INCARNATION_ATTR);
-        } else {
-            resource.getAttributes().put(INCARNATION_ATTR, identity.incarnationId());
-        }
     }
 
     private static ObjectNode address(Identity identity) {
-        return MAPPER.createObjectNode().put("poolId", identity.poolId()).put("identifier", identity.identifier())
-                .put("incarnationId", identity.incarnationId());
-    }
-
-    private static void requireOwnership(Identity identity, ResourceServer server) {
-        if (identity.incarnationId() == null || identity.incarnationId().isBlank()
-                || server.getIncarnationId() == null || server.getIncarnationId().isBlank()) {
-            throw new IllegalStateException("Cannot verify Cognito resource server ownership");
-        }
-        if (!identity.incarnationId().equals(server.getIncarnationId())) {
-            throw new AwsException("ResourceConflictException", "Resource server ownership has changed", 400);
-        }
+        return MAPPER.createObjectNode().put("poolId", identity.poolId()).put("identifier", identity.identifier());
     }
 
     private static ObjectNode snapshot(Identity identity, ResourceServer server, boolean replacement) {
@@ -204,7 +183,7 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
 
     private void delete(Identity identity) {
         CfnDeletes.safeDelete("Cognito resource server", identity.identifier(),
-                () -> cognitoService.deleteResourceServer(identity.poolId(), identity.identifier(), identity.incarnationId()),
+                () -> cognitoService.deleteResourceServer(identity.poolId(), identity.identifier()),
                 "ResourceNotFoundException");
     }
 
@@ -235,7 +214,7 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
             }
         } else {
             cognitoService.updateResourceServer(prior.poolId(), prior.identifier(), name,
-                    scopes(snapshot.path("scopes")), prior.incarnationId());
+                    scopes(snapshot.path("scopes")));
             setIdentity(resource, prior);
             resource.getAttributes().remove(UPDATE_ATTR);
         }

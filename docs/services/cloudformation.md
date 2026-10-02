@@ -116,6 +116,8 @@ passing model validation does not imply provider acceptance.
 `AWS::Cognito::UserPoolResourceServer` returns its `Identifier` for `Ref`. Changing `Identifier`
 or `UserPoolId` replaces the server; changing `Name` or `Scopes` updates it in place. Optional
 `Scopes` or individual scope entries can be omitted by `Fn::If` selecting `AWS::NoValue`.
+Changed-template updates and `DeleteStack` address the currently present server by `UserPoolId`
+and `Identifier`, including a server recreated outside the stack at the same address.
 
 Failed in-place restoration keeps the prior name and scopes for retry while the stack still
 allows `UpdateStack`. If a later update skips that resource, pending restoration can leave the

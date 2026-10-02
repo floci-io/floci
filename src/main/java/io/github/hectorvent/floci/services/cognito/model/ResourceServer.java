@@ -12,7 +12,6 @@ public class ResourceServer {
     private String userPoolId;
     private String identifier;
     private String name;
-    private String incarnationId;
     private List<ResourceServerScope> scopes = new ArrayList<>();
     private long creationDate;
     private long lastModifiedDate;
@@ -31,9 +30,6 @@ public class ResourceServer {
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
-
-    public String getIncarnationId() { return incarnationId; }
-    public void setIncarnationId(String incarnationId) { this.incarnationId = incarnationId; }
 
     public List<ResourceServerScope> getScopes() { return scopes; }
     public void setScopes(List<ResourceServerScope> scopes) { this.scopes = scopes; }
