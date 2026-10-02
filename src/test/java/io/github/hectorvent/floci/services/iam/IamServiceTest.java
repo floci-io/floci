@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iam;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -15,10 +16,10 @@ import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
-import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
@@ -172,6 +173,213 @@ class IamServiceTest {
                 service.resolveCallerArns("ASIALIVESESSION").orElseThrow());
         // An expired session answers for neither, never for one and not the other.
         assertTrue(service.resolveCallerArns("ASIAEXPIREDSESSION").isEmpty());
+    }
+
+    private static final String READ_S3 = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}""";
+    private static final String ALL_S3 = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}""";
+
+    /** The Deny every federated session carries: no IAM operation, and no STS operation but GetCallerIdentity. */
+    private static void assertFederatedUserLimits(String policy) throws Exception {
+        JsonNode statement = new ObjectMapper().readTree(policy).path("Statement").get(0);
+        assertEquals("Deny", statement.path("Effect").asText());
+        assertEquals("[\"iam:*\",\"sts:*\"]", statement.path("Action").toString());
+    }
+
+    /** A session that is no credential at all: unknown to every lookup, so nothing can act on its behalf. */
+    private static void assertNotACredential(IamService service, String accessKeyId) {
+        assertFalse(service.isKnownAccessKey(accessKeyId));
+        assertNull(service.resolveCallerContext(accessKeyId));
+        assertTrue(service.resolveCallerArns(accessKeyId).isEmpty());
+        assertTrue(service.findSecretKey(accessKeyId, "token").isEmpty());
+    }
+
+    @Test
+    void aSessionTokenActsAsTheUserWhoseKeyMintedIt() {
+        IamService service = iamService(false);
+        IamUser alice = service.createUser("alice", "/team/");
+        service.putUserPolicy("alice", "read", READ_S3);
+        String aliceKey = service.createAccessKey("alice").getAccessKeyId();
+        service.registerIssuedSession("ASIASESSIONTOKEN", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000", aliceKey);
+
+        CallerContext context = service.resolveCallerContext("ASIASESSIONTOKEN");
+
+        assertEquals(List.of(READ_S3), context.identityPolicies());
+        assertNull(context.sessionPolicyDocument());
+        assertEquals(new IamService.CallerArns(alice.getArn(), alice.getArn()),
+                service.resolveCallerArns("ASIASESSIONTOKEN").orElseThrow());
+        assertEquals(alice.getUserId(), service.resolveCallerUserId("ASIASESSIONTOKEN", "token").orElseThrow());
+    }
+
+    @Test
+    void aSessionTokenTheAccountRootMintedActsAsTheRoot() {
+        IamService service = iamService(false);
+        service.registerIssuedSession("ASIAROOTSESSION", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000", "000000000000");
+
+        // Allowed everything, as the root is, but through a context the filter bounds by the
+        // account's SCPs, rather than the null that lets a credential through unevaluated.
+        CallerContext context = service.resolveCallerContext("ASIAROOTSESSION");
+        assertEquals(1, context.identityPolicies().size());
+        assertEquals(new IamService.CallerArns("arn:aws:iam::000000000000:root", "arn:aws:iam::000000000000:root"),
+                service.resolveCallerArns("ASIAROOTSESSION").orElseThrow());
+    }
+
+    @Test
+    void aSessionTokenMintedWithAKeyIamDoesNotKnowActsAsTheRoot() {
+        IamService service = iamService(false);
+        service.registerIssuedSession("ASIAFROMUNKNOWNKEY", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000", "AKIAIOSFODNN7EXAMPLE");
+
+        // Floci treats a key IAM does not know as the account root, and the session it mints the same.
+        assertNull(service.resolveCallerContext("AKIAIOSFODNN7EXAMPLE"));
+        assertEquals(1, service.resolveCallerContext("ASIAFROMUNKNOWNKEY").identityPolicies().size());
+        assertEquals("arn:aws:iam::000000000000:root",
+                service.resolveCallerArns("ASIAFROMUNKNOWNKEY").orElseThrow().callerArn());
+    }
+
+    @Test
+    void aSessionTokenMintedWithAnotherSessionsKeyIsNoCredential() {
+        IamService service = iamService(false);
+        service.createRole("Worker", "/", "{}", null, 3600, null);
+        service.putRolePolicy("Worker", "all", ALL_S3);
+        service.registerSession("ASIAROLESESSION", "secret", "token",
+                "arn:aws:iam::000000000000:role/Worker", Instant.now().plusSeconds(3600), null,
+                "000000000000", "s", "AROAWORKER:s");
+        // GetSessionToken and GetFederationToken take long-term credentials only.
+        service.registerIssuedSession("ASIAFROMSESSION", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000", "ASIAROLESESSION");
+
+        assertNotACredential(service, "ASIAFROMSESSION");
+    }
+
+    @Test
+    void aSessionTokenMintedWithADeactivatedKeyIsNoCredential() {
+        IamService service = iamService(false);
+        service.createUser("alice", "/");
+        service.putUserPolicy("alice", "all", ALL_S3);
+        String aliceKey = service.createAccessKey("alice").getAccessKeyId();
+        service.updateAccessKey("alice", aliceKey, "Inactive");
+        service.registerIssuedSession("ASIAFROMINACTIVEKEY", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000", aliceKey);
+
+        assertNotACredential(service, "ASIAFROMINACTIVEKEY");
+    }
+
+    @Test
+    void aSessionTokenMintedWithAnotherAccountsKeyIsNoCredential() {
+        // A key IAM holds in another account is not one it does not know: it does not stand for this
+        // account's root, the way a key no account holds does.
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        accessKeys.putForAccount("111122223333", "AKIAFOREIGNEXAMPLE",
+                new AccessKey("AKIAFOREIGNEXAMPLE", "secret", "worker"));
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+        service.registerIssuedSession("ASIAFROMFOREIGNKEY", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000", "AKIAFOREIGNEXAMPLE");
+
+        assertNotACredential(service, "ASIAFROMFOREIGNKEY");
+    }
+
+    @Test
+    void aSessionsIssuerSurvivesPersistence() throws Exception {
+        SessionCredential session = new SessionCredential("ASIAPERSISTED", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000");
+        session.setIssuerArn("arn:aws:iam::000000000000:user/alice");
+        session.setIssuerUserId("AIDAALICE");
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+
+        SessionCredential restored = mapper.readValue(mapper.writeValueAsBytes(session), SessionCredential.class);
+
+        assertEquals("arn:aws:iam::000000000000:user/alice", restored.getIssuerArn());
+        assertEquals("AIDAALICE", restored.getIssuerUserId());
+    }
+
+    @Test
+    void aSessionTokenOfAUserRecreatedUnderTheSameNameIsNoCredential() {
+        IamService service = iamService(false);
+        service.createUser("alice", "/");
+        String aliceKey = service.createAccessKey("alice").getAccessKeyId();
+        service.registerIssuedSession("ASIASESSIONTOKEN", "secret", "token", null,
+                Instant.now().plusSeconds(3600), null, "000000000000", aliceKey);
+        service.deleteAccessKey("alice", aliceKey);
+        service.deleteUser("alice");
+        service.createUser("alice", "/");
+        service.putUserPolicy("alice", "all", ALL_S3);
+
+        assertNotACredential(service, "ASIASESSIONTOKEN");
+    }
+
+    @Test
+    void aFederatedSessionGetsItsUsersPermissionsOnlyThroughItsSessionPolicyAndNeverARoles() throws Exception {
+        IamService service = iamService(false);
+        service.createUser("alice", "/");
+        service.putUserPolicy("alice", "read", READ_S3);
+        String aliceKey = service.createAccessKey("alice").getAccessKeyId();
+        // A role with the federated user's name is not the federated user.
+        service.createRole("Bob", "/", "{}", null, 3600, null);
+        service.putRolePolicy("Bob", "all", ALL_S3);
+        String federatedArn = "arn:aws:sts::000000000000:federated-user/Bob";
+        service.registerIssuedSession("ASIAWITHPOLICY", "secret", "token", federatedArn,
+                Instant.now().plusSeconds(3600), ALL_S3, "000000000000", aliceKey);
+
+        CallerContext withPolicy = service.resolveCallerContext("ASIAWITHPOLICY");
+        assertEquals(2, withPolicy.identityPolicies().size());
+        assertEquals(READ_S3, withPolicy.identityPolicies().getFirst());
+        assertFederatedUserLimits(withPolicy.identityPolicies().getLast());
+        assertEquals(ALL_S3, withPolicy.sessionPolicyDocument());
+        assertEquals(new IamService.CallerArns(federatedArn, federatedArn),
+                service.resolveCallerArns("ASIAWITHPOLICY").orElseThrow());
+        assertEquals("000000000000:Bob", service.resolveCallerUserId("ASIAWITHPOLICY", "token").orElseThrow());
+    }
+
+    @Test
+    void aFederatedSessionWithoutASessionPolicyKeepsOnlyItsUsersExplicitDenies() throws Exception {
+        IamService service = iamService(false);
+        service.createUser("alice", "/");
+        service.putUserPolicy("alice", "mixed", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:*","Resource":"*"},
+                  {"Effect":"Deny","Action":"s3:DeleteObject","Resource":"*"}]}""");
+        String boundaryArn = service.createPolicy("bound", "/", null, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:*","Resource":"*"},
+                  {"Effect":"Deny","Action":"s3:PutObject","Resource":"*"}]}""", null).getArn();
+        service.putUserPermissionsBoundary("alice", boundaryArn);
+        String aliceKey = service.createAccessKey("alice").getAccessKeyId();
+        service.registerIssuedSession("ASIAWITHOUTPOLICY", "secret", "token",
+                "arn:aws:sts::000000000000:federated-user/Bob", Instant.now().plusSeconds(3600), null,
+                "000000000000", aliceKey);
+
+        // No permissions of its own (STS API Reference, GetFederationToken), but its user's explicit
+        // denies, from its policies and its boundary, still apply to what a resource policy grants it.
+        CallerContext context = service.resolveCallerContext("ASIAWITHOUTPOLICY");
+        assertEquals(2, context.identityPolicies().size());
+        assertFederatedUserLimits(context.identityPolicies().getLast());
+        JsonNode statements = new ObjectMapper().readTree(context.identityPolicies().getFirst()).path("Statement");
+        assertEquals(2, statements.size());
+        for (JsonNode statement : statements) {
+            assertEquals("Deny", statement.path("Effect").asText());
+        }
+        assertEquals("s3:DeleteObject", statements.get(0).path("Action").asText());
+        assertEquals("s3:PutObject", statements.get(1).path("Action").asText());
+        assertNull(context.sessionPolicyDocument());
+        assertNull(context.boundaryPolicyDocument());
+    }
+
+    @Test
+    void aFederatedSessionStoredWithoutItsIssuerIsNoCredential() {
+        IamService service = iamService(false);
+        service.createRole("Bob", "/", "{}", null, 3600, null);
+        service.putRolePolicy("Bob", "all", ALL_S3);
+        // How sessions were stored before the issuer was recorded.
+        service.registerSession("ASIALEGACYFEDERATED", "secret", "token",
+                "arn:aws:sts::000000000000:federated-user/Bob", Instant.now().plusSeconds(3600), ALL_S3,
+                "000000000000");
+
+        assertNotACredential(service, "ASIALEGACYFEDERATED");
     }
 
     @Test
@@ -1212,7 +1420,9 @@ class IamServiceTest {
     }
 
     @Test
-    void getSessionTokenStyleSessionBypassesEnforcementResolution() {
+    void aSessionWithNoRoleAndNoRecordedIssuerIsNoCredential() {
+        // How GetSessionToken stored its sessions before it recorded the key that minted them. Such
+        // a session used to bypass enforcement altogether.
         iamService.registerSession(
                 "ASIAIOSFODNN7EXAMPLE",
                 "temporary-secret",
@@ -1221,6 +1431,7 @@ class IamServiceTest {
                 null
         );
 
+        assertFalse(iamService.isKnownAccessKey("ASIAIOSFODNN7EXAMPLE"));
         assertNull(iamService.resolveCallerContext("ASIAIOSFODNN7EXAMPLE"));
         assertNull(iamService.resolveCallerPolicies("ASIAIOSFODNN7EXAMPLE"));
     }
@@ -1228,13 +1439,15 @@ class IamServiceTest {
     @Test
     void findSecretKeyRequiresTheTemporaryCredentialSessionToken() {
         String accessKeyId = "ASIASESSIONTOKENMATCH";
-        iamService.registerSession(
+        iamService.registerIssuedSession(
                 accessKeyId,
                 "temporary-secret",
                 "session-token",
                 null,
                 Instant.now().plusSeconds(3600),
-                null
+                null,
+                "000000000000",
+                "000000000000"
         );
 
         assertEquals("temporary-secret", iamService.findSecretKey(accessKeyId, "session-token").orElseThrow());
@@ -1263,12 +1476,15 @@ class IamServiceTest {
 
     @Test
     void resolveAccountIdFallsBackToOriginAccountWhenNoRoleArn() {
-        iamService.registerSession(
+        // A GetSessionToken session the account's root minted.
+        iamService.registerIssuedSession(
                 "ASIASESSIONTOKEN",
                 "temp-secret",
+                "token",
                 null,
                 Instant.now().plusSeconds(3600),
                 null,
+                "111122223333",
                 "111122223333"
         );
 

@@ -116,10 +116,10 @@ class IamServicePersistenceTest {
     void expiredTemporarySessionsAreRemovedAfterRestart(@TempDir Path dir) {
         Instant now = Instant.now();
         IamService first = newService(dir);
-        first.registerSessionForAccount("000000000000", "ASIAEXPIREDPRESIGN", "expired-secret",
-                "expired-token", null, now.minusSeconds(1), null);
-        first.registerSessionForAccount("000000000000", "ASIAVALIDPRESIGN", "valid-secret",
-                "valid-token", null, now.plusSeconds(3600), null);
+        first.registerPresignedUrlSession("000000000000", "ASIAEXPIREDPRESIGN", "expired-secret",
+                "expired-token", now.minusSeconds(1), null, "s3:GetObject", "arn:aws:s3:::bucket/key");
+        first.registerPresignedUrlSession("000000000000", "ASIAVALIDPRESIGN", "valid-secret",
+                "valid-token", now.plusSeconds(3600), null, "s3:GetObject", "arn:aws:s3:::bucket/key");
 
         IamService restarted = newService(dir);
         assertEquals(1, restarted.sweepExpiredSessions(now));

@@ -1,5 +1,11 @@
 package io.github.hectorvent.floci.services.iam;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -21,6 +27,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.CredentialReport;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
@@ -31,13 +38,11 @@ import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
-import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
 import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -54,21 +59,21 @@ import java.security.interfaces.RSAPublicKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -90,8 +95,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
+    private static final String FEDERATED_USER_PREFIX = "federated-user/";
+    private static final ObjectMapper POLICY_MAPPER = new ObjectMapper();
     private static final String SCOPED_IDENTITY_SESSION_BASE_POLICY =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
+    /**
+     * GetFederationToken credentials cannot call any IAM operation, nor any STS operation except
+     * GetCallerIdentity, whatever their policies allow. The enforcement filter answers
+     * GetCallerIdentity before reading any policy, so denying all of {@code sts:*} leaves it callable.
+     */
+    private static final String FEDERATED_USER_SESSION_LIMITS =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":[\"iam:*\",\"sts:*\"],\"Resource\":\"*\"}]}";
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
@@ -3358,6 +3372,36 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         sessions.put(sessionAccessKeyId, session);
     }
 
+    /**
+     * Stores a session GetSessionToken or GetFederationToken minted, with the identity whose
+     * long-term key minted it. An active access key of a user in this account names that user. A
+     * key IAM holds nowhere, the legacy {@code test} key or the account id among them, names the
+     * account root, which is how Floci treats such a key itself. Any other key IAM holds, such as
+     * another session's (both operations take long-term credentials only) or an inactive or
+     * foreign access key, leaves the issuer unset, and {@link #resolveCallerContext} then grants
+     * the session nothing.
+     *
+     * @param federatedUserArn the federated user's ARN for GetFederationToken, null for
+     *                         GetSessionToken
+     */
+    public void registerIssuedSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
+                                      String federatedUserArn, Instant expiration, String sessionPolicyDocument,
+                                      String originAccountId, String issuingAccessKeyId) {
+        SessionCredential session = new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken,
+                federatedUserArn, expiration, sessionPolicyDocument, originAccountId);
+        Optional<IamUser> issuingUser = issuingAccessKeyId == null ? Optional.empty()
+                : accessKeys.get(issuingAccessKeyId)
+                        .filter(accessKey -> "Active".equals(accessKey.getStatus()))
+                        .flatMap(accessKey -> users.get(accessKey.getUserName()));
+        if (issuingUser.isPresent()) {
+            session.setIssuerArn(issuingUser.get().getArn());
+            session.setIssuerUserId(issuingUser.get().getUserId());
+        } else if (issuingAccessKeyId == null || !holdsKey(issuingAccessKeyId)) {
+            session.setIssuerArn(regionResolver.buildGlobalArn("iam", originAccountId, "root"));
+        }
+        sessions.put(sessionAccessKeyId, session);
+    }
+
     /** Stores a temporary session in an explicit account namespace. */
     public void registerSessionForAccount(String accountId, String sessionAccessKeyId, String secretAccessKey,
                                           String roleArn, Instant expiration,
@@ -3586,6 +3630,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * lookup spans all accounts; the access key's global uniqueness keeps the result unambiguous.
      */
     private Optional<SessionCredential> findSessionAnyAccount(String accessKeyId) {
+        return storedSessionAnyAccount(accessKeyId).filter(session -> !isOrphanedIssuedSession(session));
+    }
+
+    /** The stored session with this key in any account, including an orphaned issued session. */
+    private Optional<SessionCredential> storedSessionAnyAccount(String accessKeyId) {
         if (!isTemporaryAccessKey(accessKeyId)) {
             return Optional.empty();
         }
@@ -3593,6 +3642,130 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return aware.findAnyAccount(accessKeyId);
         }
         return sessions.get(accessKeyId);
+    }
+
+    /** Whether IAM holds this key at all: any account's access key, or any stored session. */
+    private boolean holdsKey(String accessKeyId) {
+        return isKnownAccessKey(accessKeyId) || sessions.get(accessKeyId).isPresent()
+                || storedSessionAnyAccount(accessKeyId).isPresent();
+    }
+
+    /**
+     * A GetSessionToken or GetFederationToken session whose issuer is gone: none was recorded (it was
+     * minted with another session's key, an inactive or another account's key, or stored before the
+     * issuer was recorded), or its user has since been deleted or recreated under the same name.
+     * Such a session is no credential at all, so that neither a resource policy nor a fallback to the
+     * account root can act on its behalf.
+     */
+    private boolean isOrphanedIssuedSession(SessionCredential session) {
+        boolean issued = isFederatedUserSession(session)
+                || (session.getRoleArn() == null && session.getPresignedAction() == null);
+        return issued && !issuedByRoot(session) && issuingUser(session).isEmpty();
+    }
+
+    /** A session GetFederationToken minted: its role ARN slot holds the federated user's ARN. */
+    private static boolean isFederatedUserSession(SessionCredential session) {
+        String arn = session.getRoleArn();
+        return AwsArnUtils.isArnFor(arn, "sts") && AwsArnUtils.parse(arn).resource().startsWith(FEDERATED_USER_PREFIX);
+    }
+
+    private static boolean issuedByRoot(SessionCredential session) {
+        String issuerArn = session.getIssuerArn();
+        return issuerArn != null && "root".equals(AwsArnUtils.parse(issuerArn).resource());
+    }
+
+    /** The IAM user whose key minted the session, while it is still that user rather than a same-named one. */
+    private Optional<IamUser> issuingUser(SessionCredential session) {
+        String issuerArn = session.getIssuerArn();
+        String issuerUserId = session.getIssuerUserId();
+        if (issuerArn == null || issuerUserId == null) {
+            return Optional.empty();
+        }
+        String userName = issuerArn.substring(issuerArn.lastIndexOf('/') + 1);
+        Optional<IamUser> user = users instanceof AccountAwareStorageBackend<IamUser> aware
+                ? aware.getForAccount(AwsArnUtils.parse(issuerArn).accountId(), userName)
+                : users.get(userName);
+        return user.filter(candidate -> issuerUserId.equals(candidate.getUserId()));
+    }
+
+    /**
+     * GetSessionToken credentials have the permissions of the identity that minted them: an IAM
+     * user's own policies and boundary, or the account root's, which the enforcement filter still
+     * bounds by the account's service control policies.
+     */
+    private CallerContext sessionTokenContext(SessionCredential session) {
+        if (issuedByRoot(session)) {
+            return CallerContext.of(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY));
+        }
+        return issuingUser(session)
+                .map(user -> new CallerContext(collectUserPolicies(user.getUserName()), null,
+                        resolveUserBoundaryDocument(user.getUserName())))
+                .orElse(CallerContext.of(List.of()));
+    }
+
+    /**
+     * GetFederationToken credentials grant nothing without a session policy. With one, they grant
+     * the intersection of that policy and the permissions of the identity that minted them, never
+     * those of a role.
+     *
+     * <p>Without one, the session still answers to its issuer's explicit denies. A resource policy
+     * that names the federated user grants to the session directly, past any implicit deny in an
+     * identity policy, boundary or session policy, but not past an explicit one (IAM User Guide,
+     * "Resource-based policies for AWS STS federated user principal sessions"). So the session
+     * carries only the Deny statements of its user's policies and boundary.
+     */
+    private CallerContext federatedUserContext(SessionCredential session) {
+        String sessionPolicy = session.getSessionPolicyDocument();
+        if (sessionPolicy == null || sessionPolicy.isBlank()) {
+            return issuingUser(session)
+                    .map(user -> CallerContext.of(List.of(denyStatementsOf(user.getUserName()))))
+                    .orElse(CallerContext.of(List.of()));
+        }
+        if (issuedByRoot(session)) {
+            return new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY), sessionPolicy, null);
+        }
+        return issuingUser(session)
+                .map(user -> new CallerContext(collectUserPolicies(user.getUserName()), sessionPolicy,
+                        resolveUserBoundaryDocument(user.getUserName())))
+                .orElse(CallerContext.of(List.of()));
+    }
+
+    /** Adds the IAM and STS limits that bind a federated session on top of whatever it is granted. */
+    private static CallerContext withFederatedUserLimits(CallerContext context) {
+        List<String> identityPolicies = context.identityPolicies() == null
+                ? new ArrayList<>() : new ArrayList<>(context.identityPolicies());
+        identityPolicies.add(FEDERATED_USER_SESSION_LIMITS);
+        return new CallerContext(identityPolicies, context.sessionPolicyDocument(), context.boundaryPolicyDocument());
+    }
+
+    /** One policy document holding only the Deny statements of a user's policies and boundary. */
+    private String denyStatementsOf(String userName) {
+        List<String> documents = new ArrayList<>();
+        List<String> userPolicies = collectUserPolicies(userName);
+        if (userPolicies != null) {
+            documents.addAll(userPolicies);
+        }
+        String boundary = resolveUserBoundaryDocument(userName);
+        if (boundary != null) {
+            documents.add(boundary);
+        }
+        ArrayNode denies = POLICY_MAPPER.createArrayNode();
+        for (String document : documents) {
+            try {
+                JsonNode statements = POLICY_MAPPER.readTree(document).path("Statement");
+                for (JsonNode statement : statements.isArray() ? statements : List.of(statements)) {
+                    if ("Deny".equalsIgnoreCase(statement.path("Effect").asText())) {
+                        denies.add(statement);
+                    }
+                }
+            } catch (JsonProcessingException e) {
+                LOG.warnv("Skipping an unparseable policy of user {0}: {1}", userName, e.getMessage());
+            }
+        }
+        ObjectNode policy = POLICY_MAPPER.createObjectNode();
+        policy.put("Version", "2012-10-17");
+        policy.set("Statement", denies);
+        return policy.toString();
     }
 
     /**
@@ -3621,12 +3794,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 return null; // expired — unknown key → bypass
             }
 
+            if (isFederatedUserSession(session)) {
+                return withFederatedUserLimits(federatedUserContext(session));
+            }
             if (session.getRoleArn() == null) {
-                // A locally minted identity session can carry a restrictive session policy.
-                // Unscoped GetSessionToken credentials retain the historical bypass.
-                return session.getPresignedAction() == null || session.getSessionPolicyDocument() == null ? null
-                        : new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY),
-                                session.getSessionPolicyDocument(), null);
+                if (session.getPresignedAction() != null) {
+                    // A locally minted identity session can carry a restrictive session policy.
+                    return session.getSessionPolicyDocument() == null ? null
+                            : new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY),
+                                    session.getSessionPolicyDocument(), null);
+                }
+                return sessionTokenContext(session);
             }
             List<String> identityPolicies = collectRolePolicies(session.getRoleArn());
             String boundaryDoc = resolveRoleBoundaryDocument(session.getRoleArn());
@@ -3667,7 +3845,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         Optional<SessionCredential> session = sessions.get(accessKeyId);
         if (session.isPresent()) {
-            return session;
+            return session.filter(stored -> !isOrphanedIssuedSession(stored));
         }
         if (!isTemporaryAccessKey(accessKeyId)) {
             return Optional.empty();
@@ -3725,9 +3903,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 deleteSession(accessKeyId, session);
                 return Optional.empty();
             }
+            if (isFederatedUserSession(session)) {
+                return Optional.of(new CallerArns(session.getRoleArn(), session.getRoleArn()));
+            }
             String roleArn = session.getRoleArn();
             if (roleArn == null) {
-                return Optional.empty();
+                // GetSessionToken credentials act as the identity that minted them.
+                if (issuedByRoot(session)) {
+                    return Optional.of(new CallerArns(session.getIssuerArn(), session.getIssuerArn()));
+                }
+                return issuingUser(session).map(user -> new CallerArns(user.getArn(), user.getArn()));
             }
             String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
             String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
@@ -3784,6 +3969,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (isTemporaryAccessKey(accessKeyId) && session.getSessionToken() != null
                     && !hasMatchingSessionToken(session, sessionToken)) {
                 return Optional.empty();
+            }
+            if (isFederatedUserSession(session)) {
+                // account:caller-specified-name, the aws:userid of a federated user.
+                AwsArnUtils.Arn federatedUser = AwsArnUtils.parse(session.getRoleArn());
+                return Optional.of(federatedUser.accountId() + ":"
+                        + federatedUser.resource().substring(FEDERATED_USER_PREFIX.length()));
+            }
+            if (session.getRoleArn() == null) {
+                Optional<IamUser> issuingUser = issuingUser(session);
+                if (issuingUser.isPresent()) {
+                    return Optional.of(issuingUser.get().getUserId());
+                }
             }
             if (session.getAssumedRoleId() != null) {
                 return Optional.of(session.getAssumedRoleId());

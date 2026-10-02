@@ -171,12 +171,8 @@ public class StsQueryHandler {
      */
     private Response enforceTrustPolicy(String roleArn, IamRole role, String roleAccountId,
                                         MultivaluedMap<String, String> params) {
-        String auth = IamEnforcementFilter.requestAuthorization(
-                headers == null ? null : headers.getHeaderString("Authorization"),
-                uriInfo == null ? null : uriInfo.getQueryParameters());
         String callerAccount = regionResolver.getAccountId();
-        String accessKeyId = auth == null ? null : accountResolver.extractAccessKeyId(auth);
-        Optional<IamService.CallerArns> callerArns = iamService.resolveCallerArns(accessKeyId);
+        Optional<IamService.CallerArns> callerArns = iamService.resolveCallerArns(callerAccessKeyId());
         String callerArn = callerArns.map(IamService.CallerArns::callerArn)
                 .orElse(regionResolver.buildGlobalArn("iam", callerAccount, "root"));
         String principalArn = callerArns.map(IamService.CallerArns::principalArn).orElse(callerArn);
@@ -265,9 +261,9 @@ public class StsQueryHandler {
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
         String result = credentialsXml(accessKeyId, secretKey, sessionToken, expiration);
-        // No role ARN — route these credentials back to the caller's account.
-        iamService.registerSession(
-                accessKeyId, secretKey, sessionToken, null, expiration, null, regionResolver.getAccountId());
+        // No role ARN: the credentials route back to the caller's account and act as the caller.
+        iamService.registerIssuedSession(accessKeyId, secretKey, sessionToken, null, expiration, null,
+                regionResolver.getAccountId(), callerAccessKeyId());
         return Response.ok(AwsQueryResponse.envelope("GetSessionToken", AwsNamespaces.STS, result)).build();
     }
 
@@ -529,6 +525,14 @@ public class StsQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("AssumeRoleWithSAML", AwsNamespaces.STS, result)).build();
     }
 
+    /** The access key that signed this request, in the header or presigned in the query. */
+    private String callerAccessKeyId() {
+        String auth = IamEnforcementFilter.requestAuthorization(
+                headers == null ? null : headers.getHeaderString("Authorization"),
+                uriInfo == null ? null : uriInfo.getQueryParameters());
+        return auth == null ? null : accountResolver.extractAccessKeyId(auth);
+    }
+
     private Response handleGetFederationToken(MultivaluedMap<String, String> params) {
         Response validation = validateRequired(params, "Name");
         if (validation != null) {
@@ -550,10 +554,10 @@ public class StsQueryHandler {
         String federatedUserArn = regionResolver.buildGlobalArn("sts", accountId, "federated-user/" + name);
 
         String sessionPolicy = getParam(params, "Policy");
-        // Register federation token so enforcement can scope its policies via session policy.
-        // The federated-user ARN already carries the caller's account, so reuse it as the origin.
-        iamService.registerSession(
-                accessKeyId, secretKey, sessionToken, federatedUserArn, expiration, sessionPolicy, accountId);
+        // The session is scoped by its session policy within the permissions of the caller that
+        // minted it, so the caller is recorded with it.
+        iamService.registerIssuedSession(accessKeyId, secretKey, sessionToken, federatedUserArn, expiration,
+                sessionPolicy, accountId, callerAccessKeyId());
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
