@@ -4976,9 +4976,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     void reconcileServices() {
         for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
+            // Taken before the reconcile counts the tasks, since stopping some may then take seconds.
+            long minute = Instant.now().truncatedTo(ChronoUnit.MINUTES).getEpochSecond();
             try {
                 reconcileService(entry.getKey(), entry.getValue());
-                publishContainerInsights(entry.getKey(), entry.getValue());
+                publishContainerInsights(entry.getKey(), entry.getValue(), minute);
             } catch (Exception e) {
                 LOG.debugv("Error reconciling ECS service {0}: {1}", entry.getKey(), e.getMessage());
             }
@@ -4990,7 +4992,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * setting is enabled or enhanced, one sample per minute. As in AWS, nothing is published while
      * the service has no RUNNING task, so an alarm sees missing data rather than a zero.
      */
-    private void publishContainerInsights(String key, EcsServiceModel svc) {
+    private void publishContainerInsights(String key, EcsServiceModel svc, long minute) {
         if (cloudWatchMetricsService == null || !STATUS_ACTIVE.equals(svc.getStatus()) || svc.getRunningCount() < 1) {
             return;
         }
@@ -5002,7 +5004,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                         && ("enabled".equals(s.value()) || "enhanced".equals(s.value())))) {
             return;
         }
-        long minute = Instant.now().truncatedTo(ChronoUnit.MINUTES).getEpochSecond();
         Map<String, Integer> counts = Map.of("RunningTaskCount", svc.getRunningCount(),
                 "PendingTaskCount", svc.getPendingCount(), "DesiredTaskCount", svc.getDesiredCount());
         for (Map.Entry<String, Integer> count : counts.entrySet()) {
