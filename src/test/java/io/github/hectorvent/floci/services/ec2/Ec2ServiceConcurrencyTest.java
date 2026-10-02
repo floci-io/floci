@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -125,8 +126,14 @@ class Ec2ServiceConcurrencyTest {
             reader.start();
             try {
                 runRace(i -> {
-                    service.createNetworkAclEntry(region, aclId, 100 + i, "6", "allow", false,
-                            "10.0." + i + ".0/24", 80, 80, false);
+                    NetworkAclEntry entry = new NetworkAclEntry();
+                    entry.setRuleNumber(100 + i);
+                    entry.setProtocol("6");
+                    entry.setRuleAction("allow");
+                    entry.setCidrBlock("10.0." + i + ".0/24");
+                    entry.setPortRangeFrom(80);
+                    entry.setPortRangeTo(80);
+                    service.putNetworkAclEntry(region, aclId, entry, false);
                     return "entry-" + i;
                 });
             } finally {

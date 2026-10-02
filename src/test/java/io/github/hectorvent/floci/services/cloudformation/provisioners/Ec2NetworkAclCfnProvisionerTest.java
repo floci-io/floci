@@ -9,7 +9,9 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclAssociation;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.Set;
 
@@ -18,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -122,8 +125,14 @@ class Ec2NetworkAclCfnProvisionerTest {
         });
         provisioner.provision(r, props, new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack"));
 
-        verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 150, "6", "deny", true,
-                "0.0.0.0/0", 22, 22, true);
+        NetworkAclEntry entry = storedEntry("acl-abc");
+        assertEquals(150, entry.getRuleNumber());
+        assertEquals("6", entry.getProtocol());
+        assertEquals("deny", entry.getRuleAction());
+        assertEquals(true, entry.isEgress());
+        assertEquals("0.0.0.0/0", entry.getCidrBlock());
+        assertEquals(22, entry.getPortRangeFrom());
+        assertEquals(22, entry.getPortRangeTo());
         assertEquals("acl-abc|150|egress", r.getPhysicalId());
     }
 
@@ -134,9 +143,41 @@ class Ec2NetworkAclCfnProvisionerTest {
 
         provisioner.provision(r, props, ctx());
 
-        verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 100, "-1", null, false,
-                null, null, null, true);
+        NetworkAclEntry entry = storedEntry("acl-abc");
+        assertEquals(100, entry.getRuleNumber());
+        assertEquals("-1", entry.getProtocol());
+        assertNull(entry.getRuleAction());
+        assertEquals(false, entry.isEgress());
+        assertNull(entry.getCidrBlock());
+        assertNull(entry.getPortRangeFrom());
         assertEquals("acl-abc|100|ingress", r.getPhysicalId());
+    }
+
+    @Test
+    void aclEntryKeepsItsIpv6CidrBlockAndIcmp() {
+        StackResource r = resource("AWS::EC2::NetworkAclEntry", "Entry");
+        ObjectNode props = mapper.createObjectNode()
+                .put("NetworkAclId", "acl-abc")
+                .put("RuleNumber", 101)
+                .put("Protocol", "58")
+                .put("RuleAction", "allow")
+                .put("Ipv6CidrBlock", "::/0");
+        props.set("Icmp", mapper.createObjectNode().put("Type", 128).put("Code", 0));
+
+        provisioner.provision(r, props, ctx());
+
+        NetworkAclEntry entry = storedEntry("acl-abc");
+        assertEquals("::/0", entry.getIpv6CidrBlock());
+        assertNull(entry.getCidrBlock());
+        assertEquals(128, entry.getIcmpType());
+        assertEquals(0, entry.getIcmpCode());
+    }
+
+    // Re-provisioning the same RuleNumber/Egress/NetworkAclId key is a stack update, so it must replace.
+    private NetworkAclEntry storedEntry(String aclId) {
+        ArgumentCaptor<NetworkAclEntry> entry = ArgumentCaptor.forClass(NetworkAclEntry.class);
+        verify(ec2).putNetworkAclEntry(eq("us-east-1"), eq(aclId), entry.capture(), eq(true));
+        return entry.getValue();
     }
 
     /**
