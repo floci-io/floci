@@ -82,8 +82,20 @@ public final class GlueTypeMapper {
     public static String duckProjection(String columnName, String glueType) {
         String column = quote(columnName);
         String type = canonicalGlueType(glueType);
-        String expression = isNested(type) ? "to_json(" + column + ")"
-                : "binary".equals(type) ? "'\\x' || hex(" + column + ")" : column;
+        Matcher sized = SIZED_STRING.matcher(type);
+        String expression;
+        if (isNested(type)) {
+            expression = "to_json(" + column + ")";
+        } else if ("binary".equals(type)) {
+            expression = "'\\x' || hex(" + column + ")";
+        } else if (sized.matches()) {
+            // Spectrum nulls a value wider than its column (surplus_char_handling defaults to SET_TO_NULL),
+            // where COPY into varchar(n) would fail the whole query. strlen counts bytes, as VARCHAR(n) does.
+            expression = "CASE WHEN strlen(CAST(" + column + " AS VARCHAR)) > " + sized.group(1)
+                    + " THEN NULL ELSE " + column + " END";
+        } else {
+            expression = column;
+        }
         return "COALESCE(CAST(" + expression + " AS VARCHAR), " + NULL_MARKER + ") AS " + column;
     }
 

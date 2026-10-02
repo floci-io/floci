@@ -145,6 +145,22 @@ class S3ServiceTest {
     }
 
     @Test
+    void listBucketsHidesSpectrumScratchBucketButKeepsOtherInternalPrefixBuckets() {
+        s3Service.createBucket("bucket-a", "us-east-1");
+        s3Service.createBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "us-east-1");
+        String userBucket = S3Service.INTERNAL_BUCKET_PREFIX + "customer-data";
+        s3Service.createBucket(userBucket, "us-east-1");
+
+        List<Bucket> buckets = s3Service.listBuckets();
+
+        assertEquals(2, buckets.size());
+        assertTrue(buckets.stream().anyMatch(bucket -> "bucket-a".equals(bucket.getName())));
+        assertTrue(buckets.stream().anyMatch(bucket -> userBucket.equals(bucket.getName())));
+        assertFalse(buckets.stream().anyMatch(bucket ->
+                S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET.equals(bucket.getName())));
+    }
+
+    @Test
     void putObjectLastModifiedHasMillisecondPrecision() {
         s3Service.createBucket("test-bucket", null);
         S3Object obj = s3Service.putObject("test-bucket", "file.txt", "data".getBytes(), null, null);
