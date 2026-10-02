@@ -14,6 +14,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +31,10 @@ public class CodePipelineEventPublisher {
 
     private static final Logger LOG = Logger.getLogger(CodePipelineEventPublisher.class);
     private static final int MAX_SNS_SUBJECT_LENGTH = 100;
+    private static final String CONSOLE_URL = "https://console.aws.amazon.com/codepipeline/home";
+    /** The approval message's {@code expires} is to the minute, e.g. 2016-07-07T20:22Z. */
+    private static final DateTimeFormatter MINUTE_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm'Z'").withZone(ZoneOffset.UTC);
 
     private final EventBridgeService eventBridgeService;
     private final SnsService snsService;
@@ -101,13 +107,18 @@ public class CodePipelineEventPublisher {
                                String externalEntityLink, double expires) {
         try {
             ObjectNode message = mapper.createObjectNode();
+            String consoleLink = CONSOLE_URL + "?region=" + execution.getRegion()
+                    + "#/view/" + execution.getPipelineName();
             message.put("region", execution.getRegion());
+            message.put("consoleLink", consoleLink);
             ObjectNode approval = message.putObject("approval");
             approval.put("pipelineName", execution.getPipelineName());
             approval.put("stageName", action.getStageName());
             approval.put("actionName", action.getActionName());
             approval.put("token", action.getToken());
-            approval.put("expires", isoTimestamp(expires));
+            approval.put("expires", MINUTE_FORMAT.format(Instant.ofEpochSecond((long) expires)));
+            approval.put("approvalReviewLink", consoleLink + "/" + action.getStageName()
+                    + "/" + action.getActionName() + "/approve/" + action.getToken());
             if (customData != null && !customData.isBlank()) {
                 approval.put("customData", customData);
             }
@@ -127,9 +138,9 @@ public class CodePipelineEventPublisher {
         }
     }
 
-    /** Epoch seconds (with fraction) as the ISO-8601 UTC timestamp CodePipeline emits, e.g. 2020-01-24T22:03:07Z. */
+    /** Epoch seconds (with fraction) as the ISO-8601 UTC timestamp CodePipeline emits, e.g. 2023-10-26T13:31:39.604Z. */
     private static String isoTimestamp(double epochSeconds) {
-        return Instant.ofEpochSecond((long) epochSeconds).toString();
+        return Instant.ofEpochMilli(Math.round(epochSeconds * 1000)).toString();
     }
 
     private ObjectNode baseDetail(CodePipelineExecution execution) {

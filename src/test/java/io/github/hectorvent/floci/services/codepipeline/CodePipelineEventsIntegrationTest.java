@@ -38,7 +38,8 @@ class CodePipelineEventsIntegrationTest {
 
     private static final String REGION = "us-east-1";
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
-    private static final String ISO_TIMESTAMP = "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z";
+    private static final String ISO_TIMESTAMP = "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z";
+    private static final String MINUTE_TIMESTAMP = "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}Z";
     private static final String TARGET_PREFIX = "CodePipeline_20150709.";
 
     @Inject
@@ -140,7 +141,7 @@ class CodePipelineEventsIntegrationTest {
 
     @Test
     void approvalNotificationOnTheTopicMatchesTheUserGuideShape() throws Exception {
-        // Catches: approval message with non-ISO expires, no externalEntityLink, dead console links,
+        // Catches: approval message with non-ISO expires, no externalEntityLink, missing or wrong consoleLink and approvalReviewLink,
         // or a subject over 100 characters that SNS rejects and silently drops the notification.
         Topic topic = snsService.createTopic("cp-approval-it", Map.of(), Map.of(), REGION);
         sqsService.createQueue("cp-approval-it-q", Map.of(), REGION);
@@ -216,17 +217,20 @@ class CodePipelineEventsIntegrationTest {
 
         JsonNode message = mapper.readTree(envelope.path("Message").asText());
         assertEquals("us-east-1", message.path("region").asText());
-        assertFalse(message.has("consoleLink"));
+        assertEquals("https://console.aws.amazon.com/codepipeline/home?region=us-east-1#/view/"
+                + pipelineName, message.path("consoleLink").asText());
         JsonNode approval = message.path("approval");
         assertEquals(pipelineName, approval.path("pipelineName").asText());
         assertEquals("Gate", approval.path("stageName").asText());
         assertEquals("HumanGateWithALongActionName", approval.path("actionName").asText());
         assertEquals("ship it", approval.path("customData").asText());
         assertEquals("http://example.com/review", approval.path("externalEntityLink").asText());
-        assertFalse(approval.has("approvalReviewLink"));
+        assertEquals("https://console.aws.amazon.com/codepipeline/home?region=us-east-1#/view/"
+                + pipelineName + "/Gate/HumanGateWithALongActionName/approve/"
+                + approval.path("token").asText(), approval.path("approvalReviewLink").asText());
         assertFalse(approval.path("token").asText().isEmpty());
-        assertTrue(approval.path("expires").asText().matches(ISO_TIMESTAMP),
-                "expires must be an ISO-8601 timestamp: " + approval.path("expires"));
+        assertTrue(approval.path("expires").asText().matches(MINUTE_TIMESTAMP),
+                "expires must be an ISO-8601 timestamp to the minute: " + approval.path("expires"));
 
         call("StopPipelineExecution")
             .body("{ \"pipelineName\": \"" + pipelineName + "\", \"pipelineExecutionId\": \""

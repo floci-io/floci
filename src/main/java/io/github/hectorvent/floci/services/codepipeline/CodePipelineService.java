@@ -1286,11 +1286,14 @@ public class CodePipelineService {
                 activeRuns.remove(runKey(execution));
             }
         });
-        switch (execution.getStatus()) {
-            case "Succeeded" -> eventPublisher.pipelineStateChange(execution, "SUCCEEDED");
-            case "Failed" -> eventPublisher.pipelineStateChange(execution, "FAILED");
-            case "Stopped" -> eventPublisher.pipelineStateChange(execution, "STOPPED");
-            default -> { }
+        String terminalState = switch (execution.getStatus()) {
+            case "Succeeded" -> "SUCCEEDED";
+            case "Failed" -> "FAILED";
+            case "Stopped" -> "STOPPED";
+            default -> null;
+        };
+        if (terminalState != null) {
+            eventPublisher.pipelineStateChange(execution, terminalState);
         }
     }
 
@@ -1402,11 +1405,14 @@ public class CodePipelineService {
         } finally {
             state.setLastUpdateTime(now());
             putExecution(execution);
-            switch (state.getStatus()) {
-                case "Succeeded" -> eventPublisher.actionStateChange(execution, state, "SUCCEEDED");
-                case "Failed" -> eventPublisher.actionStateChange(execution, state, "FAILED");
-                case "Abandoned" -> eventPublisher.actionStateChange(execution, state, "ABANDONED");
-                default -> { }
+            String terminalState = switch (state.getStatus()) {
+                case "Succeeded" -> "SUCCEEDED";
+                case "Failed" -> "FAILED";
+                case "Abandoned" -> "ABANDONED";
+                default -> null;
+            };
+            if (terminalState != null) {
+                eventPublisher.actionStateChange(execution, state, terminalState);
             }
         }
     }

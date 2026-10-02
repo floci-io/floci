@@ -82,4 +82,23 @@ class CodePipelineEventPublisherTest {
         JsonNode detail = MAPPER.readTree((String) captor.getValue().get(0).get("Detail"));
         assertFalse(detail.path("execution-result").has("error-code"));
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void startTimeKeepsTheMillisecondsOfTheStoredStartTime() throws Exception {
+        // Catches: start-time truncated to whole seconds, up to 999 ms before the stored start.
+        CodePipelineEventPublisher publisher =
+                new CodePipelineEventPublisher(eventBridgeService, snsService, MAPPER);
+
+        CodePipelineExecution execution = new CodePipelineExecution();
+        execution.setRegion("us-east-1");
+        execution.setStartTime(1700000000.604);
+
+        publisher.pipelineStateChange(execution, "STARTED");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), any(), any());
+        JsonNode detail = MAPPER.readTree((String) captor.getValue().get(0).get("Detail"));
+        assertEquals("2023-11-14T22:13:20.604Z", detail.path("start-time").asText());
+    }
 }
