@@ -28,6 +28,8 @@ public class ServiceDeployment {
     private Instant updatedAt;
     private String targetServiceRevisionArn;
     private List<String> sourceServiceRevisionArns;
+    /** Internal revision restored if this deployment rolls back. */
+    private String rollbackTargetServiceRevisionArn;
     /** Tasks the circuit breaker has counted as failing to start. */
     private int failedTasks;
 
@@ -51,6 +53,11 @@ public class ServiceDeployment {
     public List<String> getSourceServiceRevisionArns() { return sourceServiceRevisionArns; }
     public void setSourceServiceRevisionArns(List<String> sourceServiceRevisionArns) {
         this.sourceServiceRevisionArns = sourceServiceRevisionArns;
+    }
+
+    public String getRollbackTargetServiceRevisionArn() { return rollbackTargetServiceRevisionArn; }
+    public void setRollbackTargetServiceRevisionArn(String rollbackTargetServiceRevisionArn) {
+        this.rollbackTargetServiceRevisionArn = rollbackTargetServiceRevisionArn;
     }
 
     public int getFailedTasks() { return failedTasks; }

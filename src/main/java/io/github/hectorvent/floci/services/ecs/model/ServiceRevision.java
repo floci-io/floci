@@ -18,6 +18,7 @@ public class ServiceRevision {
     private String serviceArn;
     private String clusterArn;
     private String taskDefinition;
+    private int desiredCount;
     private LaunchType launchType;
     private List<CapacityProviderStrategyItem> capacityProviderStrategy;
     private String platformVersion;
@@ -74,6 +75,9 @@ public class ServiceRevision {
 
     public String getTaskDefinition() { return taskDefinition; }
     public void setTaskDefinition(String taskDefinition) { this.taskDefinition = taskDefinition; }
+
+    public int getDesiredCount() { return desiredCount; }
+    public void setDesiredCount(int desiredCount) { this.desiredCount = desiredCount; }
 
     public LaunchType getLaunchType() { return launchType; }
     public void setLaunchType(LaunchType launchType) { this.launchType = launchType; }

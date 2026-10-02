@@ -6,8 +6,11 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
+import io.github.hectorvent.floci.services.ecs.exec.EcsExecSessionRegistry;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.CreateServiceRequest;
 import io.github.hectorvent.floci.services.ecs.model.Deployment;
@@ -64,8 +67,13 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
         service.reconcileServices();
         ServiceDeployment failed = deploymentOf(service, "cb-fail", id);
+        assertEquals("STOP_REQUESTED", failed.getStatus());
+        assertNull(failed.getFinishedAt());
+
+        service.reconcileServices();
+        failed = deploymentOf(service, "cb-fail", id);
         assertEquals("STOPPED", failed.getStatus(),
-                "without rollback a failed deployment is stopped; there is no FAILED status");
+                "without rollback a failed deployment transitions through STOP_REQUESTED");
         assertNotNull(failed.getFinishedAt());
         assertNotNull(failed.getStoppedAt());
         assertEquals("The deployment circuit breaker detected a failure.", failed.getStatusReason());
@@ -93,7 +101,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
         service.reconcileServices();
 
-        assertEquals("STOPPED", deploymentOf(service, "cb-ten", id).getStatus());
+        assertEquals("STOP_REQUESTED", deploymentOf(service, "cb-ten", id).getStatus());
         assertEquals(5, stoppedTasks(service).size(),
                 "the launch that reaches the threshold is the last one");
         assertEquals(5, liveDeployment(service, "cb-ten").getFailedTasks());
@@ -107,7 +115,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
         service.reconcileServices();
 
-        assertEquals("STOPPED", deploymentOf(service, "cb-ceil", id).getStatus());
+        assertEquals("STOP_REQUESTED", deploymentOf(service, "cb-ceil", id).getStatus());
         assertEquals(4, liveDeployment(service, "cb-ceil").getFailedTasks());
     }
 
@@ -119,7 +127,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
         service.reconcileServices();
 
-        assertEquals("STOPPED", deploymentOf(service, "cb-cap", id).getStatus());
+        assertEquals("STOP_REQUESTED", deploymentOf(service, "cb-cap", id).getStatus());
         assertEquals(200, liveDeployment(service, "cb-cap").getFailedTasks());
     }
 
@@ -133,7 +141,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
         service.reconcileServices();
 
-        assertEquals("STOPPED", deploymentOf(service, "cb-unb", id).getStatus());
+        assertEquals("STOP_REQUESTED", deploymentOf(service, "cb-unb", id).getStatus());
         assertEquals(201, liveDeployment(service, "cb-unb").getFailedTasks());
     }
 
@@ -150,7 +158,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 "four failures, and the bounded default for 2 would already have tripped at 3");
 
         service.reconcileServices();
-        assertEquals("STOPPED", deploymentOf(service, "cb-count", id).getStatus());
+        assertEquals("STOP_REQUESTED", deploymentOf(service, "cb-count", id).getStatus());
         assertEquals(5, stoppedTasks(service).size());
     }
 
@@ -185,23 +193,84 @@ class EcsServiceDeploymentCircuitBreakerTest {
         assertEquals("IN_PROGRESS", liveDeployment(service, "cb-none").getRolloutState());
     }
 
-    /**
-     * With rollback on, AWS rolls back rather than stopping (ROLLBACK_IN_PROGRESS, then
-     * ROLLBACK_SUCCESSFUL or ROLLBACK_FAILED). Rollback is not modelled, so the deployment must
-     * not claim the STOPPED outcome that only applies without it.
-     */
     @Test
-    void withRollbackOnTheDeploymentIsNotReportedStopped() {
+    void anEnabledCloudWatchAlarmStopsTheDeploymentWithAReason() {
+        CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("deployment-failure");
+        alarm.setStateValue("ALARM");
+        when(metricsService.describeAlarms(List.of("deployment-failure"), null, REGION))
+                .thenReturn(List.of(alarm));
+        EcsService service = newService(new InMemoryStorageFactory(), metricsService);
+        EcsServiceModel model = createService(service, "cb-alarm", 1, null);
+        model.setDeploymentConfiguration(Map.of("alarms", Map.of(
+                "enable", true,
+                "rollback", false,
+                "alarmNames", List.of("deployment-failure"))));
+        String id = model.getDeploymentId();
+
+        service.reconcileServices();
+
+        ServiceDeployment deployment = deploymentOf(service, "cb-alarm", id);
+        assertEquals("STOP_REQUESTED", deployment.getStatus());
+        assertTrue(deployment.getStatusReason().contains("deployment-failure"));
+        assertTrue(stoppedTasks(service).isEmpty(), "an active alarm is checked before starting another task");
+
+        service.reconcileServices();
+        assertEquals("STOPPED", deploymentOf(service, "cb-alarm", id).getStatus());
+    }
+
+    /** A failed initial deployment has no successful revision to roll back to. */
+    @Test
+    void withRollbackOnAnInitialDeploymentEndsAsRollbackFailed() {
         EcsService service = newService();
         String id = createService(service, "cb-rb", 1, breaker(true, true)).getDeploymentId();
 
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 3; i++) {
             service.reconcileServices();
         }
 
         ServiceDeployment deployment = deploymentOf(service, "cb-rb", id);
-        assertEquals("IN_PROGRESS", deployment.getStatus());
+        assertEquals("ROLLBACK_IN_PROGRESS", deployment.getStatus());
         assertNull(deployment.getStoppedAt());
+
+        service.reconcileServices();
+        deployment = deploymentOf(service, "cb-rb", id);
+        assertEquals("ROLLBACK_FAILED", deployment.getStatus());
+        assertNotNull(deployment.getFinishedAt());
+        assertTrue(deployment.getStatusReason().contains("Rollback"));
+    }
+
+    @Test
+    void rollbackRestoresTheMostRecentSuccessfulRevision() {
+        EcsService service = newService();
+        healthy = true;
+        String successfulDeploymentId = createService(service, "cb-rollback", 1, breaker(true, true))
+                .getDeploymentId();
+        service.reconcileServices();
+        EcsTask original = runningTasks(service).getFirst();
+        String originalTaskDefinition = service.serviceByArn(original.getOwningServiceArn()).getTaskDefinition();
+
+        healthy = false;
+        TaskDefinition broken = registerTaskDef(service, "cb-rollback-fam", "app:broken");
+        String failedDeploymentId = service.updateService("cb-rollback-cluster", "cb-rollback",
+                "cb-rollback-fam:" + broken.getRevision(), null, null, REGION).getDeploymentId();
+        for (int i = 0; i < 3; i++) {
+            service.reconcileServices();
+        }
+
+        ServiceDeployment rollingBack = deploymentOf(service, "cb-rollback", failedDeploymentId);
+        assertEquals("ROLLBACK_IN_PROGRESS", rollingBack.getStatus());
+        assertEquals(originalTaskDefinition,
+                service.serviceByArn(rollingBack.getServiceArn()).getTaskDefinition());
+
+        service.reconcileServices();
+        assertEquals("ROLLBACK_SUCCESSFUL",
+                deploymentOf(service, "cb-rollback", failedDeploymentId).getStatus());
+        assertEquals(List.of(original.getTaskArn()), runningTasks(service).stream().map(EcsTask::getTaskArn).toList());
+        assertEquals("SUCCESSFUL", deploymentOf(service, "cb-rollback", successfulDeploymentId).getStatus());
+        assertEquals("FAILED", liveDeployment(service, "cb-rollback").getRolloutState(),
+                "a service restored to its previous revision still reports the failed rollout");
     }
 
     /** Only a task that failed to start counts; one a user stopped while it pulled did not fail. */
@@ -273,7 +342,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
         service.reconcileServices();
         service.reconcileServices();
 
-        assertEquals("STOPPED", deploymentOf(service, "cb-cumul", id).getStatus(),
+        assertEquals("STOP_REQUESTED", deploymentOf(service, "cb-cumul", id).getStatus(),
                 "the third failure trips it although a task started in between");
     }
 
@@ -347,6 +416,8 @@ class EcsServiceDeploymentCircuitBreakerTest {
             service.reconcileServices();
         }
 
+        assertEquals("STOP_REQUESTED", deploymentOf(service, "cb-upd", second).getStatus());
+        service.reconcileServices();
         assertEquals("STOPPED", deploymentOf(service, "cb-upd", second).getStatus());
         assertEquals("SUCCESSFUL", deploymentOf(service, "cb-upd", first).getStatus());
         assertEquals(List.of(original.getTaskArn()),
@@ -456,6 +527,10 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
     /** A service over {@code storage}; a second one over the same storage is a restart. */
     private EcsService newService(InMemoryStorageFactory storage) {
+        return newService(storage, null);
+    }
+
+    private EcsService newService(InMemoryStorageFactory storage, CloudWatchMetricsService metricsService) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -478,7 +553,10 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 config,
                 mock(EcsLoadBalancerRegistrar.class),
                 storage,
-                null);
+                null,
+                new EcsExecSessionRegistry(),
+                null,
+                metricsService);
         service.initializeStorage();
         return service;
     }
