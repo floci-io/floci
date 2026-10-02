@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.config;
 
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -84,7 +85,7 @@ class TlsUserCertIntegrationTest {
                 .stream().map(X509Certificate.class::cast).toList();
         assertEquals(2, bundle.size(), "user certificate plus the local CA");
         assertEquals(
-                new CertificateGenerator().parseCertificate(Files.readString(UserCertProfile.CERT_FILE)), bundle.get(0),
+                Pem.parseCertificate(Files.readString(UserCertProfile.CERT_FILE)), bundle.get(0),
                 "the user certificate, which signs the HTTPS endpoint, comes first");
         X509Certificate localCa = bundle.get(1);
         assertTrue(localCa.getBasicConstraints() >= 0, "the local CA is a CA");

@@ -458,7 +458,7 @@ class SesConfigurationSetV2IntegrationTest {
     @Test
     @Order(19)
     void createConfigurationSet_stringSendingEnabled_coercesToTrue() {
-        // AWS accepts any string for SendingEnabled and stores true
+        // AWS accepts "yes" for SendingEnabled and stores true
         // (verified against real AWS SES V2 on 2026-06-13).
         given()
             .contentType("application/json")

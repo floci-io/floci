@@ -42,6 +42,7 @@ class CloudFormationTemplateEngineTest {
         assertEquals("", engine().resolveNode(noValue).asText());
         assertTrue(engine().resolveNodeOmittingNoValue(noValue).isMissingNode());
         assertEquals(json("\"\""), engine().resolveNodeOmittingNoValue(json("\"\"")));
+        assertEquals(json("\"AWS::NoValue\""), engine().resolveNodeOmittingNoValue(json("\"AWS::NoValue\"")));
     }
 
     @Test
@@ -53,6 +54,43 @@ class CloudFormationTemplateEngineTest {
         JsonNode malformedConditional = json("{\"Fn::If\":[\"IncludeScopes\"]}");
         assertEquals(engine().resolveNode(malformedConditional),
                 engine().resolveNodeOmittingNoValue(malformedConditional));
+        assertEquals(json("{\"keep\":\"\"}"), engine().resolveNodeOmittingNoValue(
+                json("{\"keep\":{\"Ref\":\"AWS::NoValue\",\"extra\":true}}")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void optionalNodeResolutionOmitsSelectedNestedValuesWithoutMutatingInput(boolean include) {
+        CloudFormationTemplateEngine e = engineWithCondition("Include", include);
+        JsonNode source = json("""
+                {"nested":{"optional":{"Fn::If":["Include",{"list":[0,false,""]},{"Ref":"AWS::NoValue"}]},
+                  "empty":"","literal":"AWS::NoValue","nil":null},
+                 "items":["first",{"Fn::If":["Include",{"Ref":"AWS::Region"},{"Ref":"AWS::NoValue"}]},"last"]}
+                """);
+        JsonNode before = source.deepCopy();
+        JsonNode expected = json(include ? """
+                {"nested":{"optional":{"list":[0,false,""]},"empty":"","literal":"AWS::NoValue","nil":null},
+                 "items":["first","us-east-1","last"]}
+                """ : """
+                {"nested":{"empty":"","literal":"AWS::NoValue","nil":null},"items":["first","last"]}
+                """);
+        assertEquals(expected, e.resolveNodeOmittingNoValue(source));
+        assertEquals(before, source);
+    }
+
+    @Test
+    void optionalNodeResolutionOnlyResolvesTheSelectedDynamicReferenceOnce() {
+        List<String> calls = new ArrayList<>();
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000",
+                "us-east-1", "my-stack", "stack/id", Map.of(), Map.of(), Map.of(),
+                Map.of("Include", true), Map.of(), mapper, name -> null, value -> {
+                    calls.add(value);
+                    return "{{resolve:ssm:/literal-result}}";
+                });
+        assertEquals("{{resolve:ssm:/literal-result}}", e.resolveNodeOmittingNoValue(json("""
+                {"Fn::If":["Include","{{resolve:ssm:/selected}}","{{resolve:ssm:/unselected}}"]}
+                """)).asText());
+        assertEquals(List.of("{{resolve:ssm:/selected}}"), calls);
     }
 
     @Test

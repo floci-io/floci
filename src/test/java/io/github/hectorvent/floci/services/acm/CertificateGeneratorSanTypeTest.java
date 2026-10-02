@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.acm;
 
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator.GeneratedCertificate;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.asn1.x509.GeneralName;
@@ -43,7 +44,7 @@ class CertificateGeneratorSanTypeTest {
                 List.of("localhost", "192.168.1.100"),
                 KeyAlgorithm.RSA_2048);
 
-        X509Certificate x509 = generator.parseCertificate(cert.certificatePem());
+        X509Certificate x509 = Pem.parseCertificate(cert.certificatePem());
         Collection<List<?>> sans = x509.getSubjectAlternativeNames();
 
         // Find the 192.168.1.100 SAN and verify its type is iPAddress (7)
@@ -62,7 +63,7 @@ class CertificateGeneratorSanTypeTest {
                 List.of("localhost", "0.0.0.0", "::1"),
                 KeyAlgorithm.RSA_2048);
 
-        X509Certificate x509 = generator.parseCertificate(cert.certificatePem());
+        X509Certificate x509 = Pem.parseCertificate(cert.certificatePem());
         Collection<List<?>> sans = x509.getSubjectAlternativeNames();
 
         // 0.0.0.0 should be iPAddress type
@@ -87,7 +88,7 @@ class CertificateGeneratorSanTypeTest {
                 List.of("myhost.example.com", "floci"),
                 KeyAlgorithm.RSA_2048);
 
-        X509Certificate x509 = generator.parseCertificate(cert.certificatePem());
+        X509Certificate x509 = Pem.parseCertificate(cert.certificatePem());
         Collection<List<?>> sans = x509.getSubjectAlternativeNames();
 
         // myhost.example.com should be dNSName type
@@ -112,7 +113,7 @@ class CertificateGeneratorSanTypeTest {
                 List.of("localhost", "*.localhost"),
                 KeyAlgorithm.RSA_2048);
 
-        X509Certificate x509 = generator.parseCertificate(cert.certificatePem());
+        X509Certificate x509 = Pem.parseCertificate(cert.certificatePem());
         Collection<List<?>> sans = x509.getSubjectAlternativeNames();
 
         boolean foundWildcard = sans.stream()
@@ -129,7 +130,7 @@ class CertificateGeneratorSanTypeTest {
                 List.of("localhost", "127.0.0.1", "0.0.0.0", "*.localhost", "floci", "10.0.0.5"),
                 KeyAlgorithm.RSA_2048);
 
-        X509Certificate x509 = generator.parseCertificate(cert.certificatePem());
+        X509Certificate x509 = Pem.parseCertificate(cert.certificatePem());
         Collection<List<?>> sans = x509.getSubjectAlternativeNames();
 
         // Count DNS vs IP SANs
@@ -162,7 +163,7 @@ class CertificateGeneratorSanTypeTest {
         GeneratedCertificate cert = generator.generateSelfSignedCertificate(
                 "localhost", List.of("localhost", name), KeyAlgorithm.RSA_2048);
 
-        X509Certificate x509 = generator.parseCertificate(cert.certificatePem());
+        X509Certificate x509 = Pem.parseCertificate(cert.certificatePem());
         Collection<List<?>> sans = x509.getSubjectAlternativeNames();
 
         assertTrue(sans.stream().anyMatch(san -> (Integer) san.get(0) == GeneralName.dNSName
@@ -187,7 +188,7 @@ class CertificateGeneratorSanTypeTest {
         GeneratedCertificate cert = generator.generateSelfSignedCertificate(
                 "localhost", List.of("localhost", "fffff::1"), KeyAlgorithm.RSA_2048);
 
-        X509Certificate x509 = generator.parseCertificate(cert.certificatePem());
+        X509Certificate x509 = Pem.parseCertificate(cert.certificatePem());
         Collection<List<?>> sans = x509.getSubjectAlternativeNames();
 
         assertTrue(sans.stream().anyMatch(san -> (Integer) san.get(0) == GeneralName.dNSName

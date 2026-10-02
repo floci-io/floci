@@ -131,7 +131,7 @@ final class EksTokenMinter {
         }
         var fileName = Path.of(command).getFileName();
         var commandName = fileName == null ? command : fileName.toString();
-        if (!"aws".equals(commandName)) {
+        if (!"aws".equals(commandName)) { // partition-literal: kubeconfig exec command
             return false;
         }
         return findSubcommandIndex(exec.path("args")) >= 0;

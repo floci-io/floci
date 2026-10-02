@@ -2023,7 +2023,7 @@ public class IamQueryHandler {
         // An AWS-managed policy carries the literal "aws" in the account field
         // (arn:aws:iam::aws:policy/...) and is served from the global catalog, so it is not a
         // foreign account and must not be rejected as one.
-        boolean awsManaged = "aws".equals(parsed.accountId());
+        boolean awsManaged = "aws".equals(parsed.accountId()); // partition-literal: managed-policy account
         if (!awsManaged && parsed.accountId() != null && !parsed.accountId().isEmpty()
                 && !parsed.accountId().equals(accountId)) {
             throw new AwsException("NoSuchEntity", "The ARN " + arn + " cannot be found.", 404);

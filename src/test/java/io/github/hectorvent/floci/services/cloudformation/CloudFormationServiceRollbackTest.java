@@ -139,6 +139,8 @@ class CloudFormationServiceRollbackTest {
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
         assertEquals("DELETE_COMPLETE", stack.getStatus());
+        verify(provisioner).completeDeleteCleanup(role);
+        verify(provisioner, never()).completeUpdate(any());
         verify(provisioner).delete(role, REGION);
         verify(provisioner).delete(logGroup, REGION);
         verify(provisioner).delete(owned, REGION);
@@ -148,7 +150,6 @@ class CloudFormationServiceRollbackTest {
         assertNull(role.getStatusReason());
         assertEquals("DELETE_COMPLETE", logGroup.getStatus());
         assertEquals("CREATE_FAILED", adopted.getStatus());
-        verify(provisioner, never()).completeUpdate(any());
     }
 
     @Test
@@ -170,7 +171,6 @@ class CloudFormationServiceRollbackTest {
         assertEquals("DELETE_FAILED", stack.getStatus());
         assertEquals("The following resource(s) failed to delete: [Bucket].", stack.getStatusReason());
         assertEquals("DELETE_FAILED", bucket.getStatus());
-        verify(provisioner, never()).completeUpdate(any());
     }
 
     private static StackResource resource(String logicalId, String physicalId, String resourceType, String status) {

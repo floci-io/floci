@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iot;
 
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.vertx.core.Vertx;
@@ -150,7 +151,7 @@ class ReloadingKeyManagerTest {
 
         String alias = manager.chooseEngineServerAlias("RSA", null, null);
         assertNotNull(alias);
-        assertEquals(new CertificateGenerator().parseCertificate(leaf.certificatePem()), manager.getCertificateChain(alias)[0]);
+        assertEquals(Pem.parseCertificate(leaf.certificatePem()), manager.getCertificateChain(alias)[0]);
         assertNotNull(manager.getPrivateKey(alias));
     }
 
