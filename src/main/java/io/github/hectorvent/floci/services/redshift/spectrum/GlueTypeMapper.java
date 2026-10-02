@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -72,6 +73,12 @@ public final class GlueTypeMapper {
             case "binary" -> "bytea";
             default -> throw new SpectrumSqlException("0A000", "Unsupported external column type: " + glueType);
         };
+    }
+
+    /** True when {@code glueType} is a sized string whose width, in bytes, the value does not fit in. */
+    public static boolean exceedsWidth(String glueType, String value) {
+        Matcher sized = SIZED_STRING.matcher(canonicalGlueType(glueType));
+        return sized.matches() && value.getBytes(StandardCharsets.UTF_8).length > Integer.parseInt(sized.group(1));
     }
 
     public static boolean isNested(String glueType) {
