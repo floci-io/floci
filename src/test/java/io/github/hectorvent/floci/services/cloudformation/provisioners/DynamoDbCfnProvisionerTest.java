@@ -49,6 +49,8 @@ class DynamoDbCfnProvisionerTest {
     private static final String TABLE_ARN = "arn:aws:dynamodb:us-east-1:000000000000:table/" + TABLE_NAME;
     private static final String TABLE_ID = "2d4c5c3a-1b6e-4a1d-9f0a-7b1c2d3e4f50";
     private static final String STREAM_ARN = TABLE_ARN + "/stream/2026-01-01T00:00:00.000";
+    private static final String TTL_PROPS = "{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+            + "{\"AttributeName\":\"expiresAt\",\"Enabled\":true}}";
 
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
     private final ObjectMapper mapper = new ObjectMapper();
@@ -421,6 +423,8 @@ class DynamoDbCfnProvisionerTest {
         existingTable(withTimeToLive(table(false), "expiresAt"));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
         r.setPhysicalId(TABLE_NAME);
+        // Left by an earlier successful update; it must not make the engine skip its own restore.
+        r.getAttributes().put(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR, "{}");
         JsonNode props = props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}],"
                 + "\"TimeToLiveSpecification\":{\"AttributeName\":\"deleteAfter\",\"Enabled\":true}}");
         ProvisionContext ctx = updateCtx(TABLE_NAME);
@@ -431,6 +435,150 @@ class DynamoDbCfnProvisionerTest {
         assertEquals("TimeToLive is active on a different AttributeName", e.getMessage());
         verify(dynamoDb, never()).updateTimeToLive(anyString(), any(), anyBoolean(), anyString());
         verify(dynamoDb, never()).tagResource(anyString(), any(), anyString());
+        assertFalse(provisioner.retainsFailedUpdateState(r));
+        verify(dynamoDb, never()).deleteTable(anyString(), anyString());
+    }
+
+    /**
+     * The table's own update fails after it changed the tags and the stream. The engine must keep
+     * this attempt, snapshot included, and hand it to rollbackUpdate rather than put the previous
+     * resource back and report a rollback that never happened.
+     */
+    @Test
+    void inPlaceUpdateThatFailsAfterItsSnapshotIsRetainedAndRolledBack() throws Exception {
+        existingTable(table(true));
+        when(dynamoDb.listTagsOfResource(TABLE_ARN, "us-east-1")).thenReturn(Map.of("env", "dev"));
+        when(dynamoDb.disableStream(TABLE_NAME, "us-east-1")).thenReturn(table(false));
+        doThrow(new AwsException("InternalServerError", "boom", 500))
+                .when(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", true, "us-east-1");
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        r.getAttributes().put("Arn", TABLE_ARN);
+        r.getAttributes().put("StreamArn", STREAM_ARN);
+        JsonNode props = props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}],"
+                + "\"TimeToLiveSpecification\":{\"AttributeName\":\"expiresAt\",\"Enabled\":true}}");
+        ProvisionContext ctx = updateCtx(TABLE_NAME);
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        assertTrue(provisioner.retainsFailedUpdateState(r));
+        assertEquals(TABLE_NAME, r.getPhysicalId());
+        assertEquals(TABLE_ARN, r.getAttributes().get("Arn"));
+        verify(dynamoDb, never()).deleteTable(anyString(), anyString());
+
+        when(dynamoDb.listTagsOfResource(TABLE_ARN, "us-east-1")).thenReturn(Map.of("env", "prod"));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
+        when(dynamoDb.enableStream(TABLE_NAME, "NEW_AND_OLD_IMAGES", "us-east-1")).thenReturn(table(true));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(dynamoDb).tagResource(TABLE_ARN, Map.of("env", "dev"), "us-east-1");
+        verify(dynamoDb).enableStream(TABLE_NAME, "NEW_AND_OLD_IMAGES", "us-east-1");
+        verify(dynamoDb, never()).updateTimeToLive(TABLE_NAME, "expiresAt", false, "us-east-1");
+        assertFalse(provisioner.retainsFailedUpdateState(r));
+    }
+
+    private void createdTableWhoseTimeToLiveCallFails() {
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenReturn(table(false));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
+        doThrow(new AwsException("LimitExceededException", "boom", 400))
+                .when(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", true, "us-east-1");
+    }
+
+    @Test
+    void createThatFailsAfterCreatingTheTableDeletesIt() throws Exception {
+        createdTableWhoseTimeToLiveCallFails();
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        JsonNode props = props(TTL_PROPS);
+        ProvisionContext ctx = ctx();
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        assertEquals("LimitExceededException", e.getErrorCode());
+        verify(dynamoDb).deleteTable(TABLE_NAME, "us-east-1");
+        assertFalse(r.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void replacingUpdateThatFailsDeletesTheNewTableAndLeavesTheOldOne() throws Exception {
+        createdTableWhoseTimeToLiveCallFails();
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId("orders-v1");
+        JsonNode props = props(TTL_PROPS);
+        ProvisionContext ctx = updateCtx("orders-v1");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        verify(dynamoDb).deleteTable(TABLE_NAME, "us-east-1");
+        verify(dynamoDb, never()).deleteTable("orders-v1", "us-east-1");
+        assertFalse(r.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    /** A table this attempt did not create, the update target or one adopted on create, is never deleted. */
+    @Test
+    void failureOnATableThisAttemptDidNotCreateDeletesNothing() throws Exception {
+        existingTable(table(false));
+        doThrow(new AwsException("LimitExceededException", "boom", 400))
+                .when(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", true, "us-east-1");
+        JsonNode props = props(TTL_PROPS);
+
+        for (ProvisionContext ctx : List.of(updateCtx(TABLE_NAME), ctx())) {
+            StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+            r.setPhysicalId(ctx.priorPhysicalId());
+
+            assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+            assertFalse(r.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR));
+        }
+        verify(dynamoDb, never()).deleteTable(anyString(), anyString());
+    }
+
+    /** A cleanup that fails leaves the table to the engine's create rollback, which retries the delete. */
+    @Test
+    void createWhoseCleanupFailsLeavesTheTableOwnedForTheStackRollback() throws Exception {
+        createdTableWhoseTimeToLiveCallFails();
+        doThrow(new AwsException("InternalServerError", "delete failed", 500))
+                .when(dynamoDb).deleteTable(TABLE_NAME, "us-east-1");
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        JsonNode props = props(TTL_PROPS);
+        ProvisionContext ctx = ctx();
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        assertEquals("LimitExceededException", e.getErrorCode());
+        assertEquals(TABLE_NAME, r.getPhysicalId());
+        assertEquals("true", r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    /**
+     * The update target was deleted outside the stack, so this attempt created it again. That table
+     * is this attempt's to delete, and there is no prior state to snapshot for a rollback.
+     */
+    @Test
+    void updateThatRecreatesAMissingTableAndFailsDeletesItAndKeepsNoSnapshot() throws Exception {
+        createdTableWhoseTimeToLiveCallFails();
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        JsonNode props = props(TTL_PROPS);
+        ProvisionContext ctx = updateCtx(TABLE_NAME);
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        verify(dynamoDb).deleteTable(TABLE_NAME, "us-east-1");
+        assertFalse(provisioner.retainsFailedUpdateState(r));
+    }
+
+    @Test
+    void successfulCreateLeavesNoOwnershipMarker() throws Exception {
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenReturn(table(false));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+
+        provisioner.provision(r, props(TTL_PROPS), ctx());
+
+        assertFalse(r.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR));
+        verify(dynamoDb, never()).deleteTable(anyString(), anyString());
     }
 
     @Test

@@ -1,21 +1,28 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
 
 /**
  * {@code TimeToLiveSpecification} on {@code AWS::DynamoDB::Table}: the setting a stack declares is
  * what DescribeTimeToLive reports after create, after an update that disables it and after an
- * update that removes the block, and a failed update puts the previous setting back.
+ * update that removes the block, and a failed update puts the previous setting back. A failure
+ * inside the table's own provision is injected through a spy on the DynamoDB service.
  */
 @QuarkusTest
 class CloudFormationDynamoDbTimeToLiveIntegrationTest {
@@ -46,6 +53,8 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
             ",\n\"TimeToLiveSpecification\": {\"AttributeName\": \"expiresAt\", \"Enabled\": true}";
     private static final String TTL_DISABLED =
             ",\n\"TimeToLiveSpecification\": {\"AttributeName\": \"expiresAt\", \"Enabled\": false}";
+    private static final String STREAMED =
+            ",\n\"StreamSpecification\": {\"StreamViewType\": \"NEW_AND_OLD_IMAGES\"}";
 
     /** A resource that fails after the table, so the update that changed the table rolls back. */
     private static final String FAILING_RESOURCE = """
@@ -59,6 +68,9 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
                     "GenerateSecretString": {"PasswordLength": 32}
                   }
                 }""";
+
+    @InjectSpy
+    DynamoDbService dynamoDbService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -127,6 +139,73 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
             .body("Tags.Value", contains("dev"));
 
         deleteStack(stack);
+    }
+
+    /**
+     * The table's own update changes the tags and switches the stream off, then its TTL call fails.
+     * The rollback must put the tags and the stream back, not just report that it did.
+     */
+    @Test
+    void anUpdateThatFailsInsideTheTablePutsItsTagsAndStreamBack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-own-" + suffix;
+        String table = "ttl-own-table-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", STREAMED, ""));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        String tableArn = dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(200)
+            .extract().path("Table.TableArn");
+
+        failNextUpdateTimeToLive();
+        try {
+            cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(table, "prod", TTL_ENABLED, ""));
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        } finally {
+            Mockito.doCallRealMethod().when(dynamoDbService)
+                    .updateTimeToLive(anyString(), anyString(), anyBoolean(), anyString());
+        }
+
+        dynamoDb("ListTagsOfResource", "{\"ResourceArn\": \"" + tableArn + "\"}")
+            .statusCode(200)
+            .body("Tags.Value", contains("dev"));
+        dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(200)
+            .body("Table.StreamSpecification.StreamEnabled", equalTo(true))
+            .body("Table.StreamSpecification.StreamViewType", equalTo("NEW_AND_OLD_IMAGES"));
+        describeTimeToLive(table).body("TimeToLiveDescription.TimeToLiveStatus", equalTo("DISABLED"));
+
+        deleteStack(stack);
+    }
+
+    /** A create that fails after the table exists rolls back to no table, not to an orphan. */
+    @Test
+    void aCreateThatFailsAfterTheTableExistsLeavesNoTable() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-orphan-" + suffix;
+        String table = "ttl-orphan-table-" + suffix;
+
+        failNextUpdateTimeToLive();
+        try {
+            cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", TTL_ENABLED, ""));
+            assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        } finally {
+            Mockito.doCallRealMethod().when(dynamoDbService)
+                    .updateTimeToLive(anyString(), anyString(), anyBoolean(), anyString());
+        }
+
+        dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(400)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        deleteStack(stack);
+    }
+
+    private void failNextUpdateTimeToLive() {
+        Mockito.doThrow(new IllegalStateException("simulated UpdateTimeToLive failure"))
+                .doCallRealMethod()
+                .when(dynamoDbService)
+                .updateTimeToLive(anyString(), anyString(), anyBoolean(), anyString());
     }
 
     private void cloudFormation(String stack, String action, String template) {
