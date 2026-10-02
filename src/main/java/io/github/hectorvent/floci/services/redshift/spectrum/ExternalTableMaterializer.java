@@ -25,6 +25,8 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
@@ -46,6 +48,8 @@ public class ExternalTableMaterializer {
     private static final String SQLSTATE_LOAD_FAILED = "58030";
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
     private static final long LOCK_TIMEOUT_SECONDS = 30;
+    private static final String SCRATCH_KEY_PREFIX = "spectrum-";
+    private static final Duration STALE_SCRATCH_AGE = Duration.ofHours(1);
     private static final String ICEBERG_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
     private static final String ICEBERG_MANIFESTS = "SELECT DISTINCT manifest_path FROM read_avro(%s)";
     private static final String ICEBERG_DATA_FILES = "SELECT DISTINCT file_path FROM iceberg_metadata(%s) "
@@ -62,6 +66,7 @@ public class ExternalTableMaterializer {
     /** Column definitions each loaded table was created with, to tell a data reload from a schema change. */
     private final ConcurrentHashMap<String, String> schemaSignatures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ReentrantLock> locks = new ConcurrentHashMap<>();
+    private final Set<String> sweptAccounts = ConcurrentHashMap.newKeySet();
 
     public ExternalTableMaterializer(FlociDuckClient duckClient, GlueService glueService, S3Service s3Service,
                                      IamService iamService, EmulatorConfig config) {
@@ -102,7 +107,7 @@ public class ExternalTableMaterializer {
                 return Outcome.CURRENT;
             }
             ReentrantLock lock = locks.computeIfAbsent(cacheKey, ignored -> new ReentrantLock());
-            acquire(lock, label);
+            acquire(lock, label, session.inTransaction());
             try {
                 if (!session.inTransaction() && fingerprint.equals(fingerprints.get(cacheKey))) {
                     return Outcome.CURRENT;
@@ -123,7 +128,9 @@ public class ExternalTableMaterializer {
         } catch (SpectrumSqlException | SpectrumReadException exception) {
             throw exception;
         } catch (RuntimeException exception) {
-            throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "Unable to load external table \"" + label + "\": " + exception.getMessage(), exception);
+            // the cause can carry DuckDB request text, so it goes to the log and not to the client
+            LOG.warnv(exception, "Unable to load external table {0}", label);
+            throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "Unable to load external table \"" + label + "\"", exception);
         } finally {
             RedshiftRoleAccess.releaseRoleSession(roleSession, binding.iamRoleArn(), iamService);
         }
@@ -132,10 +139,13 @@ public class ExternalTableMaterializer {
     /**
      * A session inside a transaction can hold a PostgreSQL lock on the table until it commits, so
      * waiting forever on the Java lock here could deadlock in a way PostgreSQL's detector cannot see.
+     * A session outside a transaction holds no PostgreSQL lock, so it can wait out a slow load.
      */
-    private static void acquire(ReentrantLock lock, String label) {
+    private static void acquire(ReentrantLock lock, String label, boolean inTransaction) {
         try {
-            if (!lock.tryLock(LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            if (!inTransaction) {
+                lock.lockInterruptibly();
+            } else if (!lock.tryLock(LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 throw new SpectrumReadException(SQLSTATE_LOAD_FAILED,
                         "Timed out waiting to load external table \"" + label + "\"");
             }
@@ -460,10 +470,21 @@ public class ExternalTableMaterializer {
                 || name.endsWith("~");
     }
 
+    /** A partition's values, location and the format settings the read depends on, so a format change reloads. */
+    private static String partitionEntry(Partition partition) {
+        StorageDescriptor descriptor = partition.getStorageDescriptor();
+        if (descriptor == null) {
+            return partition.getValues() + "=";
+        }
+        String serde = descriptor.getSerdeInfo() == null ? "" : descriptor.getSerdeInfo().getSerializationLibrary();
+        return partition.getValues() + "=" + descriptor.getLocation() + "|" + descriptor.getInputFormat() + "|" + serde;
+    }
+
     private String fingerprint(Table table, List<Partition> partitions, List<S3Object> objects) {
         StringBuilder value = new StringBuilder().append(table.getVersionId()).append('|').append(table.getUpdateTime()).append('|');
         if (!partitions.isEmpty()) {
-            partitions.stream().map(partition -> partition.getValues() + "=" + (partition.getStorageDescriptor() == null ? "" : partition.getStorageDescriptor().getLocation())).sorted().forEach(entry -> value.append(entry).append(';'));
+            partitions.stream().map(ExternalTableMaterializer::partitionEntry).sorted()
+                    .forEach(entry -> value.append(entry).append(';'));
         }
         for (S3Object object : objects) {
             value.append(object.getKey()).append(':').append(object.getSize()).append(':').append(object.getETag()).append(';');
@@ -498,7 +519,7 @@ public class ExternalTableMaterializer {
             stagingCreated = true;
             boolean hasObjects = sources.stream().anyMatch(source -> !source.objects().isEmpty());
             if (plan.iceberg() || hasObjects) {
-                scratchKey = "spectrum-" + UUID.randomUUID() + ".csv";
+                scratchKey = SCRATCH_KEY_PREFIX + UUID.randomUUID() + ".csv";
                 readWithDuckDb(session.accountId(), table, sources,
                         config.services().redshift().spectrumMaxRows(), scratchKey);
                 long rows;
@@ -554,6 +575,9 @@ public class ExternalTableMaterializer {
                     throw exception;
                 }
             }
+            if (sweptAccounts.add(accountId)) {
+                sweepStaleScratchObjects();
+            }
         });
         List<String> selects = sources.stream().filter(source -> source.partition() == null || !source.objects().isEmpty())
                 .map(this::readSelect).toList();
@@ -566,6 +590,29 @@ public class ExternalTableMaterializer {
         String setup = GlueTableResolver.isIcebergTable(table) ? ICEBERG_SETUP : null;
         duckClient.execute(query + " LIMIT " + (maxRows + 1), setup,
                 "s3://" + SCRATCH_BUCKET + "/" + scratchKey, accountId);
+    }
+
+    /**
+     * A JVM that dies mid-load leaves its scratch object behind. The first load of an account removes the
+     * old ones; a recent object may belong to a load still running, so only stale ones go.
+     */
+    private void sweepStaleScratchObjects() {
+        Instant cutoff = Instant.now().minus(STALE_SCRATCH_AGE);
+        try {
+            String token = null;
+            do {
+                S3Service.ListObjectsResult page = s3Service.listObjectsWithPrefixes(
+                        SCRATCH_BUCKET, SCRATCH_KEY_PREFIX, "", 1000, token, null);
+                for (S3Object object : page.objects()) {
+                    if (object.getLastModified().isBefore(cutoff)) {
+                        s3Service.deleteObject(SCRATCH_BUCKET, object.getKey());
+                    }
+                }
+                token = page.isTruncated() ? page.nextContinuationToken() : null;
+            } while (token != null);
+        } catch (RuntimeException exception) {
+            LOG.warnv(exception, "Could not sweep stale Spectrum scratch objects from {0}", SCRATCH_BUCKET);
+        }
     }
 
     private String readSelect(ReadSource source) {
@@ -584,6 +631,10 @@ public class ExternalTableMaterializer {
             for (int index = 0; index < partitionKeys.size(); index++) {
                 Column key = partitionKeys.get(index);
                 String value = index < values.size() ? values.get(index) : null;
+                if (value != null && GlueTypeMapper.exceedsWidth(key.getType(), value)) {
+                    // a data column wider than its width is NULL, so a partition value is as well
+                    value = null;
+                }
                 String expression = value == null || "__HIVE_DEFAULT_PARTITION__".equals(value)
                         ? "CAST(NULL AS VARCHAR)"
                         : "CAST('" + value.replace("'", "''") + "' AS VARCHAR)";

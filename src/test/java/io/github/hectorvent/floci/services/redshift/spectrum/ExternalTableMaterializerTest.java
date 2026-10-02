@@ -20,11 +20,18 @@ import org.mockito.Answers;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -36,9 +43,11 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -99,6 +108,9 @@ class ExternalTableMaterializerTest {
                         List.of(new S3Object("bucket", "events/p1.csv", new byte[]{1}, "text/csv", "etag1")),
                         List.of(), false, null));
         when(s3.isAuthEnforced()).thenReturn(false);
+        when(s3.listObjectsWithPrefixes(eq(ExternalTableMaterializer.SCRATCH_BUCKET), eq("spectrum-"), eq(""),
+                eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
     }
 
     @Test
@@ -517,6 +529,113 @@ class ExternalTableMaterializerTest {
 
         verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
         verify(s3, never()).listObjectsWithPrefixes(eq("other-bucket"), anyString(), anyString(), anyInt(), any(), any());
+    }
+
+    @Test
+    void sweepsStaleScratchObjectsOnceAndKeepsRecentOnes() {
+        S3Object stale = new S3Object(ExternalTableMaterializer.SCRATCH_BUCKET, "spectrum-old.csv",
+                new byte[]{1}, "text/csv", "e1");
+        stale.setLastModified(Instant.now().minus(Duration.ofHours(3)));
+        S3Object recent = new S3Object(ExternalTableMaterializer.SCRATCH_BUCKET, "spectrum-new.csv",
+                new byte[]{1}, "text/csv", "e2");
+        when(s3.listObjectsWithPrefixes(eq(ExternalTableMaterializer.SCRATCH_BUCKET), eq("spectrum-"), eq(""),
+                eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(stale, recent), List.of(), false, null));
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        forceReload();
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(s3).deleteObject(ExternalTableMaterializer.SCRATCH_BUCKET, "spectrum-old.csv");
+        verify(s3, never()).deleteObject(ExternalTableMaterializer.SCRATCH_BUCKET, "spectrum-new.csv");
+        verify(s3, times(1)).listObjectsWithPrefixes(eq(ExternalTableMaterializer.SCRATCH_BUCKET),
+                eq("spectrum-"), eq(""), eq(1000), any(), any());
+    }
+
+    @Test
+    void nullsAPartitionValueWiderThanItsVarcharKey() {
+        Table table = csvTable();
+        table.setPartitionKeys(List.of(new Column("day", "varchar(3)")));
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        StorageDescriptor descriptor = new StorageDescriptor();
+        descriptor.setLocation("s3://bucket/events/");
+        descriptor.setInputFormat("org.apache.hadoop.mapred.TextInputFormat");
+        descriptor.setColumns(table.getStorageDescriptor().getColumns());
+        Partition partition = new Partition();
+        partition.setValues(List.of("2026-09-25"));
+        partition.setStorageDescriptor(descriptor);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(partition));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).execute(argThat(sql -> sql.contains("CAST(NULL AS VARCHAR)")
+                && !sql.contains("2026-09-25") && sql.contains("AS \"day\"")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void reloadsWhenAPartitionChangesFormatAtTheSameLocation() {
+        Table table = csvTable();
+        table.setPartitionKeys(List.of(new Column("day", "string")));
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        Partition partition = partitionAt("org.apache.hadoop.mapred.TextInputFormat", table);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(partition));
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(
+                        List.of(new S3Object("bucket", "events/p1.csv", new byte[]{1}, "text/csv", "etag1")),
+                        List.of(), false, null));
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(
+                partitionAt("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat", table)));
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void aSessionOutsideATransactionWaitsOutASlowLoadInsteadOfTimingOut() throws Exception {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            loading.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            return null;
+        }).when(duck).execute(anyString(), any(), anyString(), anyString());
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<ExternalTableMaterializer.Outcome> first = executor.submit(
+                    () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+            assertThat(loading.await(10, TimeUnit.SECONDS), equalTo(true));
+            Future<ExternalTableMaterializer.Outcome> second = executor.submit(
+                    () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+            Thread.sleep(300);
+            assertThat(second.isDone(), equalTo(false));
+
+            release.countDown();
+
+            assertThat(first.get(10, TimeUnit.SECONDS), equalTo(ExternalTableMaterializer.Outcome.LOADED));
+            assertThat(second.get(10, TimeUnit.SECONDS), equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    private Partition partitionAt(String inputFormat, Table table) {
+        StorageDescriptor descriptor = new StorageDescriptor();
+        descriptor.setLocation("s3://bucket/events/");
+        descriptor.setInputFormat(inputFormat);
+        descriptor.setColumns(table.getStorageDescriptor().getColumns());
+        Partition partition = new Partition();
+        partition.setValues(List.of("2026-09-25"));
+        partition.setStorageDescriptor(descriptor);
+        return partition;
     }
 
     @Test

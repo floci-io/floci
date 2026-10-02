@@ -44,6 +44,8 @@ public final class SpectrumS3Reader {
     }
 
     public Stream<SpectrumRow> read(SpectrumExternalSchema schema, SpectrumExternalTable table) {
+        // The phase-one interceptor knows only the account and database, not the cluster's roles, so the
+        // role is enforced here without the cluster-association check. The session overload has both.
         return read(schema, table, schema.iamRoleArn(), null);
     }
 

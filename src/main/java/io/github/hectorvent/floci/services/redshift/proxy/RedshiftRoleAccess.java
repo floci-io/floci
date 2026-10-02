@@ -28,6 +28,7 @@ import java.util.Optional;
 public final class RedshiftRoleAccess {
 
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
+    private static final String SQLSTATE_INTERNAL = "XX000";
 
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
     private static final String UPPER_ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -161,8 +162,7 @@ public final class RedshiftRoleAccess {
         try {
             s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), bucket);
         } catch (AwsException e) {
-            throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                    "S3 access denied for s3://" + bucket, e);
+            throw signedAccessFailure(e, "s3://" + bucket);
         }
     }
 
@@ -173,9 +173,18 @@ public final class RedshiftRoleAccess {
         try {
             s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), bucket, key);
         } catch (AwsException e) {
-            throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                    "S3 access denied for s3://" + bucket + "/" + key, e);
+            throw signedAccessFailure(e, "s3://" + bucket + "/" + key);
         }
+    }
+
+    /** A bucket that does not exist is not an access denial, and reporting it as one hides the real cause. */
+    private static S3CopySimulator.S3TransferException signedAccessFailure(AwsException e, String target) {
+        if ("NoSuchBucket".equals(e.getErrorCode())) {
+            return new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL,
+                    "S3 bucket does not exist for " + target, e);
+        }
+        return new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                "S3 access denied for " + target, e);
     }
 
     /** The bucket and object ARNs live in the role's partition: a China role authorizes China buckets. */
