@@ -204,8 +204,10 @@ public class RdsQueryHandler {
         // which default to false.
         boolean autoMinorVersionUpgrade = !"false".equalsIgnoreCase(params.getFirst("AutoMinorVersionUpgrade"));
         Boolean publiclyAccessible;
+        Boolean deletionProtection;
         try {
             publiclyAccessible = parseOptionalBoolean(params, "PubliclyAccessible");
+            deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
@@ -221,18 +223,12 @@ public class RdsQueryHandler {
             DbInstanceSettings settings = instanceSettings(params);
             List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
             Integer requestedPort = parseIntegerParam(params, "Port");
-            DbInstance instance = requestedPort == null
-                    ? service.createDbInstance(id, engine, engineVersion, masterUsername,
-                            masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
-                            paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
-                            optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible)
-                    : service.createDbInstance(id, engine, engineVersion, masterUsername,
-                            masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
-                            paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
-                            optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible,
-                            requestedPort);
+            DbInstance instance = service.createDbInstance(id, engine, engineVersion, masterUsername,
+                    masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
+                    paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                    manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                    optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible,
+                    requestedPort, deletionProtection);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -511,8 +507,10 @@ public class RdsQueryHandler {
         Boolean autoMinorVersionUpgrade = autoMinorVersionUpgradeStr != null
                 ? Boolean.parseBoolean(autoMinorVersionUpgradeStr) : null;
         Boolean publiclyAccessible;
+        Boolean deletionProtection;
         try {
             publiclyAccessible = parseOptionalBoolean(params, "PubliclyAccessible");
+            deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
@@ -523,7 +521,7 @@ public class RdsQueryHandler {
             DbInstance instance = service.modifyDbInstance(
                     id, newPassword, iamEnabled, dbSubnetGroupName,
                     vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
-                    settings, publiclyAccessible, scaling);
+                    settings, publiclyAccessible, scaling, deletionProtection);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -2378,6 +2376,7 @@ public class RdsQueryHandler {
            .elem("BackupRetentionPeriod", i.getBackupRetentionPeriod())
            .elem("StorageEncrypted", i.isStorageEncrypted())
            .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
+           .elem("DeletionProtection", i.isDeletionProtection())
            .raw(vpcSecurityGroupsXml(i))
            .raw(dbParameterGroupsXml(i))
            .raw(optionGroupMembershipsXml(i))

@@ -57,6 +57,10 @@ OrganizationsTest#testFullLifecycle
 PipesTest#batchSizeInSourceParameters
 PipesTest#filterCriteriaFiltersMessages
 PipesTest#sqsToSqsForwarding
+RdsIamTokenCompatTest#sdkGeneratedTokenIsAccepted
+RdsJdbcCompatTest#connectWithIamAuthToken
+RdsJdbcCompatTest#modifyKeepsProxyReachableAndDeleteReleasesPort
+RdsJdbcCompatTest#toggleIamViaModifyOnRunningInstance
 ResourceExplorer2Test#viewFiltersFilterStringDeserializes
 Route53Test#crossAccountVpcAssociationLifecycleUsesAwsSdkWireContract
 S3TablesTest#createsAndGetsTableBucket
@@ -108,29 +112,6 @@ S3Test#deleteEuBucket
 S3Test#getBucketLocationEuCentral1
 StsTest#assumeRoleWithSaml
 StsTest#assumeRoleWithSamlAssumedRoleUser
-
-# Floci bugs: RdsService checks a parsed ARN against the literal partition "aws", so RDS
-# resources created in China are not found after creation; the seeded IAM Identity Center
-# instance ARN is always arn:aws:. CloudFormationRdsDynamicReferenceTest and SsoPortalTest were
-# reproduced alone (they pass under us-east-1); the other RDS entries fail the same way. Fixed in
-# a follow-up PR.
-CloudFormationRdsDynamicReferenceTest#resolvesSecureSsmMasterPassword
-RdsControlPlaneTest#sdkCopiesModifiesAndDeletesManualSnapshots
-RdsControlPlaneTest#sdkCreatesCopiesRestoresAndDeletesClusterSnapshots
-RdsControlPlaneTest#sdkFaultsDeletingAnOptionGroupStillAttachedToAnInstance
-RdsControlPlaneTest#sdkRegistersDescribesAndDeregistersDbProxyInstanceTarget
-RdsControlPlaneTest#sdkResizesAndUpgradesAStandaloneInstance
-RdsControlPlaneTest#sdkRoundTripsAuroraServerlessV2ScalingConfiguration
-RdsControlPlaneTest#sdkRoundTripsDbProxyAndItsDefaultTargetGroup
-RdsControlPlaneTest#sdkRoundTripsIamDefaultAuthAndProxyUpdates
-RdsControlPlaneTest#sdkStopsAndStartsAStandaloneInstance
-RdsControlPlaneTest#sdkUnmarshalsDbSubnetGroupSubnets
-RdsIamTokenCompatTest#sdkGeneratedTokenIsAccepted
-RdsJdbcCompatTest#connectWithIamAuthToken
-RdsJdbcCompatTest#createDbInstanceAndConnectWithPassword
-RdsJdbcCompatTest#modifyKeepsProxyReachableAndDeleteReleasesPort
-RdsJdbcCompatTest#toggleIamViaModifyOnRunningInstance
-SsoPortalTest#listAccountsUsesAwsSdk
 
 # Passes alone: in the full run OrganizationsTest#testFullLifecycle fails its arn:aws: assertion
 # before cleanup, leaving the caller as the Organizations management account.

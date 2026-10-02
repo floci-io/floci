@@ -111,6 +111,19 @@ filter pattern) can fail after deletion and trigger restoration. The CFN schema 
 256-character metric namespace, but Floci's Logs API validation currently accepts at most 255:
 passing model validation does not imply provider acceptance.
 
+## Cognito user pool resource servers
+
+`AWS::Cognito::UserPoolResourceServer` returns its `Identifier` for `Ref`. Changing `Identifier`
+or `UserPoolId` replaces the server; changing `Name` or `Scopes` updates it in place. Optional
+`Scopes` or individual scope entries can be omitted by `Fn::If` selecting `AWS::NoValue`.
+
+Failed in-place restoration keeps the prior name and scopes for retry while the stack still
+allows `UpdateStack`. If a later update skips that resource, pending restoration can leave the
+stack in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`, which blocks another update. `DeleteStack` removes
+the managed server and retains its tracking if deletion fails. Old-server cleanup after a
+committed replacement remains retryable without rolling back the committed server.
+`ContinueUpdateRollback` remains unsupported.
+
 ## Supported Resource Types
 
 Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`. Each delegates to
@@ -155,6 +168,7 @@ cross-resource references.
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | EventBridge Scheduler | `ScheduleGroup` |
+| Transfer Family | `Server` (management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported) |
 | Backup | `BackupVault` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |

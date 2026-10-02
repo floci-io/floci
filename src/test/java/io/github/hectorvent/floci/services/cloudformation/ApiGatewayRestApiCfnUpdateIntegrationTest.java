@@ -18,7 +18,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * UpdateStack keeps an AWS::ApiGateway::RestApi and the AWS::ApiGateway::Resource under it, in the
  * redeploy shape the Serverless Framework produces: only the Deployment's logical id changes. The
  * API's description and endpoint type change in place, a resource the template drops goes from the
- * kept API, and an update that fails puts the API back as it was.
+ * kept API, and an update that fails puts the API back as it was. An update that declares more
+ * than one endpoint type is rejected, as CreateRestApi rejects it.
  */
 @QuarkusTest
 class ApiGatewayRestApiCfnUpdateIntegrationTest {
@@ -67,6 +68,16 @@ class ApiGatewayRestApiCfnUpdateIntegrationTest {
                   "RestApiId":{"Ref":"Api"},
                   "ParentId":{"Fn::GetAtt":["Api","RootResourceId"]},
                   "PathPart":"items"}}%s
+              },
+              "Outputs":{"ApiId":{"Value":{"Ref":"Api"}}}
+            }
+            """;
+    /** The API's description, then its endpoint types as a JSON list. */
+    private static final String TYPES_TEMPLATE = """
+            {
+              "Resources": {
+                "Api": {"Type":"AWS::ApiGateway::RestApi", "Properties":{"Name":"cfn-restapi-types",
+                  "Description":"%s", "EndpointConfiguration":{"Types":%s}}}
               },
               "Outputs":{"ApiId":{"Value":{"Ref":"Api"}}}
             }
@@ -124,6 +135,25 @@ class ApiGatewayRestApiCfnUpdateIntegrationTest {
                     .body("description", equalTo("first"))
                     .body("endpointConfiguration.types", contains("REGIONAL"));
             assertPaths(apiId, "/", "/items");
+        } finally {
+            deleteStack(stack);
+        }
+    }
+
+    @Test
+    void updateWithMoreThanOneEndpointTypeIsRejected() {
+        String stack = "apigw-cfn-restapi-types-it";
+        try {
+            stackAction(stack, "CreateStack", TYPES_TEMPLATE.formatted("first", "[\"REGIONAL\"]"));
+            String apiId = outputsOnceStatusIs(stack, "CREATE_COMPLETE").get("ApiId");
+
+            // CreateRestApi rejects more than one type, so an update does too.
+            stackAction(stack, "UpdateStack", TYPES_TEMPLATE.formatted("second", "[\"REGIONAL\", \"EDGE\"]"));
+            assertEquals(apiId, outputsOnceStatusIs(stack, "UPDATE_ROLLBACK_COMPLETE").get("ApiId"));
+
+            given().when().get("/restapis/" + apiId).then().statusCode(200)
+                    .body("description", equalTo("first"))
+                    .body("endpointConfiguration.types", contains("REGIONAL"));
         } finally {
             deleteStack(stack);
         }

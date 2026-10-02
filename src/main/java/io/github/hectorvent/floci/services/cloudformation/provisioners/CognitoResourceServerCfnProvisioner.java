@@ -40,7 +40,6 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
 
     @Override
     public void provision(StackResource resource, JsonNode properties, ProvisionContext ctx) {
-        resource.getAttributes().remove(UPDATE_ATTR);
         String poolId = required(ctx.resolveOptional(properties, "UserPoolId"), "UserPoolId");
         String identifier = required(ctx.resolveOptional(properties, "Identifier"), "Identifier");
         String name = required(ctx.resolveOptional(properties, "Name"), "Name");
@@ -49,9 +48,20 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         validateString(name, "Name", 256, "[\\w\\s+=,.@-]+");
         List<ResourceServerScope> scopes = scopes(properties, ctx);
 
+        if (ctx.isUpdate() && resource.getAttributes().containsKey(UPDATE_ATTR)) {
+            try {
+                rollbackUpdate(resource);
+                resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
+                resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR);
+            } catch (RuntimeException failure) {
+                resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, failure.getMessage());
+                throw new IllegalStateException("Could not finish the previous resource server update rollback", failure);
+            }
+        }
+        String priorPhysicalId = ctx.isUpdate() ? resource.getPhysicalId() : null;
         deletePending(resource);
         Identity target = new Identity(poolId, identifier);
-        Identity prior = ctx.isUpdate() ? identity(resource, ctx.priorPhysicalId()) : null;
+        Identity prior = ctx.isUpdate() ? identity(resource, priorPhysicalId) : null;
         boolean replacement = prior != null && !prior.equals(target);
         ResourceServer existing = prior == null ? null
                 : cognitoService.describeResourceServer(prior.poolId(), prior.identifier());
@@ -80,8 +90,8 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         if (properties == null || !properties.hasNonNull("Scopes")) {
             return List.of();
         }
-        JsonNode resolved = ctx.engine().resolveNode(properties.get("Scopes"));
-        if (resolved == null || resolved.isNull()) {
+        JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(properties.get("Scopes"));
+        if (resolved == null || resolved.isNull() || resolved.isMissingNode()) {
             return List.of();
         }
         if (!resolved.isArray()) {
@@ -239,11 +249,29 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        if ("UPDATE_FAILED".equals(resource.getStatus()) && retainsFailedUpdateState(resource)) {
+            throw new IllegalStateException("Resource server rollback is still pending; its original configuration "
+                    + "cannot be discarded by another resource's update cleanup");
+        }
+        boolean updated = resource.getAttributes().remove(UPDATE_ATTR) != null;
+        UpdateCleanupResult cleanup = completeCleanup(resource);
+        return !cleanup.applicable() && updated ? new UpdateCleanupResult(true, true, null, 0, null) : cleanup;
+    }
+
+    @Override
+    public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
+        return completeCleanup(resource);
+    }
+
+    @Override
+    public void clearDeleteCleanup(StackResource resource) {
+        // The rollback snapshot remains until deleting the managed server succeeds.
+    }
+
+    private UpdateCleanupResult completeCleanup(StackResource resource) {
         ObjectNode cleanup = read(resource, CLEANUP_ATTR);
         if (cleanup == null) {
-            return resource.getAttributes().containsKey(UPDATE_ATTR)
-                    ? new UpdateCleanupResult(true, true, null, 0, null)
-                    : UpdateCleanupResult.notApplicable();
+            return UpdateCleanupResult.notApplicable();
         }
         String identifier = cleanup.path("identifier").asText();
         if (retained(resource, cleanup)) {

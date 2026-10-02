@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -29,6 +30,7 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executor;
@@ -366,18 +368,27 @@ public class SesImportJobService implements Resettable {
                         "Import job " + jobId + " does not exist.", 404));
     }
 
-    public List<ImportJob> listImportJobs(String region, String destinationType, Integer pageSize,
-                                          String nextToken) {
+    /** The filter is checked before the page size and token, and a token is bound to it, as on the tenant lists. */
+    public PaginatedResult<ImportJob> listImportJobs(String region, String destinationType,
+                                                     SesListPaging paging, Integer pageSize, String nextToken) {
+        return paging.page(region, Objects.toString(destinationType, ""), listImportJobs(region, destinationType),
+                SesImportJobService::cursor, pageSize, nextToken);
+    }
+
+    /** Oldest first, Floci's own order since SES's could not be observed; the paged list resumes on it. */
+    public List<ImportJob> listImportJobs(String region, String destinationType) {
         if (destinationType != null && !DESTINATION_TYPES.contains(destinationType)) {
             throw validationError("importDestinationType",
                     "Member must satisfy enum value set: [SUPPRESSION_LIST, CONTACT_LIST]");
         }
-        SesTenantService.validateListPaging(pageSize, nextToken);
         return importJobStore.scan(k -> k.startsWith(keyPrefix(region))).stream()
                 .filter(j -> destinationType == null || destinationType.equals(j.getDestinationType()))
-                .sorted(Comparator.comparing(ImportJob::getCreatedTimestamp)
-                        .thenComparing(ImportJob::getJobId))
+                .sorted(Comparator.comparing(SesImportJobService::cursor))
                 .toList();
+    }
+
+    private static String cursor(ImportJob job) {
+        return SesListPaging.oldestFirst(job.getCreatedTimestamp(), job.getJobId());
     }
 
     // ──────────────────────────── Lifecycle ────────────────────────────

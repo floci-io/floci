@@ -82,7 +82,11 @@ public class CloudTrailCfnProvisioner implements CfnResourceProvisioner {
 
         resource.setPhysicalId(trail.trailArn());
         resource.getAttributes().put("Arn", trail.trailArn());
-        resource.getAttributes().put("SnsTopicArn", trail.snsTopicArn());
+        if (trail.snsTopicArn() != null) {
+            resource.getAttributes().put("SnsTopicArn", trail.snsTopicArn());
+        } else {
+            resource.getAttributes().remove("SnsTopicArn");
+        }
     }
 
     @Override

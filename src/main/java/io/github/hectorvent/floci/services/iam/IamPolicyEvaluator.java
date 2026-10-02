@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsServiceNamespaces;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.PolicyStatement;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -173,8 +174,9 @@ public class IamPolicyEvaluator {
     }
 
     /**
-     * Evaluates a resource-based policy standalone for a given caller principal, action,
-     * and resource.
+     * Evaluates a resource-based policy standalone for an IAM caller identified by its ARN. With no
+     * ARN, the request's {@code aws:PrincipalArn} stands in for it, which is IAM-only too: the key
+     * names IAM users, roles, federated users and the account root, never a service.
      */
     public ResourcePolicyDecision evaluateResourcePolicy(
             List<String> resourcePolicies,
@@ -182,28 +184,64 @@ public class IamPolicyEvaluator {
             String action,
             String resource,
             Map<String, List<String>> conditionCtx) {
+        String callerArn = principalArn;
+        if (callerArn == null) {
+            List<String> principalArns = normalizeConditionContext(conditionCtx).get("aws:principalarn");
+            if (principalArns != null && !principalArns.isEmpty()) {
+                callerArn = principalArns.getFirst();
+            }
+        }
+        RequestPrincipal principal = callerArn == null
+                ? RequestPrincipal.anonymous()
+                : RequestPrincipal.iam(callerArn);
+        return evaluateResourcePolicyFor(resourcePolicies, principal, action, resource, conditionCtx);
+    }
+
+    /**
+     * Evaluates a resource-based policy standalone for a typed caller. Each principal type in the
+     * policy matches only the callers it can name: {@code AWS} an IAM identity, {@code Service} a
+     * service by its exact name, {@code "*"} anyone. Named apart from the String form so a call
+     * passing a literal null caller to that one stays unambiguous.
+     */
+    public ResourcePolicyDecision evaluateResourcePolicyFor(
+            List<String> resourcePolicies,
+            RequestPrincipal principal,
+            String action,
+            String resource,
+            Map<String, List<String>> conditionCtx) {
         if (resourcePolicies == null || resourcePolicies.isEmpty()) {
             return ResourcePolicyDecision.NEUTRAL;
         }
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
-        if (principalArn == null && ctx.containsKey("aws:principalarn")) {
-            List<String> principalArns = ctx.get("aws:principalarn");
-            if (principalArns != null && !principalArns.isEmpty()) {
-                principalArn = principalArns.getFirst();
-            }
-        }
         String loweredAction = lowercase(action);
         List<PolicyStatement> stmts = parseAll(resourcePolicies);
-        if (anyResourceExplicitDeny(stmts, principalArn, loweredAction, resource, ctx)) {
+        if (anyResourceExplicitDeny(stmts, principal, loweredAction, resource, ctx)) {
             return ResourcePolicyDecision.EXPLICIT_DENY;
         }
-        if (anyResourceDirectIamUserAllow(stmts, principalArn, loweredAction, resource, ctx)) {
+        if (anyResourceDirectIamUserAllow(stmts, principal, loweredAction, resource, ctx)) {
             return ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER;
         }
-        if (anyResourceExplicitAllow(stmts, principalArn, loweredAction, resource, ctx)) {
+        if (anyResourceExplicitAllow(stmts, principal, loweredAction, resource, ctx)) {
             return ResourcePolicyDecision.ALLOW;
         }
         return ResourcePolicyDecision.NEUTRAL;
+    }
+
+    /**
+     * Decides a call an AWS service makes on its own behalf, such as SNS delivering to a queue. The
+     * resource policy decides alone: a service principal carries no identity, session or boundary
+     * policy, and SCPs apply only to the IAM users and roles of an organization's accounts. An
+     * explicit Deny denies, an Allow allows, and a policy that says nothing denies.
+     */
+    public Decision evaluateServicePrincipal(
+            List<String> resourcePolicies,
+            String servicePrincipal,
+            String action,
+            String resource,
+            Map<String, List<String>> conditionCtx) {
+        ResourcePolicyDecision decision = evaluateResourcePolicyFor(
+                resourcePolicies, RequestPrincipal.service(servicePrincipal), action, resource, conditionCtx);
+        return decision == ResourcePolicyDecision.ALLOW ? Decision.ALLOW : Decision.DENY;
     }
 
     private Decision evaluateParsed(
@@ -570,41 +608,43 @@ public class IamPolicyEvaluator {
         return false;
     }
 
-    private boolean anyResourceExplicitDeny(List<PolicyStatement> stmts, String principalArn,
+    private boolean anyResourceExplicitDeny(List<PolicyStatement> stmts, RequestPrincipal principal,
                                             String action, String resource, Map<String, List<String>> ctx) {
         for (PolicyStatement stmt : stmts) {
-            if (stmt.isDeny() && matchesResourceStatement(stmt, principalArn, action, resource, ctx)) {
+            if (stmt.isDeny() && matchesResourceStatement(stmt, principal, action, resource, ctx)) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean anyResourceExplicitAllow(List<PolicyStatement> stmts, String principalArn,
+    private boolean anyResourceExplicitAllow(List<PolicyStatement> stmts, RequestPrincipal principal,
                                              String action, String resource, Map<String, List<String>> ctx) {
         for (PolicyStatement stmt : stmts) {
-            if (stmt.isAllow() && matchesResourceStatement(stmt, principalArn, action, resource, ctx)) {
+            if (stmt.isAllow() && matchesResourceStatement(stmt, principal, action, resource, ctx)) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean anyResourceDirectIamUserAllow(List<PolicyStatement> stmts, String principalArn,
+    private boolean anyResourceDirectIamUserAllow(List<PolicyStatement> stmts, RequestPrincipal principal,
                                                  String action, String resource, Map<String, List<String>> ctx) {
         for (PolicyStatement stmt : stmts) {
-            if (stmt.isAllow() && matchesDirectIamUserStatement(stmt, principalArn, action, resource, ctx)) {
+            if (stmt.isAllow() && matchesDirectIamUserStatement(stmt, principal, action, resource, ctx)) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean matchesDirectIamUserStatement(PolicyStatement stmt, String principalArn,
+    private boolean matchesDirectIamUserStatement(PolicyStatement stmt, RequestPrincipal principal,
                                                   String action, String resource, Map<String, List<String>> ctx) {
-        if (principalArn == null || !principalArn.contains(":user/")) {
+        if (principal.type() != RequestPrincipal.Type.IAM
+                || principal.arn() == null || !principal.arn().contains(":user/")) {
             return false;
         }
+        String principalArn = principal.arn();
         if (stmt.getPrincipals() == null) {
             return false;
         }
@@ -662,13 +702,13 @@ public class IamPolicyEvaluator {
         return false;
     }
 
-    private boolean matchesResourceStatement(PolicyStatement stmt, String principalArn,
+    private boolean matchesResourceStatement(PolicyStatement stmt, RequestPrincipal principal,
                                              String action, String resource, Map<String, List<String>> ctx) {
         // A resource-policy statement with no Principal matches nothing (per AWS specification)
         if (stmt.getPrincipals() == null && stmt.getNotPrincipals() == null) {
             return false;
         }
-        if (!matchesPrincipal(stmt, principalArn)) {
+        if (!matchesPrincipal(stmt, principal)) {
             return false;
         }
         return matchesAction(stmt, action)
@@ -676,17 +716,27 @@ public class IamPolicyEvaluator {
                 && matchesConditions(stmt.getConditions(), ctx);
     }
 
-    private boolean matchesPrincipal(PolicyStatement stmt, String principalArn) {
+    private boolean matchesPrincipal(PolicyStatement stmt, RequestPrincipal principal) {
         if (stmt.getPrincipals() != null) {
-            return matchesAnyPrincipal(stmt.getPrincipals(), principalArn);
+            return matchesAnyPrincipal(stmt.getPrincipals(), principal);
         }
         if (stmt.getNotPrincipals() != null) {
-            return !matchesAnyPrincipal(stmt.getNotPrincipals(), principalArn);
+            return !matchesAnyPrincipal(stmt.getNotPrincipals(), principal);
         }
         return false;
     }
 
-    private boolean matchesAnyPrincipal(Map<String, List<String>> principals, String principalArn) {
+    /**
+     * Matches a statement's {@code Principal} (or {@code NotPrincipal}) map against a typed caller.
+     * {@code "*"} matches anyone. {@code {"AWS": "*"}} matches IAM identities and services alike,
+     * which policies AWS writes itself rely on (an FIS Deny pausing DynamoDB replication names the
+     * replication service that way). Any other {@code AWS} entry names IAM identities only, and a
+     * role session matches the role it assumed through that role's own ARN, path included.
+     * {@code Service} names one service exactly; {@code {"Service": "*"}} is not a form AWS accepts
+     * and matches nothing. {@code Federated}, {@code CanonicalUser} and any other type name callers
+     * this evaluator never sees, and so match nothing, rather than being compared with an IAM ARN.
+     */
+    private boolean matchesAnyPrincipal(Map<String, List<String>> principals, RequestPrincipal principal) {
         for (Map.Entry<String, List<String>> entry : principals.entrySet()) {
             String type = entry.getKey();
             List<String> patterns = entry.getValue();
@@ -698,44 +748,56 @@ public class IamPolicyEvaluator {
                     if ("*".equals(pattern)) {
                         return true;
                     }
-                    if (principalArn != null && globMatches(pattern, principalArn)) {
+                    if (principal.type() == RequestPrincipal.Type.IAM && principal.arn() != null
+                            && globMatches(pattern, principal.arn())) {
                         return true;
                     }
                 }
             } else if ("AWS".equalsIgnoreCase(type)) {
-                if (principalArn == null) {
-                    continue;
+                if (patterns.contains("*") && principal.type() != RequestPrincipal.Type.ANONYMOUS) {
+                    return true;
                 }
-                String accountId = extractAccountId(principalArn);
-                String roleArn = extractRoleArnFromAssumedRole(principalArn);
-                for (String pattern : patterns) {
-                    if ("*".equals(pattern)) {
-                        return true;
-                    }
-                    if (pattern.matches("\\d{12}")) {
-                        if (pattern.equals(accountId)) {
+                if (principal.type() == RequestPrincipal.Type.IAM && principal.arn() != null
+                        && matchesAwsPrincipal(patterns, principal)) {
+                    return true;
+                }
+            } else if ("Service".equalsIgnoreCase(type)) {
+                if (principal.type() == RequestPrincipal.Type.SERVICE && principal.servicePrincipal() != null) {
+                    String wanted = ServicePrincipals.canonical(principal.servicePrincipal());
+                    for (String pattern : patterns) {
+                        if (!"*".equals(pattern) && ServicePrincipals.canonical(pattern).equals(wanted)) {
                             return true;
                         }
-                    } else if (ROOT_PRINCIPAL_ARN.matcher(pattern).matches()) {
-                        // An account id is scoped to its partition: arn:aws-cn:iam::123:root names
-                        // the China account 123, which is not the commercial account 123.
-                        AwsArnUtils.Arn root = AwsArnUtils.parse(pattern);
-                        if (root.accountId().equals(accountId)
-                                && root.partition().equals(AwsArnUtils.parse(principalArn).partition())) {
-                            return true;
-                        }
-                    } else if (globMatches(pattern, principalArn)) {
-                        return true;
-                    } else if (roleArn != null && globMatches(pattern, roleArn)) {
-                        return true;
                     }
                 }
-            } else if (principalArn != null) {
-                for (String pattern : patterns) {
-                    if ("*".equals(pattern) || globMatches(pattern, principalArn)) {
-                        return true;
-                    }
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesAwsPrincipal(List<String> patterns, RequestPrincipal principal) {
+        String principalArn = principal.arn();
+        String accountId = extractAccountId(principalArn);
+        String roleArn = principal.roleArn() != null
+                ? principal.roleArn()
+                : extractRoleArnFromAssumedRole(principalArn);
+        for (String pattern : patterns) {
+            if (pattern.matches("\\d{12}")) {
+                if (pattern.equals(accountId)) {
+                    return true;
                 }
+            } else if (ROOT_PRINCIPAL_ARN.matcher(pattern).matches()) {
+                // An account id is scoped to its partition: arn:aws-cn:iam::123:root names
+                // the China account 123, which is not the commercial account 123.
+                AwsArnUtils.Arn root = AwsArnUtils.parse(pattern);
+                if (root.accountId().equals(accountId)
+                        && root.partition().equals(AwsArnUtils.parse(principalArn).partition())) {
+                    return true;
+                }
+            } else if (globMatches(pattern, principalArn)) {
+                return true;
+            } else if (roleArn != null && globMatches(pattern, roleArn)) {
+                return true;
             }
         }
         return false;

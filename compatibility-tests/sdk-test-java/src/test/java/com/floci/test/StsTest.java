@@ -11,6 +11,8 @@ import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.CreateRoleRequest;
 import software.amazon.awssdk.services.iam.model.CreateSamlProviderRequest;
 import software.amazon.awssdk.services.iam.model.CreateSamlProviderResponse;
+import software.amazon.awssdk.services.iam.model.DeleteRoleRequest;
+import software.amazon.awssdk.services.iam.model.NoSuchEntityException;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.*;
 import org.w3c.dom.Document;
@@ -59,11 +61,30 @@ class StsTest {
     private static String allowedRoleArn;
     private static String allowedRoleName;
 
+    private static final String OPEN_TRUST_POLICY = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"*\"},\"Action\":\"sts:AssumeRole\"}]}";
+
     @BeforeAll
     static void setup() throws Exception {
         sts = TestFixtures.stsClient();
         iam = TestFixtures.iamClient();
         signingKeys = createSigningKeys();
+
+        iam.createRole(CreateRoleRequest.builder()
+                .roleName("sdk-test-assumed-role")
+                .assumeRolePolicyDocument(OPEN_TRUST_POLICY)
+                .build());
+        iam.createRole(CreateRoleRequest.builder()
+                .roleName("my-role")
+                .assumeRolePolicyDocument(OPEN_TRUST_POLICY)
+                .build());
+        iam.createRole(CreateRoleRequest.builder()
+                .roleName("short-lived-role")
+                .assumeRolePolicyDocument(OPEN_TRUST_POLICY)
+                .build());
+        iam.createRole(CreateRoleRequest.builder()
+                .roleName("web-identity-role")
+                .assumeRolePolicyDocument(OPEN_TRUST_POLICY)
+                .build());
 
         String issuer = "https://sdk-test.example.test/saml";
         String providerName = TestFixtures.uniqueName("sdk-saml");
@@ -88,11 +109,26 @@ class StsTest {
 
     @AfterAll
     static void cleanup() {
+        safeDeleteRole("sdk-test-assumed-role");
+        safeDeleteRole("my-role");
+        safeDeleteRole("short-lived-role");
+        safeDeleteRole("web-identity-role");
+        safeDeleteRole(allowedRoleName);
         if (iam != null) {
             iam.close();
         }
         if (sts != null) {
             sts.close();
+        }
+    }
+
+    private static void safeDeleteRole(String roleName) {
+        if (iam != null && roleName != null) {
+            try {
+                iam.deleteRole(DeleteRoleRequest.builder().roleName(roleName).build());
+            } catch (NoSuchEntityException ignored) {
+                // Safe to ignore if the role was already cleaned up or never created.
+            }
         }
     }
 
@@ -209,6 +245,31 @@ class StsTest {
                 .isInstanceOf(StsException.class)
                 .extracting(e -> ((StsException) e).statusCode())
                 .isEqualTo(400);
+    }
+
+    @Test
+    void assumeRoleNonExistentRoleThrows403() {
+        assertThatThrownBy(() -> sts.assumeRole(AssumeRoleRequest.builder()
+                .roleArn("arn:aws:iam::000000000000:role/non-existent-role-" + UUID.randomUUID())
+                .roleSessionName("sdk-test-session")
+                .build()))
+                .isInstanceOf(StsException.class)
+                .extracting(e -> ((StsException) e).statusCode())
+                .isEqualTo(403);
+    }
+
+    @Test
+    void assumeRoleWithWebIdentityNonExistentRoleThrows403() {
+        assertThatThrownBy(() -> sts.assumeRoleWithWebIdentity(
+                AssumeRoleWithWebIdentityRequest.builder()
+                        .roleArn("arn:aws:iam::000000000000:role/non-existent-role-" + UUID.randomUUID())
+                        .roleSessionName("sdk-test-session")
+                        .webIdentityToken("eyJhbGciOiJSUzI1NiJ9.test-token")
+                        .durationSeconds(3600)
+                        .build()))
+                .isInstanceOf(StsException.class)
+                .extracting(e -> ((StsException) e).statusCode())
+                .isEqualTo(403);
     }
 
     @Test

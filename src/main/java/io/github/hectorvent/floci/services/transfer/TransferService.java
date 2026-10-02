@@ -75,10 +75,18 @@ public class TransferService {
         server.setTags(tags != null ? tags : new HashMap<>());
         server.setCreationTime(Instant.now());
 
-        putServer(server);
-
-        if (tags != null && !tags.isEmpty()) {
-            putTags("server/" + serverId, tags);
+        try {
+            putServer(server);
+            if (tags != null && !tags.isEmpty()) {
+                putTags("server/" + serverId, tags);
+            }
+        } catch (RuntimeException failure) {
+            try {
+                deleteServerRecord(server);
+            } catch (RuntimeException cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            throw failure;
         }
 
         return server;
@@ -171,6 +179,25 @@ public class TransferService {
         if (securityPolicyName != null) {
             server.setSecurityPolicyName(securityPolicyName);
         }
+        putServer(server);
+        return server;
+    }
+
+    /** Reconciles mutable server properties, including ones removed from a CloudFormation template. */
+    public Server replaceServerConfiguration(String serverId,
+                                             List<String> protocols,
+                                             String endpointType,
+                                             Map<String, Object> endpointDetails,
+                                             Map<String, String> identityProviderDetails,
+                                             String loggingRole,
+                                             String securityPolicyName) {
+        Server server = getServer(serverId);
+        server.setProtocols(protocols);
+        server.setEndpointType(endpointType);
+        server.setEndpointDetails(endpointDetails);
+        server.setIdentityProviderDetails(identityProviderDetails);
+        server.setLoggingRole(loggingRole);
+        server.setSecurityPolicyName(securityPolicyName);
         putServer(server);
         return server;
     }

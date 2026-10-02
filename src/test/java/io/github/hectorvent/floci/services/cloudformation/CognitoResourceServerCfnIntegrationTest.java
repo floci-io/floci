@@ -3,22 +3,33 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
 
 @QuarkusTest
 class CognitoResourceServerCfnIntegrationTest {
@@ -30,6 +41,9 @@ class CognitoResourceServerCfnIntegrationTest {
     private final List<String> poolIds = new ArrayList<>();
     private final String stack = "cognito-resource-server-" + Long.toString(System.nanoTime(), 36);
     private boolean createdStack;
+
+    @InjectSpy
+    CognitoService cognitoService;
 
     @BeforeAll
     static void configureAwsContentTypes() {
@@ -84,6 +98,39 @@ class CognitoResourceServerCfnIntegrationTest {
         updateStack(template(pool, IDENTIFIER, "No scopes", null), "UPDATE_COMPLETE");
 
         assertEquals(0, server(pool, IDENTIFIER).path("Scopes").size());
+    }
+
+    @Test
+    void changingOnlyTheConditionClearsAndRestoresOptionalScopes() throws Exception {
+        String pool = createPool();
+        createStack(conditionalScopeTemplate(pool, false, false));
+        assertEquals(0, server(pool, IDENTIFIER).path("Scopes").size());
+
+        updateStack(conditionalScopeTemplate(pool, true, false), "UPDATE_COMPLETE");
+        assertServer(pool, IDENTIFIER, "Conditional API", "read");
+
+        updateStack(conditionalScopeTemplate(pool, false, false), "UPDATE_COMPLETE");
+        assertEquals(0, server(pool, IDENTIFIER).path("Scopes").size());
+        assertEquals(IDENTIFIER, output("ServerRef"));
+
+        updateStack(conditionalScopeTemplate(pool, true, false), "UPDATE_COMPLETE");
+        assertServer(pool, IDENTIFIER, "Conditional API", "read");
+    }
+
+    @Test
+    void changingOnlyTheConditionOmitsOneScopeAndPreservesTheOther() throws Exception {
+        String pool = createPool();
+        createStack(conditionalScopeTemplate(pool, true, true));
+        assertEquals(2, server(pool, IDENTIFIER).path("Scopes").size());
+        assertEquals("write", server(pool, IDENTIFIER).path("Scopes").get(1).path("ScopeName").asText());
+
+        updateStack(conditionalScopeTemplate(pool, false, true), "UPDATE_COMPLETE");
+        assertServer(pool, IDENTIFIER, "Conditional API", "read");
+
+        updateStack(conditionalScopeTemplate(pool, true, true), "UPDATE_COMPLETE");
+        assertEquals(2, server(pool, IDENTIFIER).path("Scopes").size());
+        assertEquals("write", server(pool, IDENTIFIER).path("Scopes").get(1).path("ScopeName").asText());
+        assertEquals(IDENTIFIER, output("ServerRef"));
     }
 
     @Test
@@ -147,6 +194,146 @@ class CognitoResourceServerCfnIntegrationTest {
         assertEquals(IDENTIFIER, output("ServerRef"));
     }
 
+    @Test
+    void aPendingRollbackSurvivesFailedUpdatesUntilItCanBeRestored() throws Exception {
+        String pool = createPool();
+        createStack(template(pool, IDENTIFIER, "Original API", "read"));
+        doThrow(new AwsException("InternalErrorException", "temporary restore failure", 500))
+                .when(cognitoService).updateResourceServer(eq(pool), eq(IDENTIFIER), eq("Original API"), any());
+
+        try {
+            ObjectNode firstAttempt = template(pool, IDENTIFIER, "First attempt", "write");
+            addFailingDependentResource(firstAttempt);
+            updateStack(firstAttempt, "UPDATE_ROLLBACK_FAILED");
+            assertServer(pool, IDENTIFIER, "First attempt", "write");
+
+            ObjectNode nextAttempt = template(pool, IDENTIFIER, "Next attempt", "admin");
+            addFailingDependentResource(nextAttempt);
+            nextAttempt.withObject("/Resources/Broken/Properties").put("ClientName", "broken-next");
+            updateStack(nextAttempt, "UPDATE_ROLLBACK_FAILED");
+            assertServer(pool, IDENTIFIER, "First attempt", "write");
+
+            doCallRealMethod().when(cognitoService)
+                    .updateResourceServer(eq(pool), eq(IDENTIFIER), eq("Original API"), any());
+            ObjectNode recoveryAttempt = template(pool, IDENTIFIER, "Recovery attempt", "write");
+            addFailingDependentResource(recoveryAttempt);
+            recoveryAttempt.withObject("/Resources/Broken/Properties").put("ClientName", "broken-recovery");
+            updateStack(recoveryAttempt, "UPDATE_ROLLBACK_COMPLETE");
+            assertServer(pool, IDENTIFIER, "Original API", "read");
+            assertEquals(IDENTIFIER, output("ServerRef"));
+        } finally {
+            doCallRealMethod().when(cognitoService)
+                    .updateResourceServer(eq(pool), eq(IDENTIFIER), eq("Original API"), any());
+        }
+    }
+
+    @Test
+    void skippingAPendingRollbackPreservesOwnershipAndBlocksAnotherUpdate() throws Exception {
+        String pool = createPool();
+        createStack(template(pool, IDENTIFIER, "Original API", "read"));
+        doThrow(new AwsException("InternalErrorException", "temporary restore failure", 500))
+                .when(cognitoService).updateResourceServer(eq(pool), eq(IDENTIFIER), eq("Original API"), any());
+
+        try {
+            ObjectNode firstAttempt = template(pool, IDENTIFIER, "First attempt", "write");
+            addFailingDependentResource(firstAttempt);
+            updateStack(firstAttempt, "UPDATE_ROLLBACK_FAILED");
+            assertServer(pool, IDENTIFIER, "First attempt", "write");
+
+            ObjectNode outputsOnly = firstAttempt.deepCopy();
+            outputsOnly.withObject("/Resources").remove("Broken");
+            outputsOnly.withObject("/Outputs").putObject("Marker").put("Value", "unchanged-resource");
+            cloudFormation("UpdateStack", outputsOnly);
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                    assertEquals("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", stackStatus(),
+                            "Skipping the resource must not discard its pending restoration"));
+            assertServer(pool, IDENTIFIER, "First attempt", "write");
+            assertEquals(IDENTIFIER, output("ServerRef"));
+
+            ObjectNode nextAttempt = template(pool, IDENTIFIER, "Next attempt", "admin");
+            String error = given().contentType("application/x-www-form-urlencoded")
+                    .header("Authorization", CFN_AUTH).formParam("Action", "UpdateStack")
+                    .formParam("StackName", stack).formParam("TemplateBody", nextAttempt.toString())
+                    .post("/").then().statusCode(400).extract().asString();
+            assertEquals("ValidationError", XmlParser.extractFirst(error, "Code", null));
+            assertTrue(XmlParser.extractFirst(error, "Message", "")
+                    .contains("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS"));
+            assertEquals("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", stackStatus());
+            assertServer(pool, IDENTIFIER, "First attempt", "write");
+
+            cloudFormation("DeleteStack", null);
+            CfnStackWaits.awaitStackDeleted(stack);
+            createdStack = false;
+            assertServerGone(pool, IDENTIFIER);
+        } finally {
+            doCallRealMethod().when(cognitoService)
+                    .updateResourceServer(eq(pool), eq(IDENTIFIER), eq("Original API"), any());
+        }
+    }
+
+    @Test
+    void aNameOnlyChangeSetUpdatesTheExistingServerWithoutReplacement() throws Exception {
+        String pool = createPool();
+        createStack(template(pool, IDENTIFIER, "Original API", "read"));
+        changeSet("CreateChangeSet", "rename-display", template(pool, IDENTIFIER, "Renamed API", "read"));
+        Map<String, String> change = resourceChange(changeSet("DescribeChangeSet", "rename-display", null));
+        assertEquals("Modify", change.get("Action"));
+        assertEquals("False", change.get("Replacement"));
+
+        changeSet("ExecuteChangeSet", "rename-display", null);
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
+        assertServer(pool, IDENTIFIER, "Renamed API", "read");
+        assertEquals(IDENTIFIER, output("ServerRef"));
+    }
+
+    @Test
+    void deletingAPendingRollbackKeepsOwnershipAfterADeleteFailureAndCanBeRetried() throws Exception {
+        String pool = createPool();
+        createStack(template(pool, IDENTIFIER, "Original API", "read"));
+        doThrow(new AwsException("InternalErrorException", "temporary restore failure", 500))
+                .when(cognitoService).updateResourceServer(eq(pool), eq(IDENTIFIER), eq("Original API"), any());
+        doThrow(new AwsException("InternalErrorException", "temporary delete failure", 500))
+                .when(cognitoService).deleteResourceServer(pool, IDENTIFIER);
+
+        try {
+            ObjectNode attempted = template(pool, IDENTIFIER, "Attempted API", "write");
+            addFailingDependentResource(attempted);
+            updateStack(attempted, "UPDATE_ROLLBACK_FAILED");
+            assertServer(pool, IDENTIFIER, "Attempted API", "write");
+
+            cloudFormation("DeleteStack", null);
+            assertEquals("DELETE_FAILED", CfnStackWaits.awaitTerminal(stack).status());
+            assertServer(pool, IDENTIFIER, "Attempted API", "write");
+
+            doCallRealMethod().when(cognitoService).deleteResourceServer(pool, IDENTIFIER);
+            cloudFormation("DeleteStack", null);
+            CfnStackWaits.awaitStackDeleted(stack);
+            createdStack = false;
+            assertServerGone(pool, IDENTIFIER);
+        } finally {
+            doCallRealMethod().when(cognitoService)
+                    .updateResourceServer(eq(pool), eq(IDENTIFIER), eq("Original API"), any());
+            doCallRealMethod().when(cognitoService).deleteResourceServer(pool, IDENTIFIER);
+        }
+    }
+
+    @Test
+    void aPoolOnlyChangeSetReplacesTheServerEvenWhenItsRefStaysTheSame() throws Exception {
+        String originalPool = createPool();
+        String replacementPool = createPool();
+        createStack(template(originalPool, IDENTIFIER, "Original API", "read"));
+        changeSet("CreateChangeSet", "move-pool", template(replacementPool, IDENTIFIER, "Original API", "read"));
+        Map<String, String> change = resourceChange(changeSet("DescribeChangeSet", "move-pool", null));
+        assertEquals("Modify", change.get("Action"));
+        assertEquals("True", change.get("Replacement"));
+
+        changeSet("ExecuteChangeSet", "move-pool", null);
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
+        assertServerGone(originalPool, IDENTIFIER);
+        assertServer(replacementPool, IDENTIFIER, "Original API", "read");
+        assertEquals(IDENTIFIER, output("ServerRef"));
+    }
+
     private String createPool() throws Exception {
         String id = cognitoJson("CreateUserPool", "{\"PoolName\":\"" + stack + "\"}")
                 .path("UserPool").path("Id").asText();
@@ -187,6 +374,29 @@ class CognitoResourceServerCfnIntegrationTest {
         return XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue").get(key);
     }
 
+    private String stackStatus() {
+        String xml = given().contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH).formParam("Action", "DescribeStacks")
+                .formParam("StackName", stack).post("/").then().statusCode(200).extract().asString();
+        return XmlParser.extractFirst(xml, "StackStatus", null);
+    }
+
+    private String changeSet(String action, String name, ObjectNode template) {
+        RequestSpecification request = given().contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH).formParam("Action", action)
+                .formParam("StackName", stack).formParam("ChangeSetName", name);
+        if (template != null) {
+            request.formParam("ChangeSetType", "UPDATE").formParam("TemplateBody", template.toString());
+        }
+        return request.post("/").then().statusCode(200).extract().asString();
+    }
+
+    private static Map<String, String> resourceChange(String xml) {
+        return XmlParser.extractGroups(xml, "ResourceChange").stream()
+                .filter(change -> "Server".equals(change.get("LogicalResourceId")))
+                .findFirst().orElseThrow();
+    }
+
     private ObjectNode template(String pool, String identifier, String name, String scope) {
         ObjectNode template = mapper.createObjectNode();
         ObjectNode resource = template.putObject("Resources").putObject("Server");
@@ -199,6 +409,25 @@ class CognitoResourceServerCfnIntegrationTest {
             properties.putArray("Scopes").addObject().put("ScopeName", scope).put("ScopeDescription", "Access");
         }
         template.putObject("Outputs").putObject("ServerRef").putObject("Value").put("Ref", "Server");
+        return template;
+    }
+
+    private ObjectNode conditionalScopeTemplate(String pool, boolean enabled, boolean entry) {
+        ObjectNode template = template(pool, IDENTIFIER, "Conditional API", "read");
+        template.putObject("Conditions").putObject("IncludeScopes")
+                .putArray("Fn::Equals").add("enabled").add(enabled ? "enabled" : "disabled");
+        ObjectNode properties = (ObjectNode) template.path("Resources").path("Server").path("Properties");
+        ObjectNode conditional = mapper.createObjectNode();
+        JsonNode included = entry
+                ? mapper.createObjectNode().put("ScopeName", "write").put("ScopeDescription", "Write access")
+                : properties.path("Scopes");
+        conditional.putArray("Fn::If").add("IncludeScopes").add(included)
+                .add(mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        if (entry) {
+            properties.withArray("Scopes").add(conditional);
+        } else {
+            properties.set("Scopes", conditional);
+        }
         return template;
     }
 

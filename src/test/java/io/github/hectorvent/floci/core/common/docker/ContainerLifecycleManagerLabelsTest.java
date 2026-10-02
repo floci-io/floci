@@ -104,7 +104,36 @@ class ContainerLifecycleManagerLabelsTest {
     }
 
     @Test
+    void createWritesTheLegacyAliasOfEachNewKeyWithTheSameValue() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+        ContainerSpec spec = specWithLabels(Map.of(
+                ContainerStorageHelper.OWNER_LABEL, "alpha/4566",
+                ContainerStorageHelper.ECS_RUN_LABEL, "run-1"));
+
+        manager().create(spec);
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws",
+                        "io.floci.owner", "alpha/4566", "floci_owner_port", "alpha/4566",
+                        "io.floci.ecs.run", "run-1", "floci.ecs-run", "run-1"),
+                capturedLabels(createCmd));
+    }
+
+    @Test
     void protectedWorkloadCannotAdministerOrSpoofItsNetwork() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(specWithLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL, "true")));
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        List<Capability> dropped = List.of(hostConfig.getValue().getCapDrop());
+        assertTrue(dropped.contains(Capability.NET_ADMIN));
+        assertTrue(dropped.contains(Capability.NET_RAW));
+    }
+
+    @Test
+    void protectedWorkloadSpecWithOnlyTheLegacyLabelStillDropsNetworkAdministration() {
         CreateContainerCmd createCmd = stubCreateContainer();
 
         manager().create(specWithLabels(Map.of("floci.security-group-workload", "true")));
@@ -126,6 +155,17 @@ class ContainerLifecycleManagerLabelsTest {
         verify(createCmd).withHostConfig(hostConfig.capture());
         assertEquals(List.of(Capability.NET_ADMIN), List.of(hostConfig.getValue().getCapAdd()));
         assertNotEquals(Boolean.TRUE, hostConfig.getValue().getPrivileged());
+    }
+
+    @Test
+    void firewallHelperSpecWithTheNewLabelGetsNetAdmin() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(specWithLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL, "true")));
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        assertEquals(List.of(Capability.NET_ADMIN), List.of(hostConfig.getValue().getCapAdd()));
     }
 
     @Test
