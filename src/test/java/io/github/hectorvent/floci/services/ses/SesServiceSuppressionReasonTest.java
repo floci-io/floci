@@ -7,18 +7,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
- * Covers {@link SesService#resolveSuppressionReason(String, String)} — the per-recipient
- * lookup that publishSendEvents uses to map suppressed addresses to synthetic Bounce or
- * Complaint events.
+ * Covers {@link SesService#collectSuppressedReasons}, the per-send lookup that filters the relay
+ * and maps suppressed recipients to synthetic Bounce or Complaint events.
  *
- * <p>The helper returns a reason only when the address is on the suppression list AND
- * the address's stored reason intersects {@link AccountSuppressionAttributes#getSuppressedReasons()}.
+ * <p>An address is reported only when it is on the suppression list and its stored reason
+ * intersects {@link AccountSuppressionAttributes#getSuppressedReasons()}.
  */
 class SesServiceSuppressionReasonTest {
 
@@ -39,47 +39,49 @@ class SesServiceSuppressionReasonTest {
     }
 
     @Test
-    void notOnList_returnsNull() {
+    void notOnList_returnsEmpty() {
         // Default fresh account: suppressedReasons defaults to [BOUNCE, COMPLAINT], but the
-        // address is not on the list, so resolution returns null.
-        assertNull(service.resolveSuppressionReason("unknown@example.com", null, REGION));
+        // address is not on the list, so nothing is reported.
+        assertEquals(Map.of(), reasons("unknown@example.com"));
     }
 
     @Test
     void onListAndReasonInAccountSettings_returnsReason() {
         suppression.putSuppressedDestination(REGION, "bouncer@example.com", "BOUNCE");
         // Account-level suppressedReasons defaults to [BOUNCE, COMPLAINT].
-        assertEquals("BOUNCE", service.resolveSuppressionReason("bouncer@example.com", null, REGION));
+        assertEquals(Map.of("bouncer@example.com", "BOUNCE"), reasons("bouncer@example.com"));
     }
 
     @Test
-    void onListButReasonNotInAccountSettings_returnsNull() {
+    void onListButReasonNotInAccountSettings_returnsEmpty() {
         suppression.putSuppressedDestination(REGION, "complainer@example.com", "COMPLAINT");
         // Narrow the account settings to BOUNCE only.
         suppression.putAccountSuppressionAttributes(REGION, List.of("BOUNCE"));
-        assertNull(service.resolveSuppressionReason("complainer@example.com", null, REGION));
+        assertEquals(Map.of(), reasons("complainer@example.com"));
     }
 
     @Test
-    void accountSettingsEmpty_returnsNull() {
+    void accountSettingsEmpty_returnsEmpty() {
         suppression.putSuppressedDestination(REGION, "bouncer@example.com", "BOUNCE");
         // Disable account-level suppression by passing an empty list.
         suppression.putAccountSuppressionAttributes(REGION, new ArrayList<>());
-        assertNull(service.resolveSuppressionReason("bouncer@example.com", null, REGION));
+        assertEquals(Map.of(), reasons("bouncer@example.com"));
     }
 
     @Test
     void leadingTrailingWhitespaceIsNormalized() {
         suppression.putSuppressedDestination(REGION, "trim-me@example.com", "BOUNCE");
         // Caller may pass the recipient with surrounding whitespace (e.g. from a header).
-        assertEquals("BOUNCE",
-                service.resolveSuppressionReason("  trim-me@example.com  ", null, REGION));
+        assertEquals(Map.of("  trim-me@example.com  ", "BOUNCE"), reasons("  trim-me@example.com  "));
     }
 
     @Test
-    void nullOrBlankInput_returnsNull() {
-        assertNull(service.resolveSuppressionReason(null, null, REGION));
-        assertNull(service.resolveSuppressionReason("", null, REGION));
-        assertNull(service.resolveSuppressionReason("   ", null, REGION));
+    void nullOrBlankInput_returnsEmpty() {
+        assertEquals(Map.of(), service.collectSuppressedReasons(Arrays.asList(null, "", "   "), null, REGION));
+        assertEquals(Map.of(), service.collectSuppressedReasons(null, null, REGION));
+    }
+
+    private Map<String, String> reasons(String address) {
+        return service.collectSuppressedReasons(List.of(address), null, REGION);
     }
 }

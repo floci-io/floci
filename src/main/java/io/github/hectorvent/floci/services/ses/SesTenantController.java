@@ -34,10 +34,10 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAb
 
 /**
  * SES V2 tenant endpoints ({@code /v2/email/tenants}, {@code /v2/email/tenant} and
- * {@code /v2/email/resources/tenants}). Tenant create, get, list and suppression attributes
- * call {@link SesTenantService} directly; the resource
- * associations and tenant delete go through the {@link SesService} facade, which checks the
- * associated identity, configuration set or template exists and cascades the tenant's
+ * {@code /v2/email/resources/tenants}). Tenant create, get, list, suppression attributes and the
+ * tenant's resource list call {@link SesTenantService} directly; association create and delete,
+ * the resource's tenant list and tenant delete go through the {@link SesService} facade, which
+ * checks the associated identity, configuration set or template exists and cascades the tenant's
  * suppression entries, work that spans several domains.
  */
 @Path("/v2/email")
@@ -230,9 +230,9 @@ public class SesTenantController {
             }
             Integer pageSize = intMemberOrAbsent(request, "PageSize");
             String nextToken = stringMemberOrAbsent(request, "NextToken");
-            PaginatedResult<TenantResourceAssociation> page = sesService.listTenantResources(
-                    tenantName, resourceTypeFilter, SesListPaging.V2_LIST_TENANT_RESOURCES, pageSize, nextToken,
-                    region);
+            PaginatedResult<TenantResourceAssociation> page = tenantService.listTenantResources(
+                    tenantName, resourceTypeFilter, region, SesListPaging.V2_LIST_TENANT_RESOURCES, pageSize,
+                    nextToken);
             ObjectNode result = objectMapper.createObjectNode();
             result.put("NextToken", page.nextToken());
             ArrayNode resources = result.putArray("TenantResources");
