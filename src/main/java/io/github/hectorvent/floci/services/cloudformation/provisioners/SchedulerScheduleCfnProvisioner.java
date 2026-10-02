@@ -115,6 +115,9 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
                 throw failure;
             }
         } else {
+            if (ctx.isUpdate()) {
+                ownedSchedule(resource, ctx.priorPhysicalId(), priorGroup, ctx.region());
+            }
             schedule = schedulerService.createSchedule(request, ctx.region());
         }
         if (!sameAddress) {
@@ -144,7 +147,9 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
     private Schedule ownedSchedule(StackResource resource, String name, String group, String region) {
         Schedule schedule = schedulerService.getSchedule(name, group, region);
         String expected = resource.getAttributes().get(INCARNATION_PREFIX + address(group, name));
-        if (expected == null || !expected.equals(schedule.getIncarnationId())) {
+        if (expected == null || expected.isBlank()
+                || schedule.getIncarnationId() == null || schedule.getIncarnationId().isBlank()
+                || !expected.equals(schedule.getIncarnationId())) {
             throw new IllegalStateException("Schedule ownership cannot be verified: " + address(group, name));
         }
         return schedule;

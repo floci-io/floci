@@ -203,7 +203,8 @@ name or ARN. If another client removes a managed schedule and recreates that add
 cleanup leaves the new schedule untouched. Snapshot restoration refuses to overwrite it and
 keeps the pending rollback for operator reconciliation. Older preview stack or schedule records
 without incarnation proof fail closed; their ownership must be reconciled before cleanup or
-restoration can finish.
+restoration can finish. A name replacement, including removal of an explicit name, verifies
+the current schedule's ownership before creating its destination, even under `UpdateReplacePolicy: Retain`.
 
 ## EventBridge Event Buses
 

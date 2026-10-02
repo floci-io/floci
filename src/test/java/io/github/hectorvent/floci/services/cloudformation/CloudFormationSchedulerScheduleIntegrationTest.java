@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.scheduler.ScheduleInvoker;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
+import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
@@ -24,6 +25,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -35,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 
 @QuarkusTest
@@ -451,6 +454,121 @@ class CloudFormationSchedulerScheduleIntegrationTest {
         getSchedule(originalName, "default").then().statusCode(404);
         getSchedule(replacementName, "default").then().statusCode(404);
         sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+    }
+
+    @Test
+    void nameReplacementRejectsLegacyCurrentOwnershipBeforeCreatingDestination() {
+        for (String proof : List.of("missing", "blank")) {
+            String suffix = Long.toString(System.nanoTime(), 36);
+            String stack = "cfn-schedule-legacy-current-" + suffix;
+            String originalName = "legacy-current-" + suffix;
+            String replacementName = "legacy-destination-" + suffix;
+            Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+            cloudFormation(stack, "CreateStack", externalQueueTemplate("", queue), Map.of("Name", originalName));
+            outputs(stack, "CREATE_COMPLETE");
+            StackResource resource = scheduleResource(stack);
+            String ownershipKey = "__FlociSchedulerIncarnation:default/" + originalName;
+            String originalIncarnation = resource.getAttributes().get(ownershipKey);
+            Schedule current = scheduler.getSchedule(originalName, "default", "us-east-1");
+            // Simulate the private fields of an older persisted record, not a runtime migration.
+            if ("missing".equals(proof)) {
+                resource.getAttributes().remove(ownershipKey);
+                current.setIncarnationId(null);
+            } else {
+                resource.getAttributes().put(ownershipKey, " ");
+                current.setIncarnationId(" ");
+            }
+            try {
+                cloudFormation(stack, "UpdateStack", externalQueueTemplate("", queue),
+                        Map.of("Name", replacementName));
+                outputs(stack, "UPDATE_ROLLBACK_COMPLETE");
+                assertEquals(originalName, scheduleResource(stack).getPhysicalId());
+                getSchedule(originalName, "default").then().statusCode(200)
+                        .body("Target.Input", equalTo("payload:first"));
+                getSchedule(replacementName, "default").then().statusCode(404);
+                assertFalse(scheduleResource(stack).getAttributes().containsKey("__FlociReplacementCleanup"));
+            } finally {
+                current.setIncarnationId(originalIncarnation);
+                scheduleResource(stack).getAttributes().put(ownershipKey, originalIncarnation);
+                deleteStack(stack);
+                sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+            }
+        }
+    }
+
+    @Test
+    void replacementCleanupPreservesForeignRecreationAfterCurrentOwnershipWasChecked() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-preflight-race-" + suffix;
+        String foreignStack = "cfn-schedule-preflight-foreign-" + suffix;
+        String originalName = "preflight-current-" + suffix;
+        String replacementName = "preflight-destination-" + suffix;
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        String template = externalQueueTemplate("", queue);
+        cloudFormation(stack, "CreateStack", template, Map.of("Name", originalName));
+        outputs(stack, "CREATE_COMPLETE");
+        String originalIncarnation = scheduler.getSchedule(originalName, "default", "us-east-1").getIncarnationId();
+        AtomicBoolean recreateAfterRead = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            Schedule observed = (Schedule) invocation.callRealMethod();
+            if (recreateAfterRead.compareAndSet(true, false)) {
+                given().delete("/schedules/" + originalName).then().statusCode(200);
+                cloudFormation(foreignStack, "CreateStack", template,
+                        Map.of("Name", originalName, "Payload", "foreign"));
+                outputs(foreignStack, "CREATE_COMPLETE");
+            }
+            return observed;
+        }).when(scheduler).getSchedule(originalName, "default", "us-east-1");
+
+        try {
+            cloudFormation(stack, "UpdateStack", template, Map.of("Name", replacementName, "Payload", "owned"));
+            assertEquals(replacementName, outputs(stack, "UPDATE_COMPLETE").get("ScheduleRef"));
+            assertFalse(recreateAfterRead.get());
+            assertFalse(originalIncarnation.equals(
+                    scheduler.getSchedule(originalName, "default", "us-east-1").getIncarnationId()));
+            getSchedule(originalName, "default").then().statusCode(200)
+                    .body("Target.Input", equalTo("payload:foreign"));
+            getSchedule(replacementName, "default").then().statusCode(200)
+                    .body("Target.Input", equalTo("payload:owned"));
+            deleteStack(stack);
+            getSchedule(replacementName, "default").then().statusCode(404);
+            getSchedule(originalName, "default").then().statusCode(200)
+                    .body("Target.Input", equalTo("payload:foreign"));
+        } finally {
+            doCallRealMethod().when(scheduler).getSchedule(originalName, "default", "us-east-1");
+            deleteStack(foreignStack);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
+    }
+
+    @Test
+    void nameReplacementRejectsForeignCurrentOwnershipBeforeCreatingDestination() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-foreign-current-" + suffix;
+        String foreignStack = "cfn-schedule-foreign-recreation-" + suffix;
+        String originalName = "foreign-current-" + suffix;
+        String replacementName = "foreign-destination-" + suffix;
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        cloudFormation(stack, "CreateStack", externalQueueTemplate("", queue), Map.of("Name", originalName));
+        outputs(stack, "CREATE_COMPLETE");
+        given().delete("/schedules/" + originalName).then().statusCode(200);
+        cloudFormation(foreignStack, "CreateStack", externalQueueTemplate("", queue),
+                Map.of("Name", originalName, "Payload", "foreign"));
+        outputs(foreignStack, "CREATE_COMPLETE");
+        try {
+            cloudFormation(stack, "UpdateStack", externalQueueTemplate("", queue), Map.of("Name", replacementName));
+            outputs(stack, "UPDATE_ROLLBACK_COMPLETE");
+            assertEquals(originalName, scheduleResource(stack).getPhysicalId());
+            getSchedule(originalName, "default").then().statusCode(200)
+                    .body("Target.Input", equalTo("payload:foreign"));
+            getSchedule(replacementName, "default").then().statusCode(404);
+            deleteStack(stack);
+            getSchedule(originalName, "default").then().statusCode(200)
+                    .body("Target.Input", equalTo("payload:foreign"));
+        } finally {
+            deleteStack(foreignStack);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
     }
 
     @Test
