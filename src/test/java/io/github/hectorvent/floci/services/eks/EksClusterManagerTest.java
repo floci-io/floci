@@ -523,6 +523,7 @@ class EksClusterManagerTest {
         @Test
         void deletingAClusterHandsItsApiServerPortBackForTheNextCluster() {
             stubFreshStart("cid-1", 6441);
+            when(lifecycleManager.stopAndRemove("cid-1", null)).thenReturn(true);
             Cluster cluster = cluster();
             manager.startCluster(cluster);
 
@@ -532,11 +533,24 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void deletingAClusterWhoseContainerDockerCouldNotRemoveKeepsItsPortReserved() {
+            stubFreshStart("cid-1", 6441);
+            when(lifecycleManager.stopAndRemove("cid-1", null)).thenReturn(false);
+            Cluster cluster = cluster();
+            manager.startCluster(cluster);
+
+            manager.stopCluster(cluster);
+
+            verify(portAllocator, never()).release(6441);
+        }
+
+        @Test
         void retryingADeleteAfterBackupCleanupFailedHandsThePortBackOnlyOnce() {
             Cluster cluster = cluster();
             cluster.setDockerName("floci-eks-demo");
             cluster.setContainerId("cid-1");
             cluster.setHostPort(6441);
+            when(lifecycleManager.stopAndRemove("cid-1", null)).thenReturn(true);
             Mockito.doThrow(new IllegalStateException("Docker cleanup failed")).doNothing()
                     .when(lifecycleManager).removeIfExistsStrict("floci-aws-eks-capacity-backup.demo");
 
@@ -553,6 +567,7 @@ class EksClusterManagerTest {
             Cluster cluster = cluster();
 
             assertThrows(IllegalStateException.class, () -> manager.startCluster(cluster));
+            assertEquals(0, cluster.getHostPort());
             manager.stopCluster(cluster);
 
             verify(portAllocator, Mockito.times(1)).release(6441);

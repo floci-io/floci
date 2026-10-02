@@ -920,8 +920,9 @@ public class EksClusterManager
             closeQuietly(logStream);
             return;
         }
-        lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
-        if (cluster.getHostPort() > 0) {
+        boolean removed = lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
+        // A container Docker could not remove may still publish the port: keep it reserved.
+        if (removed && cluster.getHostPort() > 0) {
             portAllocator.release(cluster.getHostPort());
             // Cleared so a delete retried after a failed backup cleanup cannot free a reused port.
             cluster.setHostPort(0);
