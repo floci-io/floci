@@ -540,7 +540,8 @@ public final class ContainerStorageHelper {
             return new ArrayList<>(byId.values());
         }
 
-        private String legacyValue(Map<String, String> labels, String key) {
+        /** The value under {@code key}'s legacy alias, or null when it has none or the label is absent. */
+        public String legacyValue(Map<String, String> labels, String key) {
             String legacyKey = legacyByKey.get(key);
             if (legacyKey != null) {
                 return labels.get(legacyKey);

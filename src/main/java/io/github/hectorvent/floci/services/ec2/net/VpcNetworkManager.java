@@ -18,6 +18,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -98,6 +99,7 @@ public class VpcNetworkManager {
     public static final String COMPONENT_VALUE = "vpc-network";
     public static final String SERVICE_VALUE = "ec2";
     private static final ContainerStorageHelper.LabelAliases ALIASES = ContainerStorageHelper.NETWORK_LABEL_ALIASES;
+    private static final String NAMESPACE_LABEL = "floci_namespace";
 
     /**
      * Instance addresses start here inside each subnet slice. AWS reserves the first four
@@ -735,6 +737,25 @@ public class VpcNetworkManager {
         return subnets;
     }
 
+    /**
+     * Whether a VPC network belongs to this deployment. A network created before the owner label
+     * took the resource namespace carries only the legacy {@code floci_vpc_owner_port} key, holding
+     * the bare API port that every deployment on that port wrote; such a network is this
+     * deployment's when its {@code floci_namespace} label also names this deployment's namespace
+     * (none when unset), which is the same identity {@link ContainerStorageHelper#ownerIdentity}
+     * encodes for networks created since.
+     */
+    private boolean ownedByThisDeployment(Map<String, String> labels) {
+        if (labels.containsKey(ContainerStorageHelper.OWNER_LABEL)) {
+            return ALIASES.matches(labels, ContainerStorageHelper.OWNER_LABEL,
+                    ContainerStorageHelper.ownerIdentity(config));
+        }
+        String legacyOwner = ALIASES.legacyValue(labels, ContainerStorageHelper.OWNER_LABEL);
+        return String.valueOf(config.port()).equals(legacyOwner)
+                && Objects.equals(labels.get(NAMESPACE_LABEL),
+                        ContainerStorageHelper.defaultLabels(config).get(NAMESPACE_LABEL));
+    }
+
     private Map<String, String> networkLabels(VpcBinding vpc) {
         Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.defaultLabels(config));
         labels.putAll(ContainerStorageHelper.resourceIdentityLabels(SERVICE_VALUE, vpc.vpcId, null, vpc.region));
@@ -806,7 +827,6 @@ public class VpcNetworkManager {
         if (!enabled() || !config.services().ec2().vpcNetworks().reconcileOnStartup()) {
             return;
         }
-        String owner = ContainerStorageHelper.ownerIdentity(config);
         int removed = 0;
         try {
             List<Network> networks = ALIASES.listByLabels(
@@ -820,8 +840,7 @@ public class VpcNetworkManager {
                     Network::getId);
             for (Network network : networks) {
                 Map<String, String> labels = network.getLabels() == null ? Map.of() : network.getLabels();
-                if (!ALIASES.consistent(network.getName(), labels)
-                        || !ALIASES.matches(labels, ContainerStorageHelper.OWNER_LABEL, owner)) {
+                if (!ALIASES.consistent(network.getName(), labels) || !ownedByThisDeployment(labels)) {
                     continue;
                 }
                 String vpcId = ALIASES.labelValue(labels, ContainerStorageHelper.RESOURCE_ID_LABEL);
@@ -925,12 +944,11 @@ public class VpcNetworkManager {
      */
     private Set<Cidr4> dockerNetworkSubnets(String ownVpcId) {
         Set<Cidr4> taken = new java.util.LinkedHashSet<>();
-        String owner = ContainerStorageHelper.ownerIdentity(config);
         try {
             for (Network network : dockerClient.listNetworksCmd().exec()) {
                 Map<String, String> labels = network.getLabels() == null ? Map.of() : network.getLabels();
                 if (ownVpcId != null && ALIASES.matches(labels, ContainerStorageHelper.RESOURCE_ID_LABEL, ownVpcId)
-                        && ALIASES.matches(labels, ContainerStorageHelper.OWNER_LABEL, owner)) {
+                        && ownedByThisDeployment(labels)) {
                     continue;
                 }
                 if (network.getIpam() == null || network.getIpam().getConfig() == null) {

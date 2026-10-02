@@ -110,7 +110,7 @@ class ContainerStorageHelperTest {
     void extraLabelsAreMergedIntoDefaultLabels() {
         // A dotted key — exactly the shape that motivates list-of-entries config over a Map,
         // whose env-var naming convention cannot express such keys.
-        EmulatorConfig config = config("", java.util.List.of(
+        EmulatorConfig config = config("", List.of(
                 label("com.example.project", "my-project"),
                 label("environment", "dev")));
 
@@ -124,7 +124,7 @@ class ContainerStorageHelperTest {
     void extraLabelsCannotOverrideReservedKeys() {
         // The reserved labels drive container/volume discovery and pruning; a user label must
         // never be able to break `docker volume prune --filter label=floci=true` cleanup.
-        EmulatorConfig config = config(" run/one ", java.util.List.of(
+        EmulatorConfig config = config(" run/one ", List.of(
                 label("floci", "false"),
                 label("floci_emulator", "spoofed"),
                 label("floci_namespace", "spoofed"),
@@ -138,7 +138,7 @@ class ContainerStorageHelperTest {
 
     @Test
     void blankExtraLabelKeysAreIgnored() {
-        EmulatorConfig config = config("", java.util.List.of(
+        EmulatorConfig config = config("", List.of(
                 label("  ", "dropped"),
                 label(null, "dropped"),
                 label("kept", null)));
@@ -171,7 +171,7 @@ class ContainerStorageHelperTest {
     @Test
     void extraLabelsCannotSetAnAliasedKeyNewOrLegacy() {
         // A cleanup path trusts the owner and identity labels; a user label must never fake one.
-        EmulatorConfig config = config("", java.util.List.of(
+        EmulatorConfig config = config("", List.of(
                 label("io.floci.owner", "spoofed"),
                 label("floci_owner_port", "spoofed"),
                 label("io.floci.ecs.run", "spoofed"),
@@ -347,7 +347,7 @@ class ContainerStorageHelperTest {
     }
 
     private static EmulatorConfig config(String namespace) {
-        return config(namespace, java.util.List.of());
+        return config(namespace, List.of());
     }
 
     private static EmulatorConfig config(

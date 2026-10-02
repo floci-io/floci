@@ -559,6 +559,49 @@ class VpcNetworkManagerTest {
         assertEquals("alpha/4650", labels.get("floci_vpc_owner_port"));
     }
 
+    /** The labels a namespaced or plain Floci wrote on a VPC network before the io.floci.owner key. */
+    private static Map<String, String> preUpgradeLabels(String vpcId, String namespace) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        labels.put("floci", "true");
+        if (namespace != null) {
+            labels.put("floci_namespace", namespace);
+        }
+        labels.put("floci_component", "ec2-vpc");
+        labels.put("floci_vpc_id", vpcId);
+        labels.put("floci_vpc_region", REGION);
+        labels.put("floci_vpc_owner_port", "4650");
+        return labels;
+    }
+
+    @Test
+    void aPreUpgradeNetworkOfThisNamespacedEmulatorIsNotReadAsACollision() {
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
+        existingNetwork(manager.networkName(REGION, "vpc-1"), "10.0.0.0/16", preUpgradeLabels("vpc-1", "alpha"));
+
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+
+        assertFalse(manager.isSubstituted(REGION, "vpc-1"),
+                "a network this namespace created before the owner label took the namespace is still its own");
+        assertEquals("10.0.0.0/16", manager.effectiveVpcCidr(REGION, "vpc-1").orElseThrow());
+    }
+
+    @Test
+    void reconcileRemovesAPreUpgradeOrphanOnlyWhenItsNamespaceIsThisEmulators() {
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
+        existingNetwork("floci-aws-alpha-vpc-4650-us-east-1-vpc-dead", "10.7.0.0/16",
+                preUpgradeLabels("vpc-dead", "alpha"));
+        existingNetwork("floci-aws-beta-vpc-4650-us-east-1-vpc-beta", "10.8.0.0/16",
+                preUpgradeLabels("vpc-beta", "beta"));
+        existingNetwork("floci-aws-vpc-4650-us-east-1-vpc-plain", "10.9.0.0/16",
+                preUpgradeLabels("vpc-plain", null));
+
+        manager.reconcileOrphans((region, vpcId) -> false);
+
+        assertEquals(List.of("floci-aws-alpha-vpc-4650-us-east-1-vpc-dead"), removedNetworks,
+                "the bare port in the legacy owner key is shared by every deployment on it, so only the "
+                        + "namespace label decides which pre-upgrade network is this emulator's");
+    }
+
     @Test
     void reconcileQueriesTheNewAndLegacyKeySetsAndRemovesOrphansUnderEither() {
         existingNetwork("vpc-new", "10.7.0.0/16", newLabels("vpc-new", "4650"));
