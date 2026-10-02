@@ -1,15 +1,18 @@
 package io.github.hectorvent.floci.services.s3;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
-import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -17,6 +20,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.storage.WriteProfile;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -26,12 +30,8 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.s3.model.*;
-import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Event;
 import jakarta.enterprise.inject.Instance;
@@ -48,17 +48,18 @@ import java.net.URLEncoder;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.NoSuchFileException;
 import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -84,6 +85,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 @ApplicationScoped
 public class S3Service implements Resettable, ResourceProvider {
@@ -206,7 +208,10 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         return locks;
     }
-    private final ConcurrentHashMap<String, Map<Integer, byte[]>> memoryMultipartStore = new ConcurrentHashMap<>();
+    // Memory mode keeps an object in one byte array; this is the largest the JDK reliably allocates.
+    private static final long MAX_IN_MEMORY_OBJECT_SIZE = Integer.MAX_VALUE - 8;
+    // Upload ID to part bytes, keyed by each part's storage ID.
+    private final ConcurrentHashMap<String, Map<String, byte[]>> memoryMultipartStore = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
     // Account-level (S3 Control) Block Public Access config, one entry per AWS account.
     // Distinct from the bucket-level configuration held on each Bucket. Block Public Access is a
@@ -376,6 +381,7 @@ public class S3Service implements Resettable, ResourceProvider {
             } catch (IOException e) {
                 throw new UncheckedIOException("Failed to create S3 data directory: " + dataRoot, e);
             }
+            deleteMultipartFiles();
         }
     }
 
@@ -391,7 +397,29 @@ public class S3Service implements Resettable, ResourceProvider {
             // default account alone is not enough). Mirrors the metadata erase; the pre-existing
             // .s3data behavior is unchanged.
             deleteAnnotationPayloadRoots();
+            deleteMultipartFiles();
         }
+    }
+
+    /**
+     * Deletes the part and assembled files of every multipart upload. Uploads are tracked only in
+     * memory, so at startup or after a reset these files belong to uploads that no longer exist, and
+     * an assembly a crash interrupted can be as large as the object it was building.
+     */
+    private void deleteMultipartFiles() {
+        Path multipartRoot = dataRoot.resolve(".multipart");
+        if (!Files.isDirectory(multipartRoot)) {
+            return;
+        }
+        try (Stream<Path> uploads = Files.list(multipartRoot)) {
+            long count = uploads.count();
+            if (count > 0) {
+                LOG.infov("Removing the files of {0} multipart uploads that no longer exist under {1}", count, multipartRoot);
+            }
+        } catch (IOException e) {
+            LOG.warnv(e, "Failed to list {0} before removing it", multipartRoot);
+        }
+        deleteDirectory(multipartRoot);
     }
 
     private void deleteAnnotationPayloadRoots() {
@@ -620,18 +648,45 @@ public class S3Service implements Resettable, ResourceProvider {
     private S3Object storeObject(String bucketName, String key, byte[] data,
                                  String contentType, Map<String, String> metadata,
                                  S3Checksum checksum, List<Part> parts, PutObjectOptions options, String eTag) {
+        return storeObject(bucketName, key, new BytesBody(data), contentType, metadata, checksum, parts, options, eTag);
+    }
+
+    private S3Object storeObject(String bucketName, String key, ObjectBody body,
+                                 String contentType, Map<String, String> metadata,
+                                 S3Checksum checksum, List<Part> parts, PutObjectOptions options, String eTag) {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
         Bucket bucket = ownedBucket.value();
         synchronized (bucket) {
-            return storeObjectInternal(ownedBucket.account(), bucket, bucketName, key, data,
+            return storeObjectInternal(ownedBucket.account(), bucket, bucketName, key, body,
                     contentType, metadata, checksum, parts, options, eTag);
         }
     }
 
+    /**
+     * The body of an object being stored: the bytes of a single-request write, or the file a
+     * multipart upload was assembled into, which is moved into place instead of being read back.
+     */
+    private sealed interface ObjectBody permits BytesBody, AssembledBody {
+        long size();
+    }
+
+    private record BytesBody(byte[] data) implements ObjectBody {
+        @Override
+        public long size() {
+            return data.length;
+        }
+    }
+
+    /**
+     * A disk-mode multipart object. It is stored with the ETag and checksum built from its parts,
+     * since computing either here would mean reading the whole file.
+     */
+    private record AssembledBody(Path file, long size) implements ObjectBody { }
+
     private S3Object storeObjectInternal(String bucketOwnerAccount, Bucket bucket,
-                                         String bucketName, String key, byte[] data,
+                                         String bucketName, String key, ObjectBody body,
                                          String contentType, Map<String, String> metadata,
                                          S3Checksum checksum, List<Part> parts, PutObjectOptions options,
                                          String eTag) {
@@ -641,8 +696,10 @@ public class S3Service implements Resettable, ResourceProvider {
         rejectConflictingServerSideEncryption(normalizedServerSideEncryption, sseCustomerKey);
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
 
-        S3Object object = new S3Object(bucketName, key, data, contentType,
+        byte[] data = body instanceof BytesBody bytes ? bytes.data() : null;
+        S3Object object = new S3Object(bucketName, key, body.size(), contentType,
                 eTag != null ? eTag : computeETag(data));
+        object.setData(data);
         if (metadata != null) {
             object.getMetadata().putAll(metadata);
         }
@@ -721,8 +778,14 @@ public class S3Service implements Resettable, ResourceProvider {
             // versioned write fails, the canonical file - which unlocked GETs already associate
             // with the still-unpublished previous generation - is never touched, so a concurrent
             // GET can't observe corrupted "latest" bytes paired with the old metadata.
-            writeVersionedFile(bucketOwnerAccount, bucketName, key, versionId, data);
-            writeFile(bucketOwnerAccount, bucketName, key, data);
+            if (body instanceof AssembledBody assembled) {
+                Path versionedPath = resolveVersionedPath(bucketOwnerAccount, bucketName, key, versionId);
+                moveIntoPlace(assembled.file(), versionedPath);
+                linkIntoPlace(versionedPath, resolveObjectPath(bucketOwnerAccount, bucketName, key));
+            } else {
+                writeVersionedFile(bucketOwnerAccount, bucketName, key, versionId, data);
+                writeFile(bucketOwnerAccount, bucketName, key, data);
+            }
             // Deferred pre-versioning annotation cleanup: only after the replacement body is on
             // disk, so a failed write keeps the old body and its annotations together.
             if (dropPreVersioningAnnotations[0]) {
@@ -735,7 +798,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // Store versioned copy and update latest pointer
             putObjectForAccount(bucketOwnerAccount, versionedKey(bucketName, key, versionId), object);
             putObjectForAccount(bucketOwnerAccount, latestKey, object);
-            LOG.debugv("Put versioned object: {0}/{1} v={2} ({3} bytes)", bucketName, key, versionId, data.length);
+            LOG.debugv("Put versioned object: {0}/{1} v={2} ({3} bytes)", bucketName, key, versionId, body.size());
         } else {
             S3Object prev = resolveObjectForAccount(
                     bucketOwnerAccount, objectKey(bucketName, key)).orElse(null);
@@ -757,7 +820,11 @@ public class S3Service implements Resettable, ResourceProvider {
 
             // Write the body before publishing metadata - see the comment in the versioned
             // branch above; the same ordering requirement applies here.
-            writeFile(bucketOwnerAccount, bucketName, key, data);
+            if (body instanceof AssembledBody assembled) {
+                moveIntoPlace(assembled.file(), resolveObjectPath(bucketOwnerAccount, bucketName, key));
+            } else {
+                writeFile(bucketOwnerAccount, bucketName, key, data);
+            }
             // An overwrite replaces the object's annotations (AWS drops them on overwrite).
             // The cleanup runs only after the body write succeeds, so a failed PUT keeps the
             // old body together with its annotations; and before the new metadata is published,
@@ -767,7 +834,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // branch above; the same race applies here.
             object.setData(null);
             putObjectForAccount(bucketOwnerAccount, objectKey(bucketName, key), object);
-            LOG.debugv("Put object: {0}/{1} ({2} bytes)", bucketName, key, data.length);
+            LOG.debugv("Put object: {0}/{1} ({2} bytes)", bucketName, key, body.size());
         }
         return object;
     }
@@ -3501,12 +3568,21 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             validateSseCustomerAccess(upload, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
 
+            // Each upload of a part gets its own storage, so a record and the bytes it describes are
+            // published together and never change: a re-upload adds new bytes and drops the old ones.
+            String storageId = partNumber + "-" + UUID.randomUUID();
             if (inMemory) {
-                memoryMultipartStore.get(uploadId).put(partNumber, data);
+                // A re-uploaded part number replaces its earlier part, so that part does not count.
+                long otherParts = upload.getParts().values().stream()
+                        .filter(part -> part.getPartNumber() != partNumber)
+                        .mapToLong(Part::getSize)
+                        .sum();
+                requireFitsInMemory(uploadId, otherParts + data.length);
+                memoryMultipartStore.get(uploadId).put(storageId, data);
             } else {
-                Path partPath = dataRoot.resolve(".multipart").resolve(uploadId).resolve(String.valueOf(partNumber));
+                Path partPath = dataRoot.resolve(".multipart").resolve(uploadId).resolve(storageId);
                 try {
-                    Files.write(partPath, data);
+                    Files.write(partPath, data, StandardOpenOption.CREATE_NEW);
                 } catch (IOException e) {
                     throw new UncheckedIOException("Failed to write multipart part", e);
                 }
@@ -3515,10 +3591,30 @@ public class S3Service implements Resettable, ResourceProvider {
             String eTag = computeETag(data);
             Part part = new Part(partNumber, eTag, data.length);
             part.setChecksum(S3Checksum.of(upload.getChecksumAlgorithm(), data));
-            upload.getParts().put(partNumber, part);
+            part.setStorageId(storageId);
+            Part replaced = upload.getParts().put(partNumber, part);
+            if (replaced != null) {
+                discardPartBytes(uploadId, replaced);
+            }
             LOG.debugv("Uploaded part {0} for upload {1} ({2} bytes)", partNumber, uploadId, data.length);
             return part;
         });
+    }
+
+    /**
+     * Drops the bytes of a part a re-upload replaced, once the new record is published, so no record
+     * ever names bytes that changed after it was written.
+     */
+    private void discardPartBytes(String uploadId, Part replaced) {
+        if (inMemory) {
+            Map<String, byte[]> memoryParts = memoryMultipartStore.get(uploadId);
+            if (memoryParts != null) {
+                memoryParts.remove(replaced.getStorageId());
+            }
+        } else {
+            deleteQuietly(dataRoot.resolve(".multipart").resolve(uploadId).resolve(replaced.getStorageId()),
+                    "bytes of a multipart part that was uploaded again");
+        }
     }
 
     public String uploadPartCopy(String destBucket, String destKey, String uploadId, int partNumber,
@@ -3590,6 +3686,8 @@ public class S3Service implements Resettable, ResourceProvider {
             ChecksumAlgorithm algorithm = upload.getChecksumAlgorithm() != null ? upload.getChecksumAlgorithm() : ChecksumAlgorithm.CRC64NVME;
             ChecksumType storedChecksumType = upload.getChecksumType() != null ? upload.getChecksumType() : ChecksumType.FULL_OBJECT;
 
+            // Each record is read once, and everything below, the bytes included, follows these records.
+            List<Part> parts = new ArrayList<>(partNumbers.size());
             int previousPartNumber = 0;
             for (int num : partNumbers) {
                 if (num <= previousPartNumber) {
@@ -3608,44 +3706,61 @@ public class S3Service implements Resettable, ResourceProvider {
                                     + " has an invalid ETag.", 400);
                 }
                 validatePartChecksum(upload.getChecksumAlgorithm(), storedChecksumType, num, part, partChecksums.get(num));
+                parts.add(part);
             }
 
             validateCompleteChecksumType(algorithm, storedChecksumType, ChecksumType.fromWireValue(checksumType));
+            if (inMemory) {
+                requireFitsInMemory(uploadId, parts.stream().mapToLong(Part::getSize).sum());
+            }
 
             // Concatenate parts in order
             try {
                 MessageDigest md = MessageDigest.getInstance("MD5");
-                for (int num : partNumbers) {
+                for (Part part : parts) {
                     // A part ETag is the MD5 of that part, so the composite hashes it without rehashing the data
-                    String partETag = stripSurroundingQuotes(upload.getParts().get(num).getETag());
+                    String partETag = stripSurroundingQuotes(part.getETag());
                     md.update(HexFormat.of().parseHex(partETag));
                 }
 
                 // Composite ETag: MD5 of concatenated part MD5s, suffixed with part count
                 String compositeETag = "\"" + bytesToHex(md.digest()) + "-" + partNumbers.size() + "\"";
 
-                byte[] allData = concatenateParts(uploadId, partNumbers);
-
-                List<Part> completedParts = partNumbers.stream()
-                        .map(num -> copyPart(upload.getParts().get(num)))
+                // Both checksum types come from the stored part checksums, so a mismatch is rejected
+                // before any part is read.
+                List<Part> completedParts = parts.stream()
+                        .map(S3Service::copyPart)
                         .toList();
                 S3Checksum checksum = storedChecksumType == ChecksumType.COMPOSITE
                         ? S3Checksum.composite(algorithm, completedParts.stream()
                                 .map(part -> part.getChecksum().valueFor(algorithm)).toList())
-                        : S3Checksum.fullObject(algorithm, allData);
+                        : S3Checksum.fullObject(algorithm, completedParts);
                 if (expectedChecksum != null && expectedChecksum.hasAnyValue()) {
                     validateExpectedChecksum(checksum, expectedChecksum);
                 }
-                S3Object object = storeObject(bucket, key, allData, upload.getContentType(), upload.getMetadata(),
-                        checksum, completedParts,
-                        new PutObjectOptions()
-                                .withStorageClass(upload.getStorageClass())
-                                .withContentDisposition(upload.getContentDisposition())
-                                .withServerSideEncryption(upload.getServerSideEncryption())
-                                .withSseKmsKeyId(upload.getSseKmsKeyId())
-                                .withAcl(upload.getAcl())
-                                .withTagging(upload.getTagging()),
-                        compositeETag);
+
+                ObjectBody body = inMemory
+                        ? new BytesBody(concatenateParts(uploadId, parts))
+                        : assembleParts(uploadId, parts);
+                S3Object object;
+                try {
+                    object = storeObject(bucket, key, body, upload.getContentType(), upload.getMetadata(),
+                            checksum, completedParts,
+                            new PutObjectOptions()
+                                    .withStorageClass(upload.getStorageClass())
+                                    .withContentDisposition(upload.getContentDisposition())
+                                    .withServerSideEncryption(upload.getServerSideEncryption())
+                                    .withSseKmsKeyId(upload.getSseKmsKeyId())
+                                    .withAcl(upload.getAcl())
+                                    .withTagging(upload.getTagging()),
+                            compositeETag);
+                } finally {
+                    // A stored body was moved away, so this only removes the file of a failed store and
+                    // leaves the parts in place for a retry or an abort.
+                    if (body instanceof AssembledBody assembled) {
+                        deleteQuietly(assembled.file(), "assembled multipart object that was not stored");
+                    }
+                }
                 if (upload.getSseCustomerAlgorithm() != null) {
                     object.setSseCustomerAlgorithm(upload.getSseCustomerAlgorithm());
                     object.setSseCustomerKeyMd5(upload.getSseCustomerKeyMd5());
@@ -3672,52 +3787,95 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /**
-     * Copies the parts, in order, into one array sized to the total upload. Disk parts are read
-     * straight into their slot, so assembly never holds a second full-size copy of the object.
-     * In-memory parts are copied from the arrays that were measured, so their sizes cannot change
-     * in between.
+     * Rejects an upload that memory mode could not hold in one byte array, with the error S3 gives an
+     * object over its size limit, so it fails at the part that crosses the limit instead of running
+     * the heap out of memory or overflowing the array size at completion.
      */
-    private byte[] concatenateParts(String uploadId, List<Integer> partNumbers) throws IOException {
-        Path partsDir = dataRoot.resolve(".multipart").resolve(uploadId);
-        Map<Integer, byte[]> memoryParts = inMemory ? memoryMultipartStore.get(uploadId) : null;
-        byte[][] memoryData = inMemory ? new byte[partNumbers.size()][] : null;
-        long[] partSizes = new long[partNumbers.size()];
-        long totalSize = 0;
-        for (int i = 0; i < partNumbers.size(); i++) {
-            int num = partNumbers.get(i);
-            if (inMemory) {
-                memoryData[i] = memoryParts.get(num);
-                partSizes[i] = memoryData[i].length;
-            } else {
-                partSizes[i] = Files.size(partsDir.resolve(String.valueOf(num)));
-            }
-            totalSize += partSizes[i];
+    private static void requireFitsInMemory(String uploadId, long uploadSize) {
+        if (uploadSize > MAX_IN_MEMORY_OBJECT_SIZE) {
+            LOG.warnv("Multipart upload {0} would hold {1} bytes, over the {2} an object can have in memory storage mode; set FLOCI_STORAGE_SERVICES_S3_MODE=persistent for larger objects",
+                    uploadId, uploadSize, MAX_IN_MEMORY_OBJECT_SIZE);
+            throw new AwsException("EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size.", 400);
         }
-        byte[] allData = new byte[Math.toIntExact(totalSize)];
-        int offset = 0;
-        for (int i = 0; i < partNumbers.size(); i++) {
-            int size = (int) partSizes[i];
-            if (inMemory) {
-                System.arraycopy(memoryData[i], 0, allData, offset, size);
-            } else {
-                int num = partNumbers.get(i);
-                try (InputStream in = Files.newInputStream(partsDir.resolve(String.valueOf(num)))) {
-                    readPart(in, allData, offset, size, num);
-                }
+    }
+
+    /**
+     * Copies the in-memory bytes of {@code parts}, in order, into one array sized to the total
+     * upload. The total is measured on the arrays being copied, so it holds whatever the records say.
+     */
+    private byte[] concatenateParts(String uploadId, List<Part> parts) {
+        Map<String, byte[]> memoryParts = memoryMultipartStore.getOrDefault(uploadId, Map.of());
+        byte[][] partData = new byte[parts.size()][];
+        long totalSize = 0;
+        for (int i = 0; i < parts.size(); i++) {
+            partData[i] = memoryParts.get(parts.get(i).getStorageId());
+            if (partData[i] == null) {
+                throw missingPartData(parts.get(i));
             }
-            offset += size;
+            totalSize += partData[i].length;
+        }
+        requireFitsInMemory(uploadId, totalSize);
+        byte[] allData = new byte[(int) totalSize];
+        int offset = 0;
+        for (byte[] part : partData) {
+            System.arraycopy(part, 0, allData, offset, part.length);
+            offset += part.length;
         }
         return allData;
     }
 
     /**
-     * Reads exactly {@code size} bytes of part {@code partNumber} into {@code dest} at {@code offset},
-     * failing if the part holds a different number of bytes than was measured before assembly.
+     * Copies the part files, in order, into one file in the upload's directory for storeObject to
+     * move into place. The copy runs file to file, so the object never passes through the heap
+     * whatever its size, and it happens before the bucket lock is taken. The file name is unique
+     * per call, so two Completes racing on one upload never write the same file.
      */
-    static void readPart(InputStream in, byte[] dest, int offset, int size, int partNumber) throws IOException {
-        if (in.readNBytes(dest, offset, size) != size || in.read() != -1) {
-            throw new IOException("Part " + partNumber + " changed size during assembly");
+    private AssembledBody assembleParts(String uploadId, List<Part> parts) throws IOException {
+        Path partsDir = dataRoot.resolve(".multipart").resolve(uploadId);
+        Path assembled = partsDir.resolve("assembled-" + UUID.randomUUID());
+        long totalSize = 0;
+        try (FileChannel out = FileChannel.open(assembled, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+            for (Part part : parts) {
+                try {
+                    appendPart(partsDir.resolve(part.getStorageId()), part, out);
+                } catch (NoSuchFileException e) {
+                    throw missingPartData(part);
+                }
+                totalSize += part.getSize();
+            }
+        } catch (IOException | RuntimeException e) {
+            deleteQuietly(assembled, "partially assembled multipart object");
+            throw e;
         }
+        return new AssembledBody(assembled, totalSize);
+    }
+
+    /**
+     * Appends part {@code part} from {@code partFile} to {@code out}, failing if the file does not
+     * hold the size recorded for the part: the ETag and checksum the object is stored with were
+     * built from that record.
+     */
+    static void appendPart(Path partFile, Part part, FileChannel out) throws IOException {
+        long size = part.getSize();
+        try (FileChannel in = FileChannel.open(partFile, StandardOpenOption.READ)) {
+            long position = 0;
+            while (position < size) {
+                long transferred = in.transferTo(position, size - position, out);
+                if (transferred <= 0) {
+                    break;
+                }
+                position += transferred;
+            }
+            if (position != size || in.size() != size) {
+                throw new IOException("Part " + part.getPartNumber() + " changed size during assembly");
+            }
+        }
+    }
+
+    /** A part whose record names bytes that are no longer stored. */
+    private static AwsException missingPartData(Part part) {
+        return new AwsException("InvalidPart", "One or more of the specified parts could not be found. Part "
+                + part.getPartNumber() + " has no stored data.", 400);
     }
 
     private boolean etagsMatch(String storedETag, String submittedETag) {
@@ -5567,16 +5725,66 @@ public class S3Service implements Resettable, ResourceProvider {
         Path tmp = filePath.resolveSibling(filePath.getFileName() + ".tmp-" + UUID.randomUUID());
         try {
             Files.write(tmp, data);
-            try {
-                Files.move(tmp, filePath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException e) {
-                // Rare filesystems (some network mounts) reject ATOMIC_MOVE; fall back to a plain
-                // replace. This narrows but does not fully close the window — acceptable only
-                // because the default overlay/ext filesystems used here support atomic rename.
-                Files.move(tmp, filePath, StandardCopyOption.REPLACE_EXISTING);
-            }
+            replaceAtomically(tmp, filePath);
         } finally {
             Files.deleteIfExists(tmp);
+        }
+    }
+
+    private static void replaceAtomically(Path source, Path target) throws IOException {
+        try {
+            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            // Rare filesystems (some network mounts) reject ATOMIC_MOVE; fall back to a plain
+            // replace. This narrows but does not fully close the window, which is acceptable only
+            // because the default overlay/ext filesystems used here support atomic rename.
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /**
+     * Moves an assembled multipart object to {@code target} with the same all-or-nothing rename
+     * {@link #atomicWrite} ends with: a concurrent reader sees the previous file or the whole new
+     * one, and the move costs the same whatever the object's size.
+     */
+    private void moveIntoPlace(Path source, Path target) {
+        ReentrantLock lock = diskFileLock(target);
+        lock.lock();
+        try {
+            Files.createDirectories(target.getParent());
+            replaceAtomically(source, target);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to move assembled S3 object file into place", e);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Gives {@code target} the file already stored at {@code source} through a hard link, so a
+     * versioned multipart object is kept once instead of being copied under the bucket lock.
+     * Sharing the file is safe because no object file is ever modified in place: every write
+     * replaces its path with a rename, which leaves the file under the other name untouched.
+     * A filesystem without hard links gets a copy instead.
+     */
+    private void linkIntoPlace(Path source, Path target) {
+        ReentrantLock lock = diskFileLock(target);
+        lock.lock();
+        Path tmp = target.resolveSibling(target.getFileName() + ".tmp-" + UUID.randomUUID());
+        try {
+            Files.createDirectories(target.getParent());
+            try {
+                Files.createLink(tmp, source);
+            } catch (UnsupportedOperationException | FileSystemException e) {
+                LOG.debugv(e, "No hard link for {0}, copying {1} instead", target, source);
+                Files.copy(source, tmp);
+            }
+            replaceAtomically(tmp, target);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to link S3 object file into place", e);
+        } finally {
+            deleteQuietly(tmp, "temporary link of a versioned multipart object that was not published");
+            lock.unlock();
         }
     }
 
