@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource;
 import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
+import io.github.hectorvent.floci.core.common.dns.DnsForwardingRule;
+import io.github.hectorvent.floci.core.common.dns.DnsForwardingRuleSource;
 import io.github.hectorvent.floci.core.common.dns.DnsRecordSource;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -88,7 +90,8 @@ import java.util.stream.Collectors;
  */
 @ApplicationScoped
 public class EksClusterManager
-        implements ClusterNodeInstanceProvider, VpcRouteTableListener, DnsClientVpcSource, DnsRecordSource {
+        implements ClusterNodeInstanceProvider, VpcRouteTableListener, DnsClientVpcSource,
+        DnsRecordSource, DnsForwardingRuleSource {
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
@@ -228,6 +231,26 @@ public class EksClusterManager
             }
         }
         return Optional.empty();
+    }
+
+    @Override
+    public List<DnsForwardingRule> rulesFor(String accountId, String region, String vpcId) {
+        List<DnsForwardingRule> rules = new ArrayList<>();
+        for (ClusterNodeRecord record : clusterNodeInstances.values()) {
+            if (accountId != null && !accountId.isBlank() && !accountId.equals(record.accountId())) {
+                continue;
+            }
+            if (region != null && !region.isBlank() && !region.equals(record.region())) {
+                continue;
+            }
+            Instance inst = record.instance();
+            if (inst != null && inst.getPrivateDnsName() != null && !inst.getPrivateDnsName().isBlank()) {
+                if (inst.getVpcId() == null || vpcId == null || inst.getVpcId().equals(vpcId)) {
+                    rules.add(DnsForwardingRule.system(inst.getPrivateDnsName()));
+                }
+            }
+        }
+        return List.copyOf(rules);
     }
 
     private void registerClusterNodeVpc(Cluster cluster, String accountId, String region,

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
+import io.github.hectorvent.floci.core.common.dns.DnsForwardingRule;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -1484,6 +1485,37 @@ class EksClusterManagerTest {
             // After unregistering, name no longer resolves
             manager.unregisterMetadataEndpoint(cluster);
             assertTrue(manager.resolveIpv4(dnsName).isEmpty());
+        }
+
+        @Test
+        void dnsForwardingRuleSourceEmitsSystemRuleForRegisteredNode() {
+            Cluster cluster = new Cluster();
+            cluster.setName("fwd-cluster");
+            cluster.setArn("arn:aws:eks:us-east-1:123456789012:cluster/fwd-cluster");
+            ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+            vpcConfig.setVpcId("vpc-12345678");
+            cluster.setResourcesVpcConfig(vpcConfig);
+
+            manager.registerClusterNodeInstance(cluster, "container-fwd");
+            Instance registered = manager.getRegisteredClusterNodeInstance(cluster);
+            assertNotNull(registered);
+
+            String dnsName = registered.getPrivateDnsName();
+            assertNotNull(dnsName);
+
+            // Matching VPC and account
+            List<DnsForwardingRule> rules = manager.rulesFor("123456789012", "us-east-1", "vpc-12345678");
+            assertEquals(1, rules.size());
+            assertEquals(DnsForwardingRule.system(dnsName), rules.getFirst());
+            assertFalse(rules.getFirst().forwards());
+
+            // Wrong account or VPC returns no rules
+            assertTrue(manager.rulesFor("999999999999", "us-east-1", "vpc-12345678").isEmpty());
+            assertTrue(manager.rulesFor("123456789012", "us-east-1", "vpc-other").isEmpty());
+
+            // After unregistering, rule disappears
+            manager.unregisterMetadataEndpoint(cluster);
+            assertTrue(manager.rulesFor("123456789012", "us-east-1", "vpc-12345678").isEmpty());
         }
 
         @Test
