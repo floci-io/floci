@@ -61,6 +61,11 @@ class DynamoDbTtlForwardingTest {
             };
 
     private static final String REGION = "us-east-1";
+    private static final String KINESIS_TTL_IDENTITY =
+            "{\"type\":\"Service\",\"principalId\":\"dynamodb.amazonaws.com\"}";
+    /** The DynamoDB Streams API capitalises the Identity members, as real AWS returns them. */
+    private static final String STREAMS_TTL_IDENTITY =
+            "{\"Type\":\"Service\",\"PrincipalId\":\"dynamodb.amazonaws.com\"}";
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -141,6 +146,8 @@ class DynamoDbTtlForwardingTest {
         for (KinesisRecord record : drained) {
             JsonNode payload = mapper.readTree(record.getData());
             assertEquals("REMOVE", payload.get("eventName").asText(), "TTL deletions forward as REMOVE");
+            assertEquals(mapper.readTree(KINESIS_TTL_IDENTITY), payload.get("userIdentity"),
+                    "TTL deletions forward as made by the DynamoDB service");
         }
         assertEquals(0L, forwarder.getForwardFailureCount(), "happy path drops nothing");
 
@@ -218,7 +225,7 @@ class DynamoDbTtlForwardingTest {
         doAnswer(invocation -> {
             svc.deleteTable("TtlTable", REGION);
             return null;
-        }).when(streamService).captureEvent(eq("REMOVE"), any(), any(), any(), any());
+        }).when(streamService).captureEvent(eq("REMOVE"), any(), any(), any(), any(), eq(true));
 
         svc.deleteExpiredItems();
 
@@ -277,11 +284,11 @@ class DynamoDbTtlForwardingTest {
         doAnswer(invocation -> {
             svc.deleteTable("TtlTable", REGION);
             return null;
-        }).doNothing().when(streamService).captureEvent(eq("REMOVE"), any(), any(), any(), any());
+        }).doNothing().when(streamService).captureEvent(eq("REMOVE"), any(), any(), any(), any(), eq(true));
 
         svc.deleteScannedItems(scans);
 
-        verify(streamService, times(1)).captureEvent(eq("REMOVE"), any(), any(), any(), any());
+        verify(streamService, times(1)).captureEvent(eq("REMOVE"), any(), any(), any(), any(), eq(true));
     }
 
     @Test
@@ -392,5 +399,59 @@ class DynamoDbTtlForwardingTest {
         }
         assertEquals(1, kinesisRemoves.size(), "a skipped delete must not forward a Kinesis REMOVE record");
         assertEquals("row-1", kinesisRemoves.get(0).get("dynamodb").get("Keys").get("pk").get("S").asText());
+    }
+
+    @Test
+    void getRecords_ttlSweepRemoval_carriesTheDynamoDbServiceIdentity() throws Exception {
+        StreamedTtlTable streamed = streamedTtlTable();
+        streamed.service().deleteExpiredItems();
+
+        JsonNode record = onlyRecord(streamed);
+        assertEquals("REMOVE", record.path("eventName").asText());
+        assertEquals("row-0", record.path("dynamodb").path("Keys").path("pk").path("S").asText());
+        assertEquals(mapper.readTree(STREAMS_TTL_IDENTITY), record.path("userIdentity"));
+    }
+
+    @Test
+    void getRecords_deleteItemRemoval_carriesNoIdentity() throws Exception {
+        StreamedTtlTable streamed = streamedTtlTable();
+        ObjectNode key = mapper.createObjectNode();
+        key.set("pk", stringAttr("row-0"));
+        streamed.service().deleteItem("TtlTable", key, REGION);
+
+        JsonNode record = onlyRecord(streamed);
+        assertEquals("REMOVE", record.path("eventName").asText());
+        assertFalse(record.has("userIdentity"), "a DeleteItem removal is not made by the DynamoDB service");
+    }
+
+    private record StreamedTtlTable(DynamoDbService service, NativeDynamoDbStreamsJsonHandler handler,
+                                    String streamArn) {}
+
+    /** A TTL table holding one expired item, whose stream starts after the item was written. */
+    private StreamedTtlTable streamedTtlTable() {
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbStreamService streamService = new DynamoDbStreamService(mapper, tableStore);
+        RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
+        DynamoDbService svc = new DynamoDbService(
+                tableStore, new InMemoryStorage<>(), regionResolver, streamService, null);
+        seedTtlTable(svc, 1);
+        TableDefinition table = tableStore.get("us-east-1::TtlTable").orElseThrow();
+        StreamDescription sd = streamService.enableStream(
+                table.getTableName(), table.getTableArn(), "NEW_AND_OLD_IMAGES", REGION);
+        return new StreamedTtlTable(svc,
+                new NativeDynamoDbStreamsJsonHandler(streamService, svc, regionResolver, mapper), sd.getStreamArn());
+    }
+
+    private JsonNode onlyRecord(StreamedTtlTable streamed) {
+        ObjectNode iteratorRequest = mapper.createObjectNode()
+                .put("StreamArn", streamed.streamArn())
+                .put("ShardId", DynamoDbStreamService.SHARD_ID)
+                .put("ShardIteratorType", "TRIM_HORIZON");
+        JsonNode iterator = (JsonNode) streamed.handler().handle("GetShardIterator", iteratorRequest, REGION).getEntity();
+        ObjectNode recordsRequest = mapper.createObjectNode().put("ShardIterator", iterator.path("ShardIterator").asText());
+        JsonNode records = ((JsonNode) streamed.handler().handle("GetRecords", recordsRequest, REGION).getEntity())
+                .path("Records");
+        assertEquals(1, records.size(), "one stream record: " + records);
+        return records.get(0);
     }
 }

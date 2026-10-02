@@ -19,6 +19,7 @@ public class DynamoDbStreamRecord {
     private JsonNode newImage;
     private JsonNode oldImage;
     private String streamViewType;
+    private boolean ttlDeletion;
 
     public DynamoDbStreamRecord() {}
 
@@ -56,4 +57,7 @@ public class DynamoDbStreamRecord {
 
     public String getStreamViewType() { return streamViewType; }
     public void setStreamViewType(String streamViewType) { this.streamViewType = streamViewType; }
+
+    public boolean isTtlDeletion() { return ttlDeletion; }
+    public void setTtlDeletion(boolean ttlDeletion) { this.ttlDeletion = ttlDeletion; }
 }

@@ -140,6 +140,12 @@ public class KinesisStreamingForwarder {
 
     public void forward(String eventName, JsonNode oldItem, JsonNode newItem,
                         TableDefinition table, String region, String ownerAccountId) {
+        forward(eventName, oldItem, newItem, table, region, ownerAccountId, false);
+    }
+
+    /** {@code ttlDeletion} marks a removal made by the time to live sweep rather than by a caller. */
+    public void forward(String eventName, JsonNode oldItem, JsonNode newItem,
+                        TableDefinition table, String region, String ownerAccountId, boolean ttlDeletion) {
         List<KinesisStreamingDestination> destinations = table.getKinesisStreamingDestinations();
         if (destinations == null || destinations.isEmpty()) {
             return;
@@ -169,7 +175,7 @@ public class KinesisStreamingForwarder {
             for (String precision : precisionByStreamArn.values()) {
                 if (!dataByPrecision.containsKey(precision)) {
                     ObjectNode payload = buildPayload(eventId, eventName, keys, newItem, oldItem,
-                            table.getTableName(), region, now, precision);
+                            table.getTableName(), region, now, precision, ttlDeletion);
                     dataByPrecision.put(precision, objectMapper.writeValueAsBytes(payload));
                 }
             }
@@ -441,12 +447,17 @@ public class KinesisStreamingForwarder {
 
     private ObjectNode buildPayload(String eventId, String eventName, JsonNode keys,
                                     JsonNode newImage, JsonNode oldImage,
-                                    String tableName, String region, Instant timestamp, String precision) {
+                                    String tableName, String region, Instant timestamp, String precision,
+                                    boolean ttlDeletion) {
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("awsRegion", region);
         payload.put("eventID", eventId);
         payload.put("eventName", eventName);
-        payload.putNull("userIdentity");
+        if (ttlDeletion) {
+            DynamoDbTtlIdentity.putOn(payload, DynamoDbTtlIdentity.Shape.EVENT_RECORD);
+        } else {
+            payload.putNull("userIdentity");
+        }
         payload.put("recordFormat", "application/json");
         payload.put("tableName", tableName);
         payload.put("eventSource", "aws:dynamodb");

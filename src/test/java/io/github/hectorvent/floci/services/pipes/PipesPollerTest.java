@@ -541,6 +541,29 @@ class PipesPollerTest {
     }
 
     @Test
+    void userIdentityFilterDeliversOnlyTheTtlDeletionWithTheEventRecordIdentity() throws Exception {
+        Pipe pipe = dynamoDbPipe("{}");
+        pipe.setSourceParameters(MAPPER.readTree("""
+                {"DynamoDBStreamParameters":{"StartingPosition":"TRIM_HORIZON"},
+                 "FilterCriteria":{"Filters":[{"Pattern":
+                   "{\\"userIdentity\\":{\\"type\\":[\\"Service\\"],\\"principalId\\":[\\"dynamodb.amazonaws.com\\"]}}"}]}}"""));
+        streams.shard.add(ddbRemoval("001", false));
+        DynamoDbStreamReader.Record ttlRemoval = ddbRemoval("002", true);
+        JsonNode original = ttlRemoval.awsRecord().deepCopy();
+        streams.shard.add(ttlRemoval);
+
+        poller.startPolling(pipe);
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+
+        assertEquals(List.of(List.of("002")), deliveredSequences(pipe));
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        assertEquals(MAPPER.createObjectNode().put("type", "Service").put("principalId", "dynamodb.amazonaws.com"),
+                MAPPER.readTree(payload.getValue()).path("Records").path(0).path("userIdentity"));
+        assertEquals(original, ttlRemoval.awsRecord(), "the reader's record is never mutated");
+    }
+
+    @Test
     void trimmedDynamoDbCheckpointRestartsAtTheTrimHorizon() throws Exception {
         Pipe pipe = dynamoDbPipe("{}");
         streams.shard.add(ddbRecord("001", "active"));
@@ -630,6 +653,22 @@ class PipesPollerTest {
         dynamodb.putObject("NewImage").putObject("status").put("S", status);
         dynamodb.put("SequenceNumber", sequenceNumber).put("SizeBytes", 50).put("StreamViewType", "NEW_IMAGE");
         return new DynamoDbStreamReader.Record(sequenceNumber, awsRecord);
+    }
+
+    /**
+     * A REMOVE record as GetRecords returns it. One that time to live made carries the DynamoDB service
+     * identity with the Streams API's capitalised member names, as AWS writes it.
+     */
+    private static DynamoDbStreamReader.Record ddbRemoval(String sequenceNumber, boolean byTtl) {
+        DynamoDbStreamReader.Record record = ddbRecord(sequenceNumber, "expired");
+        ObjectNode awsRecord = (ObjectNode) record.awsRecord();
+        awsRecord.put("eventName", "REMOVE");
+        ObjectNode dynamodb = (ObjectNode) awsRecord.path("dynamodb");
+        dynamodb.set("OldImage", dynamodb.remove("NewImage"));
+        if (byTtl) {
+            awsRecord.putObject("userIdentity").put("PrincipalId", "dynamodb.amazonaws.com").put("Type", "Service");
+        }
+        return record;
     }
 
     /** The sequence numbers of each batch the Lambda target was invoked with, in invocation order. */
