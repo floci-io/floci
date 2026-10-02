@@ -566,6 +566,32 @@ class VirtualMfaIntegrationTest {
             .body("ListMFADeviceTagsResponse.ListMFADeviceTagsResult.IsTruncated", equalTo("false"));
     }
 
+    /**
+     * The MFA actions were missing from {@code AwsQueryController.IAM_ACTIONS} as well, so an
+     * unauthenticated client reached SQS instead of IAM. Pinned here because the two families
+     * regressed the same way and nothing else covers this routing for MFA.
+     */
+    @Test
+    void mfaActionsRouteViaTheActionFallbackWhenAuthHeaderAbsent() {
+        String name = "mfa-fallback-" + suffix();
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateVirtualMFADevice")
+            .formParam("VirtualMFADeviceName", name)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("CreateVirtualMFADeviceResponse.CreateVirtualMFADeviceResult"
+                    + ".VirtualMFADevice.SerialNumber",
+                    equalTo("arn:aws:iam::000000000000:mfa/" + name));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteVirtualMFADevice")
+            .formParam("SerialNumber", "arn:aws:iam::000000000000:mfa/" + name)
+        .when().post("/").then().statusCode(200);
+    }
+
     @Test
     void tagsRoundTripAndAreListedSortedByKey() {
         Device device = createDevice("mfa-tags-" + suffix());

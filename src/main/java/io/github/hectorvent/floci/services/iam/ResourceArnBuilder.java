@@ -3,8 +3,11 @@ package io.github.hectorvent.floci.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 
@@ -27,15 +30,34 @@ import java.util.Set;
 @ApplicationScoped
 public class ResourceArnBuilder {
 
+    /**
+     * The IAM actions whose resource this builder can name. Deliberately only the
+     * server-certificate operations; see {@link #buildIamArn}.
+     */
+    private static final Set<String> SERVER_CERTIFICATE_ACTIONS = Set.of(
+            "UploadServerCertificate", "GetServerCertificate", "UpdateServerCertificate",
+            "DeleteServerCertificate", "TagServerCertificate", "UntagServerCertificate",
+            "ListServerCertificateTags");
+
     private final ObjectMapper objectMapper;
+    /**
+     * Looked up lazily through a provider: this builder is constructed by the enforcement filter,
+     * which IamService itself does not depend on, and a direct injection would close that loop.
+     */
+    private final Instance<IamService> iamService;
 
     @Inject
-    public ResourceArnBuilder(ObjectMapper objectMapper) {
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService) {
         this.objectMapper = objectMapper;
+        this.iamService = iamService;
     }
 
     public ResourceArnBuilder() {
-        this(new ObjectMapper());
+        this(new ObjectMapper(), null);
+    }
+
+    public ResourceArnBuilder(ObjectMapper objectMapper) {
+        this(objectMapper, null);
     }
 
     public String build(String credentialScope, ContainerRequestContext ctx,
@@ -60,8 +82,80 @@ public class ResourceArnBuilder {
             case "secretsmanager" -> List.of(buildSecretsManagerArn(ctx, region, accountId));
             case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
             case "kms"            -> List.of(buildKmsArn(path, region, accountId));
+            case "iam"            -> List.of(buildIamArn(ctx, region, accountId));
             default               -> List.of("*");
         };
+    }
+
+    // ── IAM ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * IAM resource ARNs are only built for the server-certificate operations. Every other IAM
+     * action still resolves to {@code *}, so a policy naming a specific user, role, policy or MFA
+     * device does not constrain it. That is how IAM behaved before server certificates existed,
+     * and closing it for the rest means mapping the resource of every dispatched IAM action, which
+     * is its own change rather than a side effect of this one: tracked in issue 4979, and
+     * described in docs/services/iam.md.
+     *
+     * <p>The operation is resolved through {@link AwsQueryServiceResolver#action(String, String)},
+     * so the legacy {@code Operation} parameter names the resource exactly as {@code Action} does.
+     * Reading {@code Action} alone would let a caller spell the operation the other way and have
+     * the request evaluated against {@code *}, skipping a deny that names the certificate.
+     *
+     * <p>The path is taken from the stored certificate when one exists: a policy names the full
+     * ARN, path included, and only the store knows the path.
+     */
+    private String buildIamArn(ContainerRequestContext ctx, String region, String accountId) {
+        String action = AwsQueryServiceResolver.action(
+                RequestBodyReader.formField(ctx, "Action"),
+                RequestBodyReader.formField(ctx, "Operation"));
+        if (action == null || !SERVER_CERTIFICATE_ACTIONS.contains(action)) {
+            return "*";
+        }
+        String name = RequestBodyReader.formField(ctx, "ServerCertificateName");
+        if (name == null || name.isBlank()) {
+            return "*";
+        }
+        // Every operation but the upload acts on a certificate that already exists, so the check
+        // uses that certificate's own stored ARN instead of deriving one again. The stored ARN
+        // carries the path and, more to the point, the partition the certificate was created in:
+        // a resource stays in its partition, so re-minting from the caller's signing region would
+        // name an ARN that no resource has and leave a deny on the real one unmatched.
+        if (!"UploadServerCertificate".equals(action)) {
+            return storedServerCertificateArn(name);
+        }
+        // An upload names a certificate that does not exist yet, so its ARN is minted from the
+        // request: the path it asks for, in the partition it is being created in. Reading a stored
+        // path here would authorize an upload to /team/ against the root path.
+        String path = normalizeArnPath(RequestBodyReader.formField(ctx, "Path"));
+        // IAM is global, so the ARN carries no region. Minted in the request's partition rather
+        // than through a blank-region Arn.of, which would silently mean the commercial one.
+        return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
+                "server-certificate" + path + name).toString();
+    }
+
+    /** A request's Path as it appears in an ARN: slash-delimited, defaulting to a bare slash. */
+    private static String normalizeArnPath(String path) {
+        if (path == null || path.isBlank()) {
+            return "/";
+        }
+        String normalized = path.startsWith("/") ? path : "/" + path;
+        return normalized.endsWith("/") ? normalized : normalized + "/";
+    }
+
+    /**
+     * The certificate's own ARN as stored, or {@code *} when this account has no certificate of
+     * that name: the operation fails as NoSuchEntity either way, and minting an ARN for a resource
+     * that is not there would only offer a policy something to match.
+     */
+    private String storedServerCertificateArn(String name) {
+        if (iamService == null) {
+            return "*";
+        }
+        return iamService.get().findServerCertificate(name)
+                .map(ServerCertificate::getArn)
+                .filter(arn -> !arn.isBlank())
+                .orElse("*");
     }
 
     // ── S3 ──────────────────────────────────────────────────────────────────────
