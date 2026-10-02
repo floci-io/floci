@@ -209,6 +209,12 @@ class EksIrsaDockerIntegrationTest {
         assertEquals(eksClusterManager.deriveClusterNodeProviderId(cluster), nodeResult.stdout().trim(),
                 "Node providerID must match the derived AWS provider ID");
 
+        ContainerExec.Result nodeNameResult = execInContainerWithExitCode(containerId,
+                new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[0].metadata.name}"});
+        assertEquals(0, nodeNameResult.exitCode(), "kubectl get nodes failed");
+        assertEquals(eksClusterManager.deriveClusterNodeInstanceId(cluster), nodeNameResult.stdout().trim(),
+                "Node name must match the derived cluster node instance ID");
+
         ContainerExec.Result zoneResult = execInContainerWithExitCode(containerId,
                 new String[]{"kubectl", "get", "nodes", "-o",
                         "jsonpath={.items[0].metadata.labels.topology\\.kubernetes\\.io/zone}"});

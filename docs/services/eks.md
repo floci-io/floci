@@ -427,9 +427,11 @@ Cleanup only targets this backup namespace; it does not look up old suffix-form 
 identify another account's live cluster. Verify ownership before manually removing leftover stopped
 backups after upgrading.
 
-#### Cluster node provider ID and topology labels
+#### Cluster node naming, provider ID, and topology labels
 
-In real mode, cluster nodes carry a Kubernetes `spec.providerID` matching the AWS format:
+In real mode, cluster nodes are named after their backing EC2 instance using AWS resource-based naming. Real EKS nodes take their Kubernetes name in one of two formats depending on the subnet: IP-based naming (`ip-<dashed-ip>.<region>.compute.internal`, or `ip-<dashed-ip>.ec2.internal` in `us-east-1`) or resource-based naming (`i-<instance-id>`). Floci implements resource-based naming by deriving the instance ID deterministically from the cluster name, account ID, and region, and passing `--node-name=<instanceId>` to k3s before startup. This keeps the node name stable across container restarts and recreations.
+
+Cluster nodes also carry a Kubernetes `spec.providerID` matching the AWS format:
 
 ```text
 aws:///<availability-zone>/<instance-id>
@@ -444,7 +446,7 @@ Cluster nodes also carry standard Kubernetes topology labels:
 
 Floci derives the availability zone from the cluster region (for example, `<region>a` for `us-east-1`, yielding `us-east-1a`), rather than from node group subnets as real EKS does. The zone matches the availability zone in the node's `spec.providerID` and synthetic EC2 node instance. These labels enable topology-aware scheduling and allow controllers such as the AWS EBS CSI driver to discover the node's availability zone.
 
-The derived availability zone and instance ID match the synthetic EC2 node instance created for link-local IMDS, ensuring consistent identity across node metadata and kubelet registration. The provider ID enables controllers that reconcile nodes against EC2 (such as CSI drivers) to extract the instance ID. Note that nothing yet resolves that synthetic instance through the EC2 API.
+The node name, the instance ID in `spec.providerID`, and the synthetic EC2 instance ID all describe the same instance. This enables controllers that reconcile nodes against EC2 (such as CSI drivers) to look up the node instance via `DescribeInstances`.
 
 ## Configuration
 

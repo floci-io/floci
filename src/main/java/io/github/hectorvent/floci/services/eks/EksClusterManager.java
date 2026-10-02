@@ -433,6 +433,15 @@ public class EksClusterManager
         }
 
         try {
+            String nodeName = deriveClusterNodeInstanceId(cluster);
+            serverArgs.add("--node-name=" + nodeName);
+        } catch (Exception e) {
+            String clusterName = cluster != null ? cluster.getName() : "unknown";
+            LOG.warnv("EKS node name injection disabled for cluster {0}: could not derive node name: {1}",
+                    clusterName, e.getMessage());
+        }
+
+        try {
             String providerId = deriveClusterNodeProviderId(cluster);
             serverArgs.add("--kubelet-arg=provider-id=" + providerId);
         } catch (Exception e) {
@@ -2280,6 +2289,12 @@ public class EksClusterManager
         String seed = safeClusterName + "-" + safeAccountId + "-" + safeRegion;
         String hex = UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");
         return "i-" + (hex.length() >= 17 ? hex.substring(0, 17) : (hex + "00000000000000000").substring(0, 17));
+    }
+
+    String deriveClusterNodeInstanceId(Cluster cluster) {
+        String accountId = resolveClusterAccountId(cluster);
+        String region = clusterRegion(cluster);
+        return deriveClusterNodeInstanceId(cluster, region, accountId);
     }
 
     String deriveClusterNodeProviderId(Cluster cluster, String region, String accountId) {

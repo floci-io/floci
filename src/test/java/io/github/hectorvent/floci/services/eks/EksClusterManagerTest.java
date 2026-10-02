@@ -1209,6 +1209,55 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void derivesClusterNodeInstanceIdMatchingExpectedAwsFormat() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+
+            String instanceId = manager.deriveClusterNodeInstanceId(cluster, "us-west-2", "123456789012");
+            assertEquals("i-0e413a1bfb5c3cd79", instanceId);
+            assertTrue(instanceId.matches("^i-[0-9a-f]{17}$"));
+        }
+
+        @Test
+        void deriveClusterNodeInstanceIdDerivesFromClusterArn() {
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+            cluster.setArn("arn:aws:eks:ap-southeast-1:123456789012:cluster/test-cluster");
+
+            String instanceId = manager.deriveClusterNodeInstanceId(cluster);
+            assertNotNull(instanceId);
+            assertEquals(manager.deriveClusterNodeInstanceId(cluster, "ap-southeast-1", "123456789012"), instanceId);
+        }
+
+        @Test
+        void twoClustersGetDistinctNodeNames() {
+            Cluster cluster1 = new Cluster();
+            cluster1.setName("cluster-alpha");
+            cluster1.setArn("arn:aws:eks:us-west-2:123456789012:cluster/cluster-alpha");
+
+            Cluster cluster2 = new Cluster();
+            cluster2.setName("cluster-beta");
+            cluster2.setArn("arn:aws:eks:us-west-2:123456789012:cluster/cluster-beta");
+
+            String name1 = manager.deriveClusterNodeInstanceId(cluster1);
+            String name2 = manager.deriveClusterNodeInstanceId(cluster2);
+
+            assertNotEquals(name1, name2);
+        }
+
+        @Test
+        void recreatingClusterContainerProducesSameNodeName() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            String initialName = manager.deriveClusterNodeInstanceId(cluster);
+            String recreatedName = manager.deriveClusterNodeInstanceId(cluster);
+
+            assertEquals(initialName, recreatedName);
+        }
+
+        @Test
         void configuresMetadataProxyWhenEnabled() {
             Cluster cluster = new Cluster();
             cluster.setName("test-cluster");
@@ -1759,6 +1808,75 @@ class EksClusterManagerTest {
 
             verify(copyCmd).withHostResource(privFile.toString());
             verify(copyCmd).withHostResource(pubFile.toString());
+        }
+
+        @Test
+        void startClusterConfiguresNodeNameArg() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String expectedNodeName = manager.deriveClusterNodeInstanceId(cluster);
+            assertEquals("i-0e413a1bfb5c3cd79", expectedNodeName);
+            assertTrue(cmd.contains("--node-name=" + expectedNodeName));
+        }
+
+        @Test
+        void startClusterContinuesWhenNodeNameDerivationFails() {
+            EksClusterManager spyManager = Mockito.spy(manager);
+            Mockito.doThrow(new RuntimeException("derivation failure"))
+                    .when(spyManager).deriveClusterNodeInstanceId(any());
+
+            Cluster cluster = new Cluster();
+            cluster.setName("fail-cluster");
+
+            assertDoesNotThrow(() -> spyManager.startCluster(cluster));
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertFalse(cmd.stream().anyMatch(arg -> arg.startsWith("--node-name=")));
+        }
+
+        @Test
+        void nodeNameMatchesProviderIdInstanceId() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setAccountId("123456789012");
+            cluster.setArn("arn:aws:eks:eu-central-1:123456789012:cluster/prod-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            String nodeNameArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--node-name="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("node-name arg missing"));
+            String nodeName = nodeNameArg.substring("--node-name=".length());
+
+            String providerIdArg = cmd.stream()
+                    .filter(arg -> arg.startsWith("--kubelet-arg=provider-id="))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("provider-id arg missing"));
+            String providerId = providerIdArg.substring("--kubelet-arg=provider-id=".length());
+            String[] parts = providerId.split("/");
+            String providerInstanceId = parts[parts.length - 1];
+
+            assertEquals(providerInstanceId, nodeName);
         }
 
         @Test
