@@ -4151,12 +4151,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 deployment.setStatus(DEPLOYMENT_STATUS_SUCCESSFUL);
                 deployment.setFinishedAt(now);
                 deployment.setUpdatedAt(now);
-                svc.setLastCompletedDeploymentId(deploymentId(svc));
-                String completedDeploymentId = deploymentId(svc);
-                if (eventPublisher != null
-                        && !completedDeploymentId.equals(svc.getLastCompletionEventDeploymentId())) {
-                    svc.setPendingCompletionEventDeploymentId(completedDeploymentId);
-                }
+                svc.setLastSettledDeploymentId(deploymentId(svc));
                 ServiceRevision revision = serviceRevisions.get(deployment.getTargetServiceRevisionArn());
                 if (revision != null) {
                     svc.setLastSuccessfulServiceRevision(revision);
@@ -5020,13 +5015,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             String deploymentId = currentDeploymentId;
             boolean converged = current >= svc.getDesiredCount();
             if (converged) {
-                boolean newlyCompleted = !deploymentId.equals(svc.getLastCompletedDeploymentId());
-                boolean completionEventPending = deploymentId.equals(svc.getPendingCompletionEventDeploymentId());
-                if ((newlyCompleted || completionEventPending)
-                        && !deploymentId.equals(svc.getLastCompletionEventDeploymentId())) {
+                if (!deploymentId.equals(svc.getLastCompletedDeploymentId())) {
                     svc.setLastCompletedDeploymentId(deploymentId);
-                    svc.setLastCompletionEventDeploymentId(deploymentId);
-                    svc.setPendingCompletionEventDeploymentId(null);
                     services.put(key, svc);
                     eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_COMPLETED",
                             "ECS deployment " + deploymentId + " completed.", region);
@@ -5106,7 +5096,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private ServiceDeployment deploymentRecordForReconciliation(EcsServiceModel svc, String key, String region) {
         ServiceDeployment deployment = deploymentRecordOf(svc);
         String currentDeploymentId = deploymentId(svc);
-        if (deployment != null || currentDeploymentId.equals(svc.getLastCompletedDeploymentId())
+        if (deployment != null || currentDeploymentId.equals(svc.getLastSettledDeploymentId())
+                || currentDeploymentId.equals(svc.getLastCompletedDeploymentId())
                 || currentDeploymentId.equals(svc.getFailedDeploymentId())) {
             return deployment;
         }

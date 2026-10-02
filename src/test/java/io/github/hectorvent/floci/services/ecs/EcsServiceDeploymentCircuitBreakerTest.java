@@ -566,14 +566,14 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 Map.of("alarms", Map.of("enable", true, "rollback", true,
                         "alarmNames", List.of("completed-restart-alarm"))));
         before.reconcileServices();
-        assertEquals(model.getDeploymentId(), model.getLastCompletedDeploymentId());
+        assertEquals(model.getDeploymentId(), model.getLastSettledDeploymentId());
 
         alarm.setStateValue("ALARM");
         EcsService after = newService(storage, metricsService);
         after.reconcileServices();
 
         EcsServiceModel restarted = after.serviceByArn(model.getServiceArn());
-        assertEquals(model.getDeploymentId(), restarted.getLastCompletedDeploymentId());
+        assertEquals(model.getDeploymentId(), restarted.getLastSettledDeploymentId());
         assertNull(restarted.getFailedDeploymentId(), "a completed deployment is not reclassified by a later alarm");
         assertEquals("COMPLETED", liveDeployment(after, "cb-completed-restart").getRolloutState());
     }

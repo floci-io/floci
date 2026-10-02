@@ -26,12 +26,10 @@ public class EcsServiceModel {
     private Instant lastDeploymentAt;
     /** Current deployment identifier ("ecs-svc/<hex>"). Rolls on a task-definition change or forceNewDeployment. */
     private String deploymentId;
-    /** Last completed deployment, persisted so a restart does not treat it as in progress. */
+    /** The deployment whose completion event has been emitted. */
     private String lastCompletedDeploymentId;
-    /** Deployment whose completion event has been emitted. */
-    private String lastCompletionEventDeploymentId;
-    /** Newly completed deployment whose completion event still needs to be emitted. */
-    private String pendingCompletionEventDeploymentId;
+    /** Last deployment to reach steady state, persisted to avoid resuming it after a restart. */
+    private String lastSettledDeploymentId;
     /** The deploymentId the circuit breaker failed; persisted so a restart does not resume it. */
     private String failedDeploymentId;
     /** Last completed revision, retained so a rollback can survive a process restart. */
@@ -107,14 +105,9 @@ public class EcsServiceModel {
         this.lastCompletedDeploymentId = lastCompletedDeploymentId;
     }
 
-    public String getLastCompletionEventDeploymentId() { return lastCompletionEventDeploymentId; }
-    public void setLastCompletionEventDeploymentId(String lastCompletionEventDeploymentId) {
-        this.lastCompletionEventDeploymentId = lastCompletionEventDeploymentId;
-    }
-
-    public String getPendingCompletionEventDeploymentId() { return pendingCompletionEventDeploymentId; }
-    public void setPendingCompletionEventDeploymentId(String pendingCompletionEventDeploymentId) {
-        this.pendingCompletionEventDeploymentId = pendingCompletionEventDeploymentId;
+    public String getLastSettledDeploymentId() { return lastSettledDeploymentId; }
+    public void setLastSettledDeploymentId(String lastSettledDeploymentId) {
+        this.lastSettledDeploymentId = lastSettledDeploymentId;
     }
 
     public ServiceRevision getLastSuccessfulServiceRevision() { return lastSuccessfulServiceRevision; }

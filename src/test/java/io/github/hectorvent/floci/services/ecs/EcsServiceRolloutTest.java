@@ -209,8 +209,7 @@ class EcsServiceRolloutTest {
                 .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
 
         // Old persisted models used lastCompletedDeploymentId as the event deduplication marker.
-        serviceModel.setLastCompletionEventDeploymentId(null);
-        serviceModel.setPendingCompletionEventDeploymentId(null);
+        serviceModel.setLastSettledDeploymentId(null);
         service.reconcileServices();
         verify(publisher, times(1))
                 .emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"), any(), eq(REGION));
