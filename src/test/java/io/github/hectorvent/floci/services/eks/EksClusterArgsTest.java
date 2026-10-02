@@ -132,8 +132,6 @@ class EksClusterArgsTest {
             "audit-log-maxage",
             "audit-log-maxbackup",
             "audit-log-maxsize",
-            "authorization-mode",
-            "authorization-mode=AlwaysAllow",
             "--service-account-issuer=https://override.example.com",
             "auditPolicyFile=/custom/path"
     })
@@ -149,6 +147,8 @@ class EksClusterArgsTest {
     @ValueSource(strings = {
             "storage-backend",
             "etcd-servers",
+            "authorization-mode",
+            "authorization-mode=AlwaysAllow",
             "storage-backend=etcd3",
             "etcd-servers=https://127.0.0.1:2379"
     })

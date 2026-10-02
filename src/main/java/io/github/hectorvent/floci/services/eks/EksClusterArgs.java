@@ -79,16 +79,17 @@ public final class EksClusterArgs {
             "auditlogpath",
             "auditlogmaxage",
             "auditlogmaxbackup",
-            "auditlogmaxsize",
-            "authorizationmode"
+            "auditlogmaxsize"
     );
 
     /**
-     * Flags refused outright because they conflict with k3s embedded SQLite (kine) engine.
+     * Flags refused outright because they conflict with the k3s embedded SQLite (kine) engine
+     * or bypass API server RBAC authorization.
      */
     static final Set<String> REFUSED_APISERVER_FLAGS = Set.of(
             "storagebackend",
-            "etcdservers"
+            "etcdservers",
+            "authorizationmode"
     );
 
     private static final TypeReference<List<String>> STRING_LIST_TYPE = new TypeReference<>() {};
