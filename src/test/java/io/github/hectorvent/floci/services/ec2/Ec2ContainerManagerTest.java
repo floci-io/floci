@@ -45,6 +45,7 @@ import java.io.Closeable;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -342,6 +343,63 @@ class Ec2ContainerManagerTest {
 
     @Test
     void startOfAProtectedInstanceReusesTheHelperTransportAddress() throws Exception {
+        Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
+        Instance instance = startProtectedInstance(metadataServer, Map.of(
+                "floci.security-group-helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "floci_owner_port", "4566"));
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(5));
+        verify(metadataServer, timeout(2000)).registerContainer("172.17.0.7", "i-protected", instance);
+        assertEquals("172.17.0.7", instance.getContainerBridgeIp(),
+                "StartInstances must keep addressing the instance through its protected namespace");
+    }
+
+    @Test
+    void startOfAProtectedInstanceAcceptsAHelperLabelledWithTheNewKeys() throws Exception {
+        Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
+        Instance instance = startProtectedInstance(metadataServer, Map.of(
+                "io.floci.security-group.helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "io.floci.owner", "4566"));
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(5));
+        verify(metadataServer, timeout(2000)).registerContainer("172.17.0.7", "i-protected", instance);
+    }
+
+    @Test
+    void startOfAProtectedInstanceAcceptsAHelperWhoseNewAndLegacyKeysAgree() throws Exception {
+        Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
+        Instance instance = startProtectedInstance(metadataServer, Map.of(
+                "io.floci.security-group.helper", "true",
+                "floci.security-group-helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "io.floci.owner", "4566",
+                "floci_owner_port", "4566"));
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(5));
+        verify(metadataServer, timeout(2000)).registerContainer("172.17.0.7", "i-protected", instance);
+    }
+
+    @Test
+    void startOfAProtectedInstanceRefusesAHelperWhoseNewAndLegacyOwnersDisagree() throws Exception {
+        Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
+        Instance instance = startProtectedInstance(metadataServer, Map.of(
+                "io.floci.security-group.helper", "true",
+                "floci.security-group-helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "io.floci.owner", "4566",
+                "floci_owner_port", "4567"));
+
+        awaitUntil(() -> "stopped".equals(instance.getState().getName()), Duration.ofSeconds(5));
+        verify(metadataServer, never()).registerContainer(anyString(), anyString(), any());
+    }
+
+    private Instance startProtectedInstance(Ec2MetadataServer metadataServer, Map<String, String> helperLabels) {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
 
@@ -360,11 +418,7 @@ class Ec2ContainerManagerTest {
 
         InspectContainerResponse helper = mock(InspectContainerResponse.class);
         ContainerConfig helperConfig = mock(ContainerConfig.class);
-        when(helperConfig.getLabels()).thenReturn(Map.of(
-                "floci.security-group-helper", "true",
-                "io.floci.service", "ec2",
-                "io.floci.resource-id", "i-protected",
-                "floci_owner_port", "4566"));
+        when(helperConfig.getLabels()).thenReturn(helperLabels);
         when(helper.getConfig()).thenReturn(helperConfig);
         NetworkSettings helperNetworks = mock(NetworkSettings.class);
         when(helperNetworks.getNetworks())
@@ -378,7 +432,6 @@ class Ec2ContainerManagerTest {
         when(config.port()).thenReturn(4566);
         when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
 
-        Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
         Ec2ContainerManager manager = new Ec2ContainerManager(
                 mock(ContainerBuilder.class),
                 lifecycleManager,
@@ -401,11 +454,7 @@ class Ec2ContainerManagerTest {
         instance.setDockerContainerId(TEST_CONTAINER_ID);
 
         manager.start(instance);
-        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(5));
-
-        verify(metadataServer, timeout(2000)).registerContainer("172.17.0.7", "i-protected", instance);
-        assertEquals("172.17.0.7", instance.getContainerBridgeIp(),
-                "StartInstances must keep addressing the instance through its protected namespace");
+        return instance;
     }
 
     private static Ec2ContainerManager managerWith(ContainerLifecycleManager lifecycleManager,
@@ -1618,7 +1667,7 @@ class Ec2ContainerManagerTest {
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         // Without this label the reconciler cannot tell one emulator's containers from another's
         // on a shared Docker daemon, so it could only ever be unsafe or a no-op.
-        verify(harness.builder).withLabels(Map.of(Ec2ContainerManager.LABEL_OWNER_PORT, "4680"));
+        verify(harness.builder).withLabels(Map.of(Ec2ContainerManager.LABEL_OWNER, "4680"));
     }
 
     @Test
@@ -1688,6 +1737,46 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void reconcileOrphanedContainersFindsOwnersUnderTheLegacyKeyOrBoth() {
+        LaunchHarness harness = reconcileHarness(true, 4680);
+        stubContainerListing(harness.dockerClient,
+                withOwners("c-legacy", Map.of("floci_owner_port", "4680"), "i-legacy"),
+                withOwners("c-both", Map.of("io.floci.owner", "4680", "floci_owner_port", "4680"), "i-both"),
+                withOwners("c-legacy-sibling", Map.of("floci_owner_port", "4620"), "i-sibling"));
+
+        int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
+
+        assertEquals(2, removed);
+        verify(harness.lifecycleManager).removeIfExists("c-legacy");
+        verify(harness.lifecycleManager).removeIfExists("c-both");
+        verify(harness.lifecycleManager, never()).removeIfExists("c-legacy-sibling");
+    }
+
+    @Test
+    void reconcileOrphanedContainersLeavesAContainerWhoseOwnersDisagreeAlone() {
+        LaunchHarness harness = reconcileHarness(true, 4680);
+        stubContainerListing(harness.dockerClient,
+                withOwners("c-new-ours", Map.of("io.floci.owner", "4680", "floci_owner_port", "4620"), "i-1"),
+                withOwners("c-legacy-ours", Map.of("io.floci.owner", "4620", "floci_owner_port", "4680"), "i-2"));
+
+        int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
+
+        assertEquals(0, removed);
+        verify(harness.lifecycleManager, never()).removeIfExists(anyString());
+    }
+
+    private static Container withOwners(String containerId, Map<String, String> owners, String instanceId) {
+        Map<String, String> labels = new HashMap<>(owners);
+        labels.put(Ec2ContainerManager.LABEL_SERVICE, Ec2ContainerManager.SERVICE_VALUE);
+        labels.put(Ec2ContainerManager.LABEL_REGION, "us-east-1");
+        labels.put(Ec2ContainerManager.LABEL_RESOURCE_ID, instanceId);
+        Container container = mock(Container.class);
+        when(container.getId()).thenReturn(containerId);
+        when(container.getLabels()).thenReturn(labels);
+        return container;
+    }
+
+    @Test
     void reconcileOrphanedContainersDoesNothingWhenDisabled() {
         LaunchHarness harness = reconcileHarness(false, 4680);
 
@@ -1701,7 +1790,7 @@ class Ec2ContainerManagerTest {
         when(container.getId()).thenReturn(containerId);
         when(container.getLabels()).thenReturn(Map.of(
                 Ec2ContainerManager.LABEL_SERVICE, Ec2ContainerManager.SERVICE_VALUE,
-                Ec2ContainerManager.LABEL_OWNER_PORT, ownerPort,
+                Ec2ContainerManager.LABEL_OWNER, ownerPort,
                 Ec2ContainerManager.LABEL_REGION, region,
                 Ec2ContainerManager.LABEL_RESOURCE_ID, instanceId));
         return container;

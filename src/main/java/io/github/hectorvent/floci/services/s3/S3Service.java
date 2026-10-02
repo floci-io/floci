@@ -17,8 +17,10 @@ import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.s3.model.*;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -163,6 +165,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private final String baseUrl;
     private final ObjectMapper objectMapper;
     private final boolean enforceAuth;
+    private final boolean enforceIam;
     private final IamService iamService;
     private final boolean globalBucketNamespace;
     private final IamPolicyEvaluator policyEvaluator;
@@ -195,7 +198,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 eventBridgeService, s3UpdatedEvent,
                 regionResolver,
                 config.effectiveBaseUrl(), objectMapper,
-                config.services().s3().enforceAuth(), iamService,
+                config.services().s3().enforceAuth(), config.services().iam().enforcementEnabled(), iamService,
                 config.services().s3().globalBucketNamespace()
         );
     }
@@ -208,7 +211,7 @@ public class S3Service implements Resettable, ResourceProvider {
               Path dataRoot, boolean inMemory) {
         this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, null, null, null,
-                null, "http://localhost:4566", new ObjectMapper(), false, null, false);
+                null, "http://localhost:4566", new ObjectMapper(), false, false, null, false);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -217,7 +220,7 @@ public class S3Service implements Resettable, ResourceProvider {
               boolean enforceAuth, IamService iamService) {
         this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, null, null, null,
-                null, "http://localhost:4566", new ObjectMapper(), enforceAuth, iamService, false);
+                null, "http://localhost:4566", new ObjectMapper(), enforceAuth, false, iamService, false);
     }
 
     /** Package-private constructor for testing account-level Block Public Access persistence. */
@@ -227,7 +230,7 @@ public class S3Service implements Resettable, ResourceProvider {
               Path dataRoot, boolean inMemory) {
         this(bucketStore, objectStore, defaultAnnotationStore(), accountPublicAccessBlockStore,
                 dataRoot, inMemory, null, null, null, null, null, null, null,
-                null, "http://localhost:4566", new ObjectMapper(), false, null, false);
+                null, "http://localhost:4566", new ObjectMapper(), false, false, null, false);
     }
 
     /** Package-private constructor for testing the global-bucket-namespace resolution flag. */
@@ -236,7 +239,7 @@ public class S3Service implements Resettable, ResourceProvider {
               Path dataRoot, boolean inMemory, boolean globalBucketNamespace) {
         this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, null, null, null,
-                null, "http://localhost:4566", new ObjectMapper(), false, null, globalBucketNamespace);
+                null, "http://localhost:4566", new ObjectMapper(), false, false, null, globalBucketNamespace);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -246,7 +249,7 @@ public class S3Service implements Resettable, ResourceProvider {
               RegionResolver regionResolver) {
         this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, lambdaService, null, null, null, null,
-                regionResolver, "http://localhost:4566", new ObjectMapper(), false, null, false);
+                regionResolver, "http://localhost:4566", new ObjectMapper(), false, false, null, false);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -256,7 +259,7 @@ public class S3Service implements Resettable, ResourceProvider {
               RegionResolver regionResolver) {
         this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, lambdaInvoker, null, null,
-                regionResolver, "http://localhost:4566", new ObjectMapper(), false, null, false);
+                regionResolver, "http://localhost:4566", new ObjectMapper(), false, false, null, false);
     }
 
     /** In-memory account-level Block Public Access store for the package-private test constructors. */
@@ -280,7 +283,8 @@ public class S3Service implements Resettable, ResourceProvider {
                       EventBridgeService eventBridgeService,
                       Event<S3ObjectUpdatedEvent> s3UpdatedEvent,
                       RegionResolver regionResolver, String baseUrl, ObjectMapper objectMapper,
-                      boolean enforceAuth, IamService iamService, boolean globalBucketNamespace) {
+                      boolean enforceAuth, boolean enforceIam, IamService iamService,
+                      boolean globalBucketNamespace) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
         this.annotationStore = annotationStore;
@@ -298,6 +302,7 @@ public class S3Service implements Resettable, ResourceProvider {
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
         this.enforceAuth = enforceAuth;
+        this.enforceIam = enforceIam;
         this.iamService = iamService;
         this.globalBucketNamespace = globalBucketNamespace;
         this.policyEvaluator = new IamPolicyEvaluator(objectMapper);
@@ -1063,7 +1068,8 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = ownedBucketEntry.value();
         String bucketOwner = ownedBucketEntry.account();
 
-        String principalArn = resolvePrincipalArn(authorization.accessKeyId()).orElse(null);
+        CallerArns caller = resolveCaller(authorization.accessKeyId()).orElse(null);
+        String principalArn = caller == null ? null : caller.callerArn();
         boolean sameAccountAsOwner = isSameAccountAsBucketOwner(authorization.accessKeyId(), principalArn, bucketOwner);
 
         if (isBucketPolicyAction(action) && !sameAccountAsOwner) {
@@ -1087,8 +1093,8 @@ public class S3Service implements Resettable, ResourceProvider {
             throw accessDeniedException(bucketName, key);
         }
 
-        Map<String, List<String>> conditionCtx = principalArn != null
-                ? Map.of("aws:PrincipalArn", List.of(principalArn),
+        Map<String, List<String>> conditionCtx = caller != null
+                ? Map.of("aws:PrincipalArn", List.of(caller.principalArn()),
                         "aws:PrincipalIsAWSService", List.of("false"))
                 : Map.of("aws:PrincipalIsAWSService", List.of("false"));
 
@@ -1111,18 +1117,25 @@ public class S3Service implements Resettable, ResourceProvider {
         throw accessDeniedException(bucketName, key);
     }
 
-    private Optional<String> resolvePrincipalArn(String accessKeyId) {
+    /**
+     * The signing caller's two ARNs: the caller ARN a bucket policy's {@code Principal} is matched
+     * against, and the request's {@code aws:PrincipalArn}, which for a role session is the role's ARN,
+     * path included, rather than the session's. A key IAM does not know is treated as its account's
+     * root, which is both.
+     */
+    private Optional<CallerArns> resolveCaller(String accessKeyId) {
         if (accessKeyId == null || accessKeyId.isBlank()) {
             return Optional.empty();
         }
         if (iamService != null) {
-            Optional<String> callerArn = iamService.resolveCallerArn(accessKeyId);
-            if (callerArn.isPresent()) {
-                return callerArn;
+            Optional<CallerArns> callerArns = iamService.resolveCallerArns(accessKeyId);
+            if (callerArns.isPresent()) {
+                return callerArns;
             }
         }
         String account = accessKeyId.matches("\\d{12}") ? accessKeyId : ownerId();
-        return Optional.of(regionResolver.buildGlobalArn("iam", account, "root"));
+        String rootArn = regionResolver.buildGlobalArn("iam", account, "root");
+        return Optional.of(new CallerArns(rootArn, rootArn));
     }
 
     private boolean isSameAccountAsBucketOwner(String accessKeyId, String principalArn, String bucketOwnerAccount) {
@@ -1155,8 +1168,8 @@ public class S3Service implements Resettable, ResourceProvider {
             return new SignedPrincipalResourcePolicyEvaluation(ResourcePolicyDecision.NEUTRAL, null);
         }
 
-        Optional<String> principalArn = resolvePrincipalArn(authorization.accessKeyId());
-        if (principalArn.isEmpty()) {
+        Optional<CallerArns> caller = resolveCaller(authorization.accessKeyId());
+        if (caller.isEmpty()) {
             return new SignedPrincipalResourcePolicyEvaluation(ResourcePolicyDecision.NEUTRAL, null);
         }
 
@@ -1168,13 +1181,13 @@ public class S3Service implements Resettable, ResourceProvider {
                         objectMapper,
                         ownedBucket.value().getPolicy(),
                         "AWS",
-                        principalArn.get(),
+                        caller.get().callerArn(),
                         action,
                         resourceArn,
-                        Map.of("aws:PrincipalArn", principalArn.get(),
+                        Map.of("aws:PrincipalArn", caller.get().principalArn(),
                                 "aws:PrincipalIsAWSService", "false"));
         ResourcePolicyDecision decision = switch (policyEvaluation.decision()) {
-            case ALLOW -> policyEvaluation.directPrincipalAllow() && principalArn.get().contains(":user/")
+            case ALLOW -> policyEvaluation.directPrincipalAllow() && caller.get().callerArn().contains(":user/")
                     ? ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
                     : ResourcePolicyDecision.ALLOW;
             case DENY -> ResourcePolicyDecision.EXPLICIT_DENY;
@@ -3631,12 +3644,172 @@ public class S3Service implements Resettable, ResourceProvider {
     // --- Notification Configuration ---
 
     public void putBucketNotificationConfiguration(String bucketName, NotificationConfiguration config) {
+        putBucketNotificationConfiguration(bucketName, config, false);
+    }
+
+    public void putBucketNotificationConfiguration(String bucketName, NotificationConfiguration config,
+                                                   boolean skipDestinationValidation) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
-        bucket.setNotificationConfiguration(config);
-        bucketStore.put(bucketName, bucket);
+
+        List<NotificationDestination> destinations = notificationDestinations(config);
+        if (!skipDestinationValidation) {
+            List<DestinationFailure> failures = new ArrayList<>();
+            for (NotificationDestination destination : destinations) {
+                if (!notificationDestinationExists(destination)) {
+                    failures.add(missingDestination(destination));
+                }
+            }
+            if (!failures.isEmpty()) {
+                throw invalidNotificationDestinations(failures);
+            }
+
+            String testEvent = s3TestEvent(bucketName);
+            for (NotificationDestination destination : destinations) {
+                try {
+                    if (!destination.accountId().equals(ownerId())
+                            && ("sns".equals(destination.service())
+                                    || enforceIam && "sqs".equals(destination.service()))) {
+                        // SNS publish still resolves topics in the caller's account.
+                        continue;
+                    }
+                    if ("sqs".equals(destination.service())) {
+                        sqsService.sendMessage(sqsUrlFromArn(destination.arn()), testEvent, 0,
+                                destination.region());
+                    } else if ("sns".equals(destination.service())) {
+                        snsService.publish(destination.arn(), null, testEvent, "Amazon S3 Notification",
+                                destination.region());
+                    }
+                } catch (AwsException e) {
+                    failures.add(new DestinationFailure(destination, e.getMessage()));
+                }
+            }
+            if (!failures.isEmpty()) {
+                throw invalidNotificationDestinations(failures);
+            }
+        }
+
+        synchronized (bucket) {
+            requireSameRecord(bucketName, bucket);
+            bucket.setNotificationConfiguration(config);
+            bucketStore.put(bucketName, bucket);
+        }
         LOG.infov("Set notification configuration for bucket: {0}", bucketName);
+    }
+
+    private record NotificationDestination(String arn, String service, String region, String accountId) {}
+
+    private record DestinationFailure(NotificationDestination destination, String reason) {}
+
+    private static List<NotificationDestination> notificationDestinations(NotificationConfiguration config) {
+        List<NotificationDestination> destinations = new ArrayList<>();
+        for (QueueNotification queue : config.getQueueConfigurations()) {
+            destinations.add(notificationDestination(queue.queueArn(), "Queue", "sqs"));
+        }
+        for (TopicNotification topic : config.getTopicConfigurations()) {
+            destinations.add(notificationDestination(topic.topicArn(), "Topic", "sns"));
+        }
+        for (LambdaNotification lambda : config.getLambdaFunctionConfigurations()) {
+            destinations.add(notificationDestination(lambda.functionArn(), "CloudFunction", "lambda"));
+        }
+        return destinations;
+    }
+
+    private static NotificationDestination notificationDestination(String arn, String argumentName,
+                                                                   String service) {
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(arn);
+        } catch (IllegalArgumentException e) {
+            throw invalidNotificationArn(arn, argumentName);
+        }
+        boolean validResource = switch (service) {
+            case "sqs" -> parsed.resource().matches("[A-Za-z0-9_-]{1,80}")
+                    || parsed.resource().matches("[A-Za-z0-9_-]{1,75}\\.fifo");
+            case "sns" -> parsed.resource().matches("[A-Za-z0-9_-]{1,256}")
+                    || parsed.resource().matches("[A-Za-z0-9_-]{1,251}\\.fifo");
+            case "lambda" -> parsed.resource().matches(
+                    "function:[A-Za-z0-9_-]{1,64}(?::[A-Za-z0-9_$-]{1,128})?");
+            default -> false;
+        };
+        if (!parsed.partition().matches(AwsArnUtils.PARTITION_REGEX)
+                || !parsed.service().equals(service)
+                || !parsed.region().matches("[a-z0-9-]+")
+                || !parsed.accountId().matches("[0-9]{12}")
+                || !validResource
+                || AwsRegions.isRegionId(parsed.region())
+                        && !parsed.partition().equals(AwsRegions.partitionFor(parsed.region()))) {
+            throw invalidNotificationArn(arn, argumentName);
+        }
+        return new NotificationDestination(arn, service, parsed.region(), parsed.accountId());
+    }
+
+    private static AwsException invalidNotificationArn(String arn, String argumentName) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("ArgumentName", argumentName);
+        details.put("ArgumentValue", arn);
+        return new AwsException("InvalidArgument", "The ARN could not be parsed", 400, details);
+    }
+
+    private boolean notificationDestinationExists(NotificationDestination destination) {
+        return switch (destination.service()) {
+            case "sqs" -> sqsService != null
+                    && sqsService.queueExists(sqsUrlFromArn(destination.arn()), destination.region());
+            case "sns" -> snsService != null && snsService.topicExists(destination.arn(), destination.region());
+            case "lambda" -> lambdaNotificationDestinationExists(destination);
+            default -> false;
+        };
+    }
+
+    private boolean lambdaNotificationDestinationExists(NotificationDestination destination) {
+        LambdaService service = resolveLambdaService();
+        if (service == null) {
+            return false;
+        }
+        try {
+            LambdaFunction function = service.getFunction(destination.region(), destination.arn(), null);
+            return destination.accountId().equals(AwsArnUtils.accountOrDefault(function.getFunctionArn(), null));
+        } catch (AwsException e) {
+            LOG.debugv("Lambda notification destination {0} is unavailable: {1} ({2})",
+                    destination.arn(), e.getErrorCode(), e.getMessage());
+            return false;
+        }
+    }
+
+    private static DestinationFailure missingDestination(NotificationDestination destination) {
+        String reason = switch (destination.service()) {
+            case "sqs" -> "The destination queue does not exist";
+            case "sns" -> "The destination topic does not exist";
+            case "lambda" -> "Not authorized to invoke function [" + destination.arn() + "]";
+            default -> "The destination does not exist";
+        };
+        return new DestinationFailure(destination, reason);
+    }
+
+    private static AwsException invalidNotificationDestinations(List<DestinationFailure> failures) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        for (int index = 0; index < failures.size(); index++) {
+            DestinationFailure failure = failures.get(index);
+            NotificationDestination destination = failure.destination();
+            String argument = "lambda".equals(destination.service())
+                    ? destination.arn() + ", null" : destination.arn();
+            details.put("ArgumentName" + (index + 1), argument);
+            details.put("ArgumentValue" + (index + 1), failure.reason());
+        }
+        return new AwsException("InvalidArgument",
+                "Unable to validate the following destination configurations", 400, details);
+    }
+
+    private String s3TestEvent(String bucketName) {
+        ObjectNode event = objectMapper.createObjectNode();
+        event.put("Service", "Amazon S3");
+        event.put("Event", "s3:TestEvent");
+        event.put("Time", Instant.now().toString());
+        event.put("Bucket", bucketName);
+        event.put("RequestId", UUID.randomUUID().toString());
+        event.put("HostId", UUID.randomUUID().toString());
+        return event.toString();
     }
 
     public NotificationConfiguration getBucketNotificationConfiguration(String bucketName) {
@@ -4529,7 +4702,8 @@ public class S3Service implements Resettable, ResourceProvider {
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(key)) {
                 try {
-                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0, extractRegionFromArn(qn.queueArn()));
+                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0,
+                            extractRegionFromArn(qn.queueArn()));
                     LOG.debugv("Fired S3 event {0} to SQS {1}", eventName, qn.queueArn());
                 } catch (Exception e) {
                     LOG.warnv("Failed to deliver S3 event to SQS {0}: {1}", qn.queueArn(), e.getMessage());
@@ -4540,7 +4714,8 @@ public class S3Service implements Resettable, ResourceProvider {
         for (TopicNotification tn : config.getTopicConfigurations()) {
             if (tn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && tn.matchesKey(key)) {
                 try {
-                    snsService.publish(tn.topicArn(), null, eventJson, "Amazon S3 Notification", region);
+                    snsService.publish(tn.topicArn(), null, eventJson, "Amazon S3 Notification",
+                            extractRegionFromArn(tn.topicArn()));
                     LOG.debugv("Fired S3 event {0} to SNS {1}", eventName, tn.topicArn());
                 } catch (Exception e) {
                     LOG.warnv("Failed to deliver S3 event to SNS {0}: {1}", tn.topicArn(), e.getMessage());

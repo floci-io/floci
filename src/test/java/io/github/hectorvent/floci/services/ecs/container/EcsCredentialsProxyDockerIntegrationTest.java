@@ -144,7 +144,7 @@ class EcsCredentialsProxyDockerIntegrationTest {
                 dockerClient, containerBuilder, lifecycleManager, dockerHostResolver, config);
         proxy.ensureProxyOn(network);
         proxyContainerId = dockerClient.listContainersCmd()
-                .withLabelFilter(Map.of("floci.ecs-task-role-credentials-proxy", "true"))
+                .withLabelFilter(Map.of(ContainerStorageHelper.ECS_CREDENTIALS_PROXY_LABEL, "true"))
                 .withNetworkFilter(List.of(networkId))
                 .exec().get(0).getId();
 
@@ -213,7 +213,7 @@ class EcsCredentialsProxyDockerIntegrationTest {
         ContainerSpec staleSpec = containerBuilder.newContainer("floci/network-helper:local")
                 .withName(name)
                 .withDockerNetwork(Optional.of(network))
-                .withLabels(Map.of("floci.ecs-task-role-credentials-proxy", "true"))
+                .withLabels(Map.of(ContainerStorageHelper.ECS_CREDENTIALS_PROXY_LABEL, "true"))
                 .build();
         String staleId = lifecycleManager.createAndStart(staleSpec).containerId();
         dockerClient.stopContainerCmd(staleId).withTimeout(1).exec();
@@ -228,7 +228,7 @@ class EcsCredentialsProxyDockerIntegrationTest {
         try {
             proxy.ensureProxyOn(network);
             proxyContainerId = dockerClient.listContainersCmd()
-                    .withLabelFilter(Map.of("floci.ecs-task-role-credentials-proxy", "true"))
+                    .withLabelFilter(Map.of(ContainerStorageHelper.ECS_CREDENTIALS_PROXY_LABEL, "true"))
                     .withNetworkFilter(List.of(networkId))
                     .exec().get(0).getId();
             assertEquals("running", dockerClient.inspectContainerCmd(proxyContainerId)

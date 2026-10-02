@@ -137,7 +137,7 @@ class CognitoFederationServiceTest {
 
         String redirect = federationService.beginAuthorization(
                 pool.getId(), "cognito-client", "https://application.example.test/callback",
-                List.of("openid"), "nonce-value", "ExampleOidc", "relying-party-state", null);
+                List.of("openid"), List.of("openid"), "nonce-value", "ExampleOidc", "relying-party-state", null);
 
         CognitoAuthorizationTransaction transaction = stateStore.consumeTransaction(queryValue(redirect, "state")).orElseThrow();
         assertEquals("relying-party-state", transaction.relyingPartyState());
@@ -149,7 +149,7 @@ class CognitoFederationServiceTest {
         String challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
         String redirect = federationService.beginAuthorization(
                 pool.getId(), "cognito-client", "https://application.example.test/callback",
-                List.of("openid"), "nonce-value", "ExampleOidc", null, challenge);
+                List.of("openid"), List.of("openid"), "nonce-value", "ExampleOidc", null, challenge);
 
         String authorizationCode = federationService.completeAuthorization(queryValue(redirect, "state"), "provider-code");
 

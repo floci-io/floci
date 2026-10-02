@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ssoadmin.model.Assignment;
 import io.github.hectorvent.floci.services.ssoadmin.model.AssignmentOperation;
 import io.github.hectorvent.floci.services.ssoadmin.model.AssignmentDeletionOperation;
@@ -25,6 +26,8 @@ import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -1831,7 +1834,49 @@ class SsoAdminServiceTest {
                 () -> service.getAssignmentOperation(service.getInstanceArn(), operation.requestId()));
     }
 
+    /** The seeded instance lives in the deployment's home region, so its ARN takes that partition. */
+    @Test
+    void seededInstanceTakesTheHomeRegionsPartition() {
+        SsoAdminService china = emptyService("cn-north-1");
+
+        assertEquals("arn:aws-cn:sso:::instance/ssoins-7223b02a5d9f7c8e", china.getInstanceArn());
+        assertEquals(List.of(china.getInstanceArn()),
+                china.listInstances("999999999999").stream().map(SsoInstance::instanceArn).toList());
+        ObjectNode addHome = mapper.createObjectNode()
+                .put("InstanceArn", china.getInstanceArn())
+                .put("RegionName", "cn-north-1");
+        assertError("ConflictException", () -> china.addRegion(addHome));
+    }
+
+    /**
+     * A China deployment persisted before the seeded instance took its partition holds it as
+     * arn:aws:, while its permission sets were already minted as arn:aws-cn:; the instance is
+     * moved to the ARN they name.
+     */
+    @Test
+    void persistedCommercialBootstrapInstanceMovesToItsPrimaryRegionsPartition() {
+        InMemoryStorage<String, SsoInstance> instances = new InMemoryStorage<>();
+        instances.put("999999999999", new SsoInstance("arn:aws:sso:::instance/ssoins-7223b02a5d9f7c8e",
+                "d-9067f2a3c1", "floci-identity-center", "999999999999", "cn-north-1", 0L, "ACTIVE",
+                null, false, new LinkedHashMap<>()));
+
+        SsoAdminService china = emptyService("cn-north-1", instances);
+
+        assertEquals("arn:aws-cn:sso:::instance/ssoins-7223b02a5d9f7c8e",
+                instances.get("999999999999").orElseThrow().instanceArn());
+        assertEquals(List.of(china.getInstanceArn()),
+                china.listInstances("999999999999").stream().map(SsoInstance::instanceArn).toList());
+    }
+
     private SsoAdminService emptyService() {
+        return emptyService("us-east-1");
+    }
+
+    private SsoAdminService emptyService(String defaultRegion) {
+        return emptyService(defaultRegion, new InMemoryStorage<String, SsoInstance>());
+    }
+
+    private SsoAdminService emptyService(String defaultRegion, StorageBackend<String, SsoInstance> instances) {
         return new SsoAdminService(
                 new InMemoryStorage<String, PermissionSet>(),
                 new InMemoryStorage<String, Assignment>(),
@@ -1850,7 +1895,7 @@ class SsoAdminServiceTest {
                 new InMemoryStorage<String, ApplicationGrant>(),
                 new InMemoryStorage<String, String>(),
                 new InMemoryStorage<String, Map<String, String>>(),
-                new InMemoryStorage<String, SsoInstance>(),
+                instances,
                 new InMemoryStorage<String, InstanceUpdateState>(),
                 new InMemoryStorage<String, String>(),
                 new InMemoryStorage<String, Boolean>(),
@@ -1861,7 +1906,7 @@ class SsoAdminServiceTest {
                 identityStoreService,
                 organizationsService,
                 "999999999999",
-                "us-east-1");
+                defaultRegion);
     }
 
     private ObjectNode trustedTokenIssuerRequest(String name, String clientToken) {

@@ -14,6 +14,8 @@ import java.nio.charset.StandardCharsets;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -940,5 +942,146 @@ class AppConfigIntegrationTest {
                     .statusCode(400)
                     .body("__type", equalTo("BadRequestException"));
         }
+    }
+
+    @Test @Order(49)
+    void getLatestConfigurationReturnsVariantFlagsAsIonToACallerThatAcceptsIt() {
+        String variantAppId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"variant-flags-app\"}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        String variantEnvId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"test\"}")
+                .when().post("/applications/" + variantAppId + "/environments")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        String variantProfileId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"flags\",\"LocationUri\":\"hosted\","
+                        + "\"Type\":\"AWS.AppConfig.FeatureFlags\"}")
+                .when().post("/applications/" + variantAppId + "/configurationprofiles")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        String content = "{\"flags\":{},\"version\":\"1\",\"values\":{\"promo\":{\"_variants\":["
+                + "{\"attributeValues\":{\"storeId\":\"uk\"},\"enabled\":true,\"name\":\"uk\","
+                + "\"rule\":\"(eq $storeId \\\"uk\\\")\"},"
+                + "{\"enabled\":false,\"name\":\"default\"}]},"
+                + "\"banner\":{\"enabled\":true,\"colour\":\"red\"}}}";
+
+        given()
+                .header("Content-Type", "application/json")
+                .body(content.getBytes(StandardCharsets.UTF_8))
+                .when().post("/applications/" + variantAppId + "/configurationprofiles/"
+                        + variantProfileId + "/hostedconfigurationversions")
+                .then().statusCode(201).header("Version-Number", equalTo("1"));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"ConfigurationProfileId\":\"" + variantProfileId + "\","
+                        + "\"ConfigurationVersion\":\"1\","
+                        + "\"DeploymentStrategyId\":\"AppConfig.AllAtOnce\"}")
+                .when().post("/applications/" + variantAppId + "/environments/" + variantEnvId + "/deployments")
+                .then().statusCode(201);
+
+        String sessionBody = "{\"ApplicationIdentifier\":\"" + variantAppId + "\","
+                + "\"EnvironmentIdentifier\":\"" + variantEnvId + "\","
+                + "\"ConfigurationProfileIdentifier\":\"" + variantProfileId + "\"}";
+
+        String agentToken = given()
+                .contentType(ContentType.JSON).body(sessionBody)
+                .when().post("/configurationsessions")
+                .then().statusCode(201)
+                .extract().path("InitialConfigurationToken");
+
+        byte[] ion = given()
+                .header("Accept", "application/ion;type=AWS.AppConfig.FeatureFlags;q=1.0,*/*;q=0.1")
+                .queryParam("configuration_token", agentToken)
+                .when().get("/configuration")
+                .then().statusCode(200)
+                .header("Content-Type", startsWith("application/ion"))
+                .header("Content-Type", containsString("type=AWS.AppConfig.FeatureFlags"))
+                .header("Version-Label", equalTo("1"))
+                .extract().asByteArray();
+        assertEquals(IonTestSupport.parse("promo::[uk::[(eq $storeId \"uk\"), "
+                        + "'''{\"_variant\":\"uk\",\"enabled\":true,\"storeId\":\"uk\"}'''],"
+                        + "'''{\"_variant\":\"default\",\"enabled\":false}'''] "
+                        + "banner::'''{\"enabled\":true,\"colour\":\"red\"}'''"),
+                IonTestSupport.decode(ion));
+
+        // Without Accept for Ion, the stored document, as before.
+        String plainToken = given()
+                .contentType(ContentType.JSON).body(sessionBody)
+                .when().post("/configurationsessions")
+                .then().statusCode(201)
+                .extract().path("InitialConfigurationToken");
+
+        given()
+                .queryParam("configuration_token", plainToken)
+                .when().get("/configuration")
+                .then().statusCode(200)
+                .header("Content-Type", startsWith("application/json"))
+                .body("values.promo._variants[0].name", equalTo("uk"));
+    }
+
+    @Test @Order(50)
+    void aFreeformProfileKeepsItsOwnContentTypeWhateverTheCallerAccepts() {
+        String appId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"binary-app\"}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        String envId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"test\"}")
+                .when().post("/applications/" + appId + "/environments")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        String profileId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"blob\",\"LocationUri\":\"hosted\",\"Type\":\"AWS.Freeform\"}")
+                .when().post("/applications/" + appId + "/configurationprofiles")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        byte[] stored = {(byte) 0xE0, 0x01, 0x00, (byte) 0xEA};
+        given()
+                .header("Content-Type", "application/octet-stream")
+                .body(stored)
+                .when().post("/applications/" + appId + "/configurationprofiles/" + profileId
+                        + "/hostedconfigurationversions")
+                .then().statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"ConfigurationProfileId\":\"" + profileId + "\",\"ConfigurationVersion\":\"1\","
+                        + "\"DeploymentStrategyId\":\"AppConfig.AllAtOnce\"}")
+                .when().post("/applications/" + appId + "/environments/" + envId + "/deployments")
+                .then().statusCode(201);
+
+        String token = given()
+                .contentType(ContentType.JSON)
+                .body("{\"ApplicationIdentifier\":\"" + appId + "\",\"EnvironmentIdentifier\":\"" + envId + "\","
+                        + "\"ConfigurationProfileIdentifier\":\"" + profileId + "\"}")
+                .when().post("/configurationsessions")
+                .then().statusCode(201)
+                .extract().path("InitialConfigurationToken");
+
+        byte[] body = given()
+                .header("Accept", "application/ion;type=AWS.AppConfig.FeatureFlags;q=1.0,*/*;q=0.1")
+                .queryParam("configuration_token", token)
+                .when().get("/configuration")
+                .then().statusCode(200)
+                .header("Content-Type", startsWith("application/octet-stream"))
+                .extract().asByteArray();
+        assertArrayEquals(stored, body);
     }
 }

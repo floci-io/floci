@@ -77,14 +77,16 @@ class EcsContainerManagerLogConfigurationTest {
                 "awslogs-region", "us-east-1",
                 "awslogs-stream-prefix", "web"), null));
 
-        verify(logStreamer).attach(eq("docker-id"), eq("my-app"), eq("web/main/abc123"), eq("us-east-1"), anyString());
+        verify(logStreamer).attachForAccount(eq("000000000000"), eq("docker-id"), eq("my-app"), eq("web/main/abc123"),
+                eq("us-east-1"), anyString());
     }
 
     @Test
     void awslogsWithoutStreamPrefixNamesTheStreamAfterTheDockerContainer() {
         startTask(new LogConfiguration("awslogs", Map.of("awslogs-group", "my-app"), null));
 
-        verify(logStreamer).attach(eq("docker-id"), eq("my-app"), eq("docker-id"), eq("us-east-1"), anyString());
+        verify(logStreamer).attachForAccount(eq("000000000000"), eq("docker-id"), eq("my-app"), eq("docker-id"),
+                eq("us-east-1"), anyString());
     }
 
     @Test
@@ -94,7 +96,18 @@ class EcsContainerManagerLogConfigurationTest {
                 "awslogs-region", "eu-west-1",
                 "awslogs-stream-prefix", "web"), null));
 
-        verify(logStreamer).attach(eq("docker-id"), eq("my-app"), eq("web/main/abc123"), eq("eu-west-1"), anyString());
+        verify(logStreamer).attachForAccount(eq("000000000000"), eq("docker-id"), eq("my-app"), eq("web/main/abc123"),
+                eq("eu-west-1"), anyString());
+    }
+
+    @Test
+    void awslogsSendsToTheGroupInTheAccountOfTheTask() {
+        // Docker's log threads have no request context, so the account comes from the task.
+        startTask("arn:aws:ecs:us-east-1:111111111111:task/test-cluster/abc123",
+                new LogConfiguration("awslogs", Map.of("awslogs-group", "my-app"), null));
+
+        verify(logStreamer).attachForAccount(eq("111111111111"), eq("docker-id"), eq("my-app"), eq("docker-id"),
+                eq("us-east-1"), anyString());
     }
 
     @Test
@@ -102,7 +115,7 @@ class EcsContainerManagerLogConfigurationTest {
         startTask(null);
 
         verify(logStreamer).attachConsoleOnly("docker-id", "ecs:logs-family:main");
-        verify(logStreamer, never()).attach(any(), any(), any(), any(), any());
+        verify(logStreamer, never()).attachForAccount(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -110,7 +123,7 @@ class EcsContainerManagerLogConfigurationTest {
         startTask(new LogConfiguration("splunk", Map.of("splunk-url", "https://splunk.example.com"), null));
 
         verify(logStreamer).attachConsoleOnly("docker-id", "ecs:logs-family:main");
-        verify(logStreamer, never()).attach(any(), any(), any(), any(), any());
+        verify(logStreamer, never()).attachForAccount(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -118,10 +131,14 @@ class EcsContainerManagerLogConfigurationTest {
         startTask(new LogConfiguration("awslogs", Map.of("awslogs-stream-prefix", "web"), null));
 
         verify(logStreamer).attachConsoleOnly("docker-id", "ecs:logs-family:main");
-        verify(logStreamer, never()).attach(any(), any(), any(), any(), any());
+        verify(logStreamer, never()).attachForAccount(any(), any(), any(), any(), any(), any());
     }
 
     private void startTask(LogConfiguration logConfiguration) {
+        startTask(TASK_ARN, logConfiguration);
+    }
+
+    private void startTask(String taskArn, LogConfiguration logConfiguration) {
         ContainerDefinition main = new ContainerDefinition();
         main.setName("main");
         main.setImage("busybox:latest");
@@ -132,7 +149,7 @@ class EcsContainerManagerLogConfigurationTest {
         taskDef.setContainerDefinitions(List.of(main));
 
         EcsTask task = new EcsTask();
-        task.setTaskArn(TASK_ARN);
+        task.setTaskArn(taskArn);
 
         manager.startTask(task, taskDef, List.of(), "us-east-1");
     }

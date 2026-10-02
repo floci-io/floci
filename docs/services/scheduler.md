@@ -101,6 +101,15 @@ so the stored schedules are not both enabled. A rollback disables the destinatio
 before restoring the original state. A name replacement can briefly leave both
 schedules enabled until commit, following the existing replacement lifecycle.
 
+If restoring a failed update also fails, the original configuration snapshot is
+kept. A later schedule update retries that restoration before taking a new snapshot
+or applying its desired configuration. If Floci skips the failed schedule during an
+otherwise unrelated stack update, cleanup preserves the snapshot and leaves the
+stack in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS` with an explicit reason. Further
+updates are blocked, and `DeleteStack` is the available recovery path. This is a
+Floci recovery limitation; AWS requires `ContinueUpdateRollback` to complete a failed
+rollback before accepting another stack update.
+
 Target parameters are limited to those the Scheduler API currently models:
 retry/dead-letter configuration, SQS, ECS and EventBridge parameters. Kinesis and
 SageMaker pipeline parameters are rejected instead of silently discarded.

@@ -52,7 +52,18 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
-        resource.getAttributes().remove(SNAPSHOT_ATTR);
+        if (ctx.isUpdate() && resource.getAttributes().containsKey(SNAPSHOT_ATTR)) {
+            try {
+                rollbackUpdate(resource);
+                ctx = new ProvisionContext(ctx.engine(), ctx.region(), ctx.accountId(), ctx.stackName(),
+                        resource.getPhysicalId(), ctx.progress());
+                resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
+                resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR);
+            } catch (RuntimeException failure) {
+                resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, failure.getMessage());
+                throw new IllegalStateException("Could not finish the previous schedule update rollback", failure);
+            }
+        }
         Map<String, String> attributesBefore = Map.copyOf(resource.getAttributes());
         String explicitName = ctx.resolveOptional(props, "Name");
         if (explicitName != null && explicitName.isBlank()) {
@@ -221,6 +232,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         if (result.applicable() && !result.complete()) {
             throw new IllegalStateException(result.failureReason());
         }
+        resource.getAttributes().remove(SNAPSHOT_ATTR);
     }
 
     private void deleteAddress(String resourceType, String physicalId, String region) {
@@ -266,12 +278,27 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        if ("UPDATE_FAILED".equals(resource.getStatus()) && retainsFailedUpdateState(resource)) {
+            throw new IllegalStateException("Schedule rollback is still pending; its original configuration "
+                    + "cannot be discarded by another resource's update cleanup");
+        }
         resource.getAttributes().remove(SNAPSHOT_ATTR);
         UpdateCleanupResult result = ReplacementCleanup.complete(cleanupResource(resource), this::deleteAddress);
         if (!result.applicable() || result.complete()) {
             resource.getAttributes().remove(NAME_REPLACEMENT_ATTR);
         }
         return result;
+    }
+
+    @Override
+    public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
+        return ReplacementCleanup.complete(cleanupResource(resource), this::deleteAddress);
+    }
+
+    @Override
+    public void clearDeleteCleanup(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+        resource.getAttributes().remove(NAME_REPLACEMENT_ATTR);
     }
 
     @Override

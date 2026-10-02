@@ -17,6 +17,7 @@ import org.mockito.InOrder;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -285,6 +286,141 @@ class SchedulerScheduleCfnProvisionerTest {
     }
 
     @Test
+    void aNewUpdateRecoversPendingRollbackBeforeTakingAnotherSnapshot() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("same", "a"), context(null));
+        AtomicReference<Schedule> current = trackScheduleUpdates("same", "a");
+        provisioner.provision(resource, properties("same", "a").put("ScheduleExpression", "rate(10 minutes)"),
+                context("same"));
+        when(scheduler.updateSchedule(argThat(r -> "rate(5 minutes)".equals(r.getScheduleExpression())), eq(REGION)))
+                .thenThrow(new AwsException("InternalServerException", "restore failed", 500))
+                .thenAnswer(inv -> {
+                    Schedule restored = schedule(inv.getArgument(0));
+                    current.set(restored);
+                    return restored;
+                });
+
+        assertThrows(IllegalStateException.class, () -> provisioner.rollbackUpdate(resource));
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
+        assertEquals("rate(10 minutes)", current.get().getScheduleExpression());
+
+        provisioner.provision(resource, properties("same", "a").put("ScheduleExpression", "rate(15 minutes)"),
+                context("same"));
+        assertEquals("rate(15 minutes)", current.get().getScheduleExpression());
+        assertTrue(provisioner.rollbackUpdate(resource));
+
+        assertEquals("rate(5 minutes)", current.get().getScheduleExpression());
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
+    }
+
+    @Test
+    void anUnrecoverableSnapshotBlocksANewUpdateWithoutLosingTheOriginalState() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("same", "a"), context(null));
+        AtomicReference<Schedule> current = trackScheduleUpdates("same", "a");
+        provisioner.provision(resource, properties("same", "a").put("ScheduleExpression", "rate(10 minutes)"),
+                context("same"));
+        when(scheduler.updateSchedule(argThat(r -> "rate(5 minutes)".equals(r.getScheduleExpression())), eq(REGION)))
+                .thenThrow(new AwsException("InternalServerException", "restore failed", 500))
+                .thenThrow(new AwsException("InternalServerException", "restore still unavailable", 500))
+                .thenAnswer(inv -> {
+                    Schedule restored = schedule(inv.getArgument(0));
+                    current.set(restored);
+                    return restored;
+                });
+        assertThrows(IllegalStateException.class, () -> provisioner.rollbackUpdate(resource));
+        String snapshot = resource.getAttributes().get("__FlociSchedulerUpdateSnapshot");
+
+        assertThrows(IllegalStateException.class,
+                () -> provisioner.provision(resource,
+                        properties("same", "a").put("ScheduleExpression", "rate(15 minutes)"), context("same")));
+
+        assertEquals(snapshot, resource.getAttributes().get("__FlociSchedulerUpdateSnapshot"));
+        assertEquals("rate(10 minutes)", current.get().getScheduleExpression());
+        verify(scheduler, never()).updateSchedule(argThat(r -> "rate(15 minutes)".equals(r.getScheduleExpression())),
+                eq(REGION));
+        provisioner.provision(resource, properties("same", "a").put("ScheduleExpression", "rate(15 minutes)"),
+                context("same"));
+        assertTrue(provisioner.rollbackUpdate(resource));
+        assertEquals("rate(5 minutes)", current.get().getScheduleExpression());
+    }
+
+    @Test
+    void cleanupOfAnotherResourceCannotDiscardAFailedScheduleRollback() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("same", "a"), context(null));
+        trackScheduleUpdates("same", "a");
+        provisioner.provision(resource, properties("same", "a").put("ScheduleExpression", "rate(10 minutes)"),
+                context("same"));
+        when(scheduler.updateSchedule(argThat(r -> "rate(5 minutes)".equals(r.getScheduleExpression())), eq(REGION)))
+                .thenThrow(new AwsException("InternalServerException", "restore failed", 500));
+        assertThrows(IllegalStateException.class, () -> provisioner.rollbackUpdate(resource));
+        resource.setStatus("UPDATE_FAILED");
+        String snapshot = resource.getAttributes().get("__FlociSchedulerUpdateSnapshot");
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> provisioner.completeUpdate(resource));
+
+        assertTrue(failure.getMessage().contains("Schedule rollback is still pending"));
+        assertEquals(snapshot, resource.getAttributes().get("__FlociSchedulerUpdateSnapshot"));
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
+    }
+
+    @Test
+    void deleteCleanupPreservesPendingSnapshotUntilTheScheduleIsActuallyDeleted() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("same", "a"), context(null));
+        trackScheduleUpdates("same", "a");
+        provisioner.provision(resource, properties("same", "a").put("ScheduleExpression", "rate(10 minutes)"),
+                context("same"));
+        when(scheduler.updateSchedule(argThat(r -> "rate(5 minutes)".equals(r.getScheduleExpression())), eq(REGION)))
+                .thenThrow(new AwsException("InternalServerException", "restore failed", 500));
+        assertThrows(IllegalStateException.class, () -> provisioner.rollbackUpdate(resource));
+        resource.setStatus("UPDATE_FAILED");
+        String snapshot = resource.getAttributes().get("__FlociSchedulerUpdateSnapshot");
+
+        provisioner.completeDeleteCleanup(resource);
+        provisioner.clearDeleteCleanup(resource);
+        assertEquals(snapshot, resource.getAttributes().get("__FlociSchedulerUpdateSnapshot"));
+        doThrow(new AwsException("InternalServerException", "delete failed", 500)).doNothing()
+                .when(scheduler).deleteSchedule("same", "a", REGION);
+        assertThrows(AwsException.class, () -> provisioner.delete(resource, REGION));
+        assertEquals(snapshot, resource.getAttributes().get("__FlociSchedulerUpdateSnapshot"));
+
+        provisioner.delete(resource, REGION);
+
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
+        verify(scheduler, times(1)).updateSchedule(
+                argThat(r -> "rate(5 minutes)".equals(r.getScheduleExpression())), eq(REGION));
+    }
+
+    @Test
+    void deleteCleanupStillReportsDisplacedScheduleFailureAndHonorsRetain() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("old", "a"), context(null));
+        provisioner.provision(resource, properties("new", "b"), context("old"));
+        doThrow(new AwsException("InternalServerException", "delete unavailable", 500)).doNothing()
+                .when(scheduler).deleteSchedule("old", "a", REGION);
+
+        UpdateCleanupResult failed = provisioner.completeDeleteCleanup(resource);
+
+        assertFalse(failed.complete());
+        assertEquals(1, failed.attempts());
+        assertEquals("delete unavailable", failed.failureReason());
+        assertEquals("a/old", provisioner.updateCleanupPhysicalId(resource));
+        assertTrue(provisioner.completeDeleteCleanup(resource).complete());
+        verify(scheduler, times(2)).deleteSchedule("old", "a", REGION);
+        verify(scheduler, never()).deleteSchedule("new", "b", REGION);
+
+        StackResource retained = resource();
+        retained.setUpdateReplacePolicy("Retain");
+        provisioner.provision(retained, properties("retained-old", "a"), context(null));
+        provisioner.provision(retained, properties("retained-new", "b"), context("retained-old"));
+        assertTrue(provisioner.completeDeleteCleanup(retained).complete());
+        verify(scheduler, never()).deleteSchedule("retained-old", "a", REGION);
+    }
+
+    @Test
     void nameReplacementHonorsRetain() throws Exception {
         StackResource resource = resource();
         provisioner.provision(resource, properties("old", "a"), context(null));
@@ -381,6 +517,17 @@ class SchedulerScheduleCfnProvisionerTest {
             props.put("GroupName", group);
         }
         return props;
+    }
+
+    private AtomicReference<Schedule> trackScheduleUpdates(String name, String group) {
+        AtomicReference<Schedule> current = new AtomicReference<>(schedule(request(name, group, "rate(5 minutes)")));
+        when(scheduler.getSchedule(name, group, REGION)).thenAnswer(inv -> current.get());
+        when(scheduler.updateSchedule(any(), eq(REGION))).thenAnswer(inv -> {
+            Schedule updated = schedule(inv.getArgument(0));
+            current.set(updated);
+            return updated;
+        });
+        return current;
     }
 
     private ProvisionContext context(String prior) {

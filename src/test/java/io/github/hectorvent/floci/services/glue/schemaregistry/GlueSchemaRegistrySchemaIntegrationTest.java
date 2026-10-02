@@ -35,6 +35,10 @@ class GlueSchemaRegistrySchemaIntegrationTest {
                     + "\\\"fields\\\":[{\\\"name\\\":\\\"id\\\",\\\"type\\\":\\\"long\\\"},"
                     + "{\\\"name\\\":\\\"email\\\",\\\"type\\\":\\\"string\\\"}]}";
 
+    private static final String AVRO_V1_WITH_CUSTOM_ATTRIBUTES = AVRO_V1
+            .replace("\\\"fields\\\"", "\\\"x-record\\\":\\\"custom\\\",\\\"fields\\\"")
+            .replace("\\\"type\\\":\\\"long\\\"", "\\\"type\\\":\\\"long\\\",\\\"x-field\\\":\\\"custom\\\"");
+
     private static String createdSchemaVersionId;
 
     @BeforeAll
@@ -232,5 +236,43 @@ class GlueSchemaRegistrySchemaIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidInputException"));
+    }
+
+    @Test
+    @Order(12)
+    void customAvroAttributesReuseExistingVersionForRegistrationAndLookup() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.RegisterSchemaVersion")
+            .body("{ \"SchemaId\": { \"RegistryName\": \"" + REGISTRY + "\", \"SchemaName\": \"" + SCHEMA + "\" },"
+                    + " \"SchemaDefinition\": \"" + AVRO_V1_WITH_CUSTOM_ATTRIBUTES + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("SchemaVersionId", equalTo(createdSchemaVersionId))
+            .body("VersionNumber", equalTo(1));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.GetSchemaByDefinition")
+            .body("{ \"SchemaId\": { \"RegistryName\": \"" + REGISTRY + "\", \"SchemaName\": \"" + SCHEMA + "\" },"
+                    + " \"SchemaDefinition\": \"" + AVRO_V1_WITH_CUSTOM_ATTRIBUTES + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("SchemaVersionId", equalTo(createdSchemaVersionId));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.GetSchemaVersion")
+            .body("{ \"SchemaId\": { \"RegistryName\": \"" + REGISTRY + "\", \"SchemaName\": \"" + SCHEMA + "\" },"
+                    + " \"SchemaVersionNumber\": { \"LatestVersion\": true } }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("VersionNumber", equalTo(2));
     }
 }

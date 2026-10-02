@@ -43,6 +43,7 @@ public class GlueSchemaRegistryService {
     private static final int DEFAULT_MAX_RESULTS = 100;
     private static final int MAX_MAX_RESULTS = 100;
     private static final int MAX_DELETE_SCHEMA_VERSIONS = 25;
+    private static final int MAX_LOOKUP_FORMAT_ATTEMPTS = 4;
     private static final int MAX_SCHEMA_DEFINITION_LENGTH = 170_000;
 
     private static final Set<String> DATA_FORMATS = Set.of("AVRO", "JSON", "PROTOBUF");
@@ -424,8 +425,15 @@ public class GlueSchemaRegistryService {
             byNumber.remove(v);
             if (hash != null) {
                 Map<String, String> hashIndex = versionByDefinitionHash.get(key);
-                if (hashIndex != null) {
-                    hashIndex.remove(hash);
+                if (hashIndex != null && hashIndex.remove(hash, id)) {
+                    for (String remainingId : byNumber.values()) {
+                        SchemaVersion remaining = versionStore.get(remainingId).orElse(null);
+                        if (remaining != null && hash.equals(canonicalHash(
+                                remaining.getSchemaDefinition(), remaining.getDataFormat()))) {
+                            hashIndex.putIfAbsent(hash, remainingId);
+                            break;
+                        }
+                    }
                 }
             }
             if (v.equals(latestRemaining)) {
@@ -639,16 +647,31 @@ public class GlueSchemaRegistryService {
         validateDefinitionRequired(definition);
         Schema schema = resolveSchema(schemaId, region);
         String schemaKey = schemaKey(schema.getRegistryName(), schema.getSchemaName());
-        String hash = canonicalHash(definition, schema.getDataFormat());
-        Map<String, String> hashIndex = versionByDefinitionHash.get(schemaKey);
-        String id = hashIndex != null ? hashIndex.get(hash) : null;
-        if (id == null) {
-            throw new AwsException("EntityNotFoundException",
-                    "Schema version is not found. Definition not found in " + schemaKey, 400);
+        String dataFormat = schema.getDataFormat();
+        for (int attempt = 0; attempt < MAX_LOOKUP_FORMAT_ATTEMPTS; attempt++) {
+            String hash = canonicalHash(definition, dataFormat);
+            synchronized (this) {
+                String currentFormat = schemaStore.get(schemaKey)
+                        .orElseThrow(() -> new AwsException("EntityNotFoundException",
+                                "Schema is not found. " + schema.getRegistryName() + "/" + schema.getSchemaName(), 400))
+                        .getDataFormat();
+                if (!dataFormat.equals(currentFormat)) {
+                    dataFormat = currentFormat;
+                    continue;
+                }
+                Map<String, String> hashIndex = versionByDefinitionHash.get(schemaKey);
+                String id = hashIndex != null ? hashIndex.get(hash) : null;
+                if (id == null) {
+                    throw new AwsException("EntityNotFoundException",
+                            "Schema version is not found. Definition not found in " + schemaKey, 400);
+                }
+                return versionStore.get(id)
+                        .orElseThrow(() -> new AwsException("EntityNotFoundException",
+                                "Schema version vanished: " + id, 400));
+            }
         }
-        return versionStore.get(id)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                        "Schema version vanished: " + id, 400));
+        throw new AwsException("InternalServiceException",
+                "Schema format changed repeatedly during definition lookup: " + schemaKey, 500);
     }
 
     // ---- Helpers ---------------------------------------------------------
@@ -933,7 +956,7 @@ public class GlueSchemaRegistryService {
         String hash = canonicalHash(version.getSchemaDefinition(), version.getDataFormat());
         versionByDefinitionHash
                 .computeIfAbsent(schemaKey, k -> new ConcurrentHashMap<>())
-                .put(hash, version.getSchemaVersionId());
+                .putIfAbsent(hash, version.getSchemaVersionId());
     }
 
     private void rebuildVersionIndexes() {
@@ -943,7 +966,9 @@ public class GlueSchemaRegistryService {
         for (Schema s : schemaStore.scan(k -> true)) {
             arnToSchemaKey.put(s.getSchemaArn(), schemaKey(s.getRegistryName(), s.getSchemaName()));
         }
-        for (SchemaVersion v : versionStore.scan(k -> true)) {
+        List<SchemaVersion> versions = new ArrayList<>(versionStore.scan(k -> true));
+        versions.sort(Comparator.comparing(SchemaVersion::getVersionNumber));
+        for (SchemaVersion v : versions) {
             String schemaKey = arnToSchemaKey.get(v.getSchemaArn());
             if (schemaKey == null) {
                 continue;

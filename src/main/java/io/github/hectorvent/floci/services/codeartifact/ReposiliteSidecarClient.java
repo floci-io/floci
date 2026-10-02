@@ -9,6 +9,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -16,6 +17,7 @@ import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Optional;
 
 /**
@@ -233,18 +235,82 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
         }
     }
 
-    /** Deploys {@code content} to {@code repoId}'s {@code gav} path, returning the HTTP status. */
+    /**
+     * Deploys {@code content} to {@code repoId}'s {@code gav} path, returning the HTTP status.
+     *
+     * <p>Reposilite's own {@code redeployment: false} setting (set in {@link #ensureRepository})
+     * rejects a redeploy to an existing path unconditionally, even when the new content is
+     * byte-identical to what is already there (confirmed against a real instance). AWS's own
+     * CodeArtifact docs ("Overwriting package assets" in the packages-overview page) say a
+     * republish of an asset whose content matches what is already published succeeds because the
+     * operation is idempotent; only a genuine content mismatch is a real conflict. Reposilite has
+     * no content-aware mode of its own, so this checks the existing artifact first and
+     * short-circuits to a 200 on an exact match rather than ever sending Reposilite a PUT it would
+     * reject regardless of whether the retry was actually harmless. That check is best-effort: any
+     * failure reading the existing artifact falls through to the real PUT below rather than failing
+     * the deploy outright, since Reposilite's own redeployment check is still there to catch a
+     * genuine conflict either way.
+     */
     public int deployArtifact(String repoId, String gav, byte[] content) {
         String baseUrl = manager.ensureReady();
+        if (existingArtifactMatches(baseUrl, repoId, gav, content)) {
+            return 200;
+        }
         HttpRequest request = authenticated(baseUrl, repoId, gav)
                 .PUT(BodyPublishers.ofByteArray(content))
                 .build();
         return send(request, BodyHandlers.discarding()).statusCode();
     }
 
+    /**
+     * {@code true} when {@code repoId}'s {@code gav} path already holds content identical to
+     * {@code content}. Streams the existing artifact in fixed-size chunks rather than buffering it
+     * whole: {@code content} is already fully resident (RESTEasy Reactive buffers the whole request
+     * body before {@link CodeArtifactMavenController#deploy} ever runs), so comparing this way
+     * costs no second full copy for a large artifact the way downloading it to compare would.
+     *
+     * <p>Any failure reading the existing artifact, including one genuinely unexpected (a timeout,
+     * a dropped connection), reads the same as "can't confirm a match" rather than propagating: a
+     * client's upload must never fail just because this best-effort preflight did, when the real
+     * PUT below is always there as the safe fallback.
+     */
+    private boolean existingArtifactMatches(String baseUrl, String repoId, String gav, byte[] content) {
+        HttpRequest request = authenticated(baseUrl, repoId, gav).GET().build();
+        try {
+            HttpResponse<InputStream> response = httpClient.send(request, BodyHandlers.ofInputStream());
+            if (response.statusCode() != 200) {
+                response.body().close();
+                return false;
+            }
+            try (InputStream in = response.body()) {
+                byte[] buffer = new byte[8192];
+                int offset = 0;
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    if (offset + read > content.length
+                            || !Arrays.equals(buffer, 0, read, content, offset, offset + read)) {
+                        return false;
+                    }
+                    offset += read;
+                }
+                return offset == content.length;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not check {0}/{1} for an existing match before deploying: {2}", repoId, gav,
+                    e.getMessage());
+            return false;
+        }
+    }
+
     /** Fetches {@code repoId}'s {@code gav} path, or {@link Optional#empty()} on a non-200 response. */
     public Optional<FetchedArtifact> fetchArtifact(String repoId, String gav) {
-        String baseUrl = manager.ensureReady();
+        return fetchArtifact(manager.ensureReady(), repoId, gav);
+    }
+
+    private Optional<FetchedArtifact> fetchArtifact(String baseUrl, String repoId, String gav) {
         HttpRequest request = authenticated(baseUrl, repoId, gav).GET().build();
         HttpResponse<byte[]> response = send(request, BodyHandlers.ofByteArray());
         if (response.statusCode() != 200) {

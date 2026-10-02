@@ -41,15 +41,15 @@ class RamServicePersistenceTest {
         RamService reloaded = serviceWithStorage(storage);
 
         assertTrue(reloaded.isSharingWithOrganizationEnabled(OWNER));
-        List<ResourceShare> owned = reloaded.getResourceShares(OWNER, "SELF");
+        List<ResourceShare> owned = reloaded.getResourceShares(OWNER, "SELF", "us-east-1");
         assertEquals(1, owned.size());
         assertEquals(created.getResourceShareArn(), owned.getFirst().getResourceShareArn());
         assertEquals(created.getCreationTime(), owned.getFirst().getCreationTime());
 
-        List<ResourceShare> shared = reloaded.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS");
+        List<ResourceShare> shared = reloaded.getResourceShares(ACCEPTER, "OTHER-ACCOUNTS", "us-east-1");
         assertEquals(1, shared.size());
         List<SharedResource> resources = reloaded.listResources(
-                ACCEPTER, "OTHER-ACCOUNTS", List.of(created.getResourceShareArn()));
+                ACCEPTER, "OTHER-ACCOUNTS", List.of(created.getResourceShareArn()), "us-east-1");
         assertEquals(1, resources.size());
         assertEquals(TGW_ARN, resources.getFirst().arn());
     }

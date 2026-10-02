@@ -660,10 +660,13 @@ class IamPolicyEvaluatorTest {
         // Service principal and array of principals
         String servicePolicy = """
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"s3:*","Resource":"*"}]}""";
-        assertEquals(ResourcePolicyDecision.ALLOW, evaluator.evaluateResourcePolicy(
-                List.of(servicePolicy), "lambda.amazonaws.com", "s3:GetObject", "arn:aws:s3:::b/k", null));
+        assertEquals(ResourcePolicyDecision.ALLOW, evaluator.evaluateResourcePolicyFor(List.of(servicePolicy),
+                RequestPrincipal.service("lambda.amazonaws.com"), "s3:GetObject", "arn:aws:s3:::b/k", null));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateResourcePolicyFor(List.of(servicePolicy),
+                RequestPrincipal.service("ec2.amazonaws.com"), "s3:GetObject", "arn:aws:s3:::b/k", null));
+        // An IAM caller is never a service, whatever its name says.
         assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateResourcePolicy(
-                List.of(servicePolicy), "ec2.amazonaws.com", "s3:GetObject", "arn:aws:s3:::b/k", null));
+                List.of(servicePolicy), "lambda.amazonaws.com", "s3:GetObject", "arn:aws:s3:::b/k", null));
 
         String arrayPolicy = """
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["arn:aws:iam::123456789012:user/alice","arn:aws:iam::123456789012:user/bob"]},"Action":"s3:*","Resource":"*"}]}""";
@@ -673,6 +676,75 @@ class IamPolicyEvaluatorTest {
                 List.of(arrayPolicy), "arn:aws:iam::123456789012:user/bob", "s3:GetObject", "arn:aws:s3:::b/k", null));
         assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateResourcePolicy(
                 List.of(arrayPolicy), "arn:aws:iam::123456789012:user/charlie", "s3:GetObject", "arn:aws:s3:::b/k", null));
+    }
+
+    @Test
+    void eachPrincipalTypeMatchesOnlyTheCallersItCanName() {
+        RequestPrincipal alice = RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice");
+        RequestPrincipal sns = RequestPrincipal.service("sns.amazonaws.com");
+        // {"Service": "*"} is not a form AWS accepts: it matches no one, an IAM caller least of all.
+        String serviceWildcard = resourcePolicy("Allow", "\"Principal\":{\"Service\":\"*\"}");
+        assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(serviceWildcard, alice));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(serviceWildcard, sns));
+        // Federated and CanonicalUser name callers of their own kinds, never an IAM identity.
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(resourcePolicy("Allow", "\"Principal\":{\"Federated\":\"*\"}"), alice));
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(resourcePolicy("Allow", "\"Principal\":{\"CanonicalUser\":\"*\"}"), alice));
+        // {"AWS": "*"} covers services too: an FIS Deny pausing DynamoDB replication names the
+        // replication service that way. Any other AWS entry names IAM identities only.
+        assertEquals(ResourcePolicyDecision.EXPLICIT_DENY,
+                resourceDecision(resourcePolicy("Deny", "\"Principal\":{\"AWS\":\"*\"}"), sns));
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(resourcePolicy("Allow", "\"Principal\":{\"AWS\":\"123456789012\"}"), sns));
+        // A Service entry names one service, exactly.
+        String snsOnly = resourcePolicy("Allow", "\"Principal\":{\"Service\":\"sns.amazonaws.com\"}");
+        assertEquals(ResourcePolicyDecision.ALLOW, resourceDecision(snsOnly, sns));
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(snsOnly, RequestPrincipal.service("sqs.amazonaws.com")));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(snsOnly, alice));
+        // NotPrincipal is typed the same way.
+        String allButSns = resourcePolicy("Deny", "\"NotPrincipal\":{\"Service\":\"sns.amazonaws.com\"}");
+        assertEquals(ResourcePolicyDecision.EXPLICIT_DENY, resourceDecision(allButSns, alice));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(allButSns, sns));
+    }
+
+    @Test
+    void aRoleSessionMatchesItsRoleByTheRolesOwnArn() {
+        // The session ARN names the role without its path; the role's own ARN keeps it.
+        RequestPrincipal session = RequestPrincipal.roleSession(
+                "arn:aws:sts::111111111111:assumed-role/App/s", "arn:aws:iam::111111111111:role/team/App");
+        assertEquals(ResourcePolicyDecision.ALLOW, resourceDecision(resourcePolicy("Allow",
+                "\"Principal\":{\"AWS\":\"arn:aws:iam::111111111111:role/team/App\"}"), session));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(resourcePolicy("Allow",
+                "\"Principal\":{\"AWS\":\"arn:aws:iam::111111111111:role/App\"}"), session));
+        assertEquals(ResourcePolicyDecision.ALLOW, resourceDecision(resourcePolicy("Allow",
+                "\"Principal\":{\"AWS\":\"arn:aws:sts::111111111111:assumed-role/App/s\"}"), session));
+    }
+
+    @Test
+    void aServicePrincipalIsDecidedByTheResourcePolicyAlone() {
+        String sns = "sns.amazonaws.com";
+        String allowSns = resourcePolicy("Allow", "\"Principal\":{\"Service\":\"sns.amazonaws.com\"}");
+        // No identity policy, boundary or SCP stands behind a service: silence denies.
+        assertEquals(Decision.DENY, evaluator.evaluateServicePrincipal(null, sns, "sqs:SendMessage", "*", null));
+        assertEquals(Decision.DENY, evaluator.evaluateServicePrincipal(
+                List.of(resourcePolicy("Allow", "\"Principal\":{\"AWS\":\"123456789012\"}")),
+                sns, "sqs:SendMessage", "*", null));
+        assertEquals(Decision.ALLOW, evaluator.evaluateServicePrincipal(
+                List.of(allowSns), sns, "sqs:SendMessage", "*", null));
+        assertEquals(Decision.DENY, evaluator.evaluateServicePrincipal(
+                List.of(allowSns, resourcePolicy("Deny", "\"Principal\":{\"AWS\":\"*\"}")),
+                sns, "sqs:SendMessage", "*", null));
+    }
+
+    private static String resourcePolicy(String effect, String principal) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"" + effect + "\"," + principal
+                + ",\"Action\":\"*\",\"Resource\":\"*\"}]}";
+    }
+
+    private ResourcePolicyDecision resourceDecision(String policy, RequestPrincipal principal) {
+        return evaluator.evaluateResourcePolicyFor(List.of(policy), principal, "sqs:SendMessage", "*", null);
     }
 
     @Test

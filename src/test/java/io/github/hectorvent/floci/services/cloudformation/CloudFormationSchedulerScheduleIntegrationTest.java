@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.scheduler.ScheduleInvoker;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -10,21 +12,29 @@ import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.containsString;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
 
 @QuarkusTest
 class CloudFormationSchedulerScheduleIntegrationTest {
@@ -59,8 +69,11 @@ class CloudFormationSchedulerScheduleIntegrationTest {
               "Properties":{"SecretString":"explicit","GenerateSecretString":{"PasswordLength":32}}}
             """;
 
-    @Inject
+    @InjectSpy
     SchedulerService scheduler;
+
+    @Inject
+    CloudFormationService cloudFormation;
 
     @Inject
     ScheduleInvoker invoker;
@@ -211,13 +224,134 @@ class CloudFormationSchedulerScheduleIntegrationTest {
         deleteStack(failedStack);
     }
 
+    @Test
+    void anotherFailedUpdateAfterRollbackFailureRestoresTheOriginalSchedule() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-retry-" + suffix;
+        String name = "retry-" + suffix;
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        prepareFailedRollback(stack, name, queue);
+        allowOriginalRestore(name);
+
+        cloudFormation(stack, "UpdateStack", externalQueueTemplate(FAILURE, queue),
+                Map.of("Name", name, "Expression", "rate(15 minutes)", "Payload", "third"));
+        outputs(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+        getSchedule(name, "default").then().statusCode(200)
+                .body("ScheduleExpression", equalTo("rate(5 minutes)"))
+                .body("Target.Input", equalTo("payload:first"));
+        assertFalse(scheduleResource(stack).getAttributes().containsKey("__FlociSchedulerUpdateSnapshot"));
+        deleteStack(stack);
+        sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+    }
+
+    @Test
+    void anotherUpdateCannotMutateTheScheduleWhileItsOriginalRestoreStillFails() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-retry-block-" + suffix;
+        String name = "retry-block-" + suffix;
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        prepareFailedRollback(stack, name, queue);
+        String snapshot = scheduleResource(stack).getAttributes().get("__FlociSchedulerUpdateSnapshot");
+
+        cloudFormation(stack, "UpdateStack", externalQueueTemplate("", queue),
+                Map.of("Name", name, "Expression", "rate(15 minutes)", "Payload", "third"));
+        outputs(stack, "UPDATE_ROLLBACK_FAILED");
+
+        getSchedule(name, "default").then().statusCode(200)
+                .body("ScheduleExpression", equalTo("rate(10 minutes)"))
+                .body("Target.Input", equalTo("payload:changed"));
+        assertEquals(snapshot, scheduleResource(stack).getAttributes().get("__FlociSchedulerUpdateSnapshot"));
+        deleteStack(stack);
+        getSchedule(name, "default").then().statusCode(404);
+        sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+    }
+
+    @Test
+    void anUpdateThatSkipsTheScheduleCannotClearItsFailedRollback() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-skipped-" + suffix;
+        String name = "skipped-" + suffix;
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        prepareFailedRollback(stack, name, queue);
+        String snapshot = scheduleResource(stack).getAttributes().get("__FlociSchedulerUpdateSnapshot");
+        String unchanged = externalQueueTemplate("", queue);
+        cloudFormation(stack, "UpdateStack", unchanged, Map.of("Name", name));
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
+                        .formParam("Action", "DescribeStacks").formParam("StackName", stack).post("/")
+                        .then().statusCode(200)
+                        .body(containsString("<StackStatus>UPDATE_COMPLETE_CLEANUP_IN_PROGRESS</StackStatus>"))
+                        .body(containsString("Schedule rollback is still pending")));
+        assertEquals(snapshot, scheduleResource(stack).getAttributes().get("__FlociSchedulerUpdateSnapshot"));
+        assertEquals(unchanged, cloudFormation.describeStacks(stack, "us-east-1").getFirst().getOriginalTemplateBody());
+        getSchedule(name, "default").then().statusCode(200)
+                .body("ScheduleExpression", equalTo("rate(10 minutes)"))
+                .body("Target.Input", equalTo("payload:changed"));
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
+                .formParam("Action", "UpdateStack").formParam("StackName", stack)
+                .formParam("TemplateBody", unchanged).post("/").then().statusCode(400)
+                .body(containsString("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS"));
+        deleteStack(stack);
+        getSchedule(name, "default").then().statusCode(404);
+        sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+    }
+
+    @Test
+    void failedStackDeletionKeepsThePendingScheduleSnapshotForDeletionRetry() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-delete-retry-" + suffix;
+        String name = "delete-retry-" + suffix;
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        prepareFailedRollback(stack, name, queue);
+        String snapshot = scheduleResource(stack).getAttributes().get("__FlociSchedulerUpdateSnapshot");
+        doThrow(new AwsException("InternalServerException", "schedule deletion unavailable", 500))
+                .doCallRealMethod().when(scheduler).deleteSchedule(name, "default", "us-east-1");
+
+        cloudFormation(stack, "DeleteStack", null, Map.of());
+        outputs(stack, "DELETE_FAILED");
+
+        assertEquals(snapshot, scheduleResource(stack).getAttributes().get("__FlociSchedulerUpdateSnapshot"));
+        getSchedule(name, "default").then().statusCode(200)
+                .body("ScheduleExpression", equalTo("rate(10 minutes)"))
+                .body("Target.Input", equalTo("payload:changed"));
+
+        deleteStack(stack);
+        getSchedule(name, "default").then().statusCode(404);
+        sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+    }
+
+    private void prepareFailedRollback(String stack, String name, Queue queue) {
+        cloudFormation(stack, "CreateStack", externalQueueTemplate("", queue), Map.of("Name", name));
+        outputs(stack, "CREATE_COMPLETE");
+        doThrow(new AwsException("InternalServerException", "original restore unavailable", 500))
+                .when(scheduler).updateSchedule(argThat(request -> name.equals(request.getName())
+                        && "rate(5 minutes)".equals(request.getScheduleExpression())), eq("us-east-1"));
+        cloudFormation(stack, "UpdateStack", externalQueueTemplate(FAILURE, queue),
+                Map.of("Name", name, "Expression", "rate(10 minutes)", "Payload", "changed"));
+        outputs(stack, "UPDATE_ROLLBACK_FAILED");
+        getSchedule(name, "default").then().statusCode(200)
+                .body("ScheduleExpression", equalTo("rate(10 minutes)"));
+        assertTrue(scheduleResource(stack).getAttributes().containsKey("__FlociSchedulerUpdateSnapshot"));
+    }
+
+    private void allowOriginalRestore(String name) {
+        doCallRealMethod().when(scheduler).updateSchedule(argThat(request -> name.equals(request.getName())
+                && "rate(5 minutes)".equals(request.getScheduleExpression())), eq("us-east-1"));
+    }
+
+    private StackResource scheduleResource(String stack) {
+        return cloudFormation.describeStacks(stack, "us-east-1").getFirst().getResources().get("Schedule");
+    }
+
     private static String template(String policy, String name, String failure) {
         return TEMPLATE.formatted(policy, name, failure);
     }
 
     private String externalQueueTemplate(String failure, Queue queue) {
-        // SQS currently cannot roll back an in-place queue update. An externally managed target
-        // keeps these failure-path tests focused on the schedule's own rollback contract.
+        // An externally managed target keeps these failure-path tests focused on the schedule's
+        // own rollback contract rather than a sibling queue's update lifecycle.
         try {
             ObjectNode template = (ObjectNode) new ObjectMapper().readTree(template("Delete", NAME, failure));
             ObjectNode resources = (ObjectNode) template.get("Resources");

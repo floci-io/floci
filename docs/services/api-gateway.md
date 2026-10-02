@@ -31,8 +31,9 @@ aws apigateway create-rest-api \
 ```
 
 The override key is consumed rather than stored, so it never appears in the tags the API returns. Any
-other tags in the same request are kept. Because an ID cannot change after creation, supplying either
-override key to `TagResource` is rejected with `BadRequestException`.
+other tags in the same request are kept. Because an ID cannot change after creation, an override that
+differs from the API's ID is rejected with `BadRequestException`. Resending the current ID is accepted,
+so CloudFormation and Terraform updates keep working.
 
 Values must be non-blank and must not contain whitespace, control characters, or `/`, `?`, `#`, since
 those would break the endpoint URL. An invalid value is rejected with `BadRequestException`.
@@ -286,6 +287,7 @@ These management-plane operations have no handler in v1. Calls will return `404`
 The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`)
 is implemented separately and is not counted as management-plane operations. A deployed REST
 API is also available at `http://{apiId}.execute-api.localhost.floci.io:4566/{stage}/{path}`
+(or with the region label, `{apiId}.execute-api.{region}.localhost.floci.io`)
 and `/execute-api/{apiId}/{stage}/{path}`. All three forms use the same method authorization
 and mappings. It supports these integration types; others return an error:
 
@@ -480,6 +482,13 @@ When an API has a `$default` stage, callers may omit the stage segment:
 
 ```bash
 curl http://{apiId}.execute-api.localhost.floci.io:4566/{path}
+```
+
+The region-bearing form a client derives from a stage's invoke URL is accepted on the
+same domain, as it is on `localhost` and the configured `FLOCI_HOSTNAME`:
+
+```bash
+curl http://{apiId}.execute-api.{region}.localhost.floci.io:4566/{stageName}/{path}
 ```
 
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to

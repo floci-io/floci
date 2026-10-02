@@ -196,21 +196,30 @@ public class CloudWatchMetricStreamsService {
     }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
-        return findByArn(resourceArn, region).map(MetricStream::getTags).orElse(Map.of());
+        return requireStream(resourceArn, region).getTags();
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags, String region) {
-        findByArn(resourceArn, region).ifPresent(stream -> {
-            stream.getTags().putAll(tags);
-            streamStore.put(key(region, stream.getName()), stream);
-        });
+        MetricStream stream = requireStream(resourceArn, region);
+        stream.getTags().putAll(tags);
+        streamStore.put(key(region, stream.getName()), stream);
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
-        findByArn(resourceArn, region).ifPresent(stream -> {
-            tagKeys.forEach(stream.getTags()::remove);
-            streamStore.put(key(region, stream.getName()), stream);
-        });
+        MetricStream stream = requireStream(resourceArn, region);
+        tagKeys.forEach(stream.getTags()::remove);
+        streamStore.put(key(region, stream.getName()), stream);
+    }
+
+    /**
+     * Resolves the stream an ARN names, or reports that nothing does. The tag operations declare
+     * {@code ResourceNotFoundException}, the same code {@code GetMetricStream} already answers
+     * with, so an unknown ARN here reads the same way an unknown name does.
+     */
+    private MetricStream requireStream(String resourceArn, String region) {
+        return findByArn(resourceArn, region).orElseThrow(() ->
+                new AwsException("ResourceNotFoundException",
+                        "Metric stream " + resourceArn + " does not exist.", 404));
     }
 
     private Optional<MetricStream> findByArn(String resourceArn, String region) {
