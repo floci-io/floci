@@ -134,11 +134,13 @@ class CloudFormationServiceRollbackTest {
         for (StackResource resource : new StackResource[] {role, logGroup, alreadyDeleted, adopted, owned}) {
             stack.getResources().put(resource.getLogicalId(), resource);
         }
-        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
 
         service.deleteStackResources(stack, REGION, ACCOUNT);
 
         assertEquals("DELETE_COMPLETE", stack.getStatus());
+        verify(provisioner).completeDeleteCleanup(role);
+        verify(provisioner, never()).completeUpdate(any());
         verify(provisioner).delete(role, REGION);
         verify(provisioner).delete(logGroup, REGION);
         verify(provisioner).delete(owned, REGION);
@@ -160,7 +162,7 @@ class CloudFormationServiceRollbackTest {
 
         StackResource bucket = resource("Bucket", "leak-probe-bucket", "AWS::S3::Bucket", "UPDATE_FAILED");
         stack.getResources().put(bucket.getLogicalId(), bucket);
-        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
         doThrow(new AwsException("BucketNotEmpty", "The bucket you tried to delete is not empty", 409))
                 .when(provisioner).delete(eq(bucket), eq(REGION));
 
