@@ -5,6 +5,7 @@ import io.restassured.RestAssured;
 import io.restassured.config.EncoderConfig;
 import io.restassured.http.ContentType;
 import io.restassured.parsing.Parser;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -136,8 +137,7 @@ class CloudFormationCognitoUserToGroupAttachmentIntegrationTest {
         .then()
             .statusCode(200)
             .extract().asString();
-        int start = xml.indexOf("<StackId>") + "<StackId>".length();
-        return xml.substring(start, xml.indexOf("</StackId>", start));
+        return XmlPath.from(xml).getString(action + "Response." + action + "Result.StackId");
     }
 
     private static void deleteStack(String stackName) {
@@ -170,7 +170,8 @@ class CloudFormationCognitoUserToGroupAttachmentIntegrationTest {
         long deadline = System.currentTimeMillis() + 10_000;
         while (System.currentTimeMillis() < deadline) {
             xml = describeStacks(stackId);
-            if (xml.contains("<StackStatus>" + status + "</StackStatus>")) {
+            if (status.equals(XmlPath.from(xml).getString(
+                    "DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus"))) {
                 return;
             }
             Thread.sleep(50);
@@ -179,8 +180,9 @@ class CloudFormationCognitoUserToGroupAttachmentIntegrationTest {
     }
 
     private static String outputValue(String stackId, String key) {
-        return describeStacks(stackId).split("<OutputKey>" + key + "</OutputKey>")[1]
-                .split("<OutputValue>")[1].split("</OutputValue>")[0];
+        return XmlPath.from(describeStacks(stackId)).getString(
+                "DescribeStacksResponse.DescribeStacksResult.Stacks.member.Outputs.member.find { it.OutputKey == '"
+                        + key + "' }.OutputValue");
     }
 
     private ValidatableResponse cognito(String target, String body) {
