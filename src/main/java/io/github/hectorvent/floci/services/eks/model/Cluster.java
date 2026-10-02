@@ -112,8 +112,15 @@ public class Cluster {
 
     private AccessConfig accessConfig;
 
+    @JsonProperty("upgradePolicy")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private UpgradePolicy upgradePolicy;
+
     public AccessConfig getAccessConfig() { return accessConfig; }
     public void setAccessConfig(AccessConfig accessConfig) { this.accessConfig = accessConfig; }
+
+    public UpgradePolicy getUpgradePolicy() { return upgradePolicy; }
+    public void setUpgradePolicy(UpgradePolicy upgradePolicy) { this.upgradePolicy = upgradePolicy; }
 
     public Cluster() {}
 
@@ -216,6 +223,7 @@ public class Cluster {
         c.nodeInstanceType = this.nodeInstanceType;
         c.clusterArgs = this.clusterArgs != null ? new ArrayList<>(this.clusterArgs) : null;
         c.accessConfig = this.accessConfig;
+        c.upgradePolicy = this.upgradePolicy;
         return c;
     }
 }

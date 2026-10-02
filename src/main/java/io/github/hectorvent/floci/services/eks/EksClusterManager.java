@@ -1052,6 +1052,12 @@ public class EksClusterManager
                         accountId, logGroup, logStream, region, "eks-audit:" + clusterName, false));
     }
 
+    /** Follows the cluster's current log types, after UpdateClusterConfig changed them. */
+    public void reattachClusterLogs(Cluster cluster) {
+        closeQuietly(clusterLogHandles.remove(clusterResourceName(cluster)));
+        attachClusterLogsFromNow(cluster);
+    }
+
     Closeable getLogHandle(Cluster cluster) {
         return clusterLogHandles.get(clusterResourceName(cluster));
     }
