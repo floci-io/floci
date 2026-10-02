@@ -140,6 +140,15 @@ public final class CfnRollback {
      */
     public static final String LAUNCH_TEMPLATE_UPDATE_SNAPSHOT_ATTR = "__FlociLaunchTemplateUpdateSnapshot";
 
+    /**
+     * Holds what a custom resource had before an update sent its handler an {@code Update}: the
+     * physical id, the old and the attempted properties, the region and the {@code Data} attributes,
+     * so a failed stack update can send the handler the old properties back, whether the handler
+     * applied the update or failed it. Written by {@code CustomResourceCfnProvisioner} before the
+     * invoke and spent by its {@code rollbackUpdate}.
+     */
+    public static final String CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR = "__FlociCustomResourceUpdateSnapshot";
+
     private CfnRollback() {
     }
 

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -9,7 +10,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.CustomResourceResponseStore;
+import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -22,6 +25,7 @@ import java.time.Duration;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 
 /**
  * Provisions {@code AWS::CloudFormation::CustomResource} and every {@code Custom::*} type, moved out
@@ -45,6 +49,9 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
     /** Reserved attribute keys used to carry custom-resource state to the later Delete invocation. */
     private static final String CR_SERVICE_TOKEN_ATTR = "__FlociServiceToken";
     private static final String CR_PROPERTIES_ATTR = "__FlociResourceProperties";
+    private static final String CR_STACK_ID_ATTR = "__FlociStackId";
+    /** Prefix of every attribute Floci keeps for itself; the others are the handler's {@code Data}. */
+    private static final String RESERVED_ATTR_PREFIX = "__Floci";
     /**
      * How long to wait for the Lambda's ResponseURL callback after the synchronous invoke returns.
      * The invoke already blocks until the handler finishes, so this only covers a PUT that lands
@@ -74,6 +81,8 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR);
         CloudFormationTemplateEngine engine = ctx.engine();
         String region = ctx.region();
         String accountId = ctx.accountId();
@@ -117,16 +126,15 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
             return;
         }
 
+        String stackId = stackIdOrMinted(engine.getStackId(), region, accountId, stackName);
+        validateServiceToken(serviceToken, region);
+        if (isUpdate) {
+            snapshotBeforeUpdate(r, oldResourceProperties, resourceProperties, region);
+        }
         JsonNode response = invokeCustomResourceHandler(serviceToken, requestType, r.getLogicalId(),
                 r.getResourceType(), priorPhysicalId, resourceProperties, oldResourceProperties,
-                region, accountId, stackName);
-
-        String status = response.path("Status").asText("FAILED");
-        if (!"SUCCESS".equals(status)) {
-            throw new AwsException("CustomResourceFailed",
-                    "Custom resource handler reported FAILED: "
-                            + response.path("Reason").asText("(no reason given)"), 400);
-        }
+                region, stackId);
+        requireSuccess(response);
 
         String returnedPhysicalId = response.path("PhysicalResourceId").asText(null);
         if (returnedPhysicalId != null && !returnedPhysicalId.isBlank()) {
@@ -138,30 +146,32 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
         }
 
         // Data.* become Fn::GetAtt attributes on the custom resource.
-        JsonNode data = response.path("Data");
-        if (data.isObject()) {
-            data.fields().forEachRemaining(e ->
-                    r.getAttributes().put(e.getKey(), nodeToAttributeValue(e.getValue())));
-        }
+        putData(r, response.path("Data"));
 
         // Stash what a later Delete invocation needs (delete() only gets the StackResource).
         r.getAttributes().put(CR_SERVICE_TOKEN_ATTR, serviceToken);
         r.getAttributes().put(CR_PROPERTIES_ATTR, resourceProperties.toString());
+        r.getAttributes().put(CR_STACK_ID_ATTR, stackId);
     }
 
     @Override
     public void delete(StackResource r, String region) {
+        ObjectNode stashed = readStashedProperties(r);
+        deleteWith(r, stashed != null ? stashed : objectMapper.createObjectNode(), region);
+    }
+
+    private void deleteWith(StackResource r, ObjectNode resourceProperties, String region) {
         String serviceToken = r.getAttributes().get(CR_SERVICE_TOKEN_ATTR);
         if (serviceToken == null || serviceToken.isBlank()) {
             LOG.debugv("Custom resource {0} has no stored ServiceToken; skipping Delete", r.getLogicalId());
             return;
         }
-        ObjectNode stashed = readStashedProperties(r);
-        ObjectNode resourceProperties = stashed != null ? stashed : objectMapper.createObjectNode();
+        // A resource stashed before the stack id was recorded has none, and delete() has no stack.
+        String stackId = stackIdOrMinted(r.getAttributes().get(CR_STACK_ID_ATTR), region,
+                accountFromArn(serviceToken), "");
         try {
             JsonNode response = invokeCustomResourceHandler(serviceToken, "Delete", r.getLogicalId(),
-                    r.getResourceType(), r.getPhysicalId(), resourceProperties, null, region,
-                    accountFromArn(serviceToken), "");
+                    r.getResourceType(), r.getPhysicalId(), resourceProperties, null, region, stackId);
             if (!"SUCCESS".equals(response.path("Status").asText("FAILED"))) {
                 LOG.warnv("Custom resource {0} Delete reported FAILED: {1}",
                         r.getLogicalId(), response.path("Reason").asText("(no reason given)"));
@@ -170,6 +180,128 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
             // Best-effort, consistent with the rest of the delete path.
             LOG.debugv("Custom resource {0} Delete invocation failed: {1}", r.getLogicalId(), e.getMessage());
         }
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        return rollbackUpdate(resource, event -> { });
+    }
+
+    /**
+     * An Update that reached the handler and then failed keeps its copy for {@link #rollbackUpdate},
+     * because CloudFormation sends that handler the old properties back too.
+     */
+    @Override
+    public boolean retainsFailedUpdateState(StackResource resource) {
+        return resource.getAttributes().containsKey(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    /**
+     * Undoes an update that reached the handler, as CloudFormation does, whether the handler applied
+     * it or failed it. An update that replaced the resource gets a Delete for the replacement, and
+     * the resource points back at the one it displaced. One that kept the physical id gets a second
+     * Update carrying the old properties, with the attempted ones as OldResourceProperties. A
+     * handler that fails that Update fails the rollback, and the snapshot stays for another attempt.
+     */
+    @Override
+    public boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress) {
+        String raw = resource.getAttributes().get(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return true;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = objectMapper.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the custom resource update snapshot for "
+                    + resource.getLogicalId(), e);
+        }
+        String priorPhysicalId = snapshot.path("physicalId").asText();
+        ObjectNode oldProperties = (ObjectNode) snapshot.get("properties");
+        ObjectNode attemptedProperties = (ObjectNode) snapshot.get("attempted");
+        String region = snapshot.path("region").asText();
+        String currentPhysicalId = resource.getPhysicalId();
+        // CloudFormation holds the rollback target as the resource's properties even when the handler
+        // fails it: a later Delete, or the next update's OldResourceProperties, carries them.
+        resource.getAttributes().put(CR_PROPERTIES_ATTR, oldProperties.toString());
+        if (!priorPhysicalId.equals(currentPhysicalId)) {
+            deleteWith(resource, attemptedProperties, region);
+            resource.setPhysicalId(priorPhysicalId);
+            replaceData(resource, snapshot.path("attributes"));
+        } else {
+            ProvisionContext.report(progress, currentPhysicalId, "UPDATE_IN_PROGRESS", null);
+            String serviceToken = resource.getAttributes().get(CR_SERVICE_TOKEN_ATTR);
+            String stackId = stackIdOrMinted(resource.getAttributes().get(CR_STACK_ID_ATTR), region,
+                    accountFromArn(serviceToken), "");
+            JsonNode response = invokeCustomResourceHandler(serviceToken, "Update", resource.getLogicalId(),
+                    resource.getResourceType(), currentPhysicalId, oldProperties, attemptedProperties,
+                    region, stackId);
+            requireSuccess(response);
+            String returnedPhysicalId = response.path("PhysicalResourceId").asText(null);
+            if (returnedPhysicalId != null && !returnedPhysicalId.isBlank()
+                    && !returnedPhysicalId.equals(currentPhysicalId)) {
+                // Floci has no rollback cleanup phase, so the id the rollback displaced goes now.
+                deleteWith(resource, attemptedProperties, region);
+                resource.setPhysicalId(returnedPhysicalId);
+            }
+            replaceData(resource, response.path("Data"));
+        }
+        resource.getAttributes().remove(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    /**
+     * Keeps what the resource has before an Update reaches its handler, so {@link #rollbackUpdate}
+     * can send the old properties back: the physical id, the old and the attempted properties, the
+     * region and the {@code Data} attributes.
+     */
+    private void snapshotBeforeUpdate(StackResource r, ObjectNode oldResourceProperties,
+                                      ObjectNode attemptedProperties, String region) {
+        ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.put("physicalId", r.getPhysicalId());
+        snapshot.set("properties", oldResourceProperties);
+        snapshot.set("attempted", attemptedProperties);
+        snapshot.put("region", region);
+        ObjectNode attributes = snapshot.putObject("attributes");
+        r.getAttributes().forEach((key, value) -> {
+            if (!key.startsWith(RESERVED_ATTR_PREFIX)) {
+                attributes.put(key, value);
+            }
+        });
+        r.getAttributes().put(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    /**
+     * Runs the checks Lambda's Invoke makes on the ServiceToken before any handler is reached: the
+     * function reference must parse, and an ARN must name this region. They run ahead of the update
+     * snapshot, so an Update rejected here never reaches a handler and owes it no rollback.
+     */
+    private static void validateServiceToken(String serviceToken, String region) {
+        LambdaArnUtils.ResolvedFunctionRef handler = LambdaArnUtils.resolveWithQualifier(serviceToken, null);
+        if (handler.region() != null && !handler.region().equals(region)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Region '" + handler.region() + "' in ARN does not match request region '" + region + "'", 400);
+        }
+    }
+
+    private static void requireSuccess(JsonNode response) {
+        if (!"SUCCESS".equals(response.path("Status").asText("FAILED"))) {
+            throw new AwsException("CustomResourceFailed",
+                    "Custom resource handler reported FAILED: "
+                            + response.path("Reason").asText("(no reason given)"), 400);
+        }
+    }
+
+    private static void putData(StackResource r, JsonNode data) {
+        if (data.isObject()) {
+            data.fields().forEachRemaining(e ->
+                    r.getAttributes().put(e.getKey(), nodeToAttributeValue(e.getValue())));
+        }
+    }
+
+    private static void replaceData(StackResource r, JsonNode data) {
+        r.getAttributes().keySet().removeIf(key -> !key.startsWith(RESERVED_ATTR_PREFIX));
+        putData(r, data);
     }
 
     // Reads the ResourceProperties stashed at the last create/update (CR_PROPERTIES_ATTR).
@@ -192,14 +324,13 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
     private JsonNode invokeCustomResourceHandler(String serviceToken, String requestType, String logicalId,
                                                  String resourceType, String physicalId,
                                                  ObjectNode resourceProperties, ObjectNode oldResourceProperties,
-                                                 String region, String accountId, String stackName) {
+                                                 String region, String stackId) {
         String token = customResourceResponseStore.register();
         try {
             ObjectNode event = objectMapper.createObjectNode();
             event.put("RequestType", requestType);
             event.put("ResponseURL", reachableEndpoint.baseUrl() + "/cfn-response/" + token);
-            event.put("StackId", AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/"
-                    + (stackName == null ? "" : stackName) + "/" + UUID.randomUUID()).toString());
+            event.put("StackId", stackId);
             event.put("RequestId", UUID.randomUUID().toString());
             event.put("ResourceType", resourceType);
             event.put("LogicalResourceId", logicalId);
@@ -262,6 +393,19 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
             return out;
         }
         return objectMapper.getNodeFactory().textNode(node.asText());
+    }
+
+    /**
+     * The {@code StackId} a request carries: the id of the stack that contains the resource, the
+     * value {@code Ref AWS::StackId} returns. A resource with no stack ARN, one provisioned through
+     * Cloud Control or one stashed before the id was recorded, gets one minted in its place.
+     */
+    private static String stackIdOrMinted(String stackId, String region, String accountId, String stackName) {
+        if (AwsArnUtils.isArn(stackId)) {
+            return stackId;
+        }
+        return AwsArnUtils.Arn.of("cloudformation", region, accountId, "stack/"
+                + (stackName == null ? "" : stackName) + "/" + UUID.randomUUID()).toString();
     }
 
     private static String accountFromArn(String arn) {
