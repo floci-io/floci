@@ -275,6 +275,12 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         }
         String description = ctx.resolveOptional(props, "Description");
         JsonNode endpoint = props != null ? props.get("EndpointConfiguration") : null;
+        List<String> endpointTypes = endpoint != null ? ctx.resolveStringList(endpoint, "Types") : List.of();
+        // CreateRestApi rejects more than one type. An update rejects them too, before anything changes.
+        if (endpointTypes.size() > 1) {
+            throw new AwsException("BadRequestException",
+                    "Endpoint configuration types must contain exactly one value.", 400);
+        }
         // A declared Body or BodyS3Location is the whole OpenAPI document. Measured on real AWS
         // it becomes the RestApi's Body with no synthesized Resource or Method, so putRestApi plus
         // applyOpenApiSpec is the only place that turns it into resources and methods. Resolved
@@ -287,9 +293,9 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
             List<Map<String, String>> operations = new ArrayList<>(List.of(
                     replacePatchOp("/name", name), replacePatchOp("/description", description)));
             if (endpoint != null) {
-                List<String> types = ctx.resolveStringList(endpoint, "Types");
                 operations.addAll(endpointPatchOps(existing.getEndpointConfiguration(),
-                        types.isEmpty() ? null : types.getFirst(), ctx.resolveStringList(endpoint, "VpcEndpointIds")));
+                        endpointTypes.isEmpty() ? null : endpointTypes.getFirst(),
+                        ctx.resolveStringList(endpoint, "VpcEndpointIds")));
             }
             api = apiGatewayService.updateRestApi(region, existing.getId(), operations);
         } else {
@@ -298,7 +304,7 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
             req.put("description", description);
             if (endpoint != null) {
                 Map<String, Object> epReq = new HashMap<>();
-                epReq.put("types", ctx.resolveStringList(endpoint, "Types"));
+                epReq.put("types", endpointTypes);
                 epReq.put("vpcEndpointIds", ctx.resolveStringList(endpoint, "VpcEndpointIds"));
                 req.put("endpointConfiguration", epReq);
             }
@@ -318,6 +324,8 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
             } catch (RuntimeException failure) {
                 if (existing != null) {
                     unwind(r, failure);
+                } else if (ctx.isUpdate()) {
+                    discard(r, api.getId(), region, failure);
                 }
                 throw failure;
             }
@@ -423,6 +431,26 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * Deletes the API an update created in place of one removed out of band, when putRestApi
+     * rejected its OpenAPI document. CloudFormationService restores the resource the stack held
+     * before the attempt, so nothing else tracks the new API. An API that cannot be deleted is
+     * listed for the next cleanup, which the restored resource inherits, and the update reports a
+     * rollback failure. {@code failure} stays the reported error.
+     */
+    private void discard(StackResource r, String apiId, String region, RuntimeException failure) {
+        try {
+            delete(REST_API, apiId, region);
+        } catch (RuntimeException deleteFailure) {
+            failure.addSuppressed(deleteFailure);
+            LOG.warnv("Could not remove REST API {0}, created for {1} by a failed update: {2}",
+                    apiId, r.getLogicalId(), deleteFailure.getMessage());
+            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, "Could not remove REST API " + apiId
+                    + ", created for " + r.getLogicalId() + " by a failed update: " + deleteFailure.getMessage());
+            ReplacementCleanup.recordOrphan(r, apiId, REST_API, region);
+        }
+    }
+
+    /**
      * A {@code replace} patch operation for {@link ApiGatewayService#updateRestApi}, allowing a
      * {@code null} value ({@code Map.of} rejects one) so an undeclared property can still be
      * cleared rather than left at whatever {@code putRestApi} last wrote to it.
@@ -484,6 +512,9 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         String ttl = ctx.resolveOptional(props, "AuthorizerResultTtlInSeconds");
         if (ttl != null) {
             req.put("authorizerResultTtlInSeconds", ttl);
+        }
+        if (props != null && props.has("ProviderARNs")) {
+            req.put("providerARNs", ctx.resolveStringList(props, "ProviderARNs"));
         }
         Authorizer authorizer = apiGatewayService.createAuthorizer(ctx.region(), apiId, req);
         r.setPhysicalId(authorizer.getId());

@@ -104,6 +104,9 @@ public class EksClusterManager
     // MutatingWebhookConfiguration registered. The directory sits under the cluster's named data
     // volume; the Docker copy resolves through the container's mounts, so the file lands there.
     static final String K3S_DATA_DIR = "/var/lib/rancher/k3s";
+    static final String CONTAINERD_CERTS_DIR = "agent/etc/containerd/certs.d";
+    static final String CONTAINERD_CERTS_TARGET = K3S_DATA_DIR + "/" + CONTAINERD_CERTS_DIR;
+    static final String CONTAINERD_CERTS_LINK = "etc/containerd/certs.d";
     static final String POD_IDENTITY_MANIFEST_FILE = "floci-eks-pod-identity.yaml";
     static final String POD_IDENTITY_MANIFEST_TAR_ENTRY = "server/manifests/" + POD_IDENTITY_MANIFEST_FILE;
     private static final String ENDPOINT_MODE_NETWORK = "network";
@@ -554,6 +557,7 @@ public class EksClusterManager
             copyAuditPolicyIntoContainer(containerId, auditPolicyLocalFile, cluster.getName());
         }
         injectEcrRegistryMirror(containerId, cluster.getName());
+        linkContainerdCertsDir(containerId, cluster.getName());
         registerPodIdentityWebhook(containerId, cluster);
         if (signingKeyFiles != null) {
             copySigningKeysIntoContainer(containerId, signingKeyFiles, cluster.getName());
@@ -1718,6 +1722,53 @@ public class EksClusterManager
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0} gets no ECR registry mirror: could not copy registries.yaml "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
+        }
+    }
+
+    /**
+     * Symlinks {@code /etc/containerd/certs.d} to k3s containerd's certs directory
+     * ({@code /var/lib/rancher/k3s/agent/etc/containerd/certs.d}) inside the container before start.
+     * EKS node group launch template user data writes registry host configurations (including
+     * pull-through caches and custom headers) to {@code /etc/containerd/certs.d}; the symlink
+     * routes those writes directly into k3s containerd's certs directory and preserves them across
+     * cluster container restarts in the cluster's named data volume.
+     */
+    void linkContainerdCertsDir(String containerId, String clusterName) {
+        try {
+            lifecycleManager.getDockerClient()
+                    .copyArchiveToContainerCmd(containerId)
+                    .withTarInputStream(new ByteArrayInputStream(buildContainerdCertsLinkTar()))
+                    .withRemotePath("/")
+                    .exec();
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0}: could not link containerd certs.d directory: {1}",
+                    clusterName, e.getMessage());
+        }
+    }
+
+    static byte[] buildContainerdCertsLinkTar() {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(out)) {
+                TarArchiveEntry targetDir = new TarArchiveEntry(CONTAINERD_CERTS_TARGET.substring(1) + "/");
+                targetDir.setMode(0755);
+                tar.putArchiveEntry(targetDir);
+                tar.closeArchiveEntry();
+
+                TarArchiveEntry containerdDir = new TarArchiveEntry("etc/containerd/");
+                containerdDir.setMode(0755);
+                tar.putArchiveEntry(containerdDir);
+                tar.closeArchiveEntry();
+
+                TarArchiveEntry symlink = new TarArchiveEntry(CONTAINERD_CERTS_LINK, TarArchiveEntry.LF_SYMLINK);
+                symlink.setLinkName(CONTAINERD_CERTS_TARGET);
+                symlink.setMode(0777);
+                tar.putArchiveEntry(symlink);
+                tar.closeArchiveEntry();
+            }
+            return out.toByteArray();
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not build in-memory tar for containerd certs.d link", e);
         }
     }
 

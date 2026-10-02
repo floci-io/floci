@@ -24,6 +24,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -45,10 +46,21 @@ class StsQueryHandlerTest {
     private static final Pattern ARN = Pattern.compile("<Arn>([^<]+)</Arn>");
 
     private static StsQueryHandler newHandler() {
-        return newHandler(new RegionResolver(REGION, "000000000000"));
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        return newHandler(role);
     }
 
-    private static StsQueryHandler newHandler(RegionResolver regionResolver) {
+    private static StsQueryHandler newHandler(IamRole role) {
+        return newHandler(role, new RegionResolver(REGION, "000000000000"));
+    }
+
+    private static StsQueryHandler newHandlerForRegion(RegionResolver regionResolver) {
+        return newHandler(null, regionResolver);
+    }
+
+    private static StsQueryHandler newHandler(IamRole role, RegionResolver regionResolver) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iam = mock(EmulatorConfig.IamServiceConfig.class);
@@ -56,8 +68,11 @@ class StsQueryHandlerTest {
         when(services.iam()).thenReturn(iam);
         when(iam.enforcementEnabled()).thenReturn(false);
 
+        IamService iamService = mock(IamService.class);
+        when(iamService.findRole(anyString(), anyString())).thenReturn(Optional.ofNullable(role));
+
         return new StsQueryHandler(
-                mock(IamService.class),
+                iamService,
                 mock(AccountResolver.class),
                 regionResolver,
                 config,
@@ -90,6 +105,96 @@ class StsQueryHandlerTest {
 
         assertNotEquals(extract(SECRET_ACCESS_KEY, firstBody), extract(SECRET_ACCESS_KEY, secondBody));
         assertNotEquals(extract(SESSION_TOKEN, firstBody), extract(SESSION_TOKEN, secondBody));
+    }
+
+    @Test
+    void assumeRoleDeniesRoleThatDoesNotExist() {
+        StsQueryHandler handler = newHandler(null);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/definitely-does-not-exist");
+        params.putSingle("RoleSessionName", "test-session");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(403, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>AccessDenied</Code>"));
+    }
+
+    @Test
+    void assumeRoleDeniesRoleWhenPathDiffers() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setPath("/team/");
+        role.setArn("arn:aws:iam::000000000000:role/team/TestRole");
+        StsQueryHandler handler = newHandler(role);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/other/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(403, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>AccessDenied</Code>"));
+    }
+
+    @Test
+    void assumeRoleAllowsPartitionCorrectRoleArn() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setPath("/");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        StsQueryHandler handler = newHandler(role);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws-cn:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Arn>arn:aws:sts::000000000000:assumed-role/TestRole/test-session</Arn>"),
+                "AssumedRoleUser Arn must use the stored role's partition");
+    }
+
+    @Test
+    void assumeRoleAllowsGovCloudPartitionRoleArn() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setPath("/");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        StsQueryHandler handler = newHandler(role);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws-us-gov:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Arn>arn:aws:sts::000000000000:assumed-role/TestRole/test-session</Arn>"),
+                "AssumedRoleUser Arn must use the stored role's partition");
+    }
+
+    @Test
+    void roleArnMatchesValidatesPartitionsAndPaths() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setPath("/team/");
+        role.setArn("arn:aws:iam::000000000000:role/team/TestRole");
+
+        assertTrue(StsQueryHandler.roleArnMatches("arn:aws:iam::000000000000:role/team/TestRole", role));
+        assertTrue(StsQueryHandler.roleArnMatches("arn:aws-cn:iam::000000000000:role/team/TestRole", role));
+        assertTrue(StsQueryHandler.roleArnMatches("arn:aws-us-gov:iam::000000000000:role/team/TestRole", role));
+
+        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:iam::000000000000:role/other/TestRole", role));
+        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:iam::111111111111:role/team/TestRole", role));
+        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:iam:us-east-1:000000000000:role/team/TestRole", role));
+        assertFalse(StsQueryHandler.roleArnMatches("arn:aws:s3:::bucket", role));
+        assertFalse(StsQueryHandler.roleArnMatches("not-an-arn", role));
+        assertFalse(StsQueryHandler.roleArnMatches(null, role));
     }
 
     @ParameterizedTest
@@ -229,6 +334,64 @@ class StsQueryHandlerTest {
     }
 
     @Test
+    void assumeRoleWithWebIdentityRejectsMalformedRoleArnWhenTokenCannotBeVerified() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "not-an-arn");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("WebIdentityToken", "opaque-token");
+
+        Response response = newHandler(null).handle("AssumeRoleWithWebIdentity", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>ValidationError</Code>"));
+    }
+
+    @Test
+    void assumeRoleWithWebIdentityRejectsNonexistentRoleWhenTokenCannotBeVerified() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/NonexistentRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("WebIdentityToken", "opaque-token");
+
+        Response response = newHandler(null).handle("AssumeRoleWithWebIdentity", params);
+
+        assertEquals(403, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>AccessDenied</Code>"), body);
+        assertTrue(body.contains("Not authorized to perform sts:AssumeRoleWithWebIdentity on resource: "
+                + "arn:aws:iam::000000000000:role/NonexistentRole"), body);
+    }
+
+    @Test
+    void assumeRoleWithWebIdentitySucceedsWhenRoleExistsAndTokenCannotBeVerified() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("WebIdentityToken", "opaque-token");
+
+        Response response = newHandler().handle("AssumeRoleWithWebIdentity", params);
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<AssumeRoleWithWebIdentityResult>"), body);
+        assertTrue(body.contains("<Arn>arn:aws:sts::000000000000:assumed-role/TestRole/test-session</Arn>"), body);
+    }
+
+    @Test
+    void assumeRoleWithWebIdentityRejectsRoleMismatchWhenTokenCannotBeVerified() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::111111111111:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("WebIdentityToken", "opaque-token");
+
+        Response response = newHandler().handle("AssumeRoleWithWebIdentity", params);
+
+        assertEquals(403, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>AccessDenied</Code>"), body);
+    }
+
+    @Test
     void assumeRoleWithSAMLRejectsDurationSecondsBelowMinimum() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
@@ -248,7 +411,7 @@ class StsQueryHandlerTest {
     @ParameterizedTest
     @MethodSource("io.github.hectorvent.floci.testing.PartitionMatrix#cases")
     void getCallerIdentityMintsTheRootArnInTheDeploymentsPartition(PartitionCase partitionCase) {
-        Response response = newHandler(PartitionMatrix.regionResolver(partitionCase))
+        Response response = newHandlerForRegion(PartitionMatrix.regionResolver(partitionCase))
                 .handle("GetCallerIdentity", new MultivaluedHashMap<>());
 
         assertEquals(200, response.getStatus());
@@ -263,7 +426,7 @@ class StsQueryHandlerTest {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("Name", "bob");
 
-        Response response = newHandler(PartitionMatrix.regionResolver(partitionCase))
+        Response response = newHandlerForRegion(PartitionMatrix.regionResolver(partitionCase))
                 .handle("GetFederationToken", params);
 
         assertEquals(200, response.getStatus());
@@ -327,8 +490,11 @@ class StsQueryHandlerTest {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/commercial-role");
         params.putSingle("RoleSessionName", "s");
+        IamRole role = new IamRole();
+        role.setRoleName("commercial-role");
+        role.setArn("arn:aws:iam::000000000000:role/commercial-role");
 
-        Response response = newHandler(new RegionResolver("cn-north-1", "000000000000"))
+        Response response = newHandler(role, new RegionResolver("cn-north-1", "000000000000"))
                 .handle("AssumeRole", params);
 
         assertEquals(200, response.getStatus());

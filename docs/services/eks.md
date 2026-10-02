@@ -567,6 +567,43 @@ Requirements and limits:
 
 By default, Floci injects its embedded DNS server into each cluster container (`FLOCI_SERVICES_EKS_EMBEDDED_DNS=true`). Cluster containers and CoreDNS forward to Floci's embedded resolver on port 53, enabling resolution of Route 53 private hosted zone records, internal hostnames, and records managed by `external-dns`. Set `FLOCI_SERVICES_EKS_EMBEDDED_DNS=false` to use standard Docker network DNS instead.
 
+### Registry host configuration (pull-through caches and custom mirrors)
+
+On standard EKS (such as AL2023), node registry host configuration is provided through the node
+group's launch template user data, which writes containerd
+[`hosts.toml`](https://github.com/containerd/containerd/blob/main/docs/hosts.md) configurations
+under `/etc/containerd/certs.d/<host>/hosts.toml`.
+
+Floci links `/etc/containerd/certs.d` to k3s's containerd certs directory
+(`/var/lib/rancher/k3s/agent/etc/containerd/certs.d`) inside the cluster container before it
+starts. Standard launch template user data works unchanged: pull-through cache endpoints, custom
+request headers, and TLS settings take effect immediately, and the files persist across cluster
+container restarts in the cluster's named data volume.
+
+Example node group launch template user data configuring a pull-through cache with an auth header
+wrapped in MIME multipart for managed node groups:
+
+```bash
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="==MYBOUNDARY=="
+
+--==MYBOUNDARY==
+Content-Type: text/x-shellscript; charset="us-ascii"
+
+#!/bin/sh
+mkdir -p /etc/containerd/certs.d/my-registry.internal:5000
+cat << 'EOF' > /etc/containerd/certs.d/my-registry.internal:5000/hosts.toml
+server = "https://my-registry.internal:5000"
+
+[host."https://cache.internal:5000"]
+  capabilities = ["pull", "resolve"]
+  [host."https://cache.internal:5000".header]
+    Authorization = "Bearer <token>"
+EOF
+
+--==MYBOUNDARY==--
+```
+
 ### Mock mode (CI / tests)
 
 Use `FLOCI_SERVICES_EKS_MOCK=true` when you only need the API shape:

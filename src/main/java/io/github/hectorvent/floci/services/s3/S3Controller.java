@@ -289,7 +289,8 @@ public class S3Controller {
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
             if (hasQueryParam(uriInfo, "notification")) {
                 s3Service.authorizeBucketWrite(bucket, "s3:PutBucketNotification", authorization);
-                return handlePutBucketNotification(bucket, body);
+                return handlePutBucketNotification(bucket, body,
+                        Boolean.parseBoolean(httpHeaders.getHeaderString("x-amz-skip-destination-validation")));
             }
             if (hasQueryParam(uriInfo, "versioning")) {
                 s3Service.authorizeBucketWrite(bucket, "s3:PutBucketVersioning", authorization);
@@ -1916,31 +1917,31 @@ public class S3Controller {
         }
     }
 
-    private Response handlePutBucketNotification(String bucket, byte[] body) {
+    private Response handlePutBucketNotification(String bucket, byte[] body, boolean skipDestinationValidation) {
         try {
             String xml = new String(body, StandardCharsets.UTF_8);
             NotificationConfiguration config = new NotificationConfiguration();
 
-            for (var parsed : parseNotificationGroups(xml, "QueueConfiguration", "Queue")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "QueueConfiguration", "Queue")) {
                 config.getQueueConfigurations().add(
                         new QueueNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
-            for (var parsed : parseNotificationGroups(xml, "TopicConfiguration", "Topic")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "TopicConfiguration", "Topic")) {
                 config.getTopicConfigurations().add(
                         new TopicNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
-            for (var parsed : parseNotificationGroups(xml, "LambdaFunctionConfiguration", "LambdaFunctionArn")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "LambdaFunctionConfiguration", "LambdaFunctionArn")) {
                 config.getLambdaFunctionConfigurations().add(
                         new LambdaNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
-            for (var parsed : parseNotificationGroups(xml, "CloudFunctionConfiguration", "CloudFunction")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "CloudFunctionConfiguration", "CloudFunction")) {
                 config.getLambdaFunctionConfigurations().add(
                         new LambdaNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
 
             config.setEventBridgeEnabled(parseEventBridgeConfiguration(xml));
 
-            s3Service.putBucketNotificationConfiguration(bucket, config);
+            s3Service.putBucketNotificationConfiguration(bucket, config, skipDestinationValidation);
             return Response.ok().build();
         } catch (AwsException e) {
             return xmlErrorResponse(e, bucket);
@@ -3284,6 +3285,19 @@ public class S3Controller {
             }
             if (argumentValue != null) {
                 xmlBuilder.elem("ArgumentValue", argumentValue.toString());
+            }
+            for (int index = 1; ; index++) {
+                Object numberedName = e.getExtendedData().get("ArgumentName" + index);
+                Object numberedValue = e.getExtendedData().get("ArgumentValue" + index);
+                if (numberedName == null && numberedValue == null) {
+                    break;
+                }
+                if (numberedName != null) {
+                    xmlBuilder.elem("ArgumentName" + index, numberedName.toString());
+                }
+                if (numberedValue != null) {
+                    xmlBuilder.elem("ArgumentValue" + index, numberedValue.toString());
+                }
             }
         }
         String xml = xmlBuilder

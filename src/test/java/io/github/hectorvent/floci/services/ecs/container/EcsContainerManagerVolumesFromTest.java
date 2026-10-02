@@ -181,9 +181,9 @@ class EcsContainerManagerVolumesFromTest {
         verify(appBuilder, never()).withLogRotation();
         verify(sourceBuilder).withLogRotation();
         verify(routerBuilder).withLogRotation();
-        verify(logStreamer, never()).attach(eq("app-id"), any(), any(), any(), any());
-        verify(logStreamer).attach(eq("source-id"), any(), any(), eq("us-east-1"), any());
-        verify(logStreamer).attach(eq("router-id"), any(), any(), eq("us-east-1"), any());
+        verify(logStreamer, never()).attachForAccount(any(), eq("app-id"), any(), any(), any(), any());
+        verify(logStreamer).attachForAccount(eq("000000000000"), eq("source-id"), any(), any(), eq("us-east-1"), any());
+        verify(logStreamer).attachForAccount(eq("000000000000"), eq("router-id"), any(), any(), eq("us-east-1"), any());
         assertEquals("floci-aws-ecs-firelens-volumesfrom1", handle.getFirelensVolumeName());
         assertEquals(List.of("source", "router", "app"), handle.getContainerIds().keySet().stream().toList());
         assertEquals(List.of("app", "router", "source"),

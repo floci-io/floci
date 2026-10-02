@@ -2219,6 +2219,7 @@ class S3IntegrationTest {
                 """;
 
         given()
+            .header("x-amz-skip-destination-validation", "true")
             .contentType("application/xml")
             .queryParam("notification", "")
             .body(xml)
@@ -2266,6 +2267,7 @@ class S3IntegrationTest {
                 """;
 
         given()
+            .header("x-amz-skip-destination-validation", "true")
             .contentType("application/xml")
             .queryParam("notification", "")
             .body(xml)
@@ -2313,6 +2315,7 @@ class S3IntegrationTest {
                 """;
 
         given()
+            .header("x-amz-skip-destination-validation", "true")
             .contentType("application/xml")
             .queryParam("notification", "")
             .body(xml)
@@ -2369,6 +2372,19 @@ class S3IntegrationTest {
                 .put("/notif-test-bucket")
             .then()
                 .statusCode(200);
+
+            given()
+                .header("Authorization", sqsAuth)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body",
+                    containsString("s3:TestEvent"));
 
             given()
                 .contentType("text/plain")

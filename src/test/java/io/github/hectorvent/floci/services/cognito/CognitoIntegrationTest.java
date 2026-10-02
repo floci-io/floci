@@ -3270,6 +3270,71 @@ class CognitoIntegrationTest {
                 .body("message", equalTo("Incorrect username or password"));
     }
 
+    /**
+     * Observed on AWS with a sign-in policy of PASSWORD: a PREFERRED_CHALLENGE outside the policy, or one the
+     * user has not set up, gets SELECT_CHALLENGE and the available list, and a name Cognito does not support
+     * gets InvalidParameterException.
+     */
+    @Test
+    @Order(112)
+    void userAuthOffersTheChoiceForAPreferredChallengeTheUserCannotTakeOverTheWire() throws Exception {
+        String poolId = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "PreferredChallengeWirePool",
+                  "Policies": { "SignInPolicy": { "AllowedFirstAuthFactors": ["PASSWORD"] } }
+                }
+                """).path("UserPool").path("Id").asText();
+        String clientId = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId": "%s", "ClientName": "preferred-challenge-client", "ExplicitAuthFlows": ["ALLOW_USER_AUTH"]}
+                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
+        cognitoAction("AdminCreateUser", """
+                {"UserPoolId": "%s", "Username": "wire-user", "MessageAction": "SUPPRESS",
+                 "UserAttributes": [{"Name": "email", "Value": "wire-user@example.com"},
+                                    {"Name": "email_verified", "Value": "true"}]}
+                """.formatted(poolId)).then().statusCode(200);
+        cognitoAction("AdminSetUserPassword", """
+                {"UserPoolId": "%s", "Username": "wire-user", "Password": "Perm1234!", "Permanent": true}
+                """.formatted(poolId)).then().statusCode(200);
+
+        for (String preferred : List.of("EMAIL_OTP", "WEB_AUTHN")) {
+            JsonNode result = cognitoJson("InitiateAuth", """
+                    {"ClientId": "%s", "AuthFlow": "USER_AUTH",
+                     "AuthParameters": {"USERNAME": "wire-user", "PREFERRED_CHALLENGE": "%s"}}
+                    """.formatted(clientId, preferred));
+            assertEquals("SELECT_CHALLENGE", result.path("ChallengeName").asText(), preferred);
+            assertEquals(List.of("PASSWORD", "PASSWORD_SRP"), textValues(result.path("AvailableChallenges")),
+                    preferred);
+            assertFalse(result.path("Session").asText().isBlank(), preferred);
+        }
+        cognitoAction("InitiateAuth", """
+                {"ClientId": "%s", "AuthFlow": "USER_AUTH",
+                 "AuthParameters": {"USERNAME": "wire-user", "PREFERRED_CHALLENGE": "BOGUS"}}
+                """.formatted(clientId))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo("The preferred challenge must be one of the supported challenges. "
+                        + "[PASSWORD, PASSWORD_SRP, SMS_OTP, EMAIL_OTP, WEB_AUTHN]"));
+    }
+
+    /** Observed on AWS: DescribeUserPool reports a SignInPolicy of PASSWORD for a pool created without one. */
+    @Test
+    @Order(113)
+    void describeUserPoolReportsAPasswordSignInPolicyForAPoolCreatedWithoutOne() throws Exception {
+        for (String tier : List.of("LITE", "ESSENTIALS")) {
+            String poolId = cognitoJson("CreateUserPool", """
+                    {"PoolName": "DefaultSignInPolicyPool", "UserPoolTier": "%s"}
+                    """.formatted(tier)).path("UserPool").path("Id").asText();
+
+            JsonNode policies = cognitoJson("DescribeUserPool", """
+                    {"UserPoolId": "%s"}
+                    """.formatted(poolId)).path("UserPool").path("Policies");
+
+            assertEquals(List.of("PASSWORD"),
+                    textValues(policies.path("SignInPolicy").path("AllowedFirstAuthFactors")), tier);
+        }
+    }
+
     private static List<String> textValues(JsonNode array) {
         List<String> values = new ArrayList<>();
         for (JsonNode value : array) {

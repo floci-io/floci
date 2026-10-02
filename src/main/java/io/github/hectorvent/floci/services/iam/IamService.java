@@ -2927,11 +2927,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return storage.scan(key -> true).stream();
     }
 
-    private static String normalizePath(String path) {
-        if (path == null || path.isEmpty()) return "/";
+    static String normalizePath(String path) {
+        if (path == null || path.isEmpty()) {
+            return "/";
+        }
         String p = path;
-        if (!p.startsWith("/")) p = "/" + p;
-        if (!p.endsWith("/")) p = p + "/";
+        if (!p.startsWith("/")) {
+            p = "/" + p;
+        }
+        if (!p.endsWith("/")) {
+            p = p + "/";
+        }
         return p;
     }
 
