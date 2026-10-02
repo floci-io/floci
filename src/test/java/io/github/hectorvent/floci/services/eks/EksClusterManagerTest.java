@@ -367,6 +367,7 @@ class EksClusterManagerTest {
         private EmulatorConfig config;
         private EmulatorConfig.StorageConfig storage;
         private ContainerLifecycleManager lifecycleManager;
+        private ContainerBuilder containerBuilder;
         private PortAllocator portAllocator;
         private DockerClient dockerClient;
         private EksClusterManager manager;
@@ -390,7 +391,7 @@ class EksClusterManagerTest {
             when(eks.ecrRegistryMirror()).thenReturn(false);
 
             lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
-            ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+            containerBuilder = Mockito.mock(ContainerBuilder.class);
             ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
             when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
@@ -454,6 +455,39 @@ class EksClusterManagerTest {
             assertEquals("https://localhost:6512", cluster.getInternalEndpoint());
             // The port Docker already holds must not be handed out to another cluster.
             verify(portAllocator).markReserved(6512);
+            verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void replacesASurvivorLeftOnANetworkFlociNoLongerUses() {
+            when(containerBuilder.resolveDockerNetwork(Optional.empty())).thenReturn(Optional.of("floci_default"));
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
+                    "{\"Id\":\"cid-old\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\"},"
+                            + "\"NetworkSettings\":{\"Networks\":{\"bridge\":{\"IPAddress\":\"172.17.0.3\"}}}}")));
+            when(lifecycleManager.adopt("cid-old", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            verify(dockerClient).stopContainerCmd("cid-old");
+        }
+
+        @Test
+        void keepsASurvivorOnTheNetworkFlociUses() {
+            when(containerBuilder.resolveDockerNetwork(Optional.empty())).thenReturn(Optional.of("floci_default"));
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
+                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\"},"
+                            + "\"NetworkSettings\":{\"Networks\":{\"floci_default\":{\"IPAddress\":\"172.18.0.4\"}}}}")));
+            when(lifecycleManager.adopt("cid-1", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6440)));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-1", cluster.getContainerId());
             verify(lifecycleManager, never()).create(any());
         }
 
