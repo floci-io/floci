@@ -155,15 +155,18 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().remove(CfnRollback.ECS_CLUSTER_SETTINGS_SNAPSHOT_ATTR);
         String clusterName = ctx.stablePhysicalName(ctx.resolveOptional(props, "ClusterName"),
                 r.getLogicalId(), 255, false);
-        EcsCluster cluster = ecsService.createCluster(clusterName, ctx.region());
         List<ClusterSetting> settings = new ArrayList<>();
         JsonNode declared = props != null ? props.get("ClusterSettings") : null;
         JsonNode resolved = declared != null ? ctx.engine().resolveNode(declared) : null;
         if (resolved != null && resolved.isArray()) {
             for (JsonNode item : resolved) {
-                settings.add(new ClusterSetting(item.path("Name").asText(null), item.path("Value").asText(null)));
+                // An entry that resolved to AWS::NoValue is not an object.
+                if (item.isObject()) {
+                    settings.add(new ClusterSetting(item.path("Name").asText(null), item.path("Value").asText(null)));
+                }
             }
         }
+        EcsCluster cluster = ecsService.createCluster(clusterName, ctx.region());
         if (!settings.isEmpty() && !settings.equals(cluster.getSettings())) {
             if (ctx.reusesPriorEntity(clusterName)) {
                 ObjectNode snapshot = MAPPER.createObjectNode().put("region", ctx.region());
