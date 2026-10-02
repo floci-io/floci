@@ -115,11 +115,14 @@ jobs:
           cmp -s all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" \
             || { echo "::error::test class list from src/test/java differs from target/test-classes:"; diff all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" | head -50; exit 1; }
 
+      # surefire.timeout kills a fork whose test ignores JUnit's interrupt (deadlock, blocking
+      # I/O) at 15 min, so surefire still reports it before the 20-minute job limit.
       - name: Run tests
         run: >
           ./mvnw surefire:test -B
           -Dsurefire.includesFile="$GITHUB_WORKSPACE/shard.txt"
           -Dsurefire.failIfNoTests=true
+          -Dsurefire.timeout=900
 
       # The prefetch runs in the background past its own step, so its per-image
       # results are only complete once the tests are done. A pull still running
