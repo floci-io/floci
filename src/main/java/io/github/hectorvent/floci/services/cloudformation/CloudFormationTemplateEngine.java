@@ -100,6 +100,11 @@ public class CloudFormationTemplateEngine {
         this.dynamicReferenceResolver = dynamicReferenceResolver;
     }
 
+    /** The stack's id, the value {@code Ref AWS::StackId} resolves to. */
+    public String getStackId() {
+        return stackId;
+    }
+
     /**
      * Resolves a property value, including CloudFormation dynamic reference syntax
      * ({@code {{resolve:ssm:...}}}, {@code {{resolve:secretsmanager:...}}}) in the result, the same
