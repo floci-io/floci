@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
+import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
@@ -1093,17 +1094,12 @@ public class S3Service implements Resettable, ResourceProvider {
             throw accessDeniedException(bucketName, key);
         }
 
-        Map<String, List<String>> conditionCtx = caller != null
-                ? Map.of("aws:PrincipalArn", List.of(caller.principalArn()),
-                        "aws:PrincipalIsAWSService", List.of("false"))
-                : Map.of("aws:PrincipalIsAWSService", List.of("false"));
-
-        ResourcePolicyDecision decision = policyEvaluator.evaluateResourcePolicy(
+        ResourcePolicyDecision decision = policyEvaluator.evaluateResourcePolicyFor(
                 List.of(policy),
-                principalArn,
+                RequestPrincipal.caller(caller),
                 action,
                 resourceArn,
-                conditionCtx);
+                bucketPolicyContext(caller));
 
         if (decision == ResourcePolicyDecision.EXPLICIT_DENY) {
             throw accessDeniedException(bucketName, key);
@@ -1136,6 +1132,17 @@ public class S3Service implements Resettable, ResourceProvider {
         String account = accessKeyId.matches("\\d{12}") ? accessKeyId : ownerId();
         String rootArn = regionResolver.buildGlobalArn("iam", account, "root");
         return Optional.of(new CallerArns(rootArn, rootArn));
+    }
+
+    /**
+     * The request context a bucket policy is evaluated with here: the caller is an IAM principal,
+     * never a service, and for a role session {@code aws:PrincipalArn} is the role's ARN.
+     */
+    private static Map<String, List<String>> bucketPolicyContext(CallerArns caller) {
+        return caller != null
+                ? Map.of("aws:PrincipalArn", List.of(caller.principalArn()),
+                        "aws:PrincipalIsAWSService", List.of("false"))
+                : Map.of("aws:PrincipalIsAWSService", List.of("false"));
     }
 
     private boolean isSameAccountAsBucketOwner(String accessKeyId, String principalArn, String bucketOwnerAccount) {
@@ -1176,23 +1183,15 @@ public class S3Service implements Resettable, ResourceProvider {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException(
                         "NoSuchBucket", "The specified bucket does not exist.", 404));
-        S3PublicAccessEvaluator.PrincipalPolicyEvaluation policyEvaluation =
-                S3PublicAccessEvaluator.principalPolicyEvaluation(
-                        objectMapper,
-                        ownedBucket.value().getPolicy(),
-                        "AWS",
-                        caller.get().callerArn(),
+        String policy = ownedBucket.value().getPolicy();
+        ResourcePolicyDecision decision = policy == null || policy.isBlank()
+                ? ResourcePolicyDecision.NEUTRAL
+                : policyEvaluator.evaluateResourcePolicyFor(
+                        List.of(policy),
+                        RequestPrincipal.caller(caller.get()),
                         action,
                         resourceArn,
-                        Map.of("aws:PrincipalArn", caller.get().principalArn(),
-                                "aws:PrincipalIsAWSService", "false"));
-        ResourcePolicyDecision decision = switch (policyEvaluation.decision()) {
-            case ALLOW -> policyEvaluation.directPrincipalAllow() && caller.get().callerArn().contains(":user/")
-                    ? ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
-                    : ResourcePolicyDecision.ALLOW;
-            case DENY -> ResourcePolicyDecision.EXPLICIT_DENY;
-            case NEUTRAL -> ResourcePolicyDecision.NEUTRAL;
-        };
+                        bucketPolicyContext(caller.get()));
         return new SignedPrincipalResourcePolicyEvaluation(decision, ownedBucket.account());
     }
 

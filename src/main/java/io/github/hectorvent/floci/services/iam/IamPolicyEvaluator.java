@@ -733,8 +733,11 @@ public class IamPolicyEvaluator {
      * replication service that way). Any other {@code AWS} entry names IAM identities only, and a
      * role session matches the role it assumed through that role's own ARN, path included.
      * {@code Service} names one service exactly; {@code {"Service": "*"}} is not a form AWS accepts
-     * and matches nothing. {@code Federated}, {@code CanonicalUser} and any other type name callers
-     * this evaluator never sees, and so match nothing, rather than being compared with an IAM ARN.
+     * and matches nothing. {@code CanonicalUser}, which S3 bucket policies accept, names an account
+     * by its S3 canonical user ID, and matches the IAM identities of that account as an account
+     * principal does; Floci's canonical ID for an account is the account id, as its S3 ACLs report
+     * it. {@code Federated} and any other type name callers this evaluator never sees, and so match
+     * nothing, rather than being compared with an IAM ARN.
      */
     private boolean matchesAnyPrincipal(Map<String, List<String>> principals, RequestPrincipal principal) {
         for (Map.Entry<String, List<String>> entry : principals.entrySet()) {
@@ -768,6 +771,13 @@ public class IamPolicyEvaluator {
                         if (!"*".equals(pattern) && ServicePrincipals.canonical(pattern).equals(wanted)) {
                             return true;
                         }
+                    }
+                }
+            } else if ("CanonicalUser".equalsIgnoreCase(type)) {
+                if (principal.type() == RequestPrincipal.Type.IAM && principal.arn() != null) {
+                    String accountId = extractAccountId(principal.arn());
+                    if (accountId != null && patterns.contains(accountId)) {
+                        return true;
                     }
                 }
             }
