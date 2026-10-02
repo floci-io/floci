@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.SignedInUser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -18,24 +19,30 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.FLOCI_URL;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.assertInvalidClient;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.assertRevoked;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.basic;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.confidentialClient;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.createPool;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.customDomain;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.expect;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.jwtPayload;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.refresh;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.requestCertificate;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.signIn;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.tokenRequest;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.emptyString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The OAuth contract of the token and userInfo endpoints when reached on a custom domain: the
+ * The OAuth contract of the token, revoke and userInfo endpoints when reached on a custom domain: the
  * same answers AWS gives on {@code https://<domain>/oauth2/...}.
  */
 @QuarkusTest
@@ -45,6 +52,7 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
     private static final String DOMAIN = "auth-c-" + System.nanoTime() + ".teos.localhost.floci.io";
 
     private static String poolA;
+    private static String poolB;
     private static String clientA;
     private static String secretA;
     private static String clientB;
@@ -59,7 +67,7 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
     @Order(1)
     void setUpTwoPoolsAndOneCustomDomain() throws Exception {
         poolA = createPool("ContractPoolA");
-        String poolB = createPool("ContractPoolB");
+        poolB = createPool("ContractPoolB");
 
         JsonNode a = cognitoJson("CreateUserPoolClient", confidentialClient(poolA)).path("UserPoolClient");
         clientA = a.path("ClientId").asText();
@@ -175,7 +183,6 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
                 .header("WWW-Authenticate", startsWith("Bearer error=\"invalid_token\""));
     }
 
-    /** Floci has no hosted UI revoke endpoint. */
     @Test
     @Order(9)
     void authorizeRouteIsServedOnCustomDomain() {
@@ -202,20 +209,88 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
 
     @Test
     @Order(11)
-    void revokeEndpointIsNotServed() {
-        for (String path : List.of("/oauth2/revoke")) {
+    void revokeIsServedOnTheCustomDomain() throws Exception {
+        SignedInUser user = signIn(poolA);
+
+        assertRevoked(given()
+                .header("Host", DOMAIN)
+                .formParam("token", user.refreshToken())
+                .formParam("client_id", user.clientId())
+        .when()
+                .post("/oauth2/revoke"));
+
+        refresh(user)
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"));
+    }
+
+    /** As on AWS, a client of another pool does not exist on a pool's custom domain. */
+    @Test
+    @Order(12)
+    void revokeRefusesAClientOfAnotherPool() throws Exception {
+        SignedInUser user = signIn(poolB);
+
+        assertInvalidClient(given()
+                .header("Host", DOMAIN)
+                .formParam("token", user.refreshToken())
+                .formParam("client_id", user.clientId())
+        .when()
+                .post("/oauth2/revoke"));
+
+        refresh(user).then().statusCode(200);
+    }
+
+    /**
+     * Cognito answers every path under /oauth2/ on its custom domain, so none reaches S3 as a key of
+     * a bucket named cognito-idp: a served path with an error, a served path called with another
+     * method, and a path Cognito does not serve.
+     */
+    @Test
+    @Order(13)
+    void cognitoAnswersItsPathsWhateverTheAcceptHeader() {
+        for (String accept : List.of("application/json", "application/xml", "text/html", "*/*")) {
             given()
                     .header("Host", DOMAIN)
+                    .header("Accept", accept)
+                    .header("Authorization", basic(clientA, secretA))
+                    .formParam("client_id", clientA)
             .when()
-                    .get(path)
+                    .post("/oauth2/revoke")
             .then()
-                    .statusCode(404);
+                    .statusCode(400)
+                    .contentType(containsString("application/json"))
+                    .body("error", equalTo("invalid_request"))
+                    .body("error_description", equalTo("Invalid parameter in request"));
+
+            given()
+                    .header("Host", DOMAIN)
+                    .header("Accept", accept)
+            .when()
+                    .get("/oauth2/token")
+            .then()
+                    .statusCode(405)
+                    .header("Allow", equalTo("POST"))
+                    .header("Content-Type", nullValue())
+                    .body(emptyString());
+
+            for (String method : List.of("GET", "POST")) {
+                given()
+                        .header("Host", DOMAIN)
+                        .header("Accept", accept)
+                .when()
+                        .request(method, "/oauth2/no-such-path")
+                .then()
+                        .statusCode(404)
+                        .contentType(containsString("application/json"))
+                        .body(equalTo("{\"error\":\"This URL doesn't exist on the authorization server.\"}"));
+            }
         }
     }
 
     /** A prefix domain's hostname resolves to AWS, so Floci never routes by it. */
     @Test
-    @Order(12)
+    @Order(14)
     void prefixDomainHostIsNotRouted() throws Exception {
         String prefix = "routing-prefix-" + System.nanoTime();
         cognitoJson("CreateUserPoolDomain", """
@@ -235,7 +310,7 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
      * requests on many threads must never let one request's pin decide another's answer.
      */
     @Test
-    @Order(13)
+    @Order(15)
     void concurrentRequestsKeepTheirOwnPinnedPool() throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(8);
         try {
