@@ -121,13 +121,24 @@ class CognitoResourceServerOwnershipTest {
             Future<String> mutation = executor.submit(() -> {
                 writerStarted.countDown();
                 try {
-                    switch (writer) {
-                        case CREATE -> service.createResourceServer(pool, IDENTIFIER, "Foreign API", List.of());
-                        case UPDATE -> service.updateResourceServer(pool, IDENTIFIER, "Public update", List.of());
-                        case DELETE -> service.deleteResourceServer(pool, IDENTIFIER);
-                        case POOL_DELETE -> service.deleteUserPool(pool);
-                    }
-                    return "complete";
+                    return switch (writer) {
+                        case CREATE -> {
+                            service.createResourceServer(pool, IDENTIFIER, "Foreign API", List.of());
+                            yield "complete";
+                        }
+                        case UPDATE -> {
+                            service.updateResourceServer(pool, IDENTIFIER, "Public update", List.of());
+                            yield "complete";
+                        }
+                        case DELETE -> {
+                            service.deleteResourceServer(pool, IDENTIFIER);
+                            yield "complete";
+                        }
+                        case POOL_DELETE -> {
+                            service.deleteUserPool(pool);
+                            yield "complete";
+                        }
+                    };
                 } catch (AwsException failure) {
                     return failure.getErrorCode();
                 }
