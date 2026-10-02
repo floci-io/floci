@@ -163,6 +163,27 @@ class EcrIntegrationTest {
 
     @Test
     @Order(8)
+    void putImageScanningConfiguration() {
+        given()
+            .header("X-Amz-Target", PREFIX + "PutImageScanningConfiguration")
+            .contentType(CT)
+            .body("""
+                {
+                  "repositoryName": "%s",
+                  "imageScanningConfiguration": { "scanOnPush": true }
+                }
+                """.formatted(REPO))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("registryId", not(emptyString()))
+            .body("repositoryName", equalTo(REPO))
+            .body("imageScanningConfiguration.scanOnPush", equalTo(true));
+    }
+
+    @Test
+    @Order(9)
     void batchGetRepositoryScanningConfiguration() {
         given()
             .header("X-Amz-Target", PREFIX + "BatchGetRepositoryScanningConfiguration")
@@ -176,14 +197,14 @@ class EcrIntegrationTest {
             .statusCode(200)
             .body("scanningConfigurations[0].repositoryName", equalTo(REPO))
             .body("scanningConfigurations[0].repositoryArn", startsWith("arn:aws:ecr:"))
-            .body("scanningConfigurations[0].scanOnPush", equalTo(false))
-            .body("scanningConfigurations[0].scanFrequency", equalTo("MANUAL"))
+            .body("scanningConfigurations[0].scanOnPush", equalTo(true))
+            .body("scanningConfigurations[0].scanFrequency", equalTo("SCAN_ON_PUSH"))
             .body("scanningConfigurations[0].appliedScanFilters", empty())
             .body("failures", empty());
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void deleteRepositoryForce() {
         given()
             .header("X-Amz-Target", PREFIX + "DeleteRepository")
@@ -216,7 +237,7 @@ class EcrIntegrationTest {
      * call rather than the emulator's configured default.
      */
     @Test
-    @Order(10)
+    @Order(11)
     void getAuthorizationToken_nonDefaultRegionRequest_returnsProxyEndpointForThatRegion() {
         String repository = "floci-it/region-scoped";
         String repositoryUri = given()
@@ -264,7 +285,7 @@ class EcrIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void createPullThroughCacheRule() {
         given()
             .header("X-Amz-Target", PREFIX + "CreatePullThroughCacheRule")
@@ -306,7 +327,7 @@ class EcrIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void updateAndValidatePullThroughCacheRule() {
         String updatedCredential =
                 "arn:aws:secretsmanager:us-east-1:000000000000:secret:ecr-pullthroughcache/updated";
@@ -353,7 +374,7 @@ class EcrIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void describePullThroughCacheRulesFiltersAndPaginates() {
         String nextToken = given()
             .header("X-Amz-Target", PREFIX + "DescribePullThroughCacheRules")
@@ -396,7 +417,7 @@ class EcrIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void createPullThroughCacheRuleDuplicateFails() {
         given()
             .header("X-Amz-Target", PREFIX + "CreatePullThroughCacheRule")
@@ -425,7 +446,7 @@ class EcrIntegrationTest {
     }
 
     @Test
-    @Order(15)
+    @Order(16)
     void deletePullThroughCacheRules() {
         for (String prefix : new String[] {CACHE_PREFIX, SECOND_CACHE_PREFIX}) {
             given()
