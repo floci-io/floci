@@ -68,17 +68,20 @@ public class SecurityGroupFirewallManager {
         }
         try {
             String owner = ContainerStorageHelper.ownerIdentity(config);
-            dockerClient.listContainersCmd().withShowAll(true)
-                    .withLabelFilter(Map.of("floci.security-group-helper", "true"))
-                    .exec().stream()
-                    .filter(container -> owner.equals(container.getLabels().get(ContainerStorageHelper.OWNER_LABEL)))
+            ContainerStorageHelper.LabelAliases aliases = ContainerStorageHelper.CONTAINER_LABEL_ALIASES;
+            aliases.listByLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL, "true"),
+                            filter -> dockerClient.listContainersCmd().withShowAll(true)
+                                    .withLabelFilter(filter).exec(),
+                            Container::getId).stream()
+                    .filter(container -> aliases.consistent(container.getId(), container.getLabels())
+                            && aliases.matches(container.getLabels(), ContainerStorageHelper.OWNER_LABEL, owner))
                     .forEach(container -> {
                         if ("running".equals(container.getState())) {
                             quarantine(container.getId());
                         } else {
                             stopNamespaceWorkloads(container.getId());
                         }
-                        if ("ecs".equals(container.getLabels().get("io.floci.service"))) {
+                        if ("ecs".equals(container.getLabels().get(ContainerStorageHelper.SERVICE_LABEL))) {
                             removeNamespaceWorkloads(container.getId());
                             lifecycleManager.removeIfExists(container.getId());
                         }
@@ -121,7 +124,7 @@ public class SecurityGroupFirewallManager {
                 .withEntrypoint(List.of("sh", "-c"))
                 .withCmd(List.of("exec sleep 2147483647"))
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(service, resourceId, accountId, region))
-                .withLabels(Map.of("floci.security-group-helper", "true",
+                .withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL, "true",
                         ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
                 .withLabels(extraLabels);
         if (portBindings != null) {

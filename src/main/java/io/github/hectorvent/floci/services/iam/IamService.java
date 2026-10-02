@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
+import io.github.hectorvent.floci.core.common.Totp;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -28,6 +29,7 @@ import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
+import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
@@ -42,6 +44,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -130,6 +133,30 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final Pattern IAM_PATH_PATTERN = Pattern.compile("(/)|(/[\\x21-\\x7E]+/)");
     private static final int IAM_PATH_MAX_LENGTH = 512;
     private static final int MAX_TAGS_PER_RESOURCE = 50;
+    /**
+     * "You can register up to eight MFA devices of any combination of the currently supported MFA
+     * types" (IAM User Guide). Floci models only virtual devices, so this bounds those alone.
+     */
+    private static final int MAX_MFA_DEVICES_PER_USER = 8;
+    /** {@code AuthenticationCode1}/{@code 2}: fixed length of 6, pattern {@code [\d]+}. */
+    private static final Pattern AUTHENTICATION_CODE_PATTERN = Pattern.compile("[0-9]{6}");
+    /**
+     * {@code virtualMFADeviceName}: a minimum of 1 and this pattern, with no maximum length. IAM's
+     * other name types are all capped at 64 or 128; this one is deliberately not.
+     */
+    private static final Pattern VIRTUAL_MFA_DEVICE_NAME_PATTERN = Pattern.compile("[\\w+=,.@-]+");
+    /** {@code serialNumberType}: 9-256 characters, and a wider pattern than a name, allowing ARNs. */
+    private static final Pattern SERIAL_NUMBER_PATTERN = Pattern.compile("[\\w+=/:,.@-]+");
+    private static final int SERIAL_NUMBER_MIN_LENGTH = 9;
+    private static final int SERIAL_NUMBER_MAX_LENGTH = 256;
+    /**
+     * How far the code pair may sit from the current 30-second window. Enabling a device is done
+     * straight after reading the codes, so a window either side absorbs clock skew and the time
+     * spent submitting; resync exists for a device that has drifted much further, and is given
+     * five minutes in each direction.
+     */
+    private static final int ENABLE_DRIFT_STEPS = 1;
+    private static final int RESYNC_DRIFT_STEPS = 10;
     private static final String ROOT_FEATURES_KEY = "org-root-features";
     private static final String CREDENTIAL_REPORT_KEY = "credential-report";
     /** AWS generates a fresh report only if the most recent one is older than this. */
@@ -172,6 +199,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * one partition is never handed to a caller in another.
      */
     private final StorageBackend<String, CredentialReport> credentialReports;
+    /** Virtual MFA devices, keyed by serial number, which for a virtual device is its own ARN. */
+    private final StorageBackend<String, VirtualMfaDevice> virtualMfaDevices;
+    /**
+     * Guards every check-then-write on an MFA device. Assignment is the reason it has to exist:
+     * EnableMFADevice reads the device to confirm it is unassigned and reads the user's device
+     * count to confirm it is under the quota, then writes. Two requests racing the same free
+     * device would otherwise both see it unassigned and the second would silently steal it.
+     */
+    private final Object mfaDeviceLock = new Object();
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
     private final String seededAccountAlias;
@@ -204,6 +240,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-slr-deletions.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-org-root-features.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-credential-reports.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-virtual-mfa-devices.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null)
@@ -233,7 +270,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
+                seedDeployerPrincipal, null);
     }
 
     // 8-backend constructor (no org-root-features): kept for existing callers/tests;
@@ -255,7 +293,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 accountAliases, passwordPolicies, new InMemoryStorage<>(), oidcProviders,
                 serviceLinkedRoleDeletions, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                regionResolver, seedDeployerPrincipal, seededAccountAlias);
+                new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal, seededAccountAlias);
     }
 
     // 9-backend constructor (no alias/OIDC/SLR backends): kept for existing callers/tests;
@@ -274,7 +312,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), passwordPolicies, new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), orgRootFeatures,
-                new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
+                seedDeployerPrincipal, null);
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -291,6 +330,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, String> serviceLinkedRoleDeletions,
                StorageBackend<String, OrganizationRootFeatures> orgRootFeatures,
                StorageBackend<String, CredentialReport> credentialReports,
+               StorageBackend<String, VirtualMfaDevice> virtualMfaDevices,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
@@ -308,6 +348,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.serviceLinkedRoleDeletions = serviceLinkedRoleDeletions;
         this.orgRootFeatures = orgRootFeatures;
         this.credentialReports = credentialReports;
+        this.virtualMfaDevices = virtualMfaDevices;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
@@ -474,7 +515,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             throw new AwsException("DeleteConflict",
                     "Cannot delete entity, must delete access keys first.", 409);
         }
-        users.delete(userName);
+        // Held across the delete, not just the check: EnableMFADevice confirms the user under this
+        // same lock, so the two cannot interleave into a device assigned to a deleted user.
+        synchronized (mfaDeviceLock) {
+            if (!mfaDevicesForUser(userName).isEmpty()) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete entity, must deactivate MFA device first.", 409);
+            }
+            users.delete(userName);
+        }
         LOG.infov("Deleted IAM user: {0}", userName);
     }
 
@@ -511,11 +560,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                             "User with name " + newUserName + " already exists.", 409);
                 }
                 List<AccessKey> keysToMove = userAccessKeys(userName);
-                users.delete(userName);
-                user.setUserName(newUserName);
-                if (newPath != null) user.setPath(normalizePath(newPath));
-                user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
-                users.put(newUserName, user);
+                // The rename publishes the user under its new name and moves its MFA devices to
+                // match. Both happen under the MFA lock, because DeleteUser checks for devices and
+                // removes the user under that same lock: split across it, a DeleteUser for the new
+                // name could land after the user is published but before the devices follow, see
+                // none, and delete a user whose device is about to be reassigned to it.
+                synchronized (mfaDeviceLock) {
+                    users.delete(userName);
+                    user.setUserName(newUserName);
+                    if (newPath != null) {
+                        user.setPath(normalizePath(newPath));
+                    }
+                    user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
+                    users.put(newUserName, user);
+                    for (VirtualMfaDevice device : mfaDevicesForUser(userName)) {
+                        device.setUserName(newUserName);
+                        virtualMfaDevices.put(device.getSerialNumber(), device);
+                    }
+                }
                 loginProfiles.get(userName).ifPresent(profile -> {
                     loginProfiles.delete(userName);
                     profile.setUserName(newUserName);
@@ -1133,9 +1195,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * keys; quota values are cross-checked against AWS's published IAM service quotas
      * (docs.aws.amazon.com/general/latest/gr/iam-service.html), though floci itself enforces
      * only the 5-versions-per-policy cap in {@link #createPolicyVersion}. Resources floci does
-     * not track at all (MFA devices, SAML providers, server certificates, account password - all
-     * stub-empty elsewhere in this handler) are reported as zero rather than omitted, so callers
-     * indexing into the full AWS field set don't hit a missing-key error.
+     * not track at all (server certificates, account password - stub-empty elsewhere in this
+     * handler) are reported as zero rather than omitted, so callers indexing into the full AWS
+     * field set don't hit a missing-key error.
      */
     public Map<String, Long> getAccountSummary() {
         long localPolicyCount = 0;
@@ -1176,8 +1238,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         summary.put("ServerCertificates", 0L);
         summary.put("ServerCertificatesQuota", 20L);
         summary.put("Providers", (long) oidcProviders.scan(k -> true).size());
-        summary.put("MFADevices", 0L);
-        summary.put("MFADevicesInUse", 0L);
+        List<VirtualMfaDevice> mfaDevices = virtualMfaDevices.scan(k -> true);
+        summary.put("MFADevices", (long) mfaDevices.size());
+        summary.put("MFADevicesInUse", mfaDevices.stream().filter(VirtualMfaDevice::isAssigned).count());
+        // AWS reports whether the *root* user has MFA enabled, not whether IAM users do. Floci
+        // does not model root credentials, so this stays false however many user devices exist,
+        // for the same reason AccountAccessKeysPresent below does.
         summary.put("AccountMFAEnabled", 0L);
         // AWS reports whether the root account has access keys, not whether IAM users do.
         // Floci does not model root access keys, so this remains false even when user keys exist.
@@ -1952,6 +2018,275 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
+    // Virtual MFA devices
+    // =========================================================================
+
+    /**
+     * Creates an unassigned virtual MFA device. The seed is real randomness, not a placeholder:
+     * AWS hands it out as {@code Base32StringSeed} precisely so an authenticator app can be
+     * programmed from it, and {@link #enableMfaDevice} then verifies codes actually derived from
+     * it. A caller that seeds a TOTP app from a Floci device gets working codes.
+     */
+    public VirtualMfaDevice createVirtualMfaDevice(String name, String path, Map<String, String> tags) {
+        validateVirtualMfaDeviceName(name);
+        validateIamPath(path, "Path");
+        String normalizedPath = normalizePath(path);
+        // The serial number is the ARN, and the ARN embeds the path, so two devices of the same
+        // name under different paths are genuinely different devices, as AWS says: "Use with
+        // path to uniquely identify a virtual MFA device."
+        String serialNumber = iamArn("mfa", normalizedPath, name);
+        // AWS's own model leaves a gap here: virtualMFADeviceName has no maximum length, but the
+        // serial number it mints is a serialNumberType, capped at 256. A long-but-valid name would
+        // therefore produce a device whose serial every other MFA operation rejects, so it could
+        // never be enabled, tagged or deleted. Floci refuses it at creation instead of handing back
+        // an unusable device; the limit named is the serial's, since the name itself has none.
+        if (serialNumber.length() > SERIAL_NUMBER_MAX_LENGTH) {
+            throw new AwsException("ValidationError",
+                    "VirtualMFADeviceName and Path together must produce a serial number of at most "
+                            + SERIAL_NUMBER_MAX_LENGTH + " characters; " + serialNumber.length()
+                            + " were produced.", 400);
+        }
+        if (tags != null && tags.size() > MAX_TAGS_PER_RESOURCE) {
+            throw new AwsException("LimitExceeded",
+                    "Cannot exceed quota for TagsPerMFADevice: " + MAX_TAGS_PER_RESOURCE, 409);
+        }
+        VirtualMfaDevice device = new VirtualMfaDevice();
+        device.setSerialNumber(serialNumber);
+        device.setDeviceName(name);
+        device.setPath(normalizedPath);
+        device.setBase32Seed(Totp.newSecret());
+        device.setTags(tags);
+        synchronized (mfaDeviceLock) {
+            if (virtualMfaDevices.get(serialNumber).isPresent()) {
+                throw new AwsException("EntityAlreadyExists",
+                        "MFADevice entity at the same path and name already exists.", 409);
+            }
+            virtualMfaDevices.put(serialNumber, device);
+        }
+        LOG.infov("Created virtual MFA device: {0}", serialNumber);
+        return device;
+    }
+
+    /**
+     * Every virtual MFA device in the account, filtered by assignment. {@code assignmentStatus}
+     * may be {@code Assigned}, {@code Unassigned} or {@code Any}; null defaults to {@code Any}.
+     */
+    public List<VirtualMfaDevice> listVirtualMfaDevices(String assignmentStatus) {
+        String status = assignmentStatus == null || assignmentStatus.isBlank() ? "Any" : assignmentStatus;
+        if (!status.equals("Any") && !status.equals("Assigned") && !status.equals("Unassigned")) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value '" + assignmentStatus
+                            + "' at 'assignmentStatus' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [Any, Unassigned, Assigned]", 400);
+        }
+        return virtualMfaDevices.scan(k -> true).stream()
+                .filter(d -> switch (status) {
+                    case "Assigned" -> d.isAssigned();
+                    case "Unassigned" -> !d.isAssigned();
+                    default -> true;
+                })
+                .sorted(Comparator.comparing(VirtualMfaDevice::getSerialNumber))
+                .toList();
+    }
+
+    /**
+     * Deletes a virtual MFA device. AWS requires it to be deactivated first: "You must deactivate
+     * a user's virtual MFA device before you can delete it", so a still-assigned device is the
+     * documented DeleteConflict rather than a silent detach.
+     */
+    public void deleteVirtualMfaDevice(String serialNumber) {
+        validateSerialNumber(serialNumber);
+        synchronized (mfaDeviceLock) {
+            VirtualMfaDevice device = getVirtualMfaDevice(serialNumber);
+            if (device.isAssigned()) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete entity, must deactivate the MFA device from user "
+                                + device.getUserName() + " first.", 409);
+            }
+            virtualMfaDevices.delete(serialNumber);
+        }
+        LOG.infov("Deleted virtual MFA device: {0}", serialNumber);
+    }
+
+    /**
+     * Assigns a device to a user, after checking the two codes really came from its seed. The
+     * codes must be consecutive, which is what AWS asks for ("a subsequent authentication code"),
+     * so a caller replaying one code twice is rejected the way a real device's user would be.
+     */
+    public void enableMfaDevice(String userName, String serialNumber, String code1, String code2) {
+        validateIamResourceName(userName, "UserName");
+        validateSerialNumber(serialNumber);
+        validateAuthenticationCode(code1, "AuthenticationCode1");
+        validateAuthenticationCode(code2, "AuthenticationCode2");
+        synchronized (mfaDeviceLock) {
+            // The user's existence is confirmed under the same lock DeleteUser checks for devices
+            // under. Checked outside it, a DeleteUser that saw no devices could remove the user
+            // between that check and this write, leaving a device assigned to nobody, and one
+            // that could never be freed, since deactivating it resolves the user first.
+            getUser(userName);
+            VirtualMfaDevice device = getVirtualMfaDevice(serialNumber);
+            if (device.isAssigned()) {
+                throw new AwsException("EntityAlreadyExists",
+                        "Device with serial number " + serialNumber + " is already assigned to user "
+                                + device.getUserName() + ".", 409);
+            }
+            if (mfaDevicesForUser(userName).size() >= MAX_MFA_DEVICES_PER_USER) {
+                throw new AwsException("LimitExceeded",
+                        "Cannot exceed quota for MFADevicesPerUser: " + MAX_MFA_DEVICES_PER_USER, 409);
+            }
+            // Codes are checked last, so a request that would be rejected for the device's state
+            // does not depend on the caller having got the codes right.
+            requireConsecutiveCodes(device, code1, code2, ENABLE_DRIFT_STEPS);
+            device.setUserName(userName);
+            device.setEnableDate(Instant.now());
+            virtualMfaDevices.put(serialNumber, device);
+        }
+        LOG.infov("Enabled MFA device {0} for user {1}", serialNumber, userName);
+    }
+
+    /**
+     * Detaches a device from its user, leaving the device itself in place. AWS "removes it from
+     * association with the user name for which it was originally enabled", it does not delete it.
+     * The seed survives, so the same authenticator entry keeps working if it is re-enabled.
+     */
+    public void deactivateMfaDevice(String userName, String serialNumber) {
+        validateSerialNumber(serialNumber);
+        getUser(userName);
+        synchronized (mfaDeviceLock) {
+            VirtualMfaDevice device = getVirtualMfaDevice(serialNumber);
+            if (!userName.equals(device.getUserName())) {
+                throw new AwsException("NoSuchEntity",
+                        "Device with serial number " + serialNumber + " is not assigned to user "
+                                + userName + ".", 404);
+            }
+            device.setUserName(null);
+            device.setEnableDate(null);
+            virtualMfaDevices.put(serialNumber, device);
+        }
+        LOG.infov("Deactivated MFA device {0} for user {1}", serialNumber, userName);
+    }
+
+    /**
+     * Re-synchronizes an assigned device. This is the same pair-of-codes check as
+     * {@link #enableMfaDevice}, over a wider drift window: a device needing resync is by
+     * definition one whose clock has wandered, so accepting only the current window would reject
+     * exactly the case the operation exists to fix.
+     */
+    public void resyncMfaDevice(String userName, String serialNumber, String code1, String code2) {
+        validateIamResourceName(userName, "UserName");
+        validateSerialNumber(serialNumber);
+        validateAuthenticationCode(code1, "AuthenticationCode1");
+        getUser(userName);
+        validateAuthenticationCode(code2, "AuthenticationCode2");
+        synchronized (mfaDeviceLock) {
+            VirtualMfaDevice device = getVirtualMfaDevice(serialNumber);
+            if (!userName.equals(device.getUserName())) {
+                throw new AwsException("NoSuchEntity",
+                        "Device with serial number " + serialNumber + " is not assigned to user "
+                                + userName + ".", 404);
+            }
+            requireConsecutiveCodes(device, code1, code2, RESYNC_DRIFT_STEPS);
+        }
+    }
+
+    /** The MFA devices assigned to a user, which is what ListMFADevices returns. */
+    public List<VirtualMfaDevice> listMfaDevices(String userName) {
+        getUser(userName);
+        return mfaDevicesForUser(userName);
+    }
+
+    public void tagMfaDevice(String serialNumber, Map<String, String> newTags) {
+        validateSerialNumber(serialNumber);
+        synchronized (mfaDeviceLock) {
+            VirtualMfaDevice device = getVirtualMfaDevice(serialNumber);
+            device.setTags(mergeTagsWithinQuota(device.getTags(), newTags, "TagsPerMFADevice", false));
+            virtualMfaDevices.put(serialNumber, device);
+        }
+    }
+
+    public void untagMfaDevice(String serialNumber, List<String> tagKeys) {
+        validateSerialNumber(serialNumber);
+        synchronized (mfaDeviceLock) {
+            VirtualMfaDevice device = getVirtualMfaDevice(serialNumber);
+            Map<String, String> remaining = new LinkedHashMap<>(device.getTags());
+            if (tagKeys != null) {
+                tagKeys.forEach(remaining::remove);
+            }
+            device.setTags(remaining);
+            virtualMfaDevices.put(serialNumber, device);
+        }
+    }
+
+    public Map<String, String> listMfaDeviceTags(String serialNumber) {
+        validateSerialNumber(serialNumber);
+        return getVirtualMfaDevice(serialNumber).getTags();
+    }
+
+    public VirtualMfaDevice getVirtualMfaDevice(String serialNumber) {
+        if (serialNumber == null) {
+            throw new AwsException("NoSuchEntity",
+                    "The MFA device with serial number null cannot be found.", 404);
+        }
+        return virtualMfaDevices.get(serialNumber)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "The MFA device with serial number " + serialNumber + " cannot be found.", 404));
+    }
+
+    private List<VirtualMfaDevice> mfaDevicesForUser(String userName) {
+        return virtualMfaDevices.scan(k -> true).stream()
+                .filter(d -> userName.equals(d.getUserName()))
+                .sorted(Comparator.comparing(VirtualMfaDevice::getSerialNumber))
+                .toList();
+    }
+
+    private void validateAuthenticationCode(String code, String paramName) {
+        if (code == null || !AUTHENTICATION_CODE_PATTERN.matcher(code).matches()) {
+            throw new AwsException("ValidationError",
+                    paramName + " must be exactly 6 digits.", 400);
+        }
+    }
+
+    /**
+     * {@code virtualMFADeviceName} carries a minimum and a pattern but, unlike every other IAM
+     * name type, no maximum length. So this cannot reuse
+     * {@link #validateIamResourceName(String, String)}: capping the name at 128 would reject a
+     * name AWS accepts.
+     */
+    private void validateVirtualMfaDeviceName(String name) {
+        if (name == null || name.isEmpty() || !VIRTUAL_MFA_DEVICE_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("ValidationError",
+                    "VirtualMFADeviceName must be at least 1 character matching [\\w+=,.@-].", 400);
+        }
+    }
+
+    /**
+     * {@code serialNumberType}: 9 to 256 characters of {@code [\w+=/:,.@-]}. Checked before the
+     * device is looked up, so a malformed serial number is the ValidationError AWS returns rather
+     * than a NoSuchEntity for a device that could never have existed under that name.
+     */
+    private void validateSerialNumber(String serialNumber) {
+        if (serialNumber == null
+                || serialNumber.length() < SERIAL_NUMBER_MIN_LENGTH
+                || serialNumber.length() > SERIAL_NUMBER_MAX_LENGTH
+                || !SERIAL_NUMBER_PATTERN.matcher(serialNumber).matches()) {
+            throw new AwsException("ValidationError",
+                    "SerialNumber must be " + SERIAL_NUMBER_MIN_LENGTH + "-" + SERIAL_NUMBER_MAX_LENGTH
+                            + " characters matching [\\w+=/:,.@-].", 400);
+        }
+    }
+
+    /**
+     * Rejects the request unless the two codes are consecutive outputs of the device's seed,
+     * allowing the counter to start anywhere within {@code driftSteps} of the current window.
+     */
+    private void requireConsecutiveCodes(VirtualMfaDevice device, String code1, String code2, int driftSteps) {
+        if (!VirtualMfaCodes.matchesConsecutiveCodes(device.getBase32Seed(), code1, code2,
+                driftSteps, Instant.now())) {
+            throw new AwsException("InvalidAuthenticationCode",
+                    "Invalid MFA one time pass code.", 403);
+        }
+    }
+
     // OIDC Identity Providers
     // =========================================================================
 
@@ -2619,6 +2954,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public Optional<String> resolveCallerArn(String accessKeyId) {
+        return resolveCallerArns(accessKeyId).map(CallerArns::callerArn);
+    }
+
+    /**
+     * The two ARNs a caller's access key stands for, read from one lookup of the key.
+     *
+     * @param callerArn    the identity the caller acts as: the user's ARN, or for a role session its
+     *                     {@code assumed-role} session ARN, as {@link #resolveCallerArn} returns it
+     * @param principalArn the request's {@code aws:PrincipalArn}: the user's ARN, or for a role
+     *                     session the ARN of the role that was assumed, path included
+     */
+    public record CallerArns(String callerArn, String principalArn) {}
+
+    /**
+     * Both of the caller's ARNs from a single lookup, so they always describe the same credential:
+     * two lookups could straddle a session's expiry and answer for it only once.
+     */
+    public Optional<CallerArns> resolveCallerArns(String accessKeyId) {
         if (accessKeyId == null || accessKeyId.isBlank()) {
             return Optional.empty();
         }
@@ -2626,7 +2979,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
         if (akOpt.isPresent()) {
             String userName = akOpt.get().getUserName();
-            return users.get(userName).map(IamUser::getArn);
+            return users.get(userName).map(IamUser::getArn).map(arn -> new CallerArns(arn, arn));
         }
 
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
@@ -2650,8 +3003,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // The session lives in its role's partition, as AssumeRole issued it, whatever region
             // a later call is signed for.
             String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
-            return Optional.of(AwsArnUtils.Arn.global(partition, "sts", accountId,
-                    "assumed-role/" + roleName + "/" + sessionName).toString());
+            String sessionArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
+                    "assumed-role/" + roleName + "/" + sessionName).toString();
+            return Optional.of(new CallerArns(sessionArn, roleArn));
         }
 
         return Optional.empty();
@@ -2663,14 +3017,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * was assumed, path included, rather than the assumed-role session ARN, which names the role
      * without its path. That is the ARN the session recorded when it was issued, read back as is:
      * looking the role up by name would hand an old session the ARN of a same-named role created
-     * after it.
+     * after it. A caller that needs the caller ARN too reads both through {@link #resolveCallerArns}.
      */
     public Optional<String> resolvePrincipalArn(String accessKeyId) {
-        Optional<String> callerArn = resolveCallerArn(accessKeyId);
-        if (callerArn.isEmpty() || accessKeys.get(accessKeyId).isPresent()) {
-            return callerArn;
-        }
-        return findSessionForCallerContext(accessKeyId).map(SessionCredential::getRoleArn);
+        return resolveCallerArns(accessKeyId).map(CallerArns::principalArn);
     }
 
     public Optional<String> resolveCallerUserId(String accessKeyId) {
@@ -2912,11 +3262,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return storage.scan(key -> true).stream();
     }
 
-    private static String normalizePath(String path) {
-        if (path == null || path.isEmpty()) return "/";
+    static String normalizePath(String path) {
+        if (path == null || path.isEmpty()) {
+            return "/";
+        }
         String p = path;
-        if (!p.startsWith("/")) p = "/" + p;
-        if (!p.endsWith("/")) p = p + "/";
+        if (!p.startsWith("/")) {
+            p = "/" + p;
+        }
+        if (!p.endsWith("/")) {
+            p = p + "/";
+        }
         return p;
     }
 
@@ -3137,10 +3493,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * The 23 columns AWS documents for the credential report, in order, always led by the
      * {@code <root_account>} row. Floci does not model root account credentials at all (see
      * {@code GetAccountSummary}'s {@code AccountPasswordPresent}/{@code AccountAccessKeysPresent},
-     * always zero), so that row is always unused/not-present placeholders. MFA devices and X.509
-     * signing certificates are not modeled for IAM users either, so those columns are always
-     * {@code FALSE}/{@code N/A} for every row; access key last-used tracking (date, region,
-     * service) is not modeled, so those three columns are always {@code N/A} too.
+     * always zero), so that row is always unused/not-present placeholders, including its
+     * {@code mfa_active}, which reports on root rather than on any IAM user's device. X.509
+     * signing certificates are not modeled, so those columns are always {@code FALSE}/{@code N/A}
+     * for every row; access key last-used tracking (date, region, service) is not modeled, so
+     * those three columns are always {@code N/A} too.
      */
     private String buildCredentialReportCsv() {
         StringBuilder csv = new StringBuilder(
@@ -3183,7 +3540,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 passwordLastUsedField(user, passwordEnabled),
                 passwordEnabled ? isoDate(passwordLastChanged(loginProfile.get())) : "N/A",
                 passwordNextRotationField(loginProfile, passwordEnabled),
-                "FALSE",
+                mfaDevicesForUser(user.getUserName()).isEmpty() ? "FALSE" : "TRUE",
                 accessKeyActiveField(key1), accessKeyRotatedField(key1), "N/A", "N/A", "N/A",
                 accessKeyActiveField(key2), accessKeyRotatedField(key2), "N/A", "N/A", "N/A",
                 "FALSE", "N/A", "FALSE", "N/A",

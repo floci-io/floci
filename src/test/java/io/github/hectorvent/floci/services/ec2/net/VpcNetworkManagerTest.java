@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -28,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
@@ -519,12 +521,185 @@ class VpcNetworkManagerTest {
         assertEquals("10.0.0.0/16", manager.effectiveVpcCidr(REGION, "vpc-1").orElseThrow());
     }
 
+    @Test
+    void createdNetworkCarriesTheIdentityLabelsAndTheirLegacyAliases() {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+
+        manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address);
+
+        Map<String, String> expected = new LinkedHashMap<>();
+        expected.put("floci", "true");
+        expected.put("floci_emulator", "floci-aws");
+        expected.put("io.floci", "aws");
+        expected.put("io.floci.service", "ec2");
+        expected.put("io.floci.resource-id", "vpc-1");
+        expected.put("io.floci.region", REGION);
+        expected.put("io.floci.component", "vpc-network");
+        expected.put("io.floci.owner", "4650");
+        expected.put("floci_component", "ec2-vpc");
+        expected.put("floci_vpc_id", "vpc-1");
+        expected.put("floci_vpc_region", REGION);
+        expected.put("floci_vpc_owner_port", "4650");
+        assertEquals(expected, createdNetworkLabels());
+    }
+
+    @Test
+    void aNamespacedEmulatorOwnsItsNetworksByNamespaceAndPort() {
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+
+        manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address);
+
+        Map<String, String> labels = createdNetworkLabels();
+        assertEquals("alpha/4650", labels.get("io.floci.owner"));
+        assertEquals("alpha/4650", labels.get("floci_vpc_owner_port"));
+    }
+
+    /** The labels a namespaced or plain Floci wrote on a VPC network before the io.floci.owner key. */
+    private static Map<String, String> preUpgradeLabels(String vpcId, String namespace) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        labels.put("floci", "true");
+        if (namespace != null) {
+            labels.put("floci_namespace", namespace);
+        }
+        labels.put("floci_component", "ec2-vpc");
+        labels.put("floci_vpc_id", vpcId);
+        labels.put("floci_vpc_region", REGION);
+        labels.put("floci_vpc_owner_port", "4650");
+        return labels;
+    }
+
+    @Test
+    void aPreUpgradeNetworkOfThisNamespacedEmulatorIsNotReadAsACollision() {
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
+        existingNetwork(manager.networkName(REGION, "vpc-1"), "10.0.0.0/16", preUpgradeLabels("vpc-1", "alpha"));
+
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+
+        assertFalse(manager.isSubstituted(REGION, "vpc-1"),
+                "a network this namespace created before the owner label took the namespace is still its own");
+        assertEquals("10.0.0.0/16", manager.effectiveVpcCidr(REGION, "vpc-1").orElseThrow());
+    }
+
+    @Test
+    void reconcileRemovesAPreUpgradeOrphanOnlyWhenItsNamespaceIsThisEmulators() {
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
+        existingNetwork("floci-aws-alpha-vpc-4650-us-east-1-vpc-dead", "10.7.0.0/16",
+                preUpgradeLabels("vpc-dead", "alpha"));
+        existingNetwork("floci-aws-beta-vpc-4650-us-east-1-vpc-beta", "10.8.0.0/16",
+                preUpgradeLabels("vpc-beta", "beta"));
+        existingNetwork("floci-aws-vpc-4650-us-east-1-vpc-plain", "10.9.0.0/16",
+                preUpgradeLabels("vpc-plain", null));
+
+        manager.reconcileOrphans((region, vpcId) -> false);
+
+        assertEquals(List.of("floci-aws-alpha-vpc-4650-us-east-1-vpc-dead"), removedNetworks,
+                "the bare port in the legacy owner key is shared by every deployment on it, so only the "
+                        + "namespace label decides which pre-upgrade network is this emulator's");
+    }
+
+    @Test
+    void reconcileQueriesTheNewAndLegacyKeySetsAndRemovesOrphansUnderEither() {
+        existingNetwork("vpc-new", "10.7.0.0/16", newLabels("vpc-new", "4650"));
+        existingNetwork("vpc-legacy", "10.8.0.0/16", ourLabels("vpc-legacy", "4650"));
+        existingNetwork("vpc-both", "10.9.0.0/16", bothLabels("vpc-both", "4650"));
+
+        manager.reconcileOrphans((region, vpcId) -> false);
+
+        assertEquals(List.of("vpc-new", "vpc-legacy", "vpc-both"), removedNetworks,
+                "each network is removed once, however many of the queries list it");
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> filters = ArgumentCaptor.forClass(List.class);
+        verify(docker.listNetworksCmd(), times(2)).withFilter(eq("label"),
+                filters.capture());
+        assertEquals(List.of(Set.of("io.floci.service=ec2", "io.floci.component=vpc-network"),
+                        Set.of("floci_component=ec2-vpc")),
+                filters.getAllValues().stream().map(Set::copyOf).toList());
+    }
+
+    @Test
+    void reconcileLeavesANetworkWhoseNewAndLegacyLabelsDisagreeAlone() {
+        Map<String, String> ownerDisagrees = bothLabels("vpc-1", "4650");
+        ownerDisagrees.put("floci_vpc_owner_port", "4620");
+        existingNetwork("owner-disagrees", "10.7.0.0/16", ownerDisagrees);
+        Map<String, String> vpcDisagrees = bothLabels("vpc-dead", "4650");
+        vpcDisagrees.put("floci_vpc_id", "vpc-live");
+        existingNetwork("vpc-disagrees", "10.8.0.0/16", vpcDisagrees);
+
+        manager.reconcileOrphans((region, vpcId) -> "vpc-live".equals(vpcId));
+
+        assertTrue(removedNetworks.isEmpty());
+    }
+
+    @Test
+    void twoNamespacedEmulatorsOnTheSamePortNeverReconcileEachOthersNetworks() {
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
+        existingNetwork("alpha-dead", "10.7.0.0/16", bothLabels("vpc-a", "alpha/4650"));
+        existingNetwork("beta-live", "10.8.0.0/16", bothLabels("vpc-b", "beta/4650"));
+        // Written by a namespaced emulator before owners carried the namespace: a bare port no
+        // longer names this deployment, so it is left alone rather than deleted.
+        existingNetwork("bare-port", "10.9.0.0/16", ourLabels("vpc-c", "4650"));
+
+        manager.reconcileOrphans((region, vpcId) -> false);
+
+        assertEquals(List.of("alpha-dead"), removedNetworks);
+    }
+
+    @Test
+    void anotherNamespacesNetworkForTheSameVpcIdIsStillACollision() {
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
+        existingNetwork("beta-vpc-1", "10.0.0.0/16", bothLabels("vpc-1", "beta/4650"));
+
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+
+        assertTrue(manager.isSubstituted(REGION, "vpc-1"),
+                "a sibling deployment's live network holds that range; it is not this VPC's own");
+    }
+
+    @Test
+    void aSurvivingNamespacedNetworkForTheSameVpcIsNotReadAsACollision() {
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of("alpha"));
+        existingNetwork("alpha-vpc-1", "10.0.0.0/16", newLabels("vpc-1", "alpha/4650"));
+
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+
+        assertFalse(manager.isSubstituted(REGION, "vpc-1"));
+    }
+
+    private Map<String, String> createdNetworkLabels() {
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
+        verify(docker.createNetworkCmd()).withLabels(labels.capture());
+        return labels.getValue();
+    }
+
+    /** What a network created before the {@code io.floci.*} keys carries. */
     private static Map<String, String> ourLabels(String vpcId, String ownerPort) {
         Map<String, String> labels = new LinkedHashMap<>();
-        labels.put(VpcNetworkManager.LABEL_COMPONENT, VpcNetworkManager.COMPONENT_VALUE);
-        labels.put(VpcNetworkManager.LABEL_VPC_ID, vpcId);
-        labels.put(VpcNetworkManager.LABEL_VPC_REGION, REGION);
-        labels.put(VpcNetworkManager.LABEL_OWNER_PORT, ownerPort);
+        labels.put("floci_component", "ec2-vpc");
+        labels.put("floci_vpc_id", vpcId);
+        labels.put("floci_vpc_region", REGION);
+        labels.put("floci_vpc_owner_port", ownerPort);
+        return labels;
+    }
+
+    private static Map<String, String> newLabels(String vpcId, String owner) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        labels.put("io.floci.service", "ec2");
+        labels.put("io.floci.component", "vpc-network");
+        labels.put("io.floci.resource-id", vpcId);
+        labels.put("io.floci.region", REGION);
+        labels.put("io.floci.owner", owner);
+        return labels;
+    }
+
+    private static Map<String, String> bothLabels(String vpcId, String owner) {
+        Map<String, String> labels = newLabels(vpcId, owner);
+        labels.putAll(ourLabels(vpcId, owner));
         return labels;
     }
 

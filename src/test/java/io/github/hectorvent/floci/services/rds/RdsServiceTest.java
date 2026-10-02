@@ -191,6 +191,22 @@ class RdsServiceTest {
         assertEquals("arn:aws:rds:us-east-1:123456789012:db:mydb", instance.getDbInstanceArn());
     }
 
+    /** An instance created in China carries an aws-cn ARN, and its own lookup must still find it. */
+    @Test
+    void aChinaInstanceIsFoundAfterCreation() {
+        regionResolver = new RegionResolver("cn-north-1", "123456789012");
+        rdsService = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+
+        DbInstance instance = rdsService.createDbInstance("cn-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertEquals("arn:aws-cn:rds:cn-north-1:123456789012:db:cn-db", instance.getDbInstanceArn());
+        assertEquals("cn-db", rdsService.getDbInstance("cn-db").getDbInstanceIdentifier());
+    }
+
     @Test
     void createDbInstanceSupportsSqlServerEngineIdentifiers() {
         DbInstance instance = rdsService.createDbInstance("sqlserver-db", "sqlserver-se", "15.00",
@@ -352,6 +368,69 @@ class RdsServiceTest {
 
         assertFalse(modified.isPubliclyAccessible());
         assertFalse(rdsService.getDbInstance("pubdb").isPubliclyAccessible());
+    }
+
+    @Test
+    void createAndModifyDbInstancePersistDeletionProtection() {
+        DbInstance instance = rdsService.createDbInstance("prot-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, true);
+
+        assertTrue(instance.isDeletionProtection());
+        assertTrue(rdsService.getDbInstance("prot-db").isDeletionProtection());
+
+        DbInstance untouched = rdsService.modifyDbInstance("prot-db", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                DbInstanceScalingChanges.unchanged(), null);
+
+        assertTrue(untouched.isDeletionProtection());
+        assertTrue(rdsService.getDbInstance("prot-db").isDeletionProtection());
+
+        DbInstance modified = rdsService.modifyDbInstance("prot-db", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                DbInstanceScalingChanges.unchanged(), false);
+
+        assertFalse(modified.isDeletionProtection());
+        assertFalse(rdsService.getDbInstance("prot-db").isDeletionProtection());
+
+        DbInstance reEnabled = rdsService.modifyDbInstance("prot-db", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                DbInstanceScalingChanges.unchanged(), true);
+
+        assertTrue(reEnabled.isDeletionProtection());
+        assertTrue(rdsService.getDbInstance("prot-db").isDeletionProtection());
+
+        DbInstance defaultInstance = rdsService.createDbInstance("unprot-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertFalse(defaultInstance.isDeletionProtection());
+        assertFalse(rdsService.getDbInstance("unprot-db").isDeletionProtection());
+    }
+
+    @Test
+    void deleteDbInstanceRefusesProtectedInstance() {
+        rdsService.createDbInstance("protected-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, true);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> rdsService.deleteDbInstance("protected-db"));
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals("Cannot delete protected DB Instance, please disable deletion protection and try again.", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+
+        assertNotNull(rdsService.getDbInstance("protected-db"));
+
+        rdsService.modifyDbInstance("protected-db", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                DbInstanceScalingChanges.unchanged(), false);
+
+        rdsService.deleteDbInstance("protected-db");
+        assertThrows(AwsException.class, () -> rdsService.getDbInstance("protected-db"));
     }
 
     @Test
@@ -1554,6 +1633,22 @@ class RdsServiceTest {
 
         rdsService.removeTagsFromResource(targetGroupArn, java.util.List.of("env"));
         assertEquals(java.util.Map.of(), rdsService.listTagsForResource(targetGroupArn));
+    }
+
+    @Test
+    void chinaDbProxyTargetGroupTagsRoundTripByArn() {
+        regionResolver = new RegionResolver("cn-north-1", "123456789012");
+        rdsService = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        String targetGroupArn = rdsService.describeDbProxyTargetGroups("app-proxy")
+                .iterator().next().getTargetGroupArn();
+        assertTrue(targetGroupArn.startsWith("arn:aws-cn:rds:cn-north-1:"), targetGroupArn);
+
+        rdsService.addTagsToResource(targetGroupArn, Map.of("env", "test"));
+        assertEquals(Map.of("env", "test"), rdsService.listTagsForResource(targetGroupArn));
     }
 
     @Test
@@ -3398,6 +3493,30 @@ class RdsServiceTest {
                 null, null, Map.of(), "us-east-1");
         assertEquals(KEY_ARN, restored.getKmsKeyId());
         verify(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("MOCK_DUMP_DATA"));
+    }
+
+    /** A China snapshot ARN is a source a China copy can read; a commercial one is not. */
+    @Test
+    void copyDbSnapshotReadsAChinaSourceArnWithinItsPartition() {
+        regionResolver = new RegionResolver("cn-north-1", "123456789012");
+        rdsService = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        DbSnapshot source = rdsService.createDbSnapshot("source", "mydb");
+        assertEquals("arn:aws-cn:rds:cn-north-1:123456789012:snapshot:source", source.getDbSnapshotArn());
+
+        DbSnapshot copy = rdsService.copyDbSnapshot(source.getDbSnapshotArn(), "copy", false,
+                Map.of(), null, null, "cn-north-1");
+        assertEquals("copy", copy.getDbSnapshotIdentifier());
+
+        AwsException otherPartition = assertThrows(AwsException.class, () ->
+                rdsService.copyDbSnapshot("arn:aws:rds:us-east-1:123456789012:snapshot:source", "other", false,
+                        Map.of(), null, null, "cn-north-1"));
+        assertEquals("InvalidParameterValue", otherPartition.getErrorCode());
     }
 
     @Test

@@ -29,15 +29,31 @@ import jakarta.annotation.PreDestroy;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
+import org.apache.commons.compress.archivers.zip.ZipFile;
+import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -50,6 +66,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.CRC32;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
+import java.util.zip.ZipEntry;
 
 @ApplicationScoped
 public class CodePipelineService {
@@ -60,6 +80,26 @@ public class CodePipelineService {
     private static final long POLL_INTERVAL_MS = 100L;
     private static final String SOURCE_POLL_TYPE = "source-poll";
     private static final String MISSING_SOURCE_REVISION = "missing";
+    private static final long MAX_ARCHIVE_BYTES = 128L << 20;
+    private static final long MAX_UNCOMPRESSED_BYTES = 128L << 20;
+    private static final int MAX_ARCHIVE_ENTRIES = 100_000;
+
+    // Overridable accessors so tests can use tiny caps and a local server instead of 1 GiB archives.
+    protected long maxArchiveBytes() {
+        return MAX_ARCHIVE_BYTES;
+    }
+
+    protected long maxUncompressedBytes() {
+        return MAX_UNCOMPRESSED_BYTES;
+    }
+
+    protected int maxEntries() {
+        return MAX_ARCHIVE_ENTRIES;
+    }
+
+    protected String githubArchiveBaseUrl() {
+        return "https://codeload.github.com";
+    }
 
     private final AccountAwareStorageBackend<CodePipelinePipeline> pipelineStore;
     private final AccountAwareStorageBackend<CodePipelineExecution> executionStore;
@@ -1340,6 +1380,11 @@ public class CodePipelineService {
             waitForApproval(execution, state);
             return;
         }
+        if ("Source".equals(category) && "GitHub".equals(provider) && "ThirdParty".equals(owner)
+                && "1".equals(action.path("actionTypeId").path("version").asText())) {
+            executeGitHubSource(execution, action, state);
+            return;
+        }
         if (!"AWS".equals(owner)) {
             waitForCustomJob(pipeline, execution, action, state);
             return;
@@ -1392,6 +1437,294 @@ public class CodePipelineService {
         }
         s3Service.putObject(bucket, objectKey, data, "application/zip", Map.of());
         state.setExternalExecutionId("s3://" + bucket + "/" + objectKey);
+    }
+
+    /**
+     * The ThirdParty GitHub (version 1) source action: fetches the branch archive from
+     * github.com and publishes it as the output artifact with the repo contents at the
+     * artifact root, the layout the real action produces.
+     */
+    private void executeGitHubSource(CodePipelineExecution execution, JsonNode action,
+                                     ActionExecution state) {
+        JsonNode config = action.path("configuration");
+        String repoOwner = config.path("Owner").asText(null);
+        String repo = config.path("Repo").asText(null);
+        String branch = config.path("Branch").asText("main");
+        if (repoOwner == null || repo == null) {
+            throw new AwsException("InvalidActionDeclarationException",
+                    "GitHub source actions require Owner and Repo", 400);
+        }
+        if (!isValidGitHubPathSegment(repoOwner) || !isValidGitHubPathSegment(repo)
+                || !isValidGitHubRef(branch)) {
+            throw new AwsException("InvalidActionDeclarationException",
+                    "GitHub source Owner and Repo must be non-empty and contain no '/' or '..', "
+                            + "and Branch must be non-empty with no leading '/', '..' or whitespace", 400);
+        }
+        byte[] archive = fetchGitHubArchive(URI.create(
+                githubArchiveBaseUrl() + "/" + repoOwner + "/" + repo
+                        + "/zip/refs/heads/" + encodeRefPath(branch)));
+        if (archive.length > maxArchiveBytes()) {
+            throw archiveDownloadTooLarge();
+        }
+        String commitSha = archiveCommitSha(archive);
+        byte[] artifact = stripTopLevelDirectory(archive);
+        for (JsonNode output : action.path("outputArtifacts")) {
+            runtimeArtifacts.put(artifactKey(execution, output.path("name").asText()), artifact);
+        }
+        Map<String, Object> revision = new LinkedHashMap<>();
+        revision.put("name", state.getActionName());
+        String summary = "github.com/" + repoOwner + "/" + repo + "@" + branch;
+        String commitUrl = "https://github.com/" + repoOwner + "/" + repo + "/commit/" + commitSha;
+        revision.put("revisionId", commitSha);
+        revision.put("revisionChangeIdentifier", commitSha);
+        revision.put("revisionSummary", summary);
+        revision.put("revisionUrl", commitUrl);
+        revision.put("created", now());
+        Map<String, Object> sourceRevision = new LinkedHashMap<>();
+        sourceRevision.put("actionName", state.getActionName());
+        sourceRevision.put("revisionId", commitSha);
+        sourceRevision.put("revisionSummary", summary);
+        sourceRevision.put("revisionUrl", commitUrl);
+        synchronized (execution) {
+            execution.getArtifactRevisions().add(revision);
+            execution.getSourceRevisions().removeIf(
+                    existing -> state.getActionName().equals(existing.get("actionName")));
+            execution.getSourceRevisions().add(sourceRevision);
+        }
+        state.setExternalExecutionId(commitSha);
+        state.setExternalExecutionUrl("https://github.com/" + repoOwner + "/" + repo);
+    }
+
+    /** Percent-encodes each '/'-separated ref segment so '#', '%' and the like stay in the path. */
+    private static String encodeRefPath(String ref) {
+        List<String> segments = new ArrayList<>();
+        for (String segment : ref.split("/", -1)) {
+            segments.add(URLEncoder.encode(segment, StandardCharsets.UTF_8).replace("+", "%20"));
+        }
+        return String.join("/", segments);
+    }
+
+    /**
+     * codeload writes the commit SHA into the ZIP end-of-central-directory comment; that is the
+     * revision a GitHub source artifact reports. Anything else is not a codeload archive.
+     */
+    private static String archiveCommitSha(byte[] zip) {
+        int min = Math.max(0, zip.length - 22 - 0xFFFF);
+        for (int i = zip.length - 22; i >= min; i--) {
+            if (zip[i] == 0x50 && zip[i + 1] == 0x4b && zip[i + 2] == 0x05 && zip[i + 3] == 0x06) {
+                int len = (zip[i + 20] & 0xFF) | ((zip[i + 21] & 0xFF) << 8);
+                if (i + 22 + len <= zip.length) {
+                    String comment = new String(zip, i + 22, len, StandardCharsets.US_ASCII).trim();
+                    if (comment.matches("[0-9a-fA-F]{40}")) {
+                        return comment.toLowerCase(Locale.ROOT);
+                    }
+                }
+                break;
+            }
+        }
+        throw new AwsException("ActionExecutionFailed",
+                "GitHub source archive does not carry a commit SHA in its ZIP comment", 400);
+    }
+
+    /** repoOwner/repo path segments: no '/', no '..', non-empty. */
+    private static boolean isValidGitHubPathSegment(String segment) {
+        return !segment.isEmpty() && !segment.contains("/") && !segment.contains("..");
+    }
+
+    /** Branch ref: slashes are legal (e.g. {@code release/v1.16.0}), but no '..' traversal,
+     * leading slash, or whitespace/control characters that could reshape the request path. */
+    private static boolean isValidGitHubRef(String ref) {
+        return !ref.isEmpty() && !ref.startsWith("/") && !ref.contains("..")
+                && ref.chars().noneMatch(Character::isWhitespace);
+    }
+
+    /** Overridable seam for tests; production goes to github.com with the JVM's proxy settings. */
+    byte[] fetchGitHubArchive(URI uri) {
+        try {
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(10))
+                    .followRedirects(HttpClient.Redirect.NORMAL)
+                    .build();
+            HttpResponse<InputStream> response = client.send(
+                    HttpRequest.newBuilder(uri)
+                            .timeout(Duration.ofSeconds(30))
+                            .GET().build(),
+                    HttpResponse.BodyHandlers.ofInputStream());
+            try (InputStream body = response.body()) {
+                if (response.statusCode() != 200) {
+                    throw new AwsException("ActionExecutionFailed",
+                            "GitHub source download returned HTTP " + response.statusCode()
+                                    + " for " + uri, 400);
+                }
+                if (response.headers().firstValueAsLong("Content-Length").orElse(0L) > maxArchiveBytes()) {
+                    throw archiveDownloadTooLarge();
+                }
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                byte[] chunk = new byte[8192];
+                long total = 0;
+                int n;
+                while ((n = body.read(chunk)) >= 0) {
+                    total += n;
+                    if (total > maxArchiveBytes()) {
+                        throw archiveDownloadTooLarge();
+                    }
+                    buffer.write(chunk, 0, n);
+                }
+                return buffer.toByteArray();
+            }
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("ActionExecutionFailed",
+                    "GitHub source download failed: " + e.getMessage(), 400);
+        }
+    }
+
+    private AwsException archiveDownloadTooLarge() {
+        return new AwsException("ActionExecutionFailed",
+                "GitHub source archive exceeds the maximum archive download size of "
+                        + maxArchiveBytes() + " bytes", 400);
+    }
+
+    /**
+     * GitHub's codeload archives wrap the repo in a {@code <repo>-<branch>/} directory;
+     * the real source artifact has the repo contents at the root.
+     */
+    private byte[] stripTopLevelDirectory(byte[] zip) {
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ZipFile zipFile = ZipFile.builder()
+                    .setSeekableByteChannel(new SeekableInMemoryByteChannel(zip)).get();
+                 ZipArchiveOutputStream zos = new ZipArchiveOutputStream(baos)) {
+                Enumeration<ZipArchiveEntry> entries = zipFile.getEntriesInPhysicalOrder();
+                int entryCount = 0;
+                long uncompressedTotal = 0;
+                while (entries.hasMoreElements()) {
+                    ZipArchiveEntry entry = entries.nextElement();
+                    if (++entryCount > maxEntries()) {
+                        throw new AwsException("ActionExecutionFailed",
+                                "GitHub source archive has more than the maximum of "
+                                        + maxEntries() + " entries", 400);
+                    }
+                    if (entry.getName().startsWith("/")) {
+                        throw new AwsException("ActionExecutionFailed",
+                                "GitHub source archive contains an escaping entry: " + entry.getName(), 400);
+                    }
+                    int slash = entry.getName().indexOf('/');
+                    if (slash < 0 || slash == entry.getName().length() - 1) {
+                        continue;
+                    }
+                    String stripped = entry.getName().substring(slash + 1);
+                    if (isEscapingPath(stripped)) {
+                        throw new AwsException("ActionExecutionFailed",
+                                "GitHub source archive contains an escaping entry: " + entry.getName(), 400);
+                    }
+                    if (entry.isDirectory()) {
+                        continue;
+                    }
+                    // Symlink entries (unix mode S_IFLNK, content = link target) are not
+                    // directories, so they flow through this copy path: the unix mode and
+                    // the content are kept as-is in the repackaged artifact. This only
+                    // preserves the entries; the current CodeBuild extractZip writes every
+                    // entry as a plain file and does not recreate symlinks.
+                    ZipArchiveEntry copy = new ZipArchiveEntry(stripped);
+                    if (entry.getUnixMode() != 0) {
+                        copy.setUnixMode(entry.getUnixMode());
+                    }
+                    zos.putArchiveEntry(copy);
+                    boolean symlink = (entry.getUnixMode() & 0xF000) == 0xA000;
+                    ByteArrayOutputStream linkTarget = new ByteArrayOutputStream();
+                    CRC32 crc = new CRC32();
+                    try (InputStream in = openEntryStream(zipFile, entry)) {
+                        byte[] chunk = new byte[8192];
+                        int n;
+                        while ((n = in.read(chunk)) >= 0) {
+                            uncompressedTotal += n;
+                            if (uncompressedTotal > maxUncompressedBytes()) {
+                                throw new AwsException("ActionExecutionFailed",
+                                        "GitHub source archive exceeds the maximum uncompressed size of "
+                                                + maxUncompressedBytes() + " bytes", 400);
+                            }
+                            crc.update(chunk, 0, n);
+                            if (symlink) {
+                                linkTarget.write(chunk, 0, n);
+                            }
+                            zos.write(chunk, 0, n);
+                        }
+                    }
+                    if (entry.getCrc() != -1 && crc.getValue() != entry.getCrc()) {
+                        throw new AwsException("ActionExecutionFailed",
+                                "GitHub source archive entry fails its checksum: " + entry.getName(), 400);
+                    }
+                    if (symlink && isEscapingSymlink(stripped, linkTarget.toString(StandardCharsets.UTF_8))) {
+                        throw new AwsException("ActionExecutionFailed",
+                                "GitHub source archive contains an escaping symlink: " + entry.getName(), 400);
+                    }
+                    zos.closeArchiveEntry();
+                }
+            }
+            return baos.toByteArray();
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("ActionExecutionFailed",
+                    "Could not repackage GitHub archive: " + e.getMessage(), 400);
+        }
+    }
+
+    private static boolean isEscapingPath(String name) {
+        if (name.startsWith("/") || name.startsWith("\\")) {
+            return true;
+        }
+        for (String segment : name.split("[/\\\\]")) {
+            if (segment.equals("..")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A symlink target is escaping if absolute or if, resolved against the link's directory, it leaves the root. */
+    private static boolean isEscapingSymlink(String linkName, String target) {
+        if (target.startsWith("/") || target.startsWith("\\")) {
+            return true;
+        }
+        Path root = Path.of("/root");
+        Path linkDir = root.resolve(linkName).getParent();
+        return !linkDir.resolve(target).normalize().startsWith(root);
+    }
+
+    /** Ends the Inflater when the stream closes; InflaterInputStream leaves a caller-supplied one open. */
+    private static final class EndingInflaterInputStream extends InflaterInputStream {
+        private EndingInflaterInputStream(InputStream in) {
+            super(in, new Inflater(true));
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+                super.close();
+            } finally {
+                inf.end();
+            }
+        }
+    }
+
+    // ZipFile's decoding stream accessor dispatches on entry.getMethod() through a switch that also
+    // covers BZIP2, DEFLATE64, XZ and ZSTD, instantiating the matching CompressorInputStream
+    // inline; GraalVM's static analysis resolves every branch of that switch because the method
+    // itself is reachable, not just the branch a given entry happens to take, and XZ/ZSTD need
+    // org.tukaani:xz / com.github.luben:zstd-jni on the classpath at native link time to do so.
+    // GitHub archives are ordinary zips (STORED or DEFLATED only), so decoding just those two
+    // methods off the entry's raw bytes avoids the dispatch method and the optional codecs.
+    private static InputStream openEntryStream(ZipFile zipFile, ZipArchiveEntry entry) throws IOException {
+        InputStream raw = zipFile.getRawInputStream(entry);
+        return switch (entry.getMethod()) {
+            case ZipEntry.STORED -> raw;
+            case ZipEntry.DEFLATED -> new EndingInflaterInputStream(raw);
+            default -> throw new IOException(
+                    "Unsupported zip compression method " + entry.getMethod() + " for entry " + entry.getName());
+        };
     }
 
     private void executeCodeBuild(CodePipelineExecution execution, JsonNode action,

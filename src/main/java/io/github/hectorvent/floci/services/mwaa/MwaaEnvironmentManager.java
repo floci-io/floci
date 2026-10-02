@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -60,6 +61,19 @@ public class MwaaEnvironmentManager {
     /** The OS user the stock apache/airflow image runs its process as (uid 50000) — distinct from
      *  the Airflow web-UI admin login username configured via {@code _AIRFLOW_WWW_USER_USERNAME}. */
     private static final String CONTAINER_OS_USER = "airflow";
+    private static final Set<String> MWAA_CLI_COMMANDS = Set.of("cheat-sheet", "version");
+    private static final Map<String, Set<String>> MWAA_CLI_SUBCOMMANDS = Map.of(
+            "connections", Set.of("add", "delete"),
+            "dags", Set.of("backfill", "delete", "list", "list-import-errors", "list-jobs",
+                    "list-runs", "next-execution", "pause", "report", "reserialize", "show",
+                    "state", "test", "trigger", "unpause"),
+            "db", Set.of("clean"),
+            "providers", Set.of("behaviours", "get", "hooks", "links", "list", "notifications",
+                    "secrets", "triggerer", "widgets"),
+            "roles", Set.of("add-perms", "create", "del-perms", "list"),
+            "tasks", Set.of("clear", "failed-deps", "list", "render", "run", "state",
+                    "states-for-dag-run", "test"),
+            "variables", Set.of("delete", "get", "list", "set"));
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -373,10 +387,25 @@ public class MwaaEnvironmentManager {
      * {@code ;}, {@code |} or {@code $(...)} reaches Airflow as plain arguments.
      */
     public ContainerExec.Result runAirflowCli(String airflowContainerId, String cliCommand) throws Exception {
+        List<String> arguments = splitCliArguments(cliCommand);
+        if (!isSupportedCliCommand(arguments)) {
+            return new ContainerExec.Result(1, "", "Command is not supported by Amazon MWAA\n", false);
+        }
         List<String> argv = new ArrayList<>();
         argv.add("airflow");
-        argv.addAll(splitCliArguments(cliCommand));
+        argv.addAll(arguments);
         return execInContainer(airflowContainerId, argv.toArray(new String[0]));
+    }
+
+    static boolean isSupportedCliCommand(List<String> arguments) {
+        if (arguments.isEmpty()) {
+            return false;
+        }
+        if (MWAA_CLI_COMMANDS.contains(arguments.getFirst())) {
+            return true;
+        }
+        Set<String> subcommands = MWAA_CLI_SUBCOMMANDS.get(arguments.getFirst());
+        return arguments.size() >= 2 && subcommands != null && subcommands.contains(arguments.get(1));
     }
 
     /**

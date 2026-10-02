@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
@@ -383,6 +384,11 @@ public class SnsService implements Resettable, ResourceProvider {
     }
 
     public boolean topicExists(String topicArn, String region) {
+        if (topicStore instanceof AccountAwareStorageBackend<Topic> aware) {
+            String accountId = AwsArnUtils.accountOrDefault(topicArn, regionResolver.getAccountId());
+            return aware.getForAccountMigratingLegacy(accountId, topicKey(region, topicArn),
+                    topic -> topicArn.equals(topic.getTopicArn())).isPresent();
+        }
         return topicStore.get(topicKey(region, topicArn)).isPresent();
     }
 

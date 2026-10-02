@@ -108,6 +108,14 @@ shared settings list. Two config knobs,
 image version or point at an already-running instance and skip container management, matching the
 pattern used elsewhere in Floci for sidecars.
 
+Each Reposilite repository is provisioned with `redeployment: false`, so redeploying an existing
+GAV path with different content is rejected with a real `409`, matching AWS's documented asset
+immutability. Reposilite's own setting has no content-aware mode, though, and would reject a
+byte-identical redeploy too; Floci fetches the existing artifact first and short-circuits to `200`
+on an exact match, matching AWS's own documented exception ("Overwriting package assets" in
+CodeArtifact's packages overview) that a republish is idempotent when the content hasn't actually
+changed.
+
 ## The npm repository endpoint
 
 `GetRepositoryEndpoint` for `format=npm` returns `http://localhost:4566/codeartifact/npm/<domain>/<repository>/`.

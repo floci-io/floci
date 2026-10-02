@@ -101,6 +101,9 @@ public class CognitoService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String INVALID_ACCESS_TOKEN_MESSAGE = "Invalid access token";
+    /** The scope of every access token from an API sign-in such as InitiateAuth, and what the user's own operations need. */
+    private static final String USER_ADMIN_SCOPE = "aws.cognito.signin.user.admin";
+    private static final List<String> API_SIGN_IN_SCOPES = List.of(USER_ADMIN_SCOPE);
 
     private static final String IDENTITIES_ATTRIBUTE = "identities";
 
@@ -434,6 +437,21 @@ public class CognitoService implements ResourceProvider {
         pool.setPolicies(normalized);
     }
 
+    /**
+     * Gives a pool without a {@code SignInPolicy} AWS's default, {@code PASSWORD} alone. DescribeUserPool on
+     * AWS reports {@code {"AllowedFirstAuthFactors": ["PASSWORD"]}} for a pool created without one, on any
+     * tier. Unlike {@link #normalizePasswordPolicy}, defaulting this one enforces nothing new: a pool with no
+     * sign-in policy already offers only password challenges.
+     */
+    private static void defaultSignInPolicy(UserPool pool) {
+        Map<String, Object> policies = pool.getPolicies() == null ? new HashMap<>() : new HashMap<>(pool.getPolicies());
+        if (policies.get("SignInPolicy") instanceof Map<?, ?>) {
+            return;
+        }
+        policies.put("SignInPolicy", Map.of("AllowedFirstAuthFactors", List.of("PASSWORD")));
+        pool.setPolicies(policies);
+    }
+
     private void validatePasswordPolicy(Map<String, Object> passwordPolicy) {
         Object minLengthVal = passwordPolicy.get("MinimumLength");
         if (minLengthVal == null) {
@@ -534,6 +552,7 @@ public class CognitoService implements ResourceProvider {
             pool.setPolicies((Map<String, Object>) request.get("Policies"));
             normalizePasswordPolicy(pool);
         }
+        defaultSignInPolicy(pool);
         if (request.containsKey("DeletionProtection")) pool.setDeletionProtection((String) request.get("DeletionProtection"));
         if (request.containsKey("LambdaConfig")) pool.setLambdaConfig((Map<String, Object>) request.get("LambdaConfig"));
         if (request.containsKey("Schema")) pool.setSchemaAttributes(prefixCustomSchemaAttributes((List<Map<String, Object>>) request.get("Schema")));
@@ -2000,6 +2019,7 @@ public class CognitoService implements ResourceProvider {
         }
 
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
         CognitoUser user;
@@ -2938,6 +2958,22 @@ public class CognitoService implements ResourceProvider {
                 username, password);
     }
 
+    /** Managed login's choice-based sign-in; see {@link CognitoAuthFlowHandler#managedLoginFirstFactors}. */
+    List<String> managedLoginFirstFactors(UserPoolClient client) {
+        return authFlowHandler.managedLoginFirstFactors(describeUserPool(client.getUserPoolId()), client);
+    }
+
+    /** See {@link CognitoAuthFlowHandler#startManagedLoginEmailOtp}. */
+    String startManagedLoginEmailOtp(UserPoolClient client, String username) {
+        return authFlowHandler.startManagedLoginEmailOtp(describeUserPool(client.getUserPoolId()), client, username);
+    }
+
+    /** See {@link CognitoAuthFlowHandler#completeManagedLoginEmailOtp}. */
+    CognitoUser completeManagedLoginEmailOtp(UserPoolClient client, String session, String code) {
+        return authFlowHandler.completeManagedLoginEmailOtp(describeUserPool(client.getUserPoolId()), client,
+                session, code);
+    }
+
     public Map<String, Object> respondToAuthChallenge(String clientId, String challengeName,
                                                        String session, Map<String, String> responses) {
         return authFlowHandler.respondToAuthChallenge(clientId, challengeName, session, responses, Map.of());
@@ -3012,6 +3048,7 @@ public class CognitoService implements ResourceProvider {
 
     public void changePassword(String accessToken, String previousPassword, String proposedPassword) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -3079,6 +3116,7 @@ public class CognitoService implements ResourceProvider {
 
     public Map<String, Object> getUser(String accessToken) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -3107,7 +3145,7 @@ public class CognitoService implements ResourceProvider {
             }
             throw e;
         }
-        requireScope(accessToken, "aws.cognito.signin.user.admin");
+        requireScope(accessToken, USER_ADMIN_SCOPE);
 
         CognitoUser user = adminGetUser(token.poolId(), token.username());
         Map<String, Object> result = new LinkedHashMap<>();
@@ -3137,6 +3175,7 @@ public class CognitoService implements ResourceProvider {
             }
             throw e;
         }
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -3195,7 +3234,7 @@ public class CognitoService implements ResourceProvider {
             }
             throw e;
         }
-        requireScope(accessToken, "aws.cognito.signin.user.admin");
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -3242,6 +3281,7 @@ public class CognitoService implements ResourceProvider {
 
     public List<Map<String, Object>> updateUserAttributes(String accessToken, Map<String, String> attributes) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -3336,6 +3376,7 @@ public class CognitoService implements ResourceProvider {
 
     public void deleteUserAttributes(String accessToken, List<String> attributeNames) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
 
@@ -3531,37 +3572,51 @@ public class CognitoService implements ResourceProvider {
      * <p>{@code protocolClaims} carries claims the OIDC flow itself owns, currently the request's
      * {@code nonce}. They are applied <em>after</em> the trigger's, so a trigger cannot displace them:
      * AWS likewise refuses to let this trigger override {@code nonce} and the other reserved claims.
-     * Passing {@code null} for either side leaves the other's claims untouched. {@code requestedScopes}
-     * are the scopes the authorization request asked for, narrowed to the ones the client may actually
-     * use before the trigger is told about them.
+     * Passing {@code null} for either side leaves the other's claims untouched.
+     *
+     * <p>{@code grantedScopes} are the scopes the authorization code was granted at authorize (see
+     * {@link #grantedScopes}). The access token carries them, narrowed to the ones the client still
+     * allows, rather than the {@code aws.cognito.signin.user.admin} of an API sign-in, and the ID
+     * token is minted only when they include {@code openid}, as on AWS. The trigger is told the same
+     * scopes, and a V2 trigger's scope changes apply on top of them.
      */
     Map<String, Object> generateAuthResultForHostedAuth(CognitoUser user, UserPool pool, UserPoolClient client,
-                                                        ClaimsOverride protocolClaims, List<String> requestedScopes) {
-        ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user,
-                scopesAllowedForClient(client, requestedScopes));
-        return generateAuthResult(user, pool, client, mergeUnderProtocolClaims(trigger, protocolClaims));
+                                                        ClaimsOverride protocolClaims, List<String> grantedScopes) {
+        List<String> scopes = scopesStillAllowed(client, grantedScopes);
+        ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user, scopes);
+        return generateAuthResult(user, pool, client, mergeUnderProtocolClaims(trigger, protocolClaims),
+                UUID.randomUUID().toString(), scopes, scopes.contains("openid"));
     }
 
     /**
-     * The requested scopes the client is allowed to use, in the order requested and without duplicates.
-     *
-     * <p>An authorization request names its own scopes, and nothing checks them against the client's
-     * AllowedOAuthScopes when the code is issued, so the stored code can carry a scope the client may
-     * not use. A V2 trigger is free to grant claims or add scopes based on what it is told was
-     * requested, so it is told only what the client was entitled to ask for. An unallowed scope is
-     * dropped rather than refused, which is how AWS treats a scope that is not associated with the
-     * client.
+     * The scopes an authorization request is granted at authorize, where the authorization code is
+     * bound to them: every scope the client allows when it asked for none, as on AWS, and otherwise
+     * the requested scopes the client allows, in the order requested and without duplicates.
      */
-    private static List<String> scopesAllowedForClient(UserPoolClient client, List<String> requestedScopes) {
-        if (requestedScopes == null || requestedScopes.isEmpty()) {
-            return List.of();
-        }
+    static List<String> grantedScopes(UserPoolClient client, List<String> requestedScopes) {
         List<String> allowed = client.getAllowedOAuthScopes();
         if (allowed == null || allowed.isEmpty()) {
             return List.of();
         }
+        if (requestedScopes == null || requestedScopes.isEmpty()) {
+            return List.copyOf(new LinkedHashSet<>(allowed));
+        }
+        return scopesStillAllowed(client, requestedScopes);
+    }
+
+    /**
+     * The code's granted scopes that the client still allows, in their order and without duplicates.
+     * The client's AllowedOAuthScopes can change between authorize and redemption: a scope removed in
+     * between is dropped, and one added in between is never granted. A V2 trigger is free to grant
+     * claims or add scopes based on what it is told was granted, so it is told only these.
+     */
+    private static List<String> scopesStillAllowed(UserPoolClient client, List<String> grantedScopes) {
+        List<String> allowed = client.getAllowedOAuthScopes();
+        if (allowed == null || grantedScopes == null) {
+            return List.of();
+        }
         List<String> kept = new ArrayList<>();
-        for (String scope : requestedScopes) {
+        for (String scope : grantedScopes) {
             if (allowed.contains(scope) && !kept.contains(scope)) {
                 kept.add(scope);
             }
@@ -3603,9 +3658,17 @@ public class CognitoService implements ResourceProvider {
     }
 
     Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client, ClaimsOverride override, String originJti) {
+        return generateAuthResult(user, pool, client, override, originJti, API_SIGN_IN_SCOPES, true);
+    }
+
+    private Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client,
+                                                   ClaimsOverride override, String originJti,
+                                                   List<String> accessScopes, boolean withIdToken) {
         Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti));
-        auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override, originJti));
+        auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti, accessScopes));
+        if (withIdToken) {
+            auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override, originJti, accessScopes));
+        }
         auth.put("RefreshToken", buildRefreshToken(pool, user.getUsername(), client.getClientId(), originJti));
         auth.put("ExpiresIn", resolveAccessTokenLifetimeSeconds(client));
         auth.put("TokenType", "Bearer");
@@ -3617,6 +3680,15 @@ public class CognitoService implements ResourceProvider {
     }
 
     String generateSignedJwt(CognitoUser user, UserPool pool, String type, UserPoolClient client, ClaimsOverride override, String originJti) {
+        return generateSignedJwt(user, pool, type, client, override, originJti, API_SIGN_IN_SCOPES);
+    }
+
+    /**
+     * @param accessScopes the access token's {@code scope} claim before any V2 trigger changes, left
+     *                     out when empty; ignored for an ID token
+     */
+    private String generateSignedJwt(CognitoUser user, UserPool pool, String type, UserPoolClient client,
+                                     ClaimsOverride override, String originJti, List<String> accessScopes) {
         String header = encodeJwtHeader(pool);
         long now = System.currentTimeMillis() / 1000L;
         long lifetimeSeconds = resolveTokenLifetimeSeconds(client, type);
@@ -3632,7 +3704,9 @@ public class CognitoService implements ResourceProvider {
         claims.put("iat", now);
         if ("access".equals(type)) {
             claims.put("username", user.getUsername());
-            claims.put("scope", "aws.cognito.signin.user.admin");
+            if (!accessScopes.isEmpty()) {
+                claims.put("scope", String.join(" ", accessScopes));
+            }
         } else if ("id".equals(type)) {
             claims.put("cognito:username", user.getUsername());
         }
@@ -4615,9 +4689,10 @@ public class CognitoService implements ResourceProvider {
 
     /**
      * The scopes in the space-separated {@code scope} claim of an already-verified access token
-     * (call after {@link #verifyAccessToken}), empty when the claim is absent or blank. Every access
-     * token Floci mints sets the claim (see {@code generateSignedJwt}); it is missing only when a
-     * PreTokenGeneration trigger removed it, and such a token grants no scope.
+     * (call after {@link #verifyAccessToken}), empty when the claim is absent or blank. An access
+     * token lacks the claim only when a PreTokenGeneration trigger removed it, or when an
+     * authorization code was granted no scope because its client allows none, which AWS does not let
+     * an OAuth client do. Such a token grants no scope.
      */
     private Set<String> extractScopesFromToken(String token) {
         try {
@@ -4639,10 +4714,10 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * AWS requires an access token carrying the given scope for some operations (for example
-     * VerifyUserAttribute requires aws.cognito.signin.user.admin), and refuses a token with no
-     * scope claim. Call after {@link #verifyAccessToken}, which already confirms the token is a
-     * valid, unexpired access token; this only adds the scope check on top.
+     * AWS requires an access token carrying the given scope for some operations (every operation
+     * authorized by the user's access token requires aws.cognito.signin.user.admin), and refuses a
+     * token with no scope claim. Call after {@link #verifyAccessToken}, which already confirms the
+     * token is a valid, unexpired access token; this only adds the scope check on top.
      */
     void requireScope(String accessToken, String requiredScope) {
         Set<String> scopes = extractScopesFromToken(accessToken);
@@ -5149,6 +5224,7 @@ public class CognitoService implements ResourceProvider {
             Boolean emailPreferred) {
 
         VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
         synchronized (userLock(token.poolId(), token.username())) {
             setUserMFAPreferenceUnderUserLock(
                     token.poolId(), token.username(), emailEnabled, emailPreferred);

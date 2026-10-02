@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.ImportJob;
 import jakarta.inject.Inject;
@@ -22,8 +23,6 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
-
-import java.util.List;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
@@ -139,14 +138,14 @@ public class SesImportJobController {
             String destinationType = stringMemberOrAbsent(request, "ImportDestinationType");
             Integer pageSize = intMemberOrAbsent(request, "PageSize");
             String nextToken = stringMemberOrAbsent(request, "NextToken");
-            List<ImportJob> jobs = importJobService.listImportJobs(region, destinationType, pageSize, nextToken);
+            PaginatedResult<ImportJob> page = importJobService.listImportJobs(region, destinationType,
+                    SesListPaging.V2_LIST_IMPORT_JOBS, pageSize, nextToken);
             ObjectNode result = objectMapper.createObjectNode();
             ArrayNode items = result.putArray("ImportJobs");
-            for (ImportJob job : jobs) {
+            for (ImportJob job : page.items()) {
                 writeSummary(items.addObject(), job);
             }
-            // AWS renders NextToken as an explicit null on the last (here: only) page.
-            result.putNull("NextToken");
+            result.put("NextToken", page.nextToken());
             return Response.ok(result).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);

@@ -106,6 +106,27 @@ class ContainerLogStreamerTest {
                 eq("us-east-1"));
     }
 
+    @Test
+    void consoleOnlyStreamReachesTheConsoleButNotCloudWatch() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        LogContainerCmd command = mock(LogContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.logContainerCmd("container-1")).thenReturn(command);
+        CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(dockerClient, cloudWatchLogsService);
+
+        streamer.attachConsoleOnly("container-1", "ecs:family:main");
+        ArgumentCaptor<ContainerLogStreamer.LogReassemblyCallback> callback =
+                ArgumentCaptor.forClass(ContainerLogStreamer.LogReassemblyCallback.class);
+        verify(command).exec(callback.capture());
+
+        List<LogRecord> records = LogCapture.capture(ContainerLogStreamer.class, () ->
+                callback.getValue().onNext(new Frame(StreamType.STDOUT, utf8("container output\n"))));
+
+        assertEquals(1, records.size());
+        verify(cloudWatchLogsService, never()).createLogGroupForAccount(any(), any(), any(), any(), any());
+        verify(cloudWatchLogsService, never()).putLogEventsForAccount(any(), any(), any(), anyList(), any());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void execStreamAlwaysReachesCloudWatchAndConsoleIsOptional(boolean logToConsole) {

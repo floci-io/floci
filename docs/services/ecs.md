@@ -131,8 +131,13 @@ port `24224`, is rejected at launch. A `fluentbit` or `fluentd` FireLens
 container is acted on at launch: Floci generates the router config (unix socket input, TCP forward
 on bridge/awsvpc, ECS metadata, optional include of a `config-file-type=file` or `s3` extra
 config, and one output per `awsfirelens` container), starts that router first, and points application
-containers with `logDriver: awsfirelens` at the generated unix socket. Other log drivers,
-including `awslogs`, still stream to CloudWatch via Floci rather than the configured driver.
+containers with `logDriver: awsfirelens` at the generated unix socket. A container with
+`logDriver: awslogs` streams to CloudWatch Logs through Floci, in the `awslogs-group` log group
+and the `awslogs-region` region (the task's region when it is not set). The log stream is
+`<awslogs-stream-prefix>/<container-name>/<task-id>`, or the Docker container ID when no prefix is
+set, as on AWS. Floci creates the log group when it does not exist, even without
+`awslogs-create-group`. A container with no `logConfiguration`, or with another log driver, sends
+nothing to CloudWatch Logs; its output still appears in Floci's own log.
 An `[OUTPUT]` for an AWS destination whose plugin reads a URL from `endpoint` (`s3`,
 `cloudwatch`, `firehose`) also gets `Endpoint` set to Floci's container-reachable base URL. The
 Fluent Bit AWS plugins take a custom endpoint only from their own configuration and ignore the
@@ -517,9 +522,11 @@ nothing manages:
 - In Docker mode, every ECS container a previous run of this Floci left on the daemon is
   removed. A graceful shutdown already stops them; this covers a run that ended without one
   (SIGKILL, OOM, a stop timeout that expired mid-drain). Containers are recognised by the
-  `floci_owner_port` label (the resource namespace and API port), so the containers of another
+  `io.floci.owner` label (the resource namespace and API port), so the containers of another
   Floci sharing the daemon stay, and are told apart from the current run's by a per-process
-  `floci.ecs-run` label rather than by creation time. Containers created by a Floci version without that label are
+  `io.floci.ecs.run` label rather than by creation time. Both are also written under their legacy
+  names, `floci_owner_port` and `floci.ecs-run`, which are still read for containers an earlier
+  version created (see [Internal Labels](../configuration/docker.md#internal-labels)). Containers created by a Floci version without that label are
   not recognised and must be removed by hand once. If Docker cannot list or remove one, the
   ECS starts no task until it is gone, retrying the removal before each launch: a service's
   replacement on a reconciliation tick, or a `RunTask` or `StartTask` call, whose task then stops

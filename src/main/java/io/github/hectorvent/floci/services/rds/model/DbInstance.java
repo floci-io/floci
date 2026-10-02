@@ -47,6 +47,7 @@ public class DbInstance {
     private String preferredBackupWindow;
     private String preferredMaintenanceWindow;
     private boolean copyTagsToSnapshot;
+    private boolean deletionProtection;
     private boolean publiclyAccessible;
     /** MonitoringInterval documents 0 as its default. */
     private int monitoringInterval;
@@ -218,6 +219,9 @@ public class DbInstance {
 
     public boolean isCopyTagsToSnapshot() { return copyTagsToSnapshot; }
     public void setCopyTagsToSnapshot(boolean copyTagsToSnapshot) { this.copyTagsToSnapshot = copyTagsToSnapshot; }
+
+    public boolean isDeletionProtection() { return deletionProtection; }
+    public void setDeletionProtection(boolean deletionProtection) { this.deletionProtection = deletionProtection; }
 
     public String getMasterUserSecretKmsKeyId() { return masterUserSecretKmsKeyId; }
     public void setMasterUserSecretKmsKeyId(String masterUserSecretKmsKeyId) { this.masterUserSecretKmsKeyId = masterUserSecretKmsKeyId; }

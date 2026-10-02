@@ -304,9 +304,10 @@ also checked against that policy's length and character-class requirements, with
 echoed back by any of these actions, matching AWS.
 
 `DeleteUser` returns `DeleteConflict`, as on AWS, while the user still has a login profile, access
-keys, inline policies, attached managed policies, or group memberships: remove those first. Floci
-has no actions that create signing certificates, SSH public keys, Git credentials, or MFA devices,
-so there is nothing of those kinds to block on. Renaming a user with `UpdateUser` carries its login
+keys, inline policies, attached managed policies, group memberships, or an
+[enabled MFA device](#multi-factor-authentication): remove those first. Floci has no actions that
+create signing certificates, SSH public keys, or Git credentials, so there is nothing of those
+kinds to block on. Renaming a user with `UpdateUser` carries its login
 profile, access keys, and group membership to the new name. Unlike AWS, Floci does not rewrite
 policy documents that name the user's ARN, so a resource or trust policy that referred to the old
 name still refers to it after a rename.
@@ -416,11 +417,89 @@ resource-based policies, ACLs, Organizations policies and trust policies are not
 Resources and conditions are not evaluated either: the question is which policies could grant the
 service at all, not whether one specific call would be authorized.
 
+### Multi-Factor Authentication
+
+| Action | Description |
+|--------|-------------|
+| CreateVirtualMFADevice | Creates an unassigned virtual MFA device and returns its `SerialNumber` and `Base32StringSeed`. |
+| ListVirtualMFADevices | Lists the account's virtual MFA devices, filtered by `AssignmentStatus` (`Assigned`, `Unassigned` or `Any`, defaulting to `Any`). |
+| DeleteVirtualMFADevice | Deletes a device. Returns `DeleteConflict` while it is still assigned to a user. |
+| EnableMFADevice | Assigns a device to a user, after verifying two consecutive authentication codes. |
+| DeactivateMFADevice | Detaches a device from its user, leaving the device itself in place. |
+| ResyncMFADevice | Re-synchronizes an assigned device, again against two consecutive codes. |
+| ListMFADevices | Lists the devices assigned to a user. |
+| TagMFADevice / UntagMFADevice / ListMFADeviceTags | Manage a device's tags. |
+
+The seed is real. `CreateVirtualMFADevice` generates a 160-bit secret from `SecureRandom` and
+returns it as an RFC 4648 base32 string (base64-wrapped on the wire, as AWS models the member), so
+an authenticator app seeded from it produces codes Floci accepts. `EnableMFADevice` and
+`ResyncMFADevice` verify those codes as RFC 6238 TOTP (HMAC-SHA1 over 30-second steps, truncated
+to six digits) and return `InvalidAuthenticationCode` when they don't match, so a caller that does
+not hold the seed cannot enable a device. The two codes must be consecutive, as AWS asks ("a
+subsequent authentication code"), so the same code sent twice is rejected. `EnableMFADevice`
+allows one 30-second step of drift either side; `ResyncMFADevice` allows ten, since a device
+needing resync is by definition one whose clock has wandered.
+
+`SerialNumber` is the device ARN, `arn:aws:iam::<account>:mfa/<name>`, so `Path` and
+`VirtualMFADeviceName` together identify a device. A device survives `DeactivateMFADevice` with its
+seed intact, so re-enabling it needs no re-provisioning. `DeleteUser` returns `DeleteConflict` while
+the user still holds a device, and a user with one reports `mfa_active` as `TRUE` in the credential
+report. Renaming a user with `UpdateUser` carries the assignment to the new name, alongside the
+login profile and access keys it already moved.
+
+A user may hold up to 8 devices, the per-user limit the IAM User Guide documents, after which
+`EnableMFADevice` returns `LimitExceeded`. That is the only MFA quota Floci enforces:
+`CreateVirtualMFADevice` models `LimitExceeded` too, but AWS publishes no account-wide figure for
+virtual MFA devices, so there is nothing to enforce it against.
+
+Request shapes are checked before the device is resolved, so a `SerialNumber` outside its modeled
+9-to-256 range is a `ValidationError` rather than a `NoSuchEntity` for a device that could not have
+existed. Note that `VirtualMFADeviceName` is the one IAM name type with no documented maximum
+length: a name longer than the 128 characters other IAM names stop at is accepted here, as on AWS.
+`ListMFADeviceTags` honors `Marker` and `MaxItems`, sorting by tag key first as AWS documents, so a
+client can walk the result a page at a time. IAM's other tag readers in Floci still return every
+tag with `IsTruncated=false`.
+
+`VirtualMFADeviceName` has no maximum length, but the serial number it mints does: 256 characters.
+A name long enough to overflow that is rejected at creation rather than producing a device whose
+serial every other MFA operation would refuse.
+
+`QRCodePNG` is not returned. AWS marks it optional, and rendering a PNG would mean taking on a QR
+encoder dependency for a field whose content is derivable: it encodes
+`otpauth://totp/<device>@<account>?secret=<Base32String>`, which a caller can build from the
+`Base32StringSeed` that *is* returned. `aws iam create-virtual-mfa-device` works against Floci with
+`--bootstrap-method Base32StringSeed`, and fails only when asked for the QR code specifically.
+
+`GetMFADevice` is not implemented: AWS states "for this API, we only accept FIDO security key
+ARNs", and Floci models virtual devices only. Hardware TOTP tokens and FIDO security keys are not
+modeled either, so `ListMFADevices` returns only virtual devices where AWS would return every type.
+
+#### What a device does not yet affect
+
+Enabling a device records state and nothing more. It does not change what a request is allowed to
+do:
+
+- **Policy evaluation ignores MFA.** `aws:MultiFactorAuthPresent` and `aws:MultiFactorAuthAge` are
+  never placed in the request context, so under [enforcement](#iam-enforcement-mode) a statement
+  conditioned on either key does not behave as it would on AWS. Both directions fail closed rather
+  than open: an `Allow` gated on `Bool: {"aws:MultiFactorAuthPresent": "true"}` never grants,
+  because a missing key fails the condition block; and the common
+  `Deny` + `BoolIfExists: {"aws:MultiFactorAuthPresent": "false"}` lockout idiom always denies,
+  because `IfExists` passes on a missing key. So an MFA-gated policy is stricter than AWS here, not
+  laxer, but a device being enabled will not unlock it.
+- **No MFA-authenticated credentials.** `GetSessionToken` and `AssumeRole` accept `SerialNumber`
+  and `TokenCode` on AWS and return credentials that carry the MFA context keys. Floci's
+  [STS](sts.md) implementations ignore both parameters, so there is no way to obtain a session that
+  would satisfy an MFA condition even once the keys are populated.
+
+Both are out of scope here: this covers the device lifecycle only, and wiring MFA into
+authorization means touching the request context and STS session shape, which is separate work.
+
 ### Account
 
 | Action | Description |
 |--------|-------------|
-| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles) and IAM quota values. `Providers` counts OIDC providers only; SAML providers are not included. Resources Floci does not track (MFA devices, server certificates) are reported as zero rather than omitted. |
+| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles, MFA devices) and IAM quota values. `Providers` counts OIDC providers only; SAML providers are not included. Resources Floci does not track (server certificates) are reported as zero rather than omitted. |
 | GetAccountAuthorizationDetails | Returns every user, group and role in the account, and the policies relevant to them: every local (customer-managed) policy, and every AWS-managed policy actually attached to or used as a permissions boundary by something in the account. |
 | GenerateCredentialReport | Generates (or, within 4 hours of the last one, reuses) the account's credential report. |
 | GetCredentialReport | Returns the most recently generated credential report as Base64-encoded CSV. |
@@ -437,10 +516,11 @@ URL-encode either.
 The credential report holds the 23 columns AWS documents, always led by a `<root_account>` row.
 Floci does not model root account credentials at all (`GetAccountSummary`'s
 `AccountPasswordPresent`/`AccountAccessKeysPresent` are always zero for the same reason), so that
-row is placeholder values throughout. MFA devices and X.509 signing certificates are not modeled
-for IAM users either, so `mfa_active` and every `cert_*` column are always `FALSE`/`N/A`; access
-key last-used tracking (date, region, service) is not modeled, so those three columns are always
-`N/A` too. `password_last_used` is likewise not tracked, so it is always `no_information`.
+row is placeholder values throughout, including its `mfa_active`, which reports on root rather
+than on any IAM user's device. X.509 signing certificates are not modeled, so every `cert_*` column
+is always `FALSE`/`N/A`; access key last-used tracking (date, region, service) is not modeled, so
+those three columns are always `N/A` too. `mfa_active` on a user row is real, and is `TRUE` once
+the user has a device enabled. `password_last_used` is likewise not tracked, so it is always `no_information`.
 `password_last_changed` reflects an `UpdateLoginProfile` password change, not just
 `CreateLoginProfile`. `additional_credentials_info` is Floci's own wording, since AWS does not
 document the exact text; in practice it is unreachable, since `CreateAccessKey` already enforces
@@ -468,10 +548,9 @@ returns and nothing else.
 
 | Action | Description |
 |--------|-------------|
-| ListMFADevices | Always returns an empty list. It does not check that the user exists, where AWS returns `NoSuchEntity` for an unknown user. |
 | ListServerCertificates | Always returns an empty list. |
 
-MFA devices and server certificates are not stored, and no action creates them.
+Server certificates are not stored, and no action creates them.
 
 ## AWS Managed Policies
 
@@ -570,7 +649,7 @@ the route's rule miss.
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries registered `ResourcePolicyProvider` SPI implementations (such as S3 bucket policies) during request authorization:
 
-- Resource policy statements are matched against the caller's principal ARN (`Principal` and `NotPrincipal` clauses), supporting wildcard, user, role, account root, and service principals.
+- Resource policy statements are matched against the caller (`Principal` and `NotPrincipal` clauses), each principal type naming only its own kind of caller, as on AWS: `"*"` matches anyone; `{"AWS": "*"}` matches IAM identities and AWS services; any other `AWS` entry (a user, role, account id or account root) matches IAM identities only, and a role session matches a `Principal` naming its role through the role's own ARN, path included; `{"Service": "<name>"}` matches that service exactly. `{"Service": "*"}`, which AWS does not accept, matches nothing, and `Federated` and `CanonicalUser` entries never match an IAM caller.
 - An explicit **Deny** in a resource policy overrides any allows.
 - In cross-account scenarios or resource-controlled access, an explicit **Allow** in a resource policy grants access to the principal.
 - For detailed S3 bucket policy behavior and configuration, see [S3 Bucket Policy Enforcement](s3.md#bucket-policy-enforcement).
@@ -692,9 +771,11 @@ floci populates:
   check is made without the object's tags in the context, as measured on AWS. `If-None-Match`
   needs no such permission.
 - `aws:PrincipalArn`: the caller's ARN, resolved from the signing access key. It is the
-  IAM-user ARN for a user access key, the assumed-role ARN for an STS session, and
-  `arn:aws:iam::<account>:root` for the bare account-id key (floci's account-root principal),
-  matching the ARN shape AWS itself reports for the account root. It is **absent** only for
+  IAM-user ARN for a user access key, and `arn:aws:iam::<account>:root` for the bare account-id
+  key (floci's account-root principal), matching the ARN shape AWS itself reports for the account
+  root. For an STS role session it is the ARN of the role that was assumed, path included, not the
+  `assumed-role` session ARN, as AWS reports it ("For IAM roles, the request context returns the
+  ARN of the role"); a condition naming the session ARN does not match. It is **absent** only for
   unknown keys, where nothing about the caller can be resolved.
 - `dynamodb:LeadingKeys`, `dynamodb:Attributes`, `dynamodb:Select`: from the DynamoDB request
   body, for `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `BatchGetItem` and
@@ -723,10 +804,6 @@ being bounded by SCPs (below): both forms of root enforcement now agree. A negat
 (`StringNotEquals`, `ArnNotLike`, `NotIpAddress` and the rest) is the exception, as on AWS: an
 absent key cannot equal what the policy names, so the condition holds, and a `Deny` written
 that way applies when the key is missing.
-
-**Caveat:** `resolveCallerArn` hardcodes the assumed-role session name as `floci-session`,
-so `aws:PrincipalArn` for an assumed-role caller will not match a condition that pins a
-different session name. This matches what `sts:GetCallerIdentity` already reports.
 
 **Not yet supported**: `NotPrincipal`, resource-based policies (S3 bucket policy, Lambda resource
 policy), and `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems` and the

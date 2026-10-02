@@ -28,6 +28,8 @@ public class ServiceDeployment {
     private Instant updatedAt;
     private String targetServiceRevisionArn;
     private List<String> sourceServiceRevisionArns;
+    /** Tasks the circuit breaker has counted as failing to start. */
+    private int failedTasks;
 
     public Instant getStartedAt() { return startedAt; }
     public void setStartedAt(Instant startedAt) { this.startedAt = startedAt; }
@@ -50,6 +52,9 @@ public class ServiceDeployment {
     public void setSourceServiceRevisionArns(List<String> sourceServiceRevisionArns) {
         this.sourceServiceRevisionArns = sourceServiceRevisionArns;
     }
+
+    public int getFailedTasks() { return failedTasks; }
+    public void setFailedTasks(int failedTasks) { this.failedTasks = failedTasks; }
 
     public String getServiceDeploymentArn() { return serviceDeploymentArn; }
     public void setServiceDeploymentArn(String serviceDeploymentArn) { this.serviceDeploymentArn = serviceDeploymentArn; }

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.Pagination;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
 import java.util.function.Function;
 
 /**
@@ -65,7 +66,25 @@ public enum SesListPaging {
     V2_LIST_EXPORT_JOBS(Namespace.EXPORT_JOB, 100, 100,
             size -> badRequest("PageSize must be between 1 and 100"),
             token -> badRequest("Failed to deserialize token. "),
-            true);
+            true),
+
+    /**
+     * The three tenant lists answer Smithy's own validation messages, reporting a bad page size and
+     * an empty token together, and bind a token to the request it came from (probed 2026-10-02).
+     * Their default page size could not be measured (it needs more than 100 tenants) and is taken
+     * to be the bound.
+     */
+    V2_LIST_TENANTS(Namespace.TENANT),
+
+    V2_LIST_TENANT_RESOURCES(Namespace.TENANT_RESOURCE),
+
+    V2_LIST_RESOURCE_TENANTS(Namespace.RESOURCE_TENANT),
+
+    /**
+     * ListImportJobs refuses sandbox accounts, so nothing about it could be probed; it is modelled
+     * on the tenant lists, which share its Smithy-generated validation.
+     */
+    V2_LIST_IMPORT_JOBS(Namespace.IMPORT_JOB);
 
     private static final class Namespace {
         static final String TEMPLATE = "template";
@@ -73,6 +92,42 @@ public enum SesListPaging {
         static final String CONFIGURATION_SET = "configuration-set";
         static final String CUSTOM_VERIFICATION_EMAIL_TEMPLATE = "custom-verification-email-template";
         static final String EXPORT_JOB = "export-job";
+        static final String TENANT = "tenant";
+        static final String TENANT_RESOURCE = "tenant-resource";
+        static final String RESOURCE_TENANT = "resource-tenant";
+        static final String IMPORT_JOB = "import-job";
+    }
+
+    /** What the tenant lists share, and ListImportJobs borrows: the bound and Smithy's messages. */
+    private static final class TenantLists {
+        static final int BOUND = 100;
+        static final String EMPTY_TOKEN = "Value '' at 'nextToken' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1";
+
+        static String pageSizeViolation(int pageSize) {
+            String constraint = pageSize < 1
+                    ? "greater than or equal to 1"
+                    : "less than or equal to " + BOUND;
+            return "Value '" + pageSize + "' at 'pageSize' failed to satisfy constraint: "
+                    + "Member must have value " + constraint;
+        }
+
+        static AwsException pageSizeError(int pageSize) {
+            return badRequest("1 validation error detected: " + pageSizeViolation(pageSize));
+        }
+
+        static AwsException tokenError(String token) {
+            if (token.isEmpty()) {
+                return badRequest("1 validation error detected: " + EMPTY_TOKEN);
+            }
+            return badRequest("Invalid Next Token");
+        }
+
+        /** SES lists the token before the page size. */
+        static AwsException bothError(int pageSize) {
+            return badRequest("2 validation errors detected: " + EMPTY_TOKEN + "; "
+                    + pageSizeViolation(pageSize));
+        }
     }
 
     private final String namespace;
@@ -82,22 +137,29 @@ public enum SesListPaging {
     private final int servedWhenOutOfRange;
     private final Function<String, AwsException> invalidToken;
     private final boolean emptyTokenInvalid;
+    private final Function<Integer, AwsException> sizeAndEmptyTokenInvalid;
 
     SesListPaging(String namespace, int defaultPageSize, int maxPageSize,
                   Function<Integer, AwsException> outOfRange, Function<String, AwsException> invalidToken,
                   boolean emptyTokenInvalid) {
-        this(namespace, defaultPageSize, maxPageSize, outOfRange, 0, invalidToken, emptyTokenInvalid);
+        this(namespace, defaultPageSize, maxPageSize, outOfRange, 0, invalidToken, emptyTokenInvalid, null);
     }
 
     SesListPaging(String namespace, int defaultPageSize, int maxPageSize, int servedWhenOutOfRange,
                   Function<String, AwsException> invalidToken, boolean emptyTokenInvalid) {
         this(namespace, defaultPageSize, maxPageSize, null, servedWhenOutOfRange, invalidToken,
-                emptyTokenInvalid);
+                emptyTokenInvalid, null);
+    }
+
+    SesListPaging(String tenantStyleNamespace) {
+        this(tenantStyleNamespace, TenantLists.BOUND, TenantLists.BOUND, TenantLists::pageSizeError, 0,
+                TenantLists::tokenError, true, TenantLists::bothError);
     }
 
     SesListPaging(String namespace, int defaultPageSize, int maxPageSize,
                   Function<Integer, AwsException> outOfRange, int servedWhenOutOfRange,
-                  Function<String, AwsException> invalidToken, boolean emptyTokenInvalid) {
+                  Function<String, AwsException> invalidToken, boolean emptyTokenInvalid,
+                  Function<Integer, AwsException> sizeAndEmptyTokenInvalid) {
         this.namespace = namespace;
         this.defaultPageSize = defaultPageSize;
         this.maxPageSize = maxPageSize;
@@ -105,15 +167,34 @@ public enum SesListPaging {
         this.servedWhenOutOfRange = servedWhenOutOfRange;
         this.invalidToken = invalidToken;
         this.emptyTokenInvalid = emptyTokenInvalid;
+        this.sizeAndEmptyTokenInvalid = sizeAndEmptyTokenInvalid;
     }
 
     <T> PaginatedResult<T> page(String region, List<T> all, Function<T, String> cursorOf, Integer pageSize,
                                 String nextToken) {
+        return page(region, "", all, cursorOf, pageSize, nextToken);
+    }
+
+    /**
+     * {@code scope} names what else the request selected, a tenant or a filter, for the lists whose
+     * tokens SES refuses once that changes. The token carries the scope's length, so a scope that
+     * merely starts with another, which a name holding the token's own separator can do, is not
+     * taken for it.
+     */
+    <T> PaginatedResult<T> page(String region, String scope, List<T> all, Function<T, String> cursorOf,
+                                Integer pageSize, String nextToken) {
+        boolean emptyToken = nextToken != null && nextToken.isEmpty() && emptyTokenInvalid;
+        if (emptyToken && sizeAndEmptyTokenInvalid != null && pageSize != null
+                && (pageSize < 1 || pageSize > maxPageSize)) {
+            throw sizeAndEmptyTokenInvalid.apply(pageSize);
+        }
         int limit = pageSize(pageSize);
-        if (nextToken != null && nextToken.isEmpty() && emptyTokenInvalid) {
+        if (emptyToken) {
             throw invalidToken.apply(nextToken);
         }
-        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace + "@" + region, invalidToken);
+        String boundTo = scope.isEmpty() ? "" : "#" + scope.length() + "#" + scope;
+        return Pagination.paginate(all, cursorOf, limit, nextToken, namespace + "@" + region + boundTo,
+                invalidToken);
     }
 
     int pageSize(Integer requested) {
@@ -133,6 +214,18 @@ public enum SesListPaging {
     static String newestFirst(Instant created, String id) {
         long descending = Long.MAX_VALUE - (created == null ? 0L : created.toEpochMilli());
         return descending + "#" + id;
+    }
+
+    /**
+     * Oldest first, as SES lists a resource's tenants; the id orders equal timestamps. The cursor
+     * keeps the whole instant, so it orders exactly as a comparison of the instants does, and a
+     * missing timestamp sorts last.
+     */
+    static String oldestFirst(Instant created, String id) {
+        String time = created == null
+                ? "~"
+                : String.format(Locale.ROOT, "%019d.%09d", created.getEpochSecond(), created.getNano());
+        return time + "#" + id;
     }
 
     /** A REST JSON query-string page size; a value that is not an int is a serialization error. */

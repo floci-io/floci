@@ -1139,10 +1139,7 @@ public class SecretsManagerService implements ResourceProvider {
         // One full ARN for the permission check, the lookup and the invoke, so all three reach the same
         // function: a name or partial ARN would otherwise be invoked in whatever account the rotation
         // thread resolves, which is not necessarily the one that was checked.
-        AwsArnUtils.Arn secretArn = AwsArnUtils.parse(secret.getArn());
-        String functionArn = serviceManaged
-                ? null
-                : LambdaArnUtils.functionArn(finalLambdaArn, secretArn.partition(), region, secretArn.accountId());
+        String functionArn = serviceManaged ? null : rotationFunctionArn(finalLambdaArn, secret, region);
         if (!serviceManaged) {
             authorizeInvoke.accept(functionArn);
         }
@@ -1214,6 +1211,22 @@ public class SecretsManagerService implements ResourceProvider {
         return secret;
     }
 
+    /**
+     * The full ARN of the rotation function {@code reference} names, in the secret's partition and
+     * account unless the reference names its own. A reference Lambda cannot read is refused with
+     * Secrets Manager's {@code InvalidParameterException}: Lambda's codes for it,
+     * {@code InvalidParameterValueException} and {@code ValidationException}, are not among the
+     * errors {@code RotateSecret} declares, so an SDK client could not type them.
+     */
+    private static String rotationFunctionArn(String reference, Secret secret, String region) {
+        AwsArnUtils.Arn secretArn = AwsArnUtils.parse(secret.getArn());
+        try {
+            return LambdaArnUtils.functionArn(reference, secretArn.partition(), region, secretArn.accountId());
+        } catch (AwsException e) {
+            throw new AwsException("InvalidParameterException",
+                    "RotationLambdaARN is not a valid Lambda function reference: " + e.getMessage(), 400);
+        }
+    }
 
     /**
      * The outcome of {@link #cancelRotateSecret}: the secret with rotation turned off, plus the id

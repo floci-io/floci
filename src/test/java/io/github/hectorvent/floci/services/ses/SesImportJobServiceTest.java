@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.services.ses.model.Contact;
 import io.github.hectorvent.floci.services.ses.model.ImportJob;
 import io.github.hectorvent.floci.services.ses.model.Topic;
 import io.github.hectorvent.floci.services.ses.model.TopicPreference;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -278,7 +280,7 @@ class SesImportJobServiceTest {
         assertBadRequest(() -> service.createSuppressionListImportJob(REGION, ACCOUNT, "s3://bucket", "CSV", "PUT"));
         assertBadRequest(() -> service.createSuppressionListImportJob(REGION, ACCOUNT, url("a.csv"), "XML", "PUT"));
         assertBadRequest(() -> service.createSuppressionListImportJob(REGION, ACCOUNT, url("a.csv"), "CSV", "UPSERT"));
-        assertTrue(service.listImportJobs(REGION, null, null, null).isEmpty());
+        assertTrue(service.listImportJobs(REGION, null).isEmpty());
     }
 
     @Test
@@ -288,7 +290,7 @@ class SesImportJobServiceTest {
         assertEquals("NotFoundException", e.getErrorCode());
         // Probed against real AWS: this path words it differently from the contact-list APIs.
         assertEquals("ContactList <missing> doesn't exist", e.getMessage());
-        assertTrue(service.listImportJobs(REGION, null, null, null).isEmpty());
+        assertTrue(service.listImportJobs(REGION, null).isEmpty());
     }
 
     @Test
@@ -321,13 +323,37 @@ class SesImportJobServiceTest {
         service.createSuppressionListImportJob(REGION, ACCOUNT, url("a.csv"), "CSV", "PUT");
         service.createContactListImportJob(REGION, ACCOUNT, url("c.csv"), "CSV", LIST, "PUT");
 
-        assertEquals(2, service.listImportJobs(REGION, null, null, null).size());
-        assertEquals(1, service.listImportJobs(REGION, "CONTACT_LIST", 10, null).size());
-        assertEquals(1, service.listImportJobs(REGION, "SUPPRESSION_LIST", null, null).size());
-        assertTrue(service.listImportJobs("us-east-1", null, null, null).isEmpty());
-        assertBadRequest(() -> service.listImportJobs(REGION, "EXPORT", null, null));
-        assertBadRequest(() -> service.listImportJobs(REGION, null, 0, null));
-        assertBadRequest(() -> service.listImportJobs(REGION, null, null, "token"));
+        assertEquals(2, service.listImportJobs(REGION, null).size());
+        assertEquals(1, service.listImportJobs(REGION, "CONTACT_LIST", SesListPaging.V2_LIST_IMPORT_JOBS, 10, null)
+                .items().size());
+        assertEquals(1, service.listImportJobs(REGION, "SUPPRESSION_LIST").size());
+        assertTrue(service.listImportJobs("us-east-1", null).isEmpty());
+        assertBadRequest(() -> service.listImportJobs(REGION, "EXPORT"));
+        assertBadRequest(() -> service.listImportJobs(REGION, null, SesListPaging.V2_LIST_IMPORT_JOBS, 0, null));
+        assertBadRequest(() -> service.listImportJobs(REGION, null, SesListPaging.V2_LIST_IMPORT_JOBS, null, "token"));
+    }
+
+    @Test
+    void listImportJobs_oldestFirst_andPagesOnThatOrder() {
+        stubObject("a.csv", "alice@example.com,BOUNCE\n");
+        // A ticking clock separates the creation stamps, so creation order can beat job-id order.
+        SesImportJobService ticking = new SesImportJobService(jobStore, s3Service, suppressionService,
+                contactService, new ObjectMapper().findAndRegisterModules(), new MutableClock(), Runnable::run);
+        List<String> created = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            created.add(ticking.createSuppressionListImportJob(REGION, ACCOUNT, url("a.csv"), "CSV", "PUT").getJobId());
+        }
+
+        assertEquals(created, ticking.listImportJobs(REGION, null).stream().map(ImportJob::getJobId).toList());
+
+        PaginatedResult<ImportJob> first = ticking.listImportJobs(REGION, null,
+                SesListPaging.V2_LIST_IMPORT_JOBS, 2, null);
+        assertEquals(created.subList(0, 2), first.items().stream().map(ImportJob::getJobId).toList());
+        assertNotNull(first.nextToken());
+        PaginatedResult<ImportJob> rest = ticking.listImportJobs(REGION, null,
+                SesListPaging.V2_LIST_IMPORT_JOBS, 10, first.nextToken());
+        assertEquals(created.subList(2, 5), rest.items().stream().map(ImportJob::getJobId).toList());
+        assertNull(rest.nextToken());
     }
 
     @Test
@@ -393,7 +419,7 @@ class SesImportJobServiceTest {
         }
 
         assertEquals(SesImportJobService.MAX_CONCURRENT_JOBS, rejected.get());
-        assertEquals(SesImportJobService.MAX_CONCURRENT_JOBS, parked.listImportJobs(REGION, null, null, null).size());
+        assertEquals(SesImportJobService.MAX_CONCURRENT_JOBS, parked.listImportJobs(REGION, null).size());
     }
 
     @Test

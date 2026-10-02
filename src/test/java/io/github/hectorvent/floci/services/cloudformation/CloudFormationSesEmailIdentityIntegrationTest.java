@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.ses.SesIdentityService;
 import io.github.hectorvent.floci.services.ses.SesService;
+import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
@@ -13,6 +15,8 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -24,6 +28,10 @@ import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.times;
@@ -38,9 +46,13 @@ class CloudFormationSesEmailIdentityIntegrationTest {
     private static final String SES_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20261001/us-east-1/ses/aws4_request";
     private String stack;
+    private String stackAuth = CFN_AUTH;
 
     @InjectSpy
     SesService sesService;
+
+    @InjectSpy
+    SesIdentityService identityService;
 
     @BeforeAll
     static void configureContentTypes() {
@@ -144,6 +156,145 @@ class CloudFormationSesEmailIdentityIntegrationTest {
     }
 
     @Test
+    void changeSetPreviewMatchesReplacementAndInPlaceExecution() throws Exception {
+        String first = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        String second = "other-" + first;
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        cfn("CreateStack", dependentTemplate(first, false)).then().statusCode(200);
+        awaitStatus("CREATE_COMPLETE");
+        assertEquals(first, dependentValue());
+
+        changeSet("CreateChangeSet", "replace-identity", dependentTemplate(second, false))
+                .then().statusCode(200);
+        String replacementPreview = changeSet("DescribeChangeSet", "replace-identity", null)
+                .then().statusCode(200).extract().asString();
+        Map<String, String> identityChange = XmlParser.extractGroups(replacementPreview, "ResourceChange")
+                .stream().filter(change -> "Identity".equals(change.get("LogicalResourceId")))
+                .findFirst().orElseThrow();
+        assertEquals("Modify", identityChange.get("Action"));
+        assertEquals("True", identityChange.get("Replacement"));
+        Map<String, String> dependentChange = XmlParser.extractGroups(replacementPreview, "ResourceChange")
+                .stream().filter(change -> "DependentParameter".equals(change.get("LogicalResourceId")))
+                .findFirst().orElseThrow();
+        assertEquals("Modify", dependentChange.get("Action"));
+        assertEquals("False", dependentChange.get("Replacement"));
+        assertEquals(200, sesIdentity(first).statusCode(), "Preview must leave the deployed identity unchanged");
+        assertEquals(404, sesIdentity(second).statusCode());
+        assertEquals(first, dependentValue());
+
+        changeSet("ExecuteChangeSet", "replace-identity", null).then().statusCode(200);
+        String replaced = awaitStatus("UPDATE_COMPLETE");
+        assertEquals(second, XmlParser.extractPairs(replaced,
+                "Outputs", "OutputKey", "OutputValue").get("IdentityRef"));
+        assertEquals(404, sesIdentity(first).statusCode());
+        assertEquals(200, sesIdentity(second).statusCode());
+        assertEquals(second, dependentValue());
+
+        changeSet("CreateChangeSet", "update-options", dependentTemplate(second, true)).then().statusCode(200);
+        String optionPreview = changeSet("DescribeChangeSet", "update-options", null)
+                .then().statusCode(200).extract().asString();
+        Map<String, String> optionChange = XmlParser.extractGroups(optionPreview, "ResourceChange")
+                .stream().filter(change -> "Identity".equals(change.get("LogicalResourceId")))
+                .findFirst().orElseThrow();
+        assertEquals("False", optionChange.get("Replacement"));
+        assertEquals(true, sesIdentity(second).jsonPath().getBoolean("FeedbackForwardingStatus"));
+        changeSet("ExecuteChangeSet", "update-options", null).then().statusCode(200);
+        awaitStatus("UPDATE_COMPLETE");
+        assertEquals(false, sesIdentity(second).jsonPath().getBoolean("FeedbackForwardingStatus"));
+        assertEquals(second, dependentValue());
+    }
+
+    @Test
+    void replacementRetainKeepsThePriorIdentityAfterAnotherUpdateAndStackDeletion() throws Exception {
+        String first = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        String second = "retained-" + first;
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        cfn("CreateStack", retainedTemplate(first, false)).then().statusCode(200);
+        awaitStatus("CREATE_COMPLETE");
+        List<String> originalTokens = sesIdentity(first).jsonPath()
+                .getList("DkimAttributes.Tokens", String.class);
+
+        try {
+            cfn("UpdateStack", retainedTemplate(second, false)).then().statusCode(200);
+            String replaced = awaitStatus("UPDATE_COMPLETE");
+            assertEquals(second, XmlParser.extractPairs(replaced,
+                    "Outputs", "OutputKey", "OutputValue").get("IdentityRef"));
+            assertEquals(originalTokens, sesIdentity(first).jsonPath()
+                    .getList("DkimAttributes.Tokens", String.class));
+
+            cfn("UpdateStack", retainedTemplate(second, true)).then().statusCode(200);
+            awaitStatus("UPDATE_COMPLETE");
+            assertEquals("old", sesIdentity(first).jsonPath()
+                    .getString("Tags.find { it.Key == 'purpose' }.Value"));
+            assertEquals("new", sesIdentity(second).jsonPath()
+                    .getString("Tags.find { it.Key == 'purpose' }.Value"));
+
+            cfn("DeleteStack", null).then().statusCode(200);
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                    assertEquals(404, sesIdentity(second).statusCode()));
+            assertEquals(200, sesIdentity(first).statusCode(),
+                    "UpdateReplacePolicy Retain must release the displaced identity from stack ownership");
+            stack = null;
+        } finally {
+            given().header("Authorization", SES_AUTH)
+                    .delete("/v2/email/identities/{identity}", first).then().statusCode(anyOf(is(200), is(404)));
+        }
+    }
+
+    @Test
+    void failedUpdateRestoresOnlyTheOwningAccountIdentity() throws Exception {
+        String owner = "000000000001";
+        String other = "000000000002";
+        String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        stackAuth = auth(owner, "cloudformation");
+        given().header("Authorization", auth(other, "ses")).contentType("application/json")
+                .body(MAPPER.writeValueAsString(Map.of("EmailIdentity", identityName,
+                        "Tags", List.of(Map.of("Key", "purpose", "Value", "external")))))
+                .post("/v2/email/identities").then().statusCode(200);
+
+        try {
+            cfn("CreateStack", template(identityName, false)).then().statusCode(200);
+            awaitStatus("CREATE_COMPLETE");
+            List<String> ownerTokens = sesIdentity(identityName, owner).jsonPath()
+                    .getList("DkimAttributes.Tokens", String.class);
+            List<String> otherTokens = sesIdentity(identityName, other).jsonPath()
+                    .getList("DkimAttributes.Tokens", String.class);
+            ObjectNode attempted = (ObjectNode) MAPPER.readTree(template(identityName, true));
+            attempted.withObject("/Resources").set("BadSecret", MAPPER.valueToTree(Map.of(
+                    "Type", "AWS::SecretsManager::Secret", "DependsOn", "Identity",
+                    "Properties", Map.of("SecretString", "explicit",
+                            "GenerateSecretString", Map.of("PasswordLength", 32)))));
+
+            cfn("UpdateStack", attempted.toString()).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+            Response restored = sesIdentity(identityName, owner);
+            assertEquals(200, restored.statusCode(), restored.asString());
+            assertEquals(ownerTokens, restored.jsonPath().getList("DkimAttributes.Tokens", String.class));
+            assertEquals(true, restored.jsonPath().getBoolean("FeedbackForwardingStatus"));
+            assertEquals("old", restored.jsonPath().getString("Tags.find { it.Key == 'purpose' }.Value"));
+            Response untouched = sesIdentity(identityName, other);
+            assertEquals(otherTokens, untouched.jsonPath().getList("DkimAttributes.Tokens", String.class));
+            assertEquals("external", untouched.jsonPath().getString("Tags.find { it.Key == 'purpose' }.Value"));
+
+            cfn("UpdateStack", template(identityName, true)).then().statusCode(200);
+            awaitStatus("UPDATE_COMPLETE");
+            cfn("DeleteStack", null).then().statusCode(200);
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                    assertEquals(404, sesIdentity(identityName, owner).statusCode()));
+            assertEquals(200, sesIdentity(identityName, other).statusCode(),
+                    "Deleting the owner stack must not delete another account's same-named identity");
+            assertEquals("external", sesIdentity(identityName, other).jsonPath()
+                    .getString("Tags.find { it.Key == 'purpose' }.Value"));
+            stack = null;
+        } finally {
+            given().header("Authorization", auth(other, "ses"))
+                    .delete("/v2/email/identities/{identity}", identityName)
+                    .then().statusCode(anyOf(is(200), is(404)));
+        }
+    }
+
+    @Test
     void failedLaterResourceRestoresIdentitySettingsAndTags() throws Exception {
         String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
         stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
@@ -173,6 +324,131 @@ class CloudFormationSesEmailIdentityIntegrationTest {
                 XmlParser.extractPairs(restored, "Outputs", "OutputKey", "OutputValue").get("DkimValue1"));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void anotherFailedUpdateRetriesTheLastSuccessfulIdentitySnapshot(boolean replacing) throws Exception {
+        String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        cfn("CreateStack", template(identityName, false)).then().statusCode(200);
+        awaitStatus("CREATE_COMPLETE");
+        List<String> originalTokens = sesIdentity(identityName).jsonPath()
+                .getList("DkimAttributes.Tokens", String.class);
+        ObjectNode firstAttempt = (ObjectNode) MAPPER.readTree(template(identityName, true));
+        firstAttempt.withObject("/Resources").set("BadSecret", MAPPER.valueToTree(Map.of(
+                "Type", "AWS::SecretsManager::Secret", "DependsOn", "Identity",
+                "Properties", Map.of("SecretString", "first-attempt",
+                        "GenerateSecretString", Map.of("PasswordLength", 32)))));
+        clearInvocations(identityService);
+        doThrow(new AwsException("ServiceUnavailableException", "temporary restore failure", 503))
+                .doCallRealMethod().when(identityService).save(
+                        argThat(identity -> isOriginalSnapshot(identity, identityName, originalTokens)),
+                        eq("us-east-1"));
+
+        try {
+            cfn("UpdateStack", firstAttempt.toString()).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_FAILED");
+            assertEquals(false, sesIdentity(identityName).jsonPath().getBoolean("FeedbackForwardingStatus"));
+            assertEquals("new", sesIdentity(identityName).jsonPath()
+                    .getString("Tags.find { it.Key == 'purpose' }.Value"));
+            String nextIdentity = replacing ? "replacement-" + identityName : identityName;
+            ObjectNode secondAttempt = (ObjectNode) MAPPER.readTree(template(nextIdentity, false));
+            secondAttempt.withObject("/Resources/Identity/Properties").set("Tags",
+                    MAPPER.valueToTree(List.of(Map.of("Key", "purpose", "Value", "second-attempt"))));
+            secondAttempt.withObject("/Resources").set("BadSecret", MAPPER.valueToTree(Map.of(
+                    "Type", "AWS::SecretsManager::Secret", "DependsOn", "Identity",
+                    "Properties", Map.of("SecretString", "second-attempt",
+                            "GenerateSecretString", Map.of("PasswordLength", 64)))));
+
+            cfn("UpdateStack", secondAttempt.toString()).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+
+            Response recovered = sesIdentity(identityName);
+            assertEquals(200, recovered.statusCode(), recovered.asString());
+            assertEquals(originalTokens, recovered.jsonPath().getList("DkimAttributes.Tokens", String.class));
+            assertEquals(true, recovered.jsonPath().getBoolean("FeedbackForwardingStatus"));
+            assertEquals(true, recovered.jsonPath().getBoolean("DkimAttributes.SigningEnabled"));
+            assertEquals("RSA_2048_BIT", recovered.jsonPath().getString("DkimAttributes.NextSigningKeyLength"));
+            assertEquals(null, recovered.jsonPath().getString("MailFromAttributes.MailFromDomain"));
+            assertEquals("old", recovered.jsonPath().getString("Tags.find { it.Key == 'purpose' }.Value"));
+            if (replacing) {
+                assertEquals(404, sesIdentity(nextIdentity).statusCode());
+                String restored = cfn("DescribeStacks", null).then().statusCode(200).extract().asString();
+                assertEquals(identityName, XmlParser.extractPairs(restored,
+                        "Outputs", "OutputKey", "OutputValue").get("IdentityRef"));
+            }
+        } finally {
+            doCallRealMethod().when(identityService).save(any(Identity.class), eq("us-east-1"));
+        }
+    }
+
+    @Test
+    void outputsOnlyUpdateDoesNotClearAnUnrestoredIdentitySnapshot() throws Exception {
+        String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
+        String otherAccount = "000000000002";
+        stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
+        given().header("Authorization", auth(otherAccount, "ses")).contentType("application/json")
+                .body(MAPPER.writeValueAsString(Map.of("EmailIdentity", identityName,
+                        "Tags", List.of(Map.of("Key", "purpose", "Value", "external")))))
+                .post("/v2/email/identities").then().statusCode(200);
+        cfn("CreateStack", template(identityName, false)).then().statusCode(200);
+        awaitStatus("CREATE_COMPLETE");
+        List<String> originalTokens = sesIdentity(identityName).jsonPath()
+                .getList("DkimAttributes.Tokens", String.class);
+        List<String> otherTokens = sesIdentity(identityName, otherAccount).jsonPath()
+                .getList("DkimAttributes.Tokens", String.class);
+        ObjectNode failed = (ObjectNode) MAPPER.readTree(template(identityName, true));
+        failed.withObject("/Resources").set("BadSecret", MAPPER.valueToTree(Map.of(
+                "Type", "AWS::SecretsManager::Secret", "DependsOn", "Identity",
+                "Properties", Map.of("SecretString", "explicit",
+                        "GenerateSecretString", Map.of("PasswordLength", 32)))));
+        clearInvocations(identityService);
+        doThrow(new AwsException("ServiceUnavailableException", "restore unavailable", 503))
+                .when(identityService).save(
+                        argThat(identity -> isOriginalSnapshot(identity, identityName, originalTokens)),
+                        eq("us-east-1"));
+
+        try {
+            cfn("UpdateStack", failed.toString()).then().statusCode(200);
+            awaitStatus("UPDATE_ROLLBACK_FAILED");
+            ObjectNode outputsOnly = (ObjectNode) MAPPER.readTree(template(identityName, true));
+            outputsOnly.withObject("/Outputs").set("Marker", MAPPER.valueToTree(Map.of("Value", "cleanup")));
+            cfn("UpdateStack", outputsOnly.toString()).then().statusCode(200);
+            String completed = await().atMost(Duration.ofSeconds(15)).until(
+                    () -> cfn("DescribeStacks", null).then().statusCode(200).extract().asString(),
+                    body -> List.of("UPDATE_COMPLETE", "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS")
+                            .contains(XmlParser.extractFirst(body, "StackStatus", null)));
+            assertEquals("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS",
+                    XmlParser.extractFirst(completed, "StackStatus", null));
+            assertEquals(false, sesIdentity(identityName).jsonPath().getBoolean("FeedbackForwardingStatus"));
+            assertEquals("new", sesIdentity(identityName).jsonPath()
+                    .getString("Tags.find { it.Key == 'purpose' }.Value"));
+            cfn("UpdateStack", template(identityName, false)).then().statusCode(400);
+            verify(identityService, times(1)).save(
+                    argThat(identity -> isOriginalSnapshot(identity, identityName, originalTokens)),
+                    eq("us-east-1"));
+
+            doThrow(new AwsException("ServiceUnavailableException", "temporary delete failure", 503))
+                    .doCallRealMethod().when(sesService).deleteIdentity(identityName, "us-east-1");
+            cfn("DeleteStack", null).then().statusCode(200);
+            awaitStatus("DELETE_FAILED");
+            assertEquals(200, sesIdentity(identityName).statusCode());
+            cfn("DeleteStack", null).then().statusCode(200);
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                    assertEquals(404, sesIdentity(identityName).statusCode()));
+            assertEquals(otherTokens, sesIdentity(identityName, otherAccount).jsonPath()
+                    .getList("DkimAttributes.Tokens", String.class));
+            assertEquals("external", sesIdentity(identityName, otherAccount).jsonPath()
+                    .getString("Tags.find { it.Key == 'purpose' }.Value"));
+            stack = null;
+        } finally {
+            doCallRealMethod().when(identityService).save(any(Identity.class), eq("us-east-1"));
+            doCallRealMethod().when(sesService).deleteIdentity(identityName, "us-east-1");
+            given().header("Authorization", auth(otherAccount, "ses"))
+                    .delete("/v2/email/identities/{identity}", identityName)
+                    .then().statusCode(anyOf(is(200), is(404)));
+        }
+    }
+
     @Test
     void failedPostCreateCleanupIsRetriedByStackRollback() throws Exception {
         String identityName = "ses-" + Long.toString(System.nanoTime(), 36) + ".example.com";
@@ -182,7 +458,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         attempted.withObject("/Resources/Identity/Properties").set("MailFromAttributes",
                 MAPPER.valueToTree(Map.of("MailFromDomain", mailFromDomain)));
         doThrow(new AwsException("BadRequestException", "MAIL FROM rejected", 400))
-                .when(sesService).setEmailIdentityMailFromAttributes(identityName, mailFromDomain,
+                .when(identityService).setMailFromDomain(identityName, mailFromDomain,
                         "UseDefaultValue", "us-east-1");
         doThrow(new AwsException("ServiceUnavailableException", "temporary delete failure", 503))
                 .doCallRealMethod().when(sesService).deleteIdentity(identityName, "us-east-1");
@@ -194,7 +470,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
                     "Stack rollback must delete an identity left by failed post-create cleanup");
             verify(sesService, times(2)).deleteIdentity(identityName, "us-east-1");
         } finally {
-            doCallRealMethod().when(sesService).setEmailIdentityMailFromAttributes(identityName, mailFromDomain,
+            doCallRealMethod().when(identityService).setMailFromDomain(identityName, mailFromDomain,
                     "UseDefaultValue", "us-east-1");
             doCallRealMethod().when(sesService).deleteIdentity(identityName, "us-east-1");
         }
@@ -206,18 +482,18 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         String replacement = "replacement-" + original;
         String mailFromDomain = "mail." + replacement;
         stack = "cfn-ses-" + Long.toString(System.nanoTime(), 36);
-        cfn("CreateStack", template(original, false)).then().statusCode(200);
+        cfn("CreateStack", retainedTemplate(original, false)).then().statusCode(200);
         awaitStatus("CREATE_COMPLETE");
         List<String> originalTokens = sesIdentity(original).jsonPath()
                 .getList("DkimAttributes.Tokens", String.class);
         doThrow(new AwsException("BadRequestException", "MAIL FROM rejected", 400))
-                .when(sesService).setEmailIdentityMailFromAttributes(replacement, mailFromDomain,
+                .when(identityService).setMailFromDomain(replacement, mailFromDomain,
                         "RejectMessage", "us-east-1");
         doThrow(new AwsException("ServiceUnavailableException", "temporary delete failure", 503))
                 .doCallRealMethod().when(sesService).deleteIdentity(replacement, "us-east-1");
 
         try {
-            cfn("UpdateStack", template(replacement, true)).then().statusCode(200);
+            cfn("UpdateStack", retainedTemplate(replacement, true)).then().statusCode(200);
             String rolledBack = awaitStatus("UPDATE_ROLLBACK_COMPLETE");
             assertEquals(original, XmlParser.extractPairs(rolledBack,
                     "Outputs", "OutputKey", "OutputValue").get("IdentityRef"));
@@ -228,7 +504,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             assertEquals(originalTokens, identity.jsonPath().getList("DkimAttributes.Tokens", String.class));
             assertEquals("old", identity.jsonPath().getString("Tags.find { it.Key == 'purpose' }.Value"));
 
-            ObjectNode rejected = (ObjectNode) MAPPER.readTree(template(original, false));
+            ObjectNode rejected = (ObjectNode) MAPPER.readTree(retainedTemplate(original, false));
             rejected.withObject("/Resources/Identity/Properties").set("DkimSigningAttributes",
                     MAPPER.valueToTree(Map.of("NextSigningKeyLength", "INVALID")));
             cfn("UpdateStack", rejected.toString()).then().statusCode(200);
@@ -238,11 +514,15 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             assertEquals(200, sesIdentity(replacement).statusCode());
             verify(sesService, times(1)).deleteIdentity(replacement, "us-east-1");
 
-            cfn("UpdateStack", template(original, true)).then().statusCode(200);
+            ObjectNode outputsOnly = (ObjectNode) MAPPER.readTree(retainedTemplate(original, false));
+            outputsOnly.withObject("/Outputs").set("Marker", MAPPER.valueToTree(Map.of("Value", "cleanup")));
+            cfn("UpdateStack", outputsOnly.toString()).then().statusCode(200);
             awaitStatus("UPDATE_COMPLETE");
             assertEquals(404, sesIdentity(replacement).statusCode(),
-                    "A committed update must retry cleanup of the earlier failed replacement");
-            assertEquals("new", sesIdentity(original).jsonPath()
+                    "An outputs-only update must retry cleanup even when SES provisioning is skipped");
+            assertEquals(originalTokens,
+                    sesIdentity(original).jsonPath().getList("DkimAttributes.Tokens", String.class));
+            assertEquals("old", sesIdentity(original).jsonPath()
                     .getString("Tags.find { it.Key == 'purpose' }.Value"));
             verify(sesService, times(2)).deleteIdentity(replacement, "us-east-1");
 
@@ -251,7 +531,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
                     assertEquals(404, sesIdentity(original).statusCode()));
             stack = null;
         } finally {
-            doCallRealMethod().when(sesService).setEmailIdentityMailFromAttributes(replacement, mailFromDomain,
+            doCallRealMethod().when(identityService).setMailFromDomain(replacement, mailFromDomain,
                     "RejectMessage", "us-east-1");
             doCallRealMethod().when(sesService).deleteIdentity(replacement, "us-east-1");
             given().header("Authorization", SES_AUTH)
@@ -267,13 +547,14 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         cfn("CreateStack", template(original, false)).then().statusCode(200);
         awaitStatus("CREATE_COMPLETE");
         doThrow(new AwsException("ServiceUnavailableException", "temporary read failure", 503))
-                .when(sesService).getEmailIdentity(replacement, "us-east-1");
+                .when(identityService).getIdentityVerificationAttributes(replacement, "us-east-1");
         doThrow(new AwsException("ServiceUnavailableException", "temporary delete failure", 503))
                 .doCallRealMethod().when(sesService).deleteIdentity(replacement, "us-east-1");
 
         try {
             cfn("UpdateStack", template(replacement, false)).then().statusCode(200);
             awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+            doCallRealMethod().when(identityService).getIdentityVerificationAttributes(replacement, "us-east-1");
             assertEquals(200, sesIdentity(original).statusCode());
             assertEquals(200, sesIdentity(replacement).statusCode());
 
@@ -285,7 +566,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             verify(sesService, times(2)).deleteIdentity(replacement, "us-east-1");
             stack = null;
         } finally {
-            doCallRealMethod().when(sesService).getEmailIdentity(replacement, "us-east-1");
+            doCallRealMethod().when(identityService).getIdentityVerificationAttributes(replacement, "us-east-1");
             doCallRealMethod().when(sesService).deleteIdentity(replacement, "us-east-1");
             given().header("Authorization", SES_AUTH)
                     .delete("/v2/email/identities/{identity}", replacement).then().statusCode(anyOf(is(200), is(404)));
@@ -298,9 +579,18 @@ class CloudFormationSesEmailIdentityIntegrationTest {
                 body -> expected.equals(XmlParser.extractFirst(body, "StackStatus", null)));
     }
 
+    private boolean isOriginalSnapshot(Identity identity, String identityName, List<String> originalTokens) {
+        return identity != null && identityName.equals(identity.getIdentity())
+                && originalTokens.equals(identity.getDkimTokens())
+                && identity.isFeedbackForwardingEnabled() && identity.isDkimEnabled()
+                && "RSA_2048_BIT".equals(identity.getDkimNextSigningKeyLength())
+                && identity.getMailFromDomain() == null
+                && identity.getTags().stream().anyMatch(tag -> "purpose".equals(tag.key()) && "old".equals(tag.value()));
+    }
+
     private Response cfn(String action, String template) {
         RequestSpecification request = given().contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH).formParam("Action", action).formParam("StackName", stack);
+                .header("Authorization", stackAuth).formParam("Action", action).formParam("StackName", stack);
         if (template != null) {
             request.formParam("TemplateBody", template);
         }
@@ -309,6 +599,47 @@ class CloudFormationSesEmailIdentityIntegrationTest {
 
     private Response sesIdentity(String identity) {
         return given().header("Authorization", SES_AUTH).get("/v2/email/identities/{identity}", identity);
+    }
+
+    private Response changeSet(String action, String name, String template) {
+        RequestSpecification request = given().contentType("application/x-www-form-urlencoded")
+                .header("Authorization", stackAuth).formParam("Action", action).formParam("StackName", stack)
+                .formParam("ChangeSetName", name);
+        if (template != null) {
+            request.formParam("ChangeSetType", "UPDATE").formParam("TemplateBody", template);
+        }
+        return request.post("/");
+    }
+
+    private String dependentValue() {
+        return given().header("Authorization", auth("000000000000", "ssm"))
+                .contentType("application/x-amz-json-1.1").header("X-Amz-Target", "AmazonSSM.GetParameter")
+                .body(Map.of("Name", stack + "-identity")).post("/").then().statusCode(200)
+                .extract().jsonPath().getString("Parameter.Value");
+    }
+
+    private String dependentTemplate(String identity, boolean updated) throws Exception {
+        ObjectNode dependent = (ObjectNode) MAPPER.readTree(template(identity, updated));
+        dependent.withObject("/Resources").set("DependentParameter", MAPPER.valueToTree(Map.of(
+                "Type", "AWS::SSM::Parameter", "Properties", Map.of("Name", stack + "-identity",
+                        "Type", "String", "Value", Map.of("Ref", "Identity")))));
+        return dependent.toString();
+    }
+
+    private Response sesIdentity(String identity, String account) {
+        return given().header("Authorization", auth(account, "ses"))
+                .get("/v2/email/identities/{identity}", identity);
+    }
+
+    private String auth(String account, String service) {
+        return "AWS4-HMAC-SHA256 Credential=" + account + "/20261002/us-east-1/" + service
+                + "/aws4_request, SignedHeaders=host, Signature=abc";
+    }
+
+    private String retainedTemplate(String identity, boolean updated) throws Exception {
+        ObjectNode retained = (ObjectNode) MAPPER.readTree(template(identity, updated));
+        retained.withObject("/Resources/Identity").put("UpdateReplacePolicy", "Retain");
+        return retained.toString();
     }
 
     private String template(String identity, boolean updated) throws Exception {

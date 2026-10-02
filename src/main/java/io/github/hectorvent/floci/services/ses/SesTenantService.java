@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -21,6 +22,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -133,12 +135,16 @@ public class SesTenantService {
                 .orElseThrow(() -> tenantNotFound(tenantName));
     }
 
+    public PaginatedResult<Tenant> listTenants(String region, SesListPaging paging, Integer pageSize,
+                                               String nextToken) {
+        return paging.page(region, listTenants(region), Tenant::tenantName, pageSize, nextToken);
+    }
+
+    /** By name, as SES lists them; the paged list resumes on the same order. */
     public List<Tenant> listTenants(String region) {
         String prefix = tenantKeyPrefix(region);
         return tenantStore.scan(k -> k.startsWith(prefix)).stream()
-                .sorted(Comparator.comparing(Tenant::createdTimestamp,
-                                Comparator.nullsLast(Comparator.naturalOrder()))
-                        .thenComparing(Tenant::tenantName, Comparator.nullsLast(Comparator.naturalOrder())))
+                .sorted(Comparator.comparing(Tenant::tenantName))
                 .toList();
     }
 
@@ -413,7 +419,15 @@ public class SesTenantService {
                 ref.arn(), tenant.tenantName(), region);
     }
 
-    /** AWS returns the tenant's resources ordered by ARN. */
+    public PaginatedResult<TenantResourceAssociation> listTenantResources(Tenant tenant, String typeFilter,
+                                                                          String region, SesListPaging paging,
+                                                                          Integer pageSize, String nextToken) {
+        return paging.page(region, tenant.tenantId() + "/" + Objects.toString(typeFilter, ""),
+                listTenantResources(tenant, typeFilter, region), TenantResourceAssociation::resourceArn,
+                pageSize, nextToken);
+    }
+
+    /** AWS returns the tenant's resources ordered by ARN; the paged list resumes on the same order. */
     public List<TenantResourceAssociation> listTenantResources(Tenant tenant, String typeFilter,
                                                                String region) {
         String prefix = associationKeyPrefix(region, tenant.tenantId());
@@ -428,7 +442,14 @@ public class SesTenantService {
     // itself contain the "::" delimiter (Floci barely restricts identity and template names), so a
     // suffix match on the key could alias one resource's associations to another's.
 
-    /** AWS returns a resource's tenants ordered by association time. */
+    public PaginatedResult<TenantResourceAssociation> listResourceTenants(AssociationResource ref, String region,
+                                                                          SesListPaging paging, Integer pageSize,
+                                                                          String nextToken) {
+        return paging.page(region, ref.arn(), listResourceTenants(ref, region),
+                SesTenantService::associationCursor, pageSize, nextToken);
+    }
+
+    /** AWS returns a resource's tenants ordered by association time; the paged list resumes on the same order. */
     public List<TenantResourceAssociation> listResourceTenants(AssociationResource ref, String region) {
         String regionPrefix = "tenantAssoc::" + region + "::";
         return associationStore.scan(k -> k.startsWith(regionPrefix)).stream()
@@ -438,6 +459,10 @@ public class SesTenantService {
                         .thenComparing(TenantResourceAssociation::tenantName,
                                 Comparator.nullsLast(Comparator.naturalOrder())))
                 .toList();
+    }
+
+    private static String associationCursor(TenantResourceAssociation association) {
+        return SesListPaging.oldestFirst(association.associatedTimestamp(), association.tenantName());
     }
 
     /**
@@ -464,21 +489,6 @@ public class SesTenantService {
         if (value != null && !SUPPORTED_RESOURCE_TYPES.contains(value)) {
             throw new AwsException("BadRequestException",
                     "Invalid resource type " + value + " specified.", 400);
-        }
-    }
-
-    /**
-     * The list operations return everything in one page, so any client-supplied NextToken is invalid —
-     * which is also what AWS answers for a token it cannot decrypt. PageSize is still range-checked.
-     */
-    public static void validateListPaging(Integer pageSize, String nextToken) {
-        if (pageSize != null && pageSize < 1) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value '" + pageSize + "' at 'pageSize' failed to "
-                            + "satisfy constraint: Member must have value greater than or equal to 1", 400);
-        }
-        if (nextToken != null) {
-            throw new AwsException("BadRequestException", "Invalid Next Token", 400);
         }
     }
 

@@ -25,6 +25,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -34,9 +36,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The scenario from a CI rebuild: a service's image tag is moved in its registry while the Docker
@@ -170,19 +175,18 @@ class EcsImagePullDockerIntegrationTest {
         }
     }
 
-    private String startRegistry() throws InterruptedException {
+    private String startRegistry() throws InterruptedException, IOException {
         pull(TestImages.REGISTRY);
         ExposedPort registryPort = ExposedPort.tcp(5000);
+        int hostPort = freeLoopbackPort();
         registryContainerId = dockerClient.createContainerCmd(TestImages.REGISTRY)
                 .withExposedPorts(registryPort)
                 .withHostConfig(HostConfig.newHostConfig().withPortBindings(new PortBinding(
-                        Ports.Binding.bindIp("127.0.0.1"), registryPort)))
+                        Ports.Binding.bindIpAndPort("127.0.0.1", hostPort), registryPort)))
                 .exec()
                 .getId();
         dockerClient.startContainerCmd(registryContainerId).exec();
-        Ports.Binding binding = dockerClient.inspectContainerCmd(registryContainerId).exec()
-                .getNetworkSettings().getPorts().getBindings().get(registryPort)[0];
-        String registry = "localhost:" + binding.getHostPortSpec();
+        String registry = "localhost:" + hostPort;
         HttpClient http = HttpClient.newHttpClient();
         for (int attempt = 0; attempt < 50; attempt++) {
             try {
@@ -217,9 +221,29 @@ class EcsImagePullDockerIntegrationTest {
     }
 
     private void push(String repository) throws InterruptedException {
-        dockerClient.pushImageCmd(repository).withTag("latest")
-                .exec(new ResultCallback.Adapter<PushResponseItem>())
+        AtomicReference<String> pushError = new AtomicReference<>();
+        boolean finished = dockerClient.pushImageCmd(repository).withTag("latest")
+                .exec(new ResultCallback.Adapter<PushResponseItem>() {
+                    @Override
+                    public void onNext(PushResponseItem item) {
+                        if (item.isErrorIndicated()) {
+                            pushError.set(String.valueOf(item.getErrorDetail()));
+                        }
+                    }
+                })
                 .awaitCompletion(2, TimeUnit.MINUTES);
+        assertTrue(finished, "the push to " + repository + " must finish");
+        assertNull(pushError.get(), "the push to " + repository + " must succeed");
+    }
+
+    /**
+     * A port named in the binding, not one the daemon picks: Docker Desktop allocates an unnamed
+     * port on the host side only, where the daemon that pushes and pulls cannot reach it.
+     */
+    private static int freeLoopbackPort() throws IOException {
+        try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+            return socket.getLocalPort();
+        }
     }
 
     private boolean isDockerAvailable() {

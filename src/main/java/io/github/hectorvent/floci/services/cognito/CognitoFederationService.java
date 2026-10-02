@@ -40,18 +40,23 @@ public class CognitoFederationService {
         this.clock = clock;
     }
 
+    /** Grants exactly the requested {@code scopes}. */
     public String beginAuthorization(String userPoolId, String clientId, String redirectUri, List<String> scopes,
                                      String nonce, String providerName) {
-        return beginAuthorization(userPoolId, clientId, redirectUri, scopes, nonce, providerName, null, null);
+        return beginAuthorization(userPoolId, clientId, redirectUri, scopes, scopes, nonce, providerName, null, null);
     }
 
     /**
-     * @param codeChallenge the relying party's S256 PKCE challenge, or null. It stays with Cognito:
-     *                      the relying party proves it at Cognito's token endpoint, not the provider's.
+     * @param requestedScopes the scopes the authorization request named, which the provider is asked
+     *                        for when it has no {@code authorize_scopes}
+     * @param grantedScopes   the scopes Cognito granted the request, which the transaction and then
+     *                        the authorization code keep; they never reach the provider
+     * @param codeChallenge   the relying party's S256 PKCE challenge, or null. It stays with Cognito:
+     *                        the relying party proves it at Cognito's token endpoint, not the provider's.
      */
-    public String beginAuthorization(String userPoolId, String clientId, String redirectUri, List<String> scopes,
-                                     String nonce, String providerName, String relyingPartyState,
-                                     String codeChallenge) {
+    public String beginAuthorization(String userPoolId, String clientId, String redirectUri,
+                                     List<String> requestedScopes, List<String> grantedScopes, String nonce,
+                                     String providerName, String relyingPartyState, String codeChallenge) {
         IdentityProvider provider = cognitoService.describeIdentityProvider(userPoolId, providerName);
         requireOidcProvider(provider);
         String authorizeEndpoint = requiredProviderDetail(provider, "authorize_url", "authorize endpoint");
@@ -59,14 +64,14 @@ public class CognitoFederationService {
         validateAuthorizeEndpoint(authorizeEndpoint, provider.getProviderName());
         Instant expiresAt = clock.instant().plus(TRANSACTION_LIFETIME);
         CognitoAuthorizationTransaction transaction = new CognitoAuthorizationTransaction(userPoolId, clientId,
-                redirectUri, scopes, nonce, providerName, relyingPartyState, codeChallenge, expiresAt);
+                redirectUri, grantedScopes, nonce, providerName, relyingPartyState, codeChallenge, expiresAt);
         String state = stateStore.putTransaction(transaction);
 
         Map<String, String> parameters = new LinkedHashMap<>();
         parameters.put("response_type", "code");
         parameters.put("client_id", providerClientId);
         parameters.put("redirect_uri", cognitoService.getIdentityProviderCallbackEndpoint(userPoolId));
-        parameters.put("scope", providerScopes(provider, scopes));
+        parameters.put("scope", providerScopes(provider, requestedScopes));
         parameters.put("state", state);
         if (nonce != null && !nonce.isBlank()) {
             parameters.put("nonce", nonce);

@@ -166,6 +166,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public static final String DEPLOYMENT_STATUS_SUCCESSFUL = "SUCCESSFUL";
     /** A service deployment that ended without completing. */
     public static final String DEPLOYMENT_STATUS_STOPPED = "STOPPED";
+    /** Why a deployment the circuit breaker ended stopped, and why its rollout FAILED. */
+    public static final String CIRCUIT_BREAKER_REASON = "The deployment circuit breaker detected a failure.";
     /** RunTask places at most ten tasks in one call, and StartTask at most ten instances. */
     public static final int MAX_TASKS_PER_RUN = 10;
     /** A listing returns at most a hundred ARNs per page. */
@@ -3885,6 +3887,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         // deployment would report a task-definition change COMPLETED as soon as it was made.
         long running = runningOnCurrentDeployment(svc);
         boolean converged = running >= svc.getDesiredCount();
+        ServiceDeployment record = lockedCopyOf(deploymentRecordOf(svc));
+        boolean failed = deploymentId.equals(svc.getFailedDeploymentId());
 
         Deployment d = new Deployment();
         d.setId(deploymentId);
@@ -3893,10 +3897,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         d.setDesiredCount(svc.getDesiredCount());
         d.setPendingCount(svc.getPendingCount());
         d.setRunningCount((int) running);
-        d.setFailedTasks(0);
-        d.setRolloutState(converged ? "COMPLETED" : "IN_PROGRESS");
-        d.setRolloutStateReason("ECS deployment " + deploymentId
-                + (converged ? " completed." : " in progress."));
+        d.setFailedTasks(record != null ? record.getFailedTasks() : 0);
+        if (failed) {
+            d.setRolloutState("FAILED");
+            d.setRolloutStateReason(CIRCUIT_BREAKER_REASON);
+        } else {
+            d.setRolloutState(converged ? "COMPLETED" : "IN_PROGRESS");
+            d.setRolloutStateReason("ECS deployment " + deploymentId
+                    + (converged ? " completed." : " in progress."));
+        }
         // A deployment reports the placement it runs under the same way the service does: a
         // capacity provider strategy when there is one, a launch type otherwise, never both.
         if (svc.getCapacityProviderStrategy() != null && !svc.getCapacityProviderStrategy().isEmpty()) {
@@ -4105,6 +4114,97 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /** The live record of the deployment the service is on, or null if none was recorded. */
+    private ServiceDeployment deploymentRecordOf(EcsServiceModel svc) {
+        if (svc.getServiceArn() == null) {
+            return null;
+        }
+        String suffix = "/" + taskSetId(svc);
+        return serviceDeployments.values().stream()
+                .filter(d -> svc.getServiceArn().equals(d.getServiceArn()))
+                .filter(d -> d.getTargetServiceRevisionArn() != null
+                        && d.getTargetServiceRevisionArn().endsWith(suffix))
+                .findFirst().orElse(null);
+    }
+
+    /**
+     * Counts a service task launch against the deployment's circuit breaker, and ends the
+     * deployment once the failures reach the threshold. Returns whether it ended.
+     */
+    private boolean countLaunch(EcsServiceModel svc, ServiceDeployment deployment, EcsTask task) {
+        if (deployment == null) {
+            return false;
+        }
+        Map<String, Object> breaker = circuitBreakerOf(svc);
+        synchronized (deployment) {
+            if (!DEPLOYMENT_STATUS_IN_PROGRESS.equals(deployment.getStatus())) {
+                return false;
+            }
+            if (TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
+                if (flag(breaker.get("resetOnHealthyTask"), true)) {
+                    deployment.setFailedTasks(0);
+                }
+                return false;
+            }
+            // Only a task that failed to start counts, not one a user stopped during its pull.
+            if (!TaskStatus.STOPPED.name().equals(task.getLastStatus())
+                    || !STOP_CODE_TASK_FAILED_TO_START.equals(task.getStopCode())) {
+                return false;
+            }
+            deployment.setFailedTasks(deployment.getFailedTasks() + 1);
+            // With rollback on, AWS rolls back instead of stopping; that is not modelled.
+            if (!flag(breaker.get("enable"), false) || flag(breaker.get("rollback"), false)
+                    || deployment.getFailedTasks() < circuitBreakerThreshold(breaker, svc.getDesiredCount())) {
+                return false;
+            }
+            Instant now = Instant.now();
+            deployment.setStatus(DEPLOYMENT_STATUS_STOPPED);
+            deployment.setStatusReason(CIRCUIT_BREAKER_REASON);
+            deployment.setFinishedAt(now);
+            deployment.setStoppedAt(now);
+            deployment.setUpdatedAt(now);
+            return true;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> circuitBreakerOf(EcsServiceModel svc) {
+        Map<String, Object> config = svc.getDeploymentConfiguration();
+        Object breaker = config == null ? null : config.get("deploymentCircuitBreaker");
+        return breaker instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
+    }
+
+    /**
+     * The failure count that trips the circuit breaker. BOUNDED_PERCENT (the default, at 50) is
+     * the percentage of the desired count rounded up and clamped to 3..200, UNBOUNDED_PERCENT the
+     * same without the clamp, and COUNT the value itself.
+     */
+    private static int circuitBreakerThreshold(Map<String, Object> breaker, int desiredCount) {
+        Object raw = breaker.get("thresholdConfiguration");
+        Map<?, ?> threshold = raw instanceof Map<?, ?> map ? map : Map.of();
+        String type = threshold.get("type") != null ? threshold.get("type").toString() : "BOUNDED_PERCENT";
+        int value = threshold.get("value") instanceof Number n ? n.intValue() : 50;
+        if ("COUNT".equals(type)) {
+            return value;
+        }
+        int percent = (value * desiredCount + 99) / 100;
+        return "UNBOUNDED_PERCENT".equals(type) ? percent : Math.min(200, Math.max(3, percent));
+    }
+
+    private static boolean flag(Object value, boolean fallback) {
+        return value == null ? fallback : Boolean.parseBoolean(value.toString());
+    }
+
+    /** {@link #copyOf} under the deployment's lock, or null for no deployment. */
+    private static ServiceDeployment lockedCopyOf(ServiceDeployment deployment) {
+        if (deployment == null) {
+            return null;
+        }
+        synchronized (deployment) {
+            return copyOf(deployment);
+        }
+    }
+
     /**
      * A copy taken under the deployment's lock, so a response never sees a half-applied
      * transition.
@@ -4124,6 +4224,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         copy.setUpdatedAt(source.getUpdatedAt());
         copy.setTargetServiceRevisionArn(source.getTargetServiceRevisionArn());
         copy.setSourceServiceRevisionArns(source.getSourceServiceRevisionArns());
+        copy.setFailedTasks(source.getFailedTasks());
         return copy;
     }
 
@@ -4716,12 +4817,23 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (!leftoverContainersCleared()) {
                 return;
             }
+            // A deployment the circuit breaker failed launches no new tasks. That is read off the
+            // persisted service, not the in-memory deployment record, so it survives a restart.
+            if (currentDeploymentId.equals(svc.getFailedDeploymentId())) {
+                return;
+            }
+            ServiceDeployment deployment = deploymentRecordOf(svc);
             int toStart = svc.getDesiredCount() - (int) current;
             for (int i = 0; i < toStart; i++) {
                 try {
                     EcsTask launched = launchServiceTask(cluster, svc, svc.getLaunchType(), null, region);
                     LOG.infov("Service reconciler started task {0} for service {1}",
                             launched.getTaskArn(), svc.getServiceName());
+                    if (countLaunch(svc, deployment, launched)) {
+                        svc.setFailedDeploymentId(currentDeploymentId);
+                        services.put(key, svc);
+                        break;
+                    }
                 } catch (Exception e) {
                     LOG.warnv("Service reconciler failed to start task for {0}: {1}",
                             svc.getServiceName(), e.getMessage());
@@ -4746,6 +4858,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                     t.getTaskArn(), e.getMessage());
                         }
                     });
+        }
+        // Settle on every tick, not only on a read: a deployment that has converged is finished,
+        // so a task dying afterwards cannot count against it.
+        ServiceDeployment settled = deploymentRecordOf(svc);
+        if (settled != null) {
+            settleStatus(settled);
         }
     }
 

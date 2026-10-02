@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.transfer.TransferService;
 import io.github.hectorvent.floci.services.wafv2.WafV2Service;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AcmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayAccountCfnProvisioner;
@@ -91,6 +92,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53Cf
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SesCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.TransferCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretsManagerCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SnsCfnProvisioner;
@@ -131,6 +133,7 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.ses.SesIdentityService;
 import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
@@ -167,6 +170,7 @@ final class CfnProvisionerFixture {
         private S3Service s3Service;
         private SnsService snsService;
         private SesService sesService;
+        private SesIdentityService sesIdentityService;
         private DynamoDbService dynamoDbService;
         private LambdaService lambdaService;
         private AppSyncService appSyncService;
@@ -202,6 +206,7 @@ final class CfnProvisionerFixture {
         private Route53Service route53Service;
         private CloudTrailService cloudTrailService;
         private SchedulerService schedulerService;
+        private TransferService transferService;
         // Services that back a provisioner without being a constructor argument of the
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
         private FlowLogService flowLogService;
@@ -273,8 +278,8 @@ final class CfnProvisionerFixture {
             if (snsService != null) {
                 discovered.add(new SnsCfnProvisioner(snsService));
             }
-            if (sesService != null) {
-                discovered.add(new SesCfnProvisioner(sesService));
+            if (sesService != null && sesIdentityService != null) {
+                discovered.add(new SesCfnProvisioner(sesService, sesIdentityService));
             }
             if (dynamoDbService != null) {
                 NativeDynamoDbBackend backend = new NativeDynamoDbBackend(null, null, dynamoDbService, null, null, objectMapper);
@@ -426,6 +431,9 @@ final class CfnProvisionerFixture {
             if (schedulerService != null) {
                 discovered.add(new SchedulerScheduleGroupCfnProvisioner(schedulerService));
             }
+            if (transferService != null) {
+                discovered.add(new TransferCfnProvisioner(transferService));
+            }
             if (redshiftService != null) {
                 discovered.add(new RedshiftClusterCfnProvisioner(redshiftService));
             }
@@ -447,6 +455,11 @@ final class CfnProvisionerFixture {
 
         public Builder ses(SesService v) {
             this.sesService = v;
+            return this;
+        }
+
+        public Builder sesIdentity(SesIdentityService v) {
+            this.sesIdentityService = v;
             return this;
         }
 
@@ -577,6 +590,11 @@ final class CfnProvisionerFixture {
 
         public Builder scheduler(SchedulerService v) {
             this.schedulerService = v;
+            return this;
+        }
+
+        public Builder transfer(TransferService v) {
+            this.transferService = v;
             return this;
         }
 

@@ -146,7 +146,9 @@ class EcsContainerManagerVolumesFromTest {
         ContainerDefinition router = definition("router", "router:latest");
         router.setFirelensConfiguration(new FirelensConfiguration("fluentbit", Map.of()));
         router.setVolumesFrom(List.of(new VolumeFrom("source", false)));
+        router.setLogConfiguration(awslogs());
         ContainerDefinition source = definition("source", "sidecar:latest");
+        source.setLogConfiguration(awslogs());
 
         EcsTask ecsTask = task();
         EcsTaskHandle handle = manager.startTask(
@@ -179,9 +181,9 @@ class EcsContainerManagerVolumesFromTest {
         verify(appBuilder, never()).withLogRotation();
         verify(sourceBuilder).withLogRotation();
         verify(routerBuilder).withLogRotation();
-        verify(logStreamer, never()).attach(eq("app-id"), any(), any(), any(), any());
-        verify(logStreamer).attach(eq("source-id"), any(), any(), eq("us-east-1"), any());
-        verify(logStreamer).attach(eq("router-id"), any(), any(), eq("us-east-1"), any());
+        verify(logStreamer, never()).attachForAccount(any(), eq("app-id"), any(), any(), any(), any());
+        verify(logStreamer).attachForAccount(eq("000000000000"), eq("source-id"), any(), any(), eq("us-east-1"), any());
+        verify(logStreamer).attachForAccount(eq("000000000000"), eq("router-id"), any(), any(), eq("us-east-1"), any());
         assertEquals("floci-aws-ecs-firelens-volumesfrom1", handle.getFirelensVolumeName());
         assertEquals(List.of("source", "router", "app"), handle.getContainerIds().keySet().stream().toList());
         assertEquals(List.of("app", "router", "source"),
@@ -265,6 +267,10 @@ class EcsContainerManagerVolumesFromTest {
         definition.setName(name);
         definition.setImage(image);
         return definition;
+    }
+
+    private static LogConfiguration awslogs() {
+        return new LogConfiguration("awslogs", Map.of("awslogs-group", "/ecs/volumesfrom-family"), null);
     }
 
     private static TaskDefinition taskDefinition(List<ContainerDefinition> definitions) {

@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
+import io.github.hectorvent.floci.services.ses.model.TenantResourceAssociation;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -13,6 +16,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -558,18 +563,72 @@ class SesTenantServiceTest {
     }
 
     @Test
-    void validateFilterAndPaging_matchAwsMessages() {
+    void validateFilter_matchesAwsMessages() {
         assertEquals("Invalid resource type NOPE specified.",
                 assertThrows(AwsException.class,
                         () -> SesTenantService.validateResourceTypeFilter("NOPE")).getMessage());
         assertEquals("Invalid resource type EMAIL_IDENTITY specified.",
                 assertThrows(AwsException.class,
                         () -> SesTenantService.validateResourceTypeFilter("EMAIL_IDENTITY")).getMessage());
-        assertTrue(assertThrows(AwsException.class,
-                () -> SesTenantService.validateListPaging(0, null))
-                .getMessage().contains("greater than or equal to 1"));
-        assertEquals("Invalid Next Token",
-                assertThrows(AwsException.class,
-                        () -> SesTenantService.validateListPaging(null, "garbage")).getMessage());
+    }
+
+    @Test
+    void listTenants_byName_andPagesOnThatOrder() {
+        for (String name : new String[] {"delta", "alpha", "echo", "charlie", "bravo"}) {
+            service.createTenant(name, List.of(), ACCOUNT, REGION);
+        }
+
+        assertEquals(List.of("alpha", "bravo", "charlie", "delta", "echo"),
+                service.listTenants(REGION).stream().map(Tenant::tenantName).toList());
+
+        PaginatedResult<Tenant> first = service.listTenants(REGION, SesListPaging.V2_LIST_TENANTS, 2, null);
+        assertEquals(List.of("alpha", "bravo"), first.items().stream().map(Tenant::tenantName).toList());
+        assertNotNull(first.nextToken());
+        PaginatedResult<Tenant> rest = service.listTenants(REGION, SesListPaging.V2_LIST_TENANTS, 10,
+                first.nextToken());
+        assertEquals(List.of("charlie", "delta", "echo"), rest.items().stream().map(Tenant::tenantName).toList());
+        assertNull(rest.nextToken());
+    }
+
+    @Test
+    void listTenantResources_pagesByArn() {
+        Tenant tenant = service.createTenant("acme", List.of(), ACCOUNT, REGION);
+        for (String domain : new String[] {"c.example.com", "a.example.com", "b.example.com"}) {
+            service.associate(tenant, identityRef(domain), REGION, () -> {});
+        }
+
+        PaginatedResult<TenantResourceAssociation> first = service.listTenantResources(tenant, null, REGION,
+                SesListPaging.V2_LIST_TENANT_RESOURCES, 2, null);
+        assertEquals(List.of(identityRef("a.example.com").arn(), identityRef("b.example.com").arn()),
+                first.items().stream().map(TenantResourceAssociation::resourceArn).toList());
+        PaginatedResult<TenantResourceAssociation> rest = service.listTenantResources(tenant, null, REGION,
+                SesListPaging.V2_LIST_TENANT_RESOURCES, 2, first.nextToken());
+        assertEquals(List.of(identityRef("c.example.com").arn()),
+                rest.items().stream().map(TenantResourceAssociation::resourceArn).toList());
+        assertNull(rest.nextToken());
+    }
+
+    @Test
+    void listResourceTenants_inAssociationOrder_andPagesOnThatOrder() {
+        // A ticking clock separates the association stamps, so association order can beat name order.
+        SesTenantService ticking = new SesTenantService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new MutableClock(), new SecureRandom());
+        for (String name : new String[] {"zulu", "alpha", "mike"}) {
+            Tenant tenant = ticking.createTenant(name, List.of(), ACCOUNT, REGION);
+            ticking.associate(tenant, identityRef("example.com"), REGION, () -> {});
+        }
+
+        assertEquals(List.of("zulu", "alpha", "mike"),
+                ticking.listResourceTenants(identityRef("example.com"), REGION).stream()
+                        .map(TenantResourceAssociation::tenantName).toList());
+
+        PaginatedResult<TenantResourceAssociation> first = ticking.listResourceTenants(identityRef("example.com"),
+                REGION, SesListPaging.V2_LIST_RESOURCE_TENANTS, 2, null);
+        assertEquals(List.of("zulu", "alpha"),
+                first.items().stream().map(TenantResourceAssociation::tenantName).toList());
+        PaginatedResult<TenantResourceAssociation> rest = ticking.listResourceTenants(identityRef("example.com"),
+                REGION, SesListPaging.V2_LIST_RESOURCE_TENANTS, 2, first.nextToken());
+        assertEquals(List.of("mike"), rest.items().stream().map(TenantResourceAssociation::tenantName).toList());
+        assertNull(rest.nextToken());
     }
 }

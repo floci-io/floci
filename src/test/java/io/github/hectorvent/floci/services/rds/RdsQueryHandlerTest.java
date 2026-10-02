@@ -122,7 +122,7 @@ class RdsQueryHandlerTest {
     @Test
     void modifyDbInstance_forwardsPubliclyAccessible() {
         when(service.modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), any(), isNull(), any(),
-                isNull(), any(DbInstanceSettings.class), eq(true), any(DbInstanceScalingChanges.class)))
+                isNull(), any(DbInstanceSettings.class), eq(true), any(DbInstanceScalingChanges.class), isNull()))
                 .thenReturn(makeInstance("mydb"));
         MultivaluedMap<String, String> p = params();
         p.putSingle("DBInstanceIdentifier", "mydb");
@@ -131,7 +131,7 @@ class RdsQueryHandlerTest {
         handler.handle("ModifyDBInstance", p);
 
         verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), any(), isNull(), any(),
-                isNull(), any(DbInstanceSettings.class), eq(true), any(DbInstanceScalingChanges.class));
+                isNull(), any(DbInstanceSettings.class), eq(true), any(DbInstanceScalingChanges.class), isNull());
     }
 
     @Test
@@ -145,7 +145,7 @@ class RdsQueryHandlerTest {
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
         verify(service, never()).modifyDbInstance(any(), any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any());
+                any(), any(), any(), any(), any());
     }
 
     @Test
@@ -159,6 +159,87 @@ class RdsQueryHandlerTest {
 
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+    }
+
+    @Test
+    void modifyDbInstance_forwardsDeletionProtection() {
+        when(service.modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), any(), isNull(), any(),
+                isNull(), any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class), eq(true)))
+                .thenReturn(makeInstance("mydb"));
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBInstanceIdentifier", "mydb");
+        p.putSingle("DeletionProtection", "true");
+
+        handler.handle("ModifyDBInstance", p);
+
+        verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), any(), isNull(), any(),
+                isNull(), any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class), eq(true));
+    }
+
+    @Test
+    void modifyDbInstance_rejectsMalformedDeletionProtection() {
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBInstanceIdentifier", "mydb");
+        p.putSingle("DeletionProtection", "maybe");
+
+        Response response = handler.handle("ModifyDBInstance", p);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+        verify(service, never()).modifyDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void createDbInstance_forwardsDeletionProtection() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+                eq(null), eq(null), eq(null), eq("db.t3.micro"),
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
+                any(), any(), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), eq(true)))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBInstanceIdentifier", "mydb");
+        p.putSingle("Engine", "postgres");
+        p.putSingle("DeletionProtection", "true");
+
+        handler.handle("CreateDBInstance", p);
+
+        verify(service).createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+                eq(null), eq(null), eq(null), eq("db.t3.micro"),
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
+                any(), any(), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), eq(true));
+    }
+
+    @Test
+    void createDbInstance_rejectsMalformedDeletionProtection() {
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("DBInstanceIdentifier", "mydb");
+        p.putSingle("Engine", "postgres");
+        p.putSingle("DeletionProtection", "yes");
+
+        Response response = handler.handle("CreateDBInstance", p);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+    }
+
+    @Test
+    void deleteDbInstance_refusesProtectedInstance() {
+        when(service.getDbInstance("mydb", null)).thenReturn(makeInstance("mydb"));
+        doThrow(new AwsException("InvalidParameterCombination",
+                "Cannot delete protected DB Instance, please disable deletion protection and try again.", 400))
+                .when(service).deleteDbInstance("mydb", null);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        Response response = handler.handle("DeleteDBInstance", p);
+
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>InvalidParameterCombination</Code>"), body);
+        assertTrue(body.contains("Cannot delete protected DB Instance, please disable deletion protection and try again."), body);
     }
 
     @Test
@@ -341,7 +422,7 @@ class RdsQueryHandlerTest {
         when(service.getDbInstance("mydb", "us-west-2")).thenReturn(instance);
         when(service.modifyDbInstance(
                 eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull(),
-                any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class)))
+                any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class), isNull()))
                 .thenReturn(instance);
         when(service.rebootDbInstance("mydb", "us-west-2")).thenReturn(instance);
         when(service.listDbClusters(null, "us-west-2")).thenReturn(List.of());
@@ -368,7 +449,7 @@ class RdsQueryHandlerTest {
         verify(service).deleteDbInstance("mydb", "us-west-2");
         verify(service).modifyDbInstance(
                 eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull(),
-                any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class));
+                any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class), isNull());
         verify(service).rebootDbInstance("mydb", "us-west-2");
         verify(service).listDbClusters(null, "us-west-2");
         verify(service).getDbCluster("mycluster", "us-west-2");
@@ -530,7 +611,7 @@ class RdsQueryHandlerTest {
     @Test
     void describeDbInstances_includesTagList() {
         DbInstance instance = makeInstance("mydb");
-        instance.setTags(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"));
+        instance.setTags(Map.of("example:ClusterId", "cluster-a", "Name", "mydb"));
         when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
 
         Response response = handler.handle("DescribeDBInstances", params());
@@ -549,7 +630,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
-                eq(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb")), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull()))
+                eq(Map.of("example:ClusterId", "cluster-a", "Name", "mydb")), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -563,7 +644,7 @@ class RdsQueryHandlerTest {
 
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 null, null, null, "db.t3.micro", 20, false, null, null, null, null, false, false, null,
-                java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"), List.of(), null, null, true, DbInstanceSettings.defaults(), null);
+                Map.of("example:ClusterId", "cluster-a", "Name", "mydb"), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, null);
     }
 
     @Test
@@ -573,7 +654,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
-                eq(java.util.Map.of()), eq(List.of("sg-123", "sg-456")), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull()))
+                eq(Map.of()), eq(List.of("sg-123", "sg-456")), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -588,7 +669,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<VpcSecurityGroupId>sg-456</VpcSecurityGroupId>"));
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 null, null, null, "db.t3.micro", 20, false, null, null, null, null, false, false, null,
-                java.util.Map.of(), List.of("sg-123", "sg-456"), null, null, true, DbInstanceSettings.defaults(), null);
+                Map.of(), List.of("sg-123", "sg-456"), null, null, true, DbInstanceSettings.defaults(), null, null, null);
     }
 
     @Test
@@ -604,7 +685,7 @@ class RdsQueryHandlerTest {
         assertTrue(((String) response.getEntity()).contains("InvalidParameterValue"));
         verify(service, never()).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), any(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull());
+                any(), any(), any(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull());
     }
 
     @Test
@@ -618,14 +699,14 @@ class RdsQueryHandlerTest {
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("InvalidParameterValue"));
         verify(service, never()).modifyDbInstance(any(), any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any());
+                any(), any(), any(), any(), any());
     }
 
     @Test
     void listTagsForResource_returnsStoredTags() {
         when(service.listTagsForResource(
                 "arn:aws:rds:us-east-1:000000000000:db:mydb", "us-west-2"))
-                .thenReturn(java.util.Map.of("Name", "mydb"));
+                .thenReturn(Map.of("Name", "mydb"));
 
         MultivaluedMap<String, String> p = params();
         p.add("ResourceName", "arn:aws:rds:us-east-1:000000000000:db:mydb");
@@ -651,7 +732,7 @@ class RdsQueryHandlerTest {
         assertEquals(200, addResponse.getStatus());
         verify(service).addTagsToResource(
                 "arn:aws:rds:us-east-1:000000000000:db:mydb",
-                java.util.Map.of("Name", "mydb"), "us-west-2");
+                Map.of("Name", "mydb"), "us-west-2");
 
         MultivaluedMap<String, String> remove = params();
         remove.add("ResourceName", "arn:aws:rds:us-east-1:000000000000:db:mydb");
@@ -667,7 +748,7 @@ class RdsQueryHandlerTest {
     @Test
     void describeOrderableDbInstanceOptions_usesServiceCatalog() {
         when(service.describeOrderableDbInstanceOptions("postgres", "16.3", "db.t4g.medium"))
-                .thenReturn(List.of(java.util.Map.of(
+                .thenReturn(List.of(Map.of(
                         "engine", "postgres",
                         "engineVersion", "16.3",
                         "dbInstanceClass", "db.t4g.medium")));
@@ -704,7 +785,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false),
-                eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull()))
+                eq(null), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -718,7 +799,7 @@ class RdsQueryHandlerTest {
 
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false,
-                null, java.util.Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null);
+                null, Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, null);
     }
 
     @Test
@@ -730,7 +811,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq(null), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(true),
-                eq("kms-key-1"), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull()))
+                eq("kms-key-1"), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -749,7 +830,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<KmsKeyId>kms-key-1</KmsKeyId>"));
         verify(service).createDbInstance("mydb", "postgres", "16.3",
                 "admin", null, "dbname", "db.t3.micro", 20, false, null, null, null, null, false, true,
-                "kms-key-1", java.util.Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null);
+                "kms-key-1", Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, null);
     }
 
     @Test
@@ -762,7 +843,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq("default"), eq(null), eq("ap-northeast-1a"), eq(true),
-                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull()))
+                eq(false), eq(null), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -792,7 +873,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false),
-                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(false), any(DbInstanceSettings.class), isNull()))
+                eq(false), eq(null), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(false), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -812,7 +893,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq("missing-subnet-group"), eq(null), eq(null), eq(false),
-                eq(false), eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull()))
+                eq(false), eq(null), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenThrow(new AwsException("DBSubnetGroupNotFoundFault",
                         "DB subnet group missing-subnet-group not found.", 404));
 
@@ -832,7 +913,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void createDbSubnetGroup_passesSubnetMembersToService() {
-        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), null, java.util.Map.of()))
+        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), null, Map.of()))
                 .thenReturn(new DbSubnetGroup(
                         "sample-db-subnets", "test", "vpc-123", List.of("subnet-aaa", "subnet-bbb"),
                         Map.of("subnet-aaa", "us-east-1a", "subnet-bbb", "us-east-1b")));
@@ -844,7 +925,7 @@ class RdsQueryHandlerTest {
         p.add("SubnetIds.SubnetIdentifier.2", "subnet-bbb");
         Response response = handler.handle("CreateDBSubnetGroup", p);
 
-        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), null, java.util.Map.of());
+        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), null, Map.of());
         String body = (String) response.getEntity();
         assertEquals(200, response.getStatus());
         assertTrue(body.contains("<DBSubnetGroupName>sample-db-subnets</DBSubnetGroupName>"));
@@ -856,7 +937,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void createDbSubnetGroupPassesRequestRegionToService() {
-        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2", java.util.Map.of()))
+        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2", Map.of()))
                 .thenReturn(new DbSubnetGroup(
                         "sample-db-subnets", "test", "vpc-123", List.of("subnet-aaa", "subnet-bbb"),
                         Map.of("subnet-aaa", "us-west-2a", "subnet-bbb", "us-west-2b")));
@@ -870,7 +951,7 @@ class RdsQueryHandlerTest {
         Response response = handler.handle("CreateDBSubnetGroup", p, "us-west-2");
 
         assertEquals(200, response.getStatus());
-        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2", java.util.Map.of());
+        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2", Map.of());
     }
 
     @Test
@@ -904,7 +985,7 @@ class RdsQueryHandlerTest {
         when(service.createDbInstance(eq("mydb"), eq("oracle"), eq("1.0"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false),
-                eq(null), eq(java.util.Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull()))
+                eq(null), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenThrow(new AwsException("InvalidParameterValue",
                         "Unsupported engine: oracle. Supported: postgres, mysql, mariadb.", 400));
 
@@ -921,7 +1002,7 @@ class RdsQueryHandlerTest {
     void modifyDbParameterGroup_ignoresParametersWithoutValue() {
         DbParameterGroup group = new DbParameterGroup("pg1", "postgres15", "test group");
         when(service.modifyDbParameterGroup(
-                eq("pg1"), eq(java.util.Map.of("max_connections", "200")), isNull()))
+                eq("pg1"), eq(Map.of("max_connections", "200")), isNull()))
                 .thenReturn(group);
 
         MultivaluedMap<String, String> p = params();
@@ -932,7 +1013,7 @@ class RdsQueryHandlerTest {
         handler.handle("ModifyDBParameterGroup", p);
 
         verify(service).modifyDbParameterGroup(
-                "pg1", java.util.Map.of("max_connections", "200"), null);
+                "pg1", Map.of("max_connections", "200"), null);
     }
 
     @Test
@@ -1005,7 +1086,7 @@ class RdsQueryHandlerTest {
     void modifyDbClusterParameterGroup_ignoresParametersWithoutValue() {
         DbClusterParameterGroup group = new DbClusterParameterGroup("cpg1", "aurora-postgresql16", "test group");
         when(service.modifyDbClusterParameterGroup(
-                eq("cpg1"), eq(java.util.Map.of("log_statement", "all")), isNull()))
+                eq("cpg1"), eq(Map.of("log_statement", "all")), isNull()))
                 .thenReturn(group);
 
         MultivaluedMap<String, String> p = params();
@@ -1016,7 +1097,7 @@ class RdsQueryHandlerTest {
         handler.handle("ModifyDBClusterParameterGroup", p);
 
         verify(service).modifyDbClusterParameterGroup(
-                "cpg1", java.util.Map.of("log_statement", "all"), null);
+                "cpg1", Map.of("log_statement", "all"), null);
     }
 
     @Test
@@ -1061,7 +1142,7 @@ class RdsQueryHandlerTest {
         group.setVpcId("vpc-12345678");
         group.setSubnetIds(List.of("subnet-a", "subnet-b"));
         group.setSubnetAvailabilityZones(Map.of("subnet-a", "us-east-1a", "subnet-b", "us-east-1b"));
-        when(service.createDbSubnetGroup("my-subnet-group", "test subnet group", List.of("subnet-a", "subnet-b"), null, java.util.Map.of()))
+        when(service.createDbSubnetGroup("my-subnet-group", "test subnet group", List.of("subnet-a", "subnet-b"), null, Map.of()))
                 .thenReturn(group);
 
         MultivaluedMap<String, String> p = params();
@@ -2459,7 +2540,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         when(service.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull()))
+                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -2471,7 +2552,7 @@ class RdsQueryHandlerTest {
         assertEquals(200, response.getStatus());
         verify(service).createDbInstance(eq("mydb"), eq("mysql"), any(), any(), any(), any(),
                 any(), anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(),
-                anyBoolean(), any(), any(), anyList(), eq("og1"), any(), anyBoolean(), any(DbInstanceSettings.class), isNull());
+                anyBoolean(), any(), any(), anyList(), eq("og1"), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull());
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
@@ -2536,7 +2617,7 @@ class RdsQueryHandlerTest {
         group.setDbSubnetGroupName("tagged");
         group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:tagged");
         when(service.createDbSubnetGroup(eq("tagged"), eq("d"), eq(List.of("subnet-aaa", "subnet-bbb")), isNull(),
-                eq(java.util.Map.of("Name", "tagged", "env", "tst")))).thenReturn(group);
+                eq(Map.of("Name", "tagged", "env", "tst")))).thenReturn(group);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBSubnetGroupName", "tagged");
@@ -2550,7 +2631,7 @@ class RdsQueryHandlerTest {
 
         assertEquals(200, handler.handle("CreateDBSubnetGroup", p).getStatus());
         verify(service).createDbSubnetGroup("tagged", "d", List.of("subnet-aaa", "subnet-bbb"), null,
-                java.util.Map.of("Name", "tagged", "env", "tst"));
+                Map.of("Name", "tagged", "env", "tst"));
     }
 
     // ──────────────────────────── RDS-family listing ────────────────────────────
@@ -2744,7 +2825,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         when(service.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull()))
+                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -2762,7 +2843,7 @@ class RdsQueryHandlerTest {
         ArgumentCaptor<DbInstanceSettings> captor = ArgumentCaptor.forClass(DbInstanceSettings.class);
         verify(service).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), any(), any(), anyBoolean(), captor.capture(), isNull());
+                any(), any(), anyList(), any(), any(), anyBoolean(), captor.capture(), isNull(), isNull(), isNull());
         DbInstanceSettings settings = captor.getValue();
         assertEquals(Boolean.TRUE, settings.storageEncrypted());
         assertEquals("arn:aws:kms:us-east-1:123456789012:key/k1", settings.kmsKeyId());
@@ -2777,7 +2858,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         when(service.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull()))
+                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -2788,7 +2869,7 @@ class RdsQueryHandlerTest {
         ArgumentCaptor<DbInstanceSettings> captor = ArgumentCaptor.forClass(DbInstanceSettings.class);
         verify(service).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), any(), any(), anyBoolean(), captor.capture(), isNull());
+                any(), any(), anyList(), any(), any(), anyBoolean(), captor.capture(), isNull(), isNull(), isNull());
         assertEquals(DbInstanceSettings.defaults(), captor.getValue());
     }
 
@@ -2806,7 +2887,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<Code>InvalidParameterValue</Code>"), body);
         verify(service, never()).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull());
+                any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull());
     }
 
     @Test
@@ -2818,6 +2899,7 @@ class RdsQueryHandlerTest {
         instance.setPreferredBackupWindow("23:30-00:00");
         instance.setPreferredMaintenanceWindow("sun:03:08-sun:03:38");
         instance.setCopyTagsToSnapshot(true);
+        instance.setDeletionProtection(true);
         when(service.listDbInstances("mydb", null)).thenReturn(List.of(instance));
 
         MultivaluedMap<String, String> p = params();
@@ -2830,6 +2912,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<PreferredBackupWindow>23:30-00:00</PreferredBackupWindow>"), body);
         assertTrue(body.contains("<PreferredMaintenanceWindow>sun:03:08-sun:03:38</PreferredMaintenanceWindow>"), body);
         assertTrue(body.contains("<CopyTagsToSnapshot>true</CopyTagsToSnapshot>"), body);
+        assertTrue(body.contains("<DeletionProtection>true</DeletionProtection>"), body);
     }
 
     @Test
@@ -2848,6 +2931,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<PreferredBackupWindow>04:00-06:00</PreferredBackupWindow>"), body);
         assertTrue(body.contains("<PreferredMaintenanceWindow>mon:00:00-mon:03:00</PreferredMaintenanceWindow>"), body);
         assertTrue(body.contains("<CopyTagsToSnapshot>false</CopyTagsToSnapshot>"), body);
+        assertTrue(body.contains("<DeletionProtection>false</DeletionProtection>"), body);
     }
 
     @Test
@@ -2855,7 +2939,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         when(service.modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
                 isNull(), isNull(), any(DbInstanceSettings.class), isNull(),
-                any(DbInstanceScalingChanges.class))).thenReturn(instance);
+                any(DbInstanceScalingChanges.class), isNull())).thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "mydb");
@@ -2869,7 +2953,7 @@ class RdsQueryHandlerTest {
 
         ArgumentCaptor<DbInstanceSettings> captor = ArgumentCaptor.forClass(DbInstanceSettings.class);
         verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
-                isNull(), isNull(), captor.capture(), isNull(), any(DbInstanceScalingChanges.class));
+                isNull(), isNull(), captor.capture(), isNull(), any(DbInstanceScalingChanges.class), isNull());
         assertEquals(new DbInstanceSettings(null, null, 3, "01:00-01:30", null, true), captor.getValue());
     }
 
@@ -2878,7 +2962,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         when(service.modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
                 isNull(), isNull(), any(DbInstanceSettings.class), isNull(),
-                any(DbInstanceScalingChanges.class))).thenReturn(instance);
+                any(DbInstanceScalingChanges.class), isNull())).thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "mydb");
@@ -2891,7 +2975,7 @@ class RdsQueryHandlerTest {
         ArgumentCaptor<DbInstanceScalingChanges> captor =
                 ArgumentCaptor.forClass(DbInstanceScalingChanges.class);
         verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
-                isNull(), isNull(), any(DbInstanceSettings.class), isNull(), captor.capture());
+                isNull(), isNull(), any(DbInstanceSettings.class), isNull(), captor.capture(), isNull());
         assertEquals(new DbInstanceScalingChanges("db.t3.large", 100, "14.7", true), captor.getValue());
     }
 
@@ -2900,7 +2984,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         when(service.modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
                 isNull(), isNull(), any(DbInstanceSettings.class), isNull(),
-                any(DbInstanceScalingChanges.class))).thenReturn(instance);
+                any(DbInstanceScalingChanges.class), isNull())).thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "mydb");
@@ -2910,7 +2994,7 @@ class RdsQueryHandlerTest {
         ArgumentCaptor<DbInstanceScalingChanges> captor =
                 ArgumentCaptor.forClass(DbInstanceScalingChanges.class);
         verify(service).modifyDbInstance(eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(),
-                isNull(), isNull(), any(DbInstanceSettings.class), isNull(), captor.capture());
+                isNull(), isNull(), any(DbInstanceSettings.class), isNull(), captor.capture(), isNull());
         assertEquals(DbInstanceScalingChanges.unchanged(), captor.getValue());
     }
 
@@ -2926,14 +3010,14 @@ class RdsQueryHandlerTest {
         assertEquals(400, response.getStatus());
         assertTrue(body.contains("<Code>InvalidParameterValue</Code>"), body);
         verify(service, never()).modifyDbInstance(any(), any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any());
+                any(), any(), any(), any(), any());
     }
 
     @Test
     void unhandledExceptionRendersXmlInternalFailure() {
         when(service.createDbInstance(any(), any(), any(), any(), any(), any(),
                 any(), anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(),
-                anyBoolean(), any(), any(), any(), any(), any(), anyBoolean(), any(), any()))
+                anyBoolean(), any(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), any()))
                 .thenThrow(new RuntimeException("Docker daemon connection failed"));
 
         MultivaluedMap<String, String> p = params();

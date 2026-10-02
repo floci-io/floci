@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elasticache;
 
+import io.github.hectorvent.floci.testing.PartitionMatrix;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Assumptions;
@@ -198,6 +199,17 @@ class ElastiCacheParameterGroupIntegrationTest {
 
         query("ListTagsForResource")
                 .formParam("ResourceName", "arn:aws:elasticache:us-east-1:000000000000:parametergroup:no-such-pg")
+        .when().post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("no-such-pg is not present"));
+        // In China the expected partition is aws-cn, so a China ARN passes the partition check
+        // and reaches the resource lookup like a commercial one does in us-east-1.
+        given()
+                .header("Authorization", PartitionMatrix.sigV4Auth("cn-north-1", "elasticache"))
+                .formParam("Action", "ListTagsForResource")
+                .formParam("Version", "2015-02-02")
+                .formParam("ResourceName", "arn:aws-cn:elasticache:cn-north-1:000000000000:parametergroup:no-such-pg")
         .when().post("/")
         .then()
             .statusCode(404)

@@ -156,6 +156,7 @@ cross-resource references.
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
 | EventBridge Scheduler | `ScheduleGroup` |
+| Transfer Family | `Server` (management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported) |
 | Backup | `BackupVault` |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
@@ -185,6 +186,20 @@ Set `floci.services.cloudformation.allow-stub-unsupported-resource-types` to `fa
 (`FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_UNSUPPORTED_RESOURCE_TYPES=false`) to fail such a
 resource instead: it reaches `CREATE_FAILED` and the stack rolls back. Use it in a pipeline that
 must not pass over a resource it never got.
+
+## SES Email Identities
+
+`AWS::SES::EmailIdentity` provisions an SES identity and supports in-place option updates and
+replacement when `EmailIdentity` changes. Change-set previews also mark the replacement and its
+`Ref` dependents.
+
+If a failed update cannot restore the identity snapshot, a subsequent update that provisions the
+identity retries that restoration before changing or replacing it. An update that skips the
+identity cannot discard the pending snapshot: it stays in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`
+and rejects further updates. `DeleteStack` can delete the current managed identity without first
+restoring its snapshot; deletion failures remain visible and can be retried. Displaced-resource
+cleanup still uses the shared retry limit. This is a recovery limitation, not support for
+`ContinueUpdateRollback`.
 
 ## EventBridge Event Buses
 

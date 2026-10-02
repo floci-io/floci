@@ -71,6 +71,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Stream;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
@@ -288,7 +289,8 @@ public class S3Controller {
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
             if (hasQueryParam(uriInfo, "notification")) {
                 s3Service.authorizeBucketWrite(bucket, "s3:PutBucketNotification", authorization);
-                return handlePutBucketNotification(bucket, body);
+                return handlePutBucketNotification(bucket, body,
+                        Boolean.parseBoolean(httpHeaders.getHeaderString("x-amz-skip-destination-validation")));
             }
             if (hasQueryParam(uriInfo, "versioning")) {
                 s3Service.authorizeBucketWrite(bucket, "s3:PutBucketVersioning", authorization);
@@ -884,7 +886,7 @@ public class S3Controller {
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
             String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
             s3Service.authorizePutObject(bucket, key, authorization);
-            S3Object obj = s3Service.putObject(bucket, key, data, contentType, extractUserMetadata(httpHeaders),
+            S3Object obj = s3Service.putObject(bucket, key, data, contentType, extractUserMetadata(httpHeaders, uriInfo),
                     new PutObjectOptions()
                             .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                             .withContentEncoding(persistedEncoding)
@@ -1484,7 +1486,7 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "uploads")) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 MultipartUpload upload = s3Service.initiateMultipartUpload(bucket, key, contentType,
-                        extractUserMetadata(httpHeaders),
+                        extractUserMetadata(httpHeaders, uriInfo),
                         httpHeaders.getHeaderString("x-amz-storage-class"),
                         httpHeaders.getHeaderString("Content-Disposition"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption"),
@@ -1915,31 +1917,31 @@ public class S3Controller {
         }
     }
 
-    private Response handlePutBucketNotification(String bucket, byte[] body) {
+    private Response handlePutBucketNotification(String bucket, byte[] body, boolean skipDestinationValidation) {
         try {
             String xml = new String(body, StandardCharsets.UTF_8);
             NotificationConfiguration config = new NotificationConfiguration();
 
-            for (var parsed : parseNotificationGroups(xml, "QueueConfiguration", "Queue")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "QueueConfiguration", "Queue")) {
                 config.getQueueConfigurations().add(
                         new QueueNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
-            for (var parsed : parseNotificationGroups(xml, "TopicConfiguration", "Topic")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "TopicConfiguration", "Topic")) {
                 config.getTopicConfigurations().add(
                         new TopicNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
-            for (var parsed : parseNotificationGroups(xml, "LambdaFunctionConfiguration", "LambdaFunctionArn")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "LambdaFunctionConfiguration", "LambdaFunctionArn")) {
                 config.getLambdaFunctionConfigurations().add(
                         new LambdaNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
-            for (var parsed : parseNotificationGroups(xml, "CloudFunctionConfiguration", "CloudFunction")) {
+            for (ParsedNotificationGroup parsed : parseNotificationGroups(xml, "CloudFunctionConfiguration", "CloudFunction")) {
                 config.getLambdaFunctionConfigurations().add(
                         new LambdaNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
 
             config.setEventBridgeEnabled(parseEventBridgeConfiguration(xml));
 
-            s3Service.putBucketNotificationConfiguration(bucket, config);
+            s3Service.putBucketNotificationConfiguration(bucket, config, skipDestinationValidation);
             return Response.ok().build();
         } catch (AwsException e) {
             return xmlErrorResponse(e, bucket);
@@ -2768,7 +2770,7 @@ public class S3Controller {
                 sourceObject.versionId(),
                 new CopyObjectOptions()
                         .withMetadataDirective(httpHeaders.getHeaderString("x-amz-metadata-directive"))
-                        .withReplacementMetadata(extractUserMetadata(httpHeaders))
+                        .withReplacementMetadata(extractUserMetadata(httpHeaders, uriInfo))
                         .withTaggingDirective(taggingDirective)
                         .withReplacementTagging(replacementTagging)
                         .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
@@ -2972,19 +2974,31 @@ public class S3Controller {
         }
     }
 
-    private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders) {
+    /**
+     * Reads {@code x-amz-meta-*} user metadata from the request headers and, for presigned URLs
+     * whose SDK hoisted them there, from the query string. A query parameter wins over a header
+     * with the same key, because the presigned URL signature covers the query value.
+     */
+    private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders, UriInfo uriInfo) {
         Map<String, String> metadata = new LinkedHashMap<>();
-        for (Map.Entry<String, List<String>> entry : httpHeaders.getRequestHeaders().entrySet()) {
-            String headerName = entry.getKey().toLowerCase(Locale.ROOT);
-            if (!headerName.startsWith("x-amz-meta-")) {
+        if (uriInfo != null) {
+            addUserMetadata(metadata, uriInfo.getQueryParameters());
+        }
+        addUserMetadata(metadata, httpHeaders.getRequestHeaders());
+        return metadata;
+    }
+
+    private static void addUserMetadata(Map<String, String> metadata, Map<String, List<String>> source) {
+        for (Map.Entry<String, List<String>> entry : source.entrySet()) {
+            String name = entry.getKey().toLowerCase(Locale.ROOT);
+            if (!name.startsWith("x-amz-meta-")) {
                 continue;
             }
-            String key = headerName.substring("x-amz-meta-".length());
+            String key = name.substring("x-amz-meta-".length());
             if (!key.isBlank() && !entry.getValue().isEmpty()) {
-                metadata.put(key, entry.getValue().get(0));
+                metadata.putIfAbsent(key, entry.getValue().get(0));
             }
         }
-        return metadata;
     }
 
     static String resolveHeaderOrQueryParam(HttpHeaders httpHeaders, UriInfo uriInfo, String name) {
@@ -3272,6 +3286,19 @@ public class S3Controller {
             if (argumentValue != null) {
                 xmlBuilder.elem("ArgumentValue", argumentValue.toString());
             }
+            for (int index = 1; ; index++) {
+                Object numberedName = e.getExtendedData().get("ArgumentName" + index);
+                Object numberedValue = e.getExtendedData().get("ArgumentValue" + index);
+                if (numberedName == null && numberedValue == null) {
+                    break;
+                }
+                if (numberedName != null) {
+                    xmlBuilder.elem("ArgumentName" + index, numberedName.toString());
+                }
+                if (numberedValue != null) {
+                    xmlBuilder.elem("ArgumentValue" + index, numberedValue.toString());
+                }
+            }
         }
         String xml = xmlBuilder
                 .elem("RequestId", java.util.UUID.randomUUID().toString())
@@ -3490,7 +3517,7 @@ public class S3Controller {
                     S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key));
         }
 
-        if (s3Service.isAuthEnforced()) {
+        if (s3Service.isAuthEnforced() || (config.auth().validateSignatures() && isSignedPost(lcFields))) {
             validatePresignedPostAuth(lcFields, bucket, key, fileData.length);
         } else {
             // Validate policy conditions if present
@@ -3557,6 +3584,17 @@ public class S3Controller {
             throw new AwsException("AuthorizationHeaderMalformed", "The authorization header is malformed; "
                     + "the region '" + region + "' is wrong; expecting a region AWS publishes.", 400);
         }
+    }
+
+    /**
+     * Whether a browser POST carries any SigV4 form field. Under {@code floci.auth.validate-signatures}
+     * such a POST must verify, while one with none of them is anonymous and is left to
+     * {@code enforce-auth}, which decides anonymous access from the bucket policy and ACL.
+     */
+    private static boolean isSignedPost(Map<String, String> fields) {
+        return Stream.of("x-amz-algorithm", "x-amz-credential", "x-amz-signature")
+                .map(fields::get)
+                .anyMatch(value -> value != null && !value.isEmpty());
     }
 
     /**

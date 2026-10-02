@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.s3.model.ChecksumType;
 import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
@@ -34,6 +36,8 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class S3ServiceTest {
 
@@ -594,7 +598,7 @@ class S3ServiceTest {
         S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve("notif-s3"),
                 false, lambdaInvoker, regionResolver);
         service.createBucket("test-bucket", "ap-northeast-1");
-        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("uploads/", ".json"));
+        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("uploads/", ".json"), true);
 
         service.putObject("test-bucket", "uploads/test.json", "{\"ok\":true}".getBytes(StandardCharsets.UTF_8),
                 "application/json", null);
@@ -613,7 +617,7 @@ class S3ServiceTest {
         S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve("notif-s3-no-match"),
                 false, lambdaInvoker, regionResolver);
         service.createBucket("test-bucket", "ap-northeast-1");
-        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("uploads/", ".json"));
+        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("uploads/", ".json"), true);
 
         service.putObject("test-bucket", "incoming/test.txt", "ignored".getBytes(StandardCharsets.UTF_8),
                 "text/plain", null);
@@ -635,11 +639,88 @@ class S3ServiceTest {
                 "arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test:PROD",
                 List.of("s3:ObjectCreated:Put"),
                 List.of()));
-        service.putBucketNotificationConfiguration("test-bucket", config);
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
 
         service.putObject("test-bucket", "a.json", "{}".getBytes(StandardCharsets.UTF_8), "application/json", null);
 
         assertEquals("s3-notif-test:PROD", lambdaInvoker.functionName);
+    }
+
+    @Test
+    void foreignLambdaArnDoesNotResolveToSameNamedLocalFunction() {
+        LambdaService lambdaService = mock(LambdaService.class);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        String localArn = "arn:aws:lambda:us-east-1:000000000000:function:shared-name";
+        String foreignArn = "arn:aws:lambda:us-east-1:111111111111:function:shared-name";
+        LambdaFunction localFunction = new LambdaFunction();
+        localFunction.setFunctionArn(localArn);
+        when(lambdaService.getFunction("us-east-1", localArn, null)).thenReturn(localFunction);
+        when(lambdaService.getFunction("us-east-1", foreignArn, null)).thenReturn(localFunction);
+
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("lambda-account-validation"), false, lambdaService, regionResolver);
+        service.createBucket("test-bucket", "us-east-1");
+        NotificationConfiguration local = new NotificationConfiguration();
+        local.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                "local", localArn, List.of("s3:ObjectCreated:*"), List.of()));
+        service.putBucketNotificationConfiguration("test-bucket", local);
+
+        NotificationConfiguration foreign = new NotificationConfiguration();
+        foreign.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                "foreign", foreignArn, List.of("s3:ObjectCreated:*"), List.of()));
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putBucketNotificationConfiguration("test-bucket", foreign));
+        assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals(foreignArn + ", null", error.getExtendedData().get("ArgumentName1"));
+        assertEquals(localArn, service.getBucketNotificationConfiguration("test-bucket")
+                .getLambdaFunctionConfigurations().getFirst().functionArn());
+    }
+
+    @Test
+    void notificationValidationCannotRestoreADeletedBucket() {
+        LambdaService lambdaService = mock(LambdaService.class);
+        RegionResolver regionResolver = new RegionResolver("ap-northeast-1", "000000000000");
+        String arn = "arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test";
+        LambdaFunction function = new LambdaFunction();
+        function.setFunctionArn(arn);
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notification-deleted-bucket"), false, lambdaService, regionResolver);
+        service.createBucket("test-bucket", "ap-northeast-1");
+        when(lambdaService.getFunction("ap-northeast-1", arn, null)).thenAnswer(ignored -> {
+            service.deleteBucket("test-bucket");
+            return function;
+        });
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putBucketNotificationConfiguration("test-bucket",
+                        lambdaNotificationConfig("", "")));
+        assertEquals("NoSuchBucket", error.getErrorCode());
+        assertEquals("NoSuchBucket", assertThrows(AwsException.class,
+                () -> service.getBucketNotificationConfiguration("test-bucket")).getErrorCode());
+    }
+
+    @Test
+    void notificationValidationCannotOverwriteARecreatedBucket() {
+        LambdaService lambdaService = mock(LambdaService.class);
+        RegionResolver regionResolver = new RegionResolver("ap-northeast-1", "000000000000");
+        String arn = "arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test";
+        LambdaFunction function = new LambdaFunction();
+        function.setFunctionArn(arn);
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notification-recreated-bucket"), false, lambdaService, regionResolver);
+        service.createBucket("test-bucket", "ap-northeast-1");
+        when(lambdaService.getFunction("ap-northeast-1", arn, null)).thenAnswer(ignored -> {
+            service.deleteBucket("test-bucket");
+            service.createBucket("test-bucket", "ap-northeast-1");
+            return function;
+        });
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putBucketNotificationConfiguration("test-bucket",
+                        lambdaNotificationConfig("", "")));
+        assertEquals("NoSuchBucket", error.getErrorCode());
+        assertTrue(service.getBucketNotificationConfiguration("test-bucket")
+                .getLambdaFunctionConfigurations().isEmpty());
     }
 
     @Test
@@ -694,7 +775,7 @@ class S3ServiceTest {
                 "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
                 List.of("s3:ObjectRemoved:*"),
                 List.of()));
-        service.putBucketNotificationConfiguration("test-bucket", config);
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
         return service;
     }
 

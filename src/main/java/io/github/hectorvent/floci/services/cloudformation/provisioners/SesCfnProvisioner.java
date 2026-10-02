@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.ses.SesIdentityService;
 import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -29,10 +30,12 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
     private static final String UPDATE_SNAPSHOT_ATTR = "__FlociSesUpdateSnapshot";
     private static final ObjectMapper MAPPER = new ObjectMapper().findAndRegisterModules();
     private final SesService sesService;
+    private final SesIdentityService identityService;
 
     @Inject
-    public SesCfnProvisioner(SesService sesService) {
+    public SesCfnProvisioner(SesService sesService, SesIdentityService identityService) {
         this.sesService = sesService;
+        this.identityService = identityService;
     }
 
     @Override
@@ -43,12 +46,19 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void provision(StackResource resource, JsonNode props, ProvisionContext ctx) {
         Properties desired = readProperties(props, ctx);
+        if (resource.getAttributes().containsKey(UPDATE_SNAPSHOT_ATTR)) {
+            // A previous rollback may have failed to persist the last successful identity. Restore
+            // it before either an in-place update or replacement can overwrite its snapshot.
+            rollbackUpdate(resource);
+            ctx = new ProvisionContext(ctx.engine(), ctx.region(), ctx.accountId(), ctx.stackName(),
+                    resource.getPhysicalId(), ctx.progress());
+        }
         String identityName = desired.identity();
         boolean updating = ctx.reusesPriorEntity(identityName);
         Map<String, String> attributesBefore = new HashMap<>(resource.getAttributes());
         Identity identity;
         if (updating) {
-            identity = sesService.getEmailIdentity(identityName, ctx.region());
+            identity = identityService.getIdentityVerificationAttributes(identityName, ctx.region());
             if (identity == null) {
                 throw new AwsException("NotFoundException", "Email identity " + identityName + " does not exist.", 404);
             }
@@ -60,7 +70,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
 
         try {
             reconcile(resource, identity, desired, ctx);
-            Identity current = sesService.getEmailIdentity(identityName, ctx.region());
+            Identity current = identityService.getIdentityVerificationAttributes(identityName, ctx.region());
             if (current == null) {
                 throw new AwsException("NotFoundException", "Email identity " + identityName + " does not exist.", 404);
             }
@@ -107,6 +117,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
                             + ": " + cleanup.failureReason(), 500);
         }
         delete(resource.getResourceType(), resource.getPhysicalId(), region);
+        resource.getAttributes().remove(UPDATE_SNAPSHOT_ATTR);
     }
 
     @Override
@@ -121,11 +132,26 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        if ("UPDATE_FAILED".equals(resource.getStatus())
+                && resource.getAttributes().containsKey(UPDATE_SNAPSHOT_ATTR)) {
+            throw new AwsException("InternalFailure",
+                    "SES identity rollback is still pending for " + resource.getPhysicalId(), 500);
+        }
         UpdateCleanupResult cleanup = ReplacementCleanup.complete(resource, this::delete);
         if (!cleanup.applicable() && resource.getAttributes().containsKey(UPDATE_SNAPSHOT_ATTR)) {
             return new UpdateCleanupResult(true, true, null, 0, null);
         }
         return cleanup;
+    }
+
+    @Override
+    public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearDeleteCleanup(StackResource resource) {
+        ReplacementCleanup.clear(resource);
     }
 
     @Override
@@ -160,7 +186,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
         String region = snapshot.path("region").asText();
         try {
             Identity previous = MAPPER.treeToValue(snapshot.path("identity"), Identity.class);
-            sesService.restoreEmailIdentity(previous, region);
+            identityService.save(previous, region);
             populateDkimAttributes(resource, previous);
         } catch (Exception failure) {
             throw new IllegalStateException("Could not restore SES identity update snapshot", failure);
@@ -210,14 +236,14 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
             String keyLength = desired.nextSigningKeyLength() == null
                     ? DEFAULT_KEY_LENGTH : desired.nextSigningKeyLength();
             if (!keyLength.equals(current.getDkimNextSigningKeyLength())) {
-                sesService.setEmailIdentityDkimSigningAttributes(identityName, keyLength, region);
+                identityService.putDkimSigningAttributes(identityName, "AWS_SES", null, keyLength, region);
             }
         }
 
         boolean signingEnabled = desired.signingEnabled() != null
                 ? desired.signingEnabled() : "Domain".equals(current.getIdentityType());
         if (current.isDkimEnabled() != signingEnabled) {
-            sesService.setEmailIdentityDkimAttributes(identityName, signingEnabled, region);
+            identityService.setDkimAttributes(identityName, signingEnabled, region);
         }
 
         String mailFromDomain = desired.mailFromDomain();
@@ -226,13 +252,13 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
                 ? "UseDefaultValue" : desired.behaviorOnMxFailure();
         if (!same(currentMailFromDomain, mailFromDomain)
                 || (mailFromDomain != null && !behavior.equals(current.getBehaviorOnMxFailure()))) {
-            sesService.setEmailIdentityMailFromAttributes(identityName,
+            identityService.setMailFromDomain(identityName,
                     mailFromDomain == null ? "" : mailFromDomain, behavior, region);
         }
 
         boolean forwarding = desired.emailForwardingEnabled() == null || desired.emailForwardingEnabled();
         if (current.isFeedbackForwardingEnabled() != forwarding) {
-            sesService.setEmailIdentityFeedbackAttributes(identityName, forwarding, region);
+            identityService.setFeedbackForwardingEnabled(identityName, forwarding, region);
         }
 
         reconcileTags(resource, identityName, desired.tags(), ctx);
