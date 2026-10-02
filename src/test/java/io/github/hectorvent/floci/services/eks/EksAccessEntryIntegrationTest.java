@@ -7,6 +7,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -57,6 +58,71 @@ class EksAccessEntryIntegrationTest {
             createCluster(account, name, "API");
             given().header("Authorization", auth(account, "eks")).get(path).then().statusCode(200)
                     .body("accessEntries", empty());
+        } finally {
+            given().header("Authorization", auth(account, "eks")).delete("/clusters/" + name)
+                    .then().statusCode(200);
+            given().header("Authorization", auth(account, "iam")).contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DeleteRole").formParam("RoleName", role).post("/").then().statusCode(200);
+        }
+    }
+
+    @Test
+    void accessPoliciesRouteToEksWithEncodedPrincipalAndPolicyArns() {
+        String account = "135791357913";
+        String name = "policies-" + UUID.randomUUID().toString().substring(0, 8);
+        String role = "admin-" + name;
+        String principal = "arn:aws:iam::" + account + ":role/path/" + role;
+        String policy = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
+        String entryPath = "/clusters/" + name + "/access-entries/" + URLEncoder.encode(principal, StandardCharsets.UTF_8);
+        String policiesPath = entryPath + "/access-policies";
+        given().header("Authorization", auth(account, "iam")).contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateRole").formParam("RoleName", role).formParam("Path", "/path/")
+                .formParam("AssumeRolePolicyDocument", "{}").post("/").then().statusCode(200);
+        createCluster(account, name, "API");
+        try {
+            given().header("Authorization", auth(account, "eks")).contentType("application/json")
+                    .body(Map.of("principalArn", principal)).post("/clusters/" + name + "/access-entries")
+                    .then().statusCode(200);
+            given().header("Authorization", auth(account, "eks")).contentType("application/json")
+                    .urlEncodingEnabled(false)
+                    .body(Map.of("policyArn", policy, "accessScope", Map.of("type", "cluster")))
+                    .post(policiesPath).then().statusCode(200).contentType(containsString("application/json"))
+                    .body("clusterName", equalTo(name)).body("principalArn", equalTo(principal))
+                    .body("associatedAccessPolicy.policyArn", equalTo(policy))
+                    .body("associatedAccessPolicy.accessScope.type", equalTo("cluster"))
+                    .body("associatedAccessPolicy.accessScope.namespaces", empty())
+                    .body("associatedAccessPolicy.associatedAt", instanceOf(Number.class))
+                    .body("associatedAccessPolicy.modifiedAt", instanceOf(Number.class));
+            String view = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy";
+            given().header("Authorization", auth(account, "eks")).contentType("application/json")
+                    .urlEncodingEnabled(false)
+                    .body(Map.of("policyArn", view, "accessScope",
+                            Map.of("type", "namespace", "namespaces", List.of("dev-*", "payments"))))
+                    .post(policiesPath).then().statusCode(200)
+                    .body("associatedAccessPolicy.accessScope.type", equalTo("namespace"))
+                    .body("associatedAccessPolicy.accessScope.namespaces", contains("dev-*", "payments"));
+            given().header("Authorization", auth(account, "eks")).urlEncodingEnabled(false)
+                    .get(policiesPath).then().statusCode(200)
+                    .body("clusterName", equalTo(name)).body("principalArn", equalTo(principal))
+                    .body("associatedAccessPolicies.policyArn", contains(policy, view))
+                    .body("associatedAccessPolicies[1].accessScope.namespaces", contains("dev-*", "payments"))
+                    .body("nextToken", nullValue());
+            given().header("Authorization", auth(account, "eks")).urlEncodingEnabled(false)
+                    .get(entryPath).then().statusCode(200).body("accessEntry.principalArn", equalTo(principal));
+            given().header("Authorization", auth(account, "eks")).urlEncodingEnabled(false)
+                    .delete(policiesPath + "/" + URLEncoder.encode(policy, StandardCharsets.UTF_8))
+                    .then().statusCode(200).body(equalTo("{}"));
+            given().header("Authorization", auth(account, "eks")).urlEncodingEnabled(false)
+                    .delete(policiesPath + "/" + URLEncoder.encode(policy, StandardCharsets.UTF_8))
+                    .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+            given().header("Authorization", auth(account, "eks")).urlEncodingEnabled(false)
+                    .get(policiesPath).then().statusCode(200).body("associatedAccessPolicies.policyArn", contains(view));
+            given().header("Authorization", auth(account, "eks")).contentType("application/json")
+                    .urlEncodingEnabled(false)
+                    .body(Map.of("policyArn", policy, "accessScope", Map.of("type", "namespace")))
+                    .post(policiesPath).then().statusCode(400).body("__type", equalTo("InvalidParameterException"));
+            given().header("Authorization", auth(account, "eks")).urlEncodingEnabled(false)
+                    .delete(entryPath).then().statusCode(200);
         } finally {
             given().header("Authorization", auth(account, "eks")).delete("/clusters/" + name)
                     .then().statusCode(200);

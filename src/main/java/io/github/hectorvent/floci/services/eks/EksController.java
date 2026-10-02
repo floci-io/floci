@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.eks.model.Addon;
+import io.github.hectorvent.floci.services.eks.model.AssociateAccessPolicyRequest;
+import io.github.hectorvent.floci.services.eks.model.AssociatedAccessPolicy;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.CreateAccessEntryRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateAddonRequest;
@@ -27,6 +29,7 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -196,6 +199,42 @@ public class EksController {
     @Path("/clusters/{name}/access-entries/{principalArn: .+}")
     public Response deleteAccessEntry(@PathParam("name") String name, @PathParam("principalArn") String principalArn) {
         accessEntries.delete(eksService.describeCluster(name), principalArn);
+        return Response.ok(Map.of()).build();
+    }
+
+    @POST
+    @Path("/clusters/{name}/access-entries/{principalArn: .+}/access-policies")
+    public Response associateAccessPolicy(@PathParam("name") String name, @PathParam("principalArn") String principalArn,
+                                          AssociateAccessPolicyRequest request) {
+        AssociatedAccessPolicy policy = accessEntries.associate(eksService.describeCluster(name), principalArn, request);
+        return Response.ok(Map.of("clusterName", name, "principalArn", principalArn,
+                "associatedAccessPolicy", policy)).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/access-entries/{principalArn: .+}/access-policies")
+    public Response listAssociatedAccessPolicies(@PathParam("name") String name,
+                                                 @PathParam("principalArn") String principalArn,
+                                                 @QueryParam("maxResults") String maxResults,
+                                                 @QueryParam("nextToken") String nextToken) {
+        EksAccessEntryService.PolicyPage page = accessEntries.listAccessPolicies(eksService.describeCluster(name),
+                principalArn, Pagination.parseMaxResults(maxResults, "InvalidParameterException"), nextToken);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("clusterName", name);
+        body.put("principalArn", principalArn);
+        body.put("associatedAccessPolicies", page.associatedAccessPolicies());
+        if (page.nextToken() != null) {
+            body.put("nextToken", page.nextToken());
+        }
+        return Response.ok(body).build();
+    }
+
+    @DELETE
+    @Path("/clusters/{name}/access-entries/{principalArn: .+}/access-policies/{policyArn: .+}")
+    public Response disassociateAccessPolicy(@PathParam("name") String name,
+                                             @PathParam("principalArn") String principalArn,
+                                             @PathParam("policyArn") String policyArn) {
+        accessEntries.disassociate(eksService.describeCluster(name), principalArn, policyArn);
         return Response.ok(Map.of()).build();
     }
 
