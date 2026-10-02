@@ -818,13 +818,19 @@ public class EksClusterManager
         try {
             String expectedNodeName = deriveClusterNodeInstanceId(cluster);
             ContainerExec.Result nodeResult = execInContainerForResult(containerId,
-                    new String[]{"kubectl", "get", "nodes", "-o", "jsonpath={.items[*].metadata.name}"}, 10);
+                    new String[]{"kubectl", "get", "nodes", "-o",
+                            "jsonpath={range .items[*]}{.metadata.name}{\" \"}{range .status.conditions[?(@.type==\"Ready\")]}{.status}{\"\\n\"}{end}{end}"}, 10);
             if (nodeResult.exitCode() == 0 && nodeResult.stdout() != null && !nodeResult.stdout().isBlank()) {
-                for (String node : nodeResult.stdout().trim().split("\\s+")) {
-                    if (!node.isBlank() && !node.equals(expectedNodeName)) {
-                        execInContainerForResult(containerId,
-                                new String[]{"kubectl", "delete", "node", node}, 10);
-                        LOG.infov("Removed legacy node {0} from EKS cluster {1}", node, cluster.getName());
+                for (String line : nodeResult.stdout().split("\\r?\\n")) {
+                    String[] parts = line.trim().split("\\s+");
+                    if (parts.length >= 1 && !parts[0].isBlank()) {
+                        String node = parts[0];
+                        String readyStatus = parts.length > 1 ? parts[1] : "";
+                        if (!node.equals(expectedNodeName) && !"True".equalsIgnoreCase(readyStatus)) {
+                            execInContainerForResult(containerId,
+                                    new String[]{"kubectl", "delete", "node", node}, 10);
+                            LOG.infov("Removed stale legacy node {0} from EKS cluster {1}", node, cluster.getName());
+                        }
                     }
                 }
             }
