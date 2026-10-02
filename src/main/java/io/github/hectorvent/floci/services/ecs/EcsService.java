@@ -15,7 +15,9 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
 import io.github.hectorvent.floci.services.ecs.exec.EcsExecChannelHandler;
@@ -74,6 +76,7 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -4970,9 +4973,43 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
             try {
                 reconcileService(entry.getKey(), entry.getValue());
+                publishContainerInsights(entry.getKey(), entry.getValue());
             } catch (Exception e) {
                 LOG.debugv("Error reconciling ECS service {0}: {1}", entry.getKey(), e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Container Insights task counts for a service on a cluster whose own {@code containerInsights}
+     * setting is enabled or enhanced, one sample per minute. As in AWS, nothing is published while
+     * the service has no RUNNING task, so an alarm sees missing data rather than a zero.
+     */
+    private void publishContainerInsights(String key, EcsServiceModel svc) {
+        if (cloudWatchMetricsService == null || !STATUS_ACTIVE.equals(svc.getStatus()) || svc.getRunningCount() < 1) {
+            return;
+        }
+        String region = extractRegionFromServiceKey(key);
+        String clusterName = extractClusterNameFromServiceKey(key);
+        EcsCluster cluster = clusters.get(clusterKey(region, clusterName));
+        if (cluster == null || cluster.getSettings() == null || cluster.getSettings().stream().noneMatch(s ->
+                "containerInsights".equals(s.name())
+                        && ("enabled".equals(s.value()) || "enhanced".equals(s.value())))) {
+            return;
+        }
+        long minute = Instant.now().truncatedTo(ChronoUnit.MINUTES).getEpochSecond();
+        Map<String, Integer> counts = Map.of("RunningTaskCount", svc.getRunningCount(),
+                "PendingTaskCount", svc.getPendingCount(), "DesiredTaskCount", svc.getDesiredCount());
+        for (Map.Entry<String, Integer> count : counts.entrySet()) {
+            MetricDatum datum = new MetricDatum();
+            datum.setMetricName(count.getKey());
+            datum.setUnit("Count");
+            datum.setDimensions(List.of(new Dimension("ClusterName", clusterName),
+                    new Dimension("ServiceName", svc.getServiceName())));
+            datum.setTimestamp(minute);
+            datum.setValue(count.getValue());
+            cloudWatchMetricsService.publishMetricForAccount(regionResolver.getAccountId(), "ECS/ContainerInsights",
+                    datum, region, "ecs-container-insights");
         }
     }
 
