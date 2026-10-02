@@ -44,6 +44,8 @@ import com.github.dockerjava.api.model.NetworkSettings;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -54,6 +56,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -994,6 +997,66 @@ class EksClusterManagerTest {
     }
 
     @Nested
+    class LinkContainerdCertsDir {
+
+        private ContainerLifecycleManager lifecycleManager;
+        private DockerClient dockerClient;
+        private CopyArchiveToContainerCmd copyCmd;
+        private EksClusterManager manager;
+
+        @BeforeEach
+        void setUp() {
+            lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+            dockerClient = Mockito.mock(DockerClient.class);
+            copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
+
+            manager = new EksClusterManager(
+                    Mockito.mock(ContainerBuilder.class), lifecycleManager,
+                    Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                    Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                    Mockito.mock(EmulatorConfig.class), Mockito.mock(RegionResolver.class));
+        }
+
+        @Test
+        void copiesArchiveWithTargetDirectoryAndSymlinkAtContainerRoot() throws Exception {
+            manager.linkContainerdCertsDir("container-1", "demo");
+
+            verify(dockerClient).copyArchiveToContainerCmd("container-1");
+            verify(copyCmd).withRemotePath("/");
+            verify(copyCmd).exec();
+
+            ArgumentCaptor<InputStream> archive = ArgumentCaptor.forClass(InputStream.class);
+            verify(copyCmd).withTarInputStream(archive.capture());
+            try (TarArchiveInputStream tar = new TarArchiveInputStream(archive.getValue())) {
+                TarArchiveEntry targetDir = tar.getNextEntry();
+                assertNotNull(targetDir);
+                assertEquals("var/lib/rancher/k3s/agent/etc/containerd/certs.d/", targetDir.getName());
+                assertTrue(targetDir.isDirectory());
+
+                TarArchiveEntry etcDir = tar.getNextEntry();
+                assertNotNull(etcDir);
+                assertEquals("etc/containerd/", etcDir.getName());
+                assertTrue(etcDir.isDirectory());
+
+                TarArchiveEntry symlink = tar.getNextEntry();
+                assertNotNull(symlink);
+                assertEquals("etc/containerd/certs.d", symlink.getName());
+                assertTrue(symlink.isSymbolicLink());
+                assertEquals("/var/lib/rancher/k3s/agent/etc/containerd/certs.d", symlink.getLinkName());
+            }
+        }
+
+        @Test
+        void copyFailureDoesNotPropagate() {
+            when(copyCmd.exec()).thenThrow(new RuntimeException("docker copy failed"));
+
+            assertDoesNotThrow(() -> manager.linkContainerdCertsDir("container-1", "demo"));
+        }
+    }
+
+    @Nested
     class ConfigureLinkLocalMetadataEndpoint {
 
         private EmulatorConfig config;
@@ -1616,7 +1679,7 @@ class EksClusterManagerTest {
             assertFalse(cmd.stream().anyMatch(a -> a.contains("service-account-issuer")));
             assertFalse(cmd.stream().anyMatch(a -> a.contains("api-audiences")));
 
-            verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
+            verify(copyCmd, never()).withHostResource(anyString());
             assertFalse(Files.exists(tempDir.resolve("keys")));
         }
 
@@ -2302,7 +2365,7 @@ class EksClusterManagerTest {
 
             manager.startCluster(cluster);
 
-            verify(copyCmd).exec();
+            verify(copyCmd, atLeastOnce()).exec();
             verify(lifecycleManager).startCreated(any(), any());
             assertEquals("container-1", cluster.getContainerId());
         }
@@ -2590,7 +2653,7 @@ class EksClusterManagerTest {
             assertTrue(cmd.contains("--kube-apiserver-arg=audit-log-maxbackup=10"));
             assertTrue(cmd.contains("--kube-apiserver-arg=audit-log-maxsize=100"));
 
-            verify(dockerClient).copyArchiveToContainerCmd("container-id-123456789012345678901234567890");
+            verify(dockerClient, atLeastOnce()).copyArchiveToContainerCmd("container-id-123456789012345678901234567890");
             verify(copyCmd).withRemotePath("/etc");
         }
 
@@ -2598,7 +2661,9 @@ class EksClusterManagerTest {
         void clusterWithoutAuditLoggingDoesNotAddAuditArgsOrInjectPolicyFile(@TempDir Path tempDir) {
             when(eks.dataPath()).thenReturn(tempDir.toString());
             DockerClient dockerClient = Mockito.mock(DockerClient.class);
+            CopyArchiveToContainerCmd copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
 
             Cluster cluster = new Cluster();
             cluster.setName("no-audit-cluster");
@@ -2614,7 +2679,7 @@ class EksClusterManagerTest {
             assertFalse(cmd.stream().anyMatch(arg -> arg.contains("audit-policy-file")));
             assertFalse(cmd.stream().anyMatch(arg -> arg.contains("audit-log-path")));
 
-            verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
+            verify(copyCmd, never()).withRemotePath("/etc");
         }
 
         @Test

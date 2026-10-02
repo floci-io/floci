@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
@@ -660,8 +661,9 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             // Every component names part of the resource, so each is checked before the name is
             // used: a partition, service, region or account that is not this one asks about a
             // different resource, and answering from the trailing name would describe the wrong.
-            if (!"aws".equals(arn[1])) {
-                throw new AwsException("InvalidARN", "partition field is wrong. Expected value is aws", 400);
+            String partition = AwsRegions.partitionFor(regionResolver.getRegion());
+            if (!partition.equals(arn[1])) {
+                throw new AwsException("InvalidARN", "partition field is wrong. Expected value is " + partition, 400);
             }
             if (!"elasticache".equals(arn[2])) {
                 throw new AwsException("InvalidARN",

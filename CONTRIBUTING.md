@@ -257,9 +257,20 @@ update path.
 3. CI runs tests automatically. All checks must pass before merge.
 4. Keep PRs focused: one feature or fix per PR.
 5. Reference any related issues in the PR description.
-6. Keep at most **5 open PRs** at a time. A bot leaves an advisory note and an `over-pr-limit` label on PRs opened beyond that. Nothing gets closed or blocked, but please land or close your existing PRs before opening more.
+6. Keep at most **2 open, non-draft PRs** at a time: see [Pull Request Limits and Review Bandwidth](#pull-request-limits-and-review-bandwidth).
 
 Docker images are built on contributor PRs only for the compatibility suite (`.github/workflows/compatibility.yml`, on changes under `src/**` and the compat test trees) and are never published, so merging to `main` is always cheap.
+
+### Pull Request Limits and Review Bandwidth
+
+To make sure every contribution gets a thorough, high-quality review in a reasonable time, we ask contributors to keep **no more than 2 open, non-draft pull requests** at any time in this repository.
+
+- **Why this policy exists:** maintainer review time is limited. Capping concurrent open PRs prevents review backlogs, reduces context switching, and keeps PR cycle times short for everyone.
+- **Dependent work:** if your work depends on a PR that has not been merged yet, build on that branch or note the dependency in the discussion instead of opening separate, uncoordinated PRs.
+- **Draft PRs:** drafts do not count against the limit. Mark a draft as ready for review only when you have review capacity available.
+- **How it is applied:** a bot labels your 3rd and later open pull requests `over-pr-limit` with a reminder. Starting **2026-10-08**, from your 5th open pull request onward, new ones are closed automatically. Your branch and commits are kept, and you can reopen the PR once one of your other PRs is merged or closed. Maintainers and dependency bots are not counted.
+
+Once your current pull requests are reviewed, merged, or closed, you are welcome to open new ones!
 
 ## Release Process (maintainers)
 

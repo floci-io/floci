@@ -25,6 +25,19 @@ class IamIntegrationTest {
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}";
 
+    private static void createRoleForAssume(String accessKeyId, String roleName) {
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", roleName)
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
     private static final String POLICY_DOCUMENT =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
@@ -77,9 +90,10 @@ class IamIntegrationTest {
     @Test
     @Order(3)
     void stsAssumeRole() {
+        createRoleForAssume("test", "StsAssumeTestRole");
         given()
             .formParam("Action", "AssumeRole")
-            .formParam("RoleArn", "arn:aws:iam::000000000000:role/TestRole")
+            .formParam("RoleArn", "arn:aws:iam::000000000000:role/StsAssumeTestRole")
             .formParam("RoleSessionName", "test-session")
             .formParam("DurationSeconds", "3600")
             .header("Authorization",
@@ -94,12 +108,13 @@ class IamIntegrationTest {
             .body("AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken", notNullValue())
             .body("AssumeRoleResponse.AssumeRoleResult.Credentials.Expiration", notNullValue())
             .body("AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn",
-                    containsString("assumed-role/TestRole/test-session"));
+                    containsString("assumed-role/StsAssumeTestRole/test-session"));
     }
 
     @Test
     @Order(4)
     void stsAssumeRoleHonoursTwelveDigitAccessKey() {
+        createRoleForAssume("123456789012", "TestRole");
         given()
             .formParam("Action", "AssumeRole")
             .formParam("RoleArn", "arn:aws:iam::123456789012:role/TestRole")
@@ -118,6 +133,7 @@ class IamIntegrationTest {
     @Test
     @Order(6)
     void stsAssumeRoleUsesAccountFromRoleArnForCrossAccount() {
+        createRoleForAssume("222222222222", "CrossAccountRole");
         given()
             .formParam("Action", "AssumeRole")
             .formParam("RoleArn", "arn:aws:iam::222222222222:role/CrossAccountRole")

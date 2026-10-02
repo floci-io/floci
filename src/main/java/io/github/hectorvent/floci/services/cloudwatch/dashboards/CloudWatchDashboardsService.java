@@ -179,27 +179,80 @@ public class CloudWatchDashboardsService {
     }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
-        return findByArn(resourceArn, region).map(Dashboard::getTags).orElse(Map.of());
+        return requireDashboard(resourceArn, region).getTags();
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags, String region) {
-        findByArn(resourceArn, region).ifPresent(dashboard -> {
-            dashboard.getTags().putAll(tags);
-            dashboardStore.put(key(region, dashboard.getDashboardName()), dashboard);
-        });
+        Dashboard dashboard = requireDashboard(resourceArn, region);
+        dashboard.getTags().putAll(tags);
+        dashboardStore.put(key(region, dashboard.getDashboardName()), dashboard);
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
-        findByArn(resourceArn, region).ifPresent(dashboard -> {
-            tagKeys.forEach(dashboard.getTags()::remove);
-            dashboardStore.put(key(region, dashboard.getDashboardName()), dashboard);
-        });
+        Dashboard dashboard = requireDashboard(resourceArn, region);
+        tagKeys.forEach(dashboard.getTags()::remove);
+        dashboardStore.put(key(region, dashboard.getDashboardName()), dashboard);
+    }
+
+    /**
+     * Resolves the dashboard an ARN names, or reports that nothing does. The tag operations
+     * declare {@code ResourceNotFoundException}, which is a different shape from the
+     * {@code ResourceNotFound} that {@code GetDashboard} declares,
+     * so this is not the {@link #notFound(String)} used by the rest of this service.
+     */
+    private Dashboard requireDashboard(String resourceArn, String region) {
+        return findByArn(resourceArn, region).orElseThrow(() ->
+                new AwsException("ResourceNotFoundException",
+                        "Dashboard does not exist: " + resourceArn, 404));
     }
 
     private java.util.Optional<Dashboard> findByArn(String resourceArn, String region) {
         return dashboardStore.scan(k -> k.startsWith(region + "::")).stream()
-                .filter(d -> d.getDashboardArn() != null && d.getDashboardArn().equals(resourceArn))
+                .filter(d -> namesDashboard(resourceArn, d.getDashboardArn()))
                 .findFirst();
+    }
+
+    /**
+     * Whether {@code candidate} is an ARN for the dashboard whose own ARN is {@code stored}.
+     *
+     * <p>Both the region-ful and the regionless form resolve, deliberately, because the two
+     * disagree here and a caller may hold either. Dashboards are a global resource and AWS
+     * documents their ARN without a region on both the TagResource and the ListTagsForResource
+     * pages, {@code arn:aws:cloudwatch::<account-id>:dashboard/<dashboard-name>}, while Floci
+     * mints a region-ful one. That divergence used to be invisible on this path: an ARN
+     * matching nothing was a silent success answering an empty tag map. Now that it is an
+     * error, a caller sending the documented ARN for a dashboard that exists would be told the
+     * dashboard does not, so the lookup accepts both shapes.
+     *
+     * <p>What Floci mints is left alone here on purpose. Clients may already hold the ARNs it
+     * has handed out, so bringing the minted shape into line with AWS is a separate change
+     * from making the lookup tolerant, and only the second one is needed to keep this path
+     * correct.
+     *
+     * <p>Only an absent region is accepted in place of the dashboard's own, so an ARN naming
+     * some other region is still a miss rather than resolving to a same-named dashboard
+     * elsewhere.
+     */
+    private static boolean namesDashboard(String candidate, String stored) {
+        if (candidate == null || stored == null) {
+            return false;
+        }
+        return candidate.equals(stored) || candidate.equals(withoutRegion(stored));
+    }
+
+    /**
+     * Blanks the region field of an ARN, turning
+     * {@code arn:aws:cloudwatch:us-east-1:123:dashboard/x} into
+     * {@code arn:aws:cloudwatch::123:dashboard/x}. An ARN with fewer than six fields is
+     * returned unchanged, since there is no region field to blank.
+     */
+    private static String withoutRegion(String arn) {
+        String[] fields = arn.split(":", 6);
+        if (fields.length < 6) {
+            return arn;
+        }
+        fields[3] = "";
+        return String.join(":", fields);
     }
 
     private static String key(String region, String dashboardName) {

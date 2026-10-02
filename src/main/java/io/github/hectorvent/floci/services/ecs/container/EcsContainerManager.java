@@ -513,9 +513,12 @@ public class EcsContainerManager {
                 if (!awsFirelens) {
                     String logPrefix = "ecs:" + taskDef.getFamily() + ":" + def.getName();
                     AwsLogsDestination awsLogs = awsLogsDestination(def, taskId, dockerId, region);
+                    // The lines are forwarded from Docker's log threads, which have no request context,
+                    // so name the task's account explicitly, as the other container-backed services do.
                     Closeable logHandle = awsLogs == null
                             ? logStreamer.attachConsoleOnly(dockerId, logPrefix)
-                            : logStreamer.attach(
+                            : logStreamer.attachForAccount(
+                                    AwsArnUtils.accountOrDefault(task.getTaskArn(), regionResolver.getAccountId()),
                                     dockerId, awsLogs.group(), awsLogs.stream(), awsLogs.region(), logPrefix);
                     if (logHandle != null) {
                         logStreamsByContainerId.put(dockerId, logHandle);

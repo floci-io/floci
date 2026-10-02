@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import io.github.hectorvent.floci.services.ses.model.Tenant;
@@ -118,26 +119,31 @@ public class SesTenantController {
     public Response listTenants(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            // Parse the body so a malformed request is rejected rather than silently accepted. Phase 1
-            // returns every tenant in one page; PageSize/NextToken pagination is a follow-up.
             JsonNode request = (body == null || body.isBlank())
                     ? objectMapper.createObjectNode()
                     : objectMapper.readTree(body);
             requireJsonObject(request);
+            Integer pageSize = intMemberOrAbsent(request, "PageSize");
+            String nextToken = stringMemberOrAbsent(request, "NextToken");
+            PaginatedResult<Tenant> page = tenantService.listTenants(region, SesListPaging.V2_LIST_TENANTS,
+                    pageSize, nextToken);
+            ObjectNode result = objectMapper.createObjectNode();
+            ArrayNode tenants = result.putArray("Tenants");
+            for (Tenant t : page.items()) {
+                // ListTenants returns the TenantInfo subset (no Tags / SendingStatus).
+                ObjectNode item = tenants.addObject();
+                item.put("TenantName", t.tenantName());
+                item.put("TenantId", t.tenantId());
+                item.put("TenantArn", t.tenantArn());
+                putTimestamp(item, "CreatedTimestamp", t.createdTimestamp());
+            }
+            result.put("NextToken", page.nextToken());
+            return Response.ok(result).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
         } catch (JsonProcessingException e) {
             throw new AwsException("SerializationException", null, 400);
         }
-        ObjectNode result = objectMapper.createObjectNode();
-        ArrayNode tenants = result.putArray("Tenants");
-        for (Tenant t : tenantService.listTenants(region)) {
-            // ListTenants returns the TenantInfo subset (no Tags / SendingStatus).
-            ObjectNode item = tenants.addObject();
-            item.put("TenantName", t.tenantName());
-            item.put("TenantId", t.tenantId());
-            item.put("TenantArn", t.tenantArn());
-            putTimestamp(item, "CreatedTimestamp", t.createdTimestamp());
-        }
-        return Response.ok(result).build();
     }
 
     @POST
@@ -224,13 +230,13 @@ public class SesTenantController {
             }
             Integer pageSize = intMemberOrAbsent(request, "PageSize");
             String nextToken = stringMemberOrAbsent(request, "NextToken");
-            List<TenantResourceAssociation> associations = sesService.listTenantResources(
-                    tenantName, resourceTypeFilter, pageSize, nextToken, region);
+            PaginatedResult<TenantResourceAssociation> page = sesService.listTenantResources(
+                    tenantName, resourceTypeFilter, SesListPaging.V2_LIST_TENANT_RESOURCES, pageSize, nextToken,
+                    region);
             ObjectNode result = objectMapper.createObjectNode();
-            // AWS renders NextToken as an explicit null on the last (here: only) page.
-            result.putNull("NextToken");
+            result.put("NextToken", page.nextToken());
             ArrayNode resources = result.putArray("TenantResources");
-            for (TenantResourceAssociation a : associations) {
+            for (TenantResourceAssociation a : page.items()) {
                 ObjectNode item = resources.addObject();
                 item.put("ResourceArn", a.resourceArn());
                 item.put("ResourceType", a.resourceType());
@@ -255,12 +261,13 @@ public class SesTenantController {
             String resourceArn = stringMemberOrAbsent(request, "ResourceArn");
             Integer pageSize = intMemberOrAbsent(request, "PageSize");
             String nextToken = stringMemberOrAbsent(request, "NextToken");
-            List<TenantResourceAssociation> associations = sesService.listResourceTenants(
-                    resourceArn, pageSize, nextToken, regionResolver.getAccountId(), region);
+            PaginatedResult<TenantResourceAssociation> page = sesService.listResourceTenants(
+                    resourceArn, SesListPaging.V2_LIST_RESOURCE_TENANTS, pageSize, nextToken,
+                    regionResolver.getAccountId(), region);
             ObjectNode result = objectMapper.createObjectNode();
-            result.putNull("NextToken");
+            result.put("NextToken", page.nextToken());
             ArrayNode tenants = result.putArray("ResourceTenants");
-            for (TenantResourceAssociation a : associations) {
+            for (TenantResourceAssociation a : page.items()) {
                 // ResourceTenantMetadata has no TenantArn (probe-confirmed).
                 ObjectNode item = tenants.addObject();
                 item.put("TenantName", a.tenantName());

@@ -122,7 +122,7 @@ add or change, and leave unrelated cleanups for their own PR.
 - [ ] Commit messages follow Conventional Commits
 - [ ] Code follows the style rules above
 
-Please keep at most **5 open PRs** at a time. A bot leaves an advisory note (label `over-pr-limit`) on PRs opened beyond that. See [CONTRIBUTING.md](https://github.com/floci-io/floci/blob/main/CONTRIBUTING.md#pull-request-guidelines) for details.
+Please keep **no more than 2 open, non-draft pull requests** at a time. A bot labels your 3rd and later open PRs `over-pr-limit`, and starting 2026-10-08 it closes new ones from your 5th onward. See [CONTRIBUTING.md](https://github.com/floci-io/floci/blob/main/CONTRIBUTING.md#pull-request-limits-and-review-bandwidth) for details.
 
 ## Releases
 
