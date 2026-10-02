@@ -129,6 +129,14 @@ public final class CfnRollback {
     public static final String SQS_UPDATE_SNAPSHOT_ATTR = "__FlociSqsUpdateSnapshot";
 
     /**
+     * Holds the tags, stream setting and time-to-live setting a DynamoDB table carried before an
+     * in-place update changed them, with the account and region that address it, so a failed
+     * stack update can put all three back. Written by {@code DynamoDbCfnProvisioner} before its
+     * first mutating call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR = "__FlociDynamoDbTableUpdateSnapshot";
+
+    /**
      * Holds the configuration an Auto Scaling group carried before an in-place update changed it,
      * so a failed stack update can restore it.
      */

@@ -1,11 +1,15 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess.TimeToLive;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
@@ -17,6 +21,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -35,6 +40,11 @@ import java.util.Set;
  * applied directly against the DynamoDB service rather than through the async CDK Provider
  * framework, and its delete removes the replica the same way instead of invoking the handler.
  * {@code Ref} of a replica follows CDK's {@code <tableName>-<region>} format.
+ *
+ * <p>A table's {@code TimeToLiveSpecification} is reconciled against what DescribeTimeToLive
+ * reports, so UpdateTimeToLive is called only when the setting differs. An in-place update of an
+ * {@code AWS::DynamoDB::Table} keeps the tags, stream and TTL setting it replaces, so a failed
+ * stack update can put all three back.
  */
 @ApplicationScoped
 public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
@@ -44,6 +54,8 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     static final String REPLICA = "Custom::DynamoDBReplica";
 
     private static final Logger LOG = Logger.getLogger(DynamoDbCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final TimeToLive TIME_TO_LIVE_OFF = new TimeToLive(false, null);
 
     private static final String REPLICA_TABLE_NAME_ATTR = "TableName";
     private static final String REPLICA_REGION_ATTR = "__FlociDynamoDbReplicaRegion";
@@ -102,6 +114,8 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionTable(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);
         CloudFormationTemplateEngine engine = ctx.engine();
         String region = ctx.region();
         // TableName is create-only, so an update without one must keep the name generated on
@@ -109,6 +123,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         // UpdateStack and re-pointed Ref at it.
         String tableName = ctx.stablePhysicalName(ctx.resolveOptional(props, "TableName"),
                 r.getLogicalId(), TABLE_NAME_MAX_LENGTH, false);
+        JsonNode ttlSpec = props != null ? engine.resolveNode(props.get("TimeToLiveSpecification")) : null;
+        boolean ttlDeclared = ttlSpec != null && ttlSpec.isObject();
+        TimeToLive desiredTtl = ttlDeclared ? declaredTimeToLive(r, ttlSpec, engine) : TIME_TO_LIVE_OFF;
 
         List<KeySchemaElement> keySchema = new ArrayList<>();
         List<AttributeDefinition> attrDefs = new ArrayList<>();
@@ -193,15 +210,22 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             table = dynamoDb.tables().describeTable(scope, tableName);
         }
 
-        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
-        List<String> staleTags = ProvisionContext.staleTagKeys(
-                dynamoDb.tables().listTagsOfResource(scope, table.getTableArn()), tags);
-        if (!staleTags.isEmpty()) {
-            dynamoDb.tables().untagResource(scope, table.getTableArn(), staleTags);
+        // TTL is read when the template declares it or an in-place update may have removed it, so
+        // UpdateTimeToLive is called only when something differs. A rename of an enabled TTL
+        // attribute fails here, and the rollback snapshot is taken here, before anything changes.
+        boolean inPlaceUpdate = ctx.reusesPriorEntity(tableName);
+        TimeToLive currentTtl = null;
+        if (ttlDeclared || inPlaceUpdate) {
+            currentTtl = dynamoDb.tables().timeToLive(scope, tableName);
+            requireTimeToLiveChangeAllowed(currentTtl, desiredTtl);
         }
-        if (!tags.isEmpty()) {
-            dynamoDb.tables().tagResource(scope, table.getTableArn(), tags);
+        Map<String, String> currentTags = dynamoDb.tables().listTagsOfResource(scope, table.getTableArn());
+        if (inPlaceUpdate && TABLE.equals(r.getResourceType())) {
+            snapshotBeforeUpdate(r, scope, tableName, table, currentTags, currentTtl);
         }
+
+        reconcileTags(scope, table.getTableArn(), currentTags,
+                parseCfnTags(props != null ? props.get("Tags") : null, engine));
 
         // A template that declares StreamSpecification wants a stream. Unlike the DynamoDB API,
         // the CloudFormation property carries no StreamEnabled flag: declaring the block IS the
@@ -221,6 +245,12 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             table = dynamoDb.tables().disableStream(scope, tableName);
         }
 
+        // TimeToLiveSpecification is reconciled like the stream: declaring it enabled turns TTL on
+        // for the attribute, and Enabled false or a block removed on an update turns it off.
+        if (currentTtl != null) {
+            reconcileTimeToLive(scope, tableName, currentTtl, desiredTtl);
+        }
+
         r.setPhysicalId(tableName);
         r.getAttributes().put("Arn", table.getTableArn());
         // Only the global table's registry schema declares TableId read-only; a plain table exposes
@@ -235,11 +265,124 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         // has since been switched off would resolve to something no longer running. An update
         // starts from the previous attributes, so the stale entry has to be removed rather than
         // merely left unwritten.
+        publishStreamArn(r, table);
+    }
+
+    private static void publishStreamArn(StackResource r, TableDefinition table) {
         if (table.isStreamEnabled() && table.getStreamArn() != null) {
             r.getAttributes().put("StreamArn", table.getStreamArn());
         } else {
             r.getAttributes().remove("StreamArn");
         }
+    }
+
+    private void reconcileTags(Scope scope, String tableArn, Map<String, String> current,
+                               Map<String, String> desired) {
+        List<String> staleTags = ProvisionContext.staleTagKeys(current, desired);
+        if (!staleTags.isEmpty()) {
+            dynamoDb.tables().untagResource(scope, tableArn, staleTags);
+        }
+        if (!desired.isEmpty()) {
+            dynamoDb.tables().tagResource(scope, tableArn, desired);
+        }
+    }
+
+    /** {@code Enabled} may arrive as the string {@code "true"}, so it goes through the engine. */
+    private static TimeToLive declaredTimeToLive(StackResource r, JsonNode spec,
+                                                 CloudFormationTemplateEngine engine) {
+        boolean enabled = spec.has("Enabled") && Boolean.parseBoolean(engine.resolve(spec.get("Enabled")));
+        String attributeName = spec.has("AttributeName") ? engine.resolve(spec.get("AttributeName")) : null;
+        if (enabled && (attributeName == null || attributeName.isBlank())) {
+            throw new AwsException("ValidationError", r.getResourceType() + " " + r.getLogicalId()
+                    + " TimeToLiveSpecification requires AttributeName when Enabled is true", 400);
+        }
+        return new TimeToLive(enabled, attributeName);
+    }
+
+    /**
+     * DynamoDB refuses to enable a second attribute while one is enabled, and CloudFormation
+     * renames one by disabling TTL in an update and enabling the new attribute in a later one.
+     */
+    private static void requireTimeToLiveChangeAllowed(TimeToLive current, TimeToLive desired) {
+        if (desired.enabled() && current.enabled() && !desired.attributeName().equals(current.attributeName())) {
+            throw new AwsException("ValidationException", "TimeToLive is active on a different AttributeName", 400);
+        }
+    }
+
+    /** Calls UpdateTimeToLive only when the table's setting differs; disabling names the current attribute. */
+    private void reconcileTimeToLive(Scope scope, String tableName, TimeToLive current, TimeToLive desired) {
+        if (desired.enabled() && !current.enabled()) {
+            dynamoDb.tables().updateTimeToLive(scope, tableName, desired.attributeName(), true);
+        } else if (!desired.enabled() && current.enabled()) {
+            dynamoDb.tables().updateTimeToLive(scope, tableName, current.attributeName(), false);
+        }
+    }
+
+    /**
+     * Keeps the tags, stream setting and TTL setting the table has before an in-place update
+     * changes them, with the account and region that address it, so {@link #rollbackUpdate} can
+     * put all three back.
+     */
+    private static void snapshotBeforeUpdate(StackResource r, Scope scope, String tableName, TableDefinition table,
+                                             Map<String, String> tags, TimeToLive ttl) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("accountId", scope.accountId());
+        snapshot.put("region", scope.region());
+        snapshot.put("tableName", tableName);
+        ObjectNode tagsNode = snapshot.putObject("tags");
+        tags.forEach(tagsNode::put);
+        snapshot.put("streamEnabled", table.isStreamEnabled());
+        snapshot.put("streamViewType", table.getStreamViewType());
+        snapshot.put("ttlEnabled", ttl.enabled());
+        snapshot.put("ttlAttributeName", ttl.attributeName());
+        r.getAttributes().put(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    /**
+     * Puts back the tags, stream setting and TTL setting an in-place table update changed. All
+     * three go back or none is claimed: restoring one alone would report a rollback while the
+     * others stayed changed. Only an in-place {@code AWS::DynamoDB::Table} update takes the
+     * snapshot, so a global table or a replacing update still reports that rollback is not
+     * implemented. The snapshot is spent only once the restore succeeded: a restore that throws
+     * leaves it in place for the next attempt.
+     */
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        String raw = resource.getAttributes().get(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return false;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the DynamoDB table update snapshot for "
+                    + resource.getLogicalId(), e);
+        }
+        Scope scope = new Scope(snapshot.path("accountId").asText(), snapshot.path("region").asText());
+        String tableName = snapshot.path("tableName").asText();
+        TableDefinition table = dynamoDb.tables().describeTable(scope, tableName);
+
+        Map<String, String> tags = new LinkedHashMap<>();
+        snapshot.path("tags").properties().forEach(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
+        reconcileTags(scope, table.getTableArn(),
+                dynamoDb.tables().listTagsOfResource(scope, table.getTableArn()), tags);
+
+        if (snapshot.path("streamEnabled").asBoolean()) {
+            table = dynamoDb.tables().enableStream(scope, tableName, snapshot.path("streamViewType").textValue());
+        } else if (table.isStreamEnabled()) {
+            table = dynamoDb.tables().disableStream(scope, tableName);
+        }
+
+        TimeToLive priorTtl = new TimeToLive(snapshot.path("ttlEnabled").asBoolean(),
+                snapshot.path("ttlAttributeName").textValue());
+        TimeToLive currentTtl = dynamoDb.tables().timeToLive(scope, tableName);
+        requireTimeToLiveChangeAllowed(currentTtl, priorTtl);
+        reconcileTimeToLive(scope, tableName, currentTtl, priorTtl);
+
+        publishStreamArn(resource, table);
+        resource.getAttributes().remove(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);
+        return true;
     }
 
     /**
