@@ -23,6 +23,7 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
     private static final String STACK = "cfn-sqs-queue-properties";
+    private static final String NO_VALUE_STACK = "cfn-sqs-queue-no-value";
 
     @Test
     void declaredPropertiesReachTheQueueAndDroppedOnesReturnToTheirDefaults() {
@@ -43,8 +44,8 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
                   "Outputs": {"QueueUrl": {"Value": {"Ref": "Queue"}}}
                 }
                 """;
-        cloudFormation("CreateStack", declared);
-        String queueUrl = XmlParser.extractPairs(describeStacks("CREATE_COMPLETE"), "Outputs", "OutputKey",
+        cloudFormation(STACK, "CreateStack", declared);
+        String queueUrl = XmlParser.extractPairs(describeStacks(STACK, "CREATE_COMPLETE"), "Outputs", "OutputKey",
                 "OutputValue").get("QueueUrl");
 
         Map<String, String> created = queueAttributes(queueUrl);
@@ -62,8 +63,8 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
                   "Outputs": {"QueueUrl": {"Value": {"Ref": "Queue"}}}
                 }
                 """;
-        cloudFormation("UpdateStack", dropped);
-        describeStacks("UPDATE_COMPLETE");
+        cloudFormation(STACK, "UpdateStack", dropped);
+        describeStacks(STACK, "UPDATE_COMPLETE");
 
         Map<String, String> updated = queueAttributes(queueUrl);
         assertEquals("45", updated.get("VisibilityTimeout"));
@@ -72,7 +73,7 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
         assertEquals("0", updated.get("ReceiveMessageWaitTimeSeconds"));
         assertFalse(updated.containsKey("RedriveAllowPolicy"), "a dropped RedriveAllowPolicy is removed");
 
-        cloudFormation("DeleteStack", null);
+        cloudFormation(STACK, "DeleteStack", null);
         await().untilAsserted(() -> given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "GetQueueUrl")
@@ -80,13 +81,50 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
             .when().post("/").then().statusCode(400));
     }
 
-    private static void cloudFormation(String action, String templateBody) {
+    @Test
+    void aPropertyAConditionDropsWithNoValueKeepsItsDefault() {
+        String template = """
+                {
+                  "Parameters": {"LongRetention": {"Type": "String", "Default": "%s"}},
+                  "Conditions": {"Long": {"Fn::Equals": [{"Ref": "LongRetention"}, "yes"]}},
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {
+                        "MessageRetentionPeriod": {"Fn::If": ["Long", 1209600, {"Ref": "AWS::NoValue"}]},
+                        "RedriveAllowPolicy": {"Fn::If": ["Long", {"redrivePermission": "denyAll"},
+                                {"Ref": "AWS::NoValue"}]}
+                      }
+                    }
+                  },
+                  "Outputs": {"QueueUrl": {"Value": {"Ref": "Queue"}}}
+                }
+                """;
+        cloudFormation(NO_VALUE_STACK, "CreateStack", template.formatted("no"));
+        String queueUrl = XmlParser.extractPairs(describeStacks(NO_VALUE_STACK, "CREATE_COMPLETE"), "Outputs",
+                "OutputKey", "OutputValue").get("QueueUrl");
+        assertEquals("345600", queueAttributes(queueUrl).get("MessageRetentionPeriod"));
+        assertFalse(queueAttributes(queueUrl).containsKey("RedriveAllowPolicy"));
+
+        cloudFormation(NO_VALUE_STACK, "UpdateStack", template.formatted("yes"));
+        describeStacks(NO_VALUE_STACK, "UPDATE_COMPLETE");
+        assertEquals("1209600", queueAttributes(queueUrl).get("MessageRetentionPeriod"));
+
+        cloudFormation(NO_VALUE_STACK, "UpdateStack", template.formatted("no"));
+        describeStacks(NO_VALUE_STACK, "UPDATE_COMPLETE");
+        assertEquals("345600", queueAttributes(queueUrl).get("MessageRetentionPeriod"));
+        assertFalse(queueAttributes(queueUrl).containsKey("RedriveAllowPolicy"));
+
+        cloudFormation(NO_VALUE_STACK, "DeleteStack", null);
+    }
+
+    private static void cloudFormation(String stack, String action, String templateBody) {
         if (templateBody == null) {
             given()
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", CFN_AUTH)
                 .formParam("Action", action)
-                .formParam("StackName", STACK)
+                .formParam("StackName", stack)
             .when().post("/").then().statusCode(200);
             return;
         }
@@ -94,17 +132,17 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
             .formParam("Action", action)
-            .formParam("StackName", STACK)
+            .formParam("StackName", stack)
             .formParam("TemplateBody", templateBody)
         .when().post("/").then().statusCode(200);
     }
 
-    private static String describeStacks(String expectedStatus) {
+    private static String describeStacks(String stack, String expectedStatus) {
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", STACK)
+            .formParam("StackName", stack)
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();

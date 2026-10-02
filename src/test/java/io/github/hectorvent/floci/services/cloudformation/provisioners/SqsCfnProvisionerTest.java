@@ -288,6 +288,38 @@ class SqsCfnProvisionerTest {
     }
 
     @Test
+    void aPropertyThatResolvesToNoValueIsAbsentOnCreate() {
+        // The engine resolves AWS::NoValue to blank; the mocked engine does the same for an object.
+        when(sqs.createQueue(eq("jobs"), any(), eq("us-east-1")))
+                .thenReturn(new Queue("jobs", "http://localhost:4566/000000000000/jobs"));
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "jobs").put("DelaySeconds", 5);
+        props.putObject("MessageRetentionPeriod").put("Ref", "AWS::NoValue");
+        props.putObject("VisibilityTimeout").put("Ref", "AWS::NoValue");
+
+        provisioner.provision(resource("AWS::SQS::Queue", "Jobs"), props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).createQueue(eq("jobs"), captor.capture(), eq("us-east-1"));
+        assertEquals(Map.of("DelaySeconds", "5"), captor.getValue());
+    }
+
+    @Test
+    void aPropertyThatResolvesToNoValueIsResetOnUpdate() {
+        StackResource r = resource("AWS::SQS::Queue", "Jobs");
+        r.setAttributes(new HashMap<>(Map.of("QueueName", "jobs")));
+        ObjectNode props = mapper.createObjectNode().put("QueueName", "jobs");
+        props.putObject("MessageRetentionPeriod").put("Ref", "AWS::NoValue");
+
+        provisioner.provision(r, props, updateCtx("http://localhost:4566/000000000000/jobs"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(sqs).setQueueAttributes(anyString(), captor.capture(), eq("us-east-1"));
+        assertEquals("345600", captor.getValue().get("MessageRetentionPeriod"));
+    }
+
+    @Test
     void anUpdateResetsThePropertiesTheTemplateDropped() {
         // CloudFormation applies the whole template as the desired state, so a property dropped from
         // it goes back to its default. An empty value removes the stored attribute, which SqsService

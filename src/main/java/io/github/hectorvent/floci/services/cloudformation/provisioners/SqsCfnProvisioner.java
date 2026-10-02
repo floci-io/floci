@@ -152,10 +152,11 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
             if (fifoFlag != null) {
                 attrs.put("FifoQueue", fifoFlag);
             }
+            // A property that resolves to blank is absent: the engine resolves AWS::NoValue to blank,
+            // which is how Fn::If [cond, value, AWS::NoValue] drops a property. Stored as an empty
+            // attribute it would replace the queue's default rather than leave it in place.
             for (String attribute : SCALAR_ATTRIBUTES) {
-                if (props.has(attribute) && !props.path(attribute).isNull()) {
-                    attrs.put(attribute, ctx.engine().resolve(props.get(attribute)));
-                }
+                putUnlessBlank(attrs, attribute, ctx.resolveOptional(props, attribute));
             }
             for (String attribute : JSON_ATTRIBUTES) {
                 if (props.has(attribute) && !props.path(attribute).isNull()) {
@@ -164,7 +165,7 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
                     // CDK commonly emits RedrivePolicy as an already-serialized string via Fn::Join,
                     // which resolveNode collapses to a TextNode: unwrap it instead of calling
                     // toString(), which would JSON-re-encode (quote/escape) the string a second time.
-                    attrs.put(attribute, ctx.engine().resolveJsonAttribute(props.path(attribute)));
+                    putUnlessBlank(attrs, attribute, ctx.engine().resolveJsonAttribute(props.path(attribute)));
                 }
             }
         }
@@ -216,6 +217,12 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("QueueName", queueName);
         r.getAttributes().put("QueueUrl", queueUrl);
         ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    private static void putUnlessBlank(Map<String, String> attrs, String attribute, String value) {
+        if (value != null && !value.isBlank()) {
+            attrs.put(attribute, value);
+        }
     }
 
     /**
