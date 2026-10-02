@@ -22,7 +22,7 @@ import java.util.List;
 
 /**
  * REST-JSON routes for AWS IoT fleet indexing: UpdateIndexingConfiguration,
- * GetIndexingConfiguration and DescribeIndex, on the paths and shapes the AWS SDKs use.
+ * GetIndexingConfiguration, DescribeIndex and SearchIndex, on the paths and shapes the AWS SDKs use.
  */
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
@@ -91,6 +91,19 @@ public class IotFleetIndexingController {
         // ponytail: always ACTIVE, Floci indexes synchronously so there is no BUILDING or REBUILDING window.
         response.put("indexStatus", "ACTIVE");
         response.put("schema", schema);
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/indices/search")
+    public Response searchIndex(@Context HttpHeaders headers, String body) {
+        IotService.Page<ObjectNode> page = fleetIndexingService.searchIndex(IotRequestBody.read(objectMapper, body),
+                regionResolver.resolveRegion(headers));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.putArray("things").addAll(page.items());
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 }

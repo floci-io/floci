@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.iot;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.JsonNodeType;
 import com.fasterxml.jackson.databind.node.MissingNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -11,27 +13,39 @@ import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration.Field;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration.GeoLocation;
 import io.github.hectorvent.floci.services.iot.model.IotIndexingConfiguration.ThingIndexing;
+import io.github.hectorvent.floci.services.iot.model.IotThingGroup;
+import io.github.hectorvent.floci.services.iot.model.Thing;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * AWS IoT fleet indexing configuration: UpdateIndexingConfiguration, GetIndexingConfiguration and
- * DescribeIndex. One configuration per account and region; a region never updated is OFF.
+ * AWS IoT fleet indexing: UpdateIndexingConfiguration, GetIndexingConfiguration, DescribeIndex and
+ * a bounded SearchIndex. One configuration per account and region; a region never updated is OFF.
  */
 @ApplicationScoped
 public class IotFleetIndexingService {
 
     static final String THINGS_INDEX = "AWS_Things";
     static final String THING_GROUPS_INDEX = "AWS_ThingGroups";
+
+    private static final int MAX_QUERY_STRING_LENGTH = 1000;
+    private static final Pattern PAGE_TOKEN = Pattern.compile("([0-9a-f-]{36})([0-9a-f-]{36})(.+)", Pattern.DOTALL);
 
     // Enum value sets in the order AWS prints them in its validation messages.
     private static final List<String> THING_INDEXING_MODES = List.of("REGISTRY_AND_SHADOW", "OFF", "REGISTRY");
@@ -81,17 +95,19 @@ public class IotFleetIndexingService {
             new Field("thingGroupId", "String"));
 
     private final StorageBackend<String, IotIndexingConfiguration> store;
+    private final IotService iotService;
     /** Guards the read-modify-write of an update that changes only one of the two configurations. */
     private final Object lock = new Object();
 
     @Inject
-    public IotFleetIndexingService(StorageFactory storageFactory) {
+    public IotFleetIndexingService(StorageFactory storageFactory, IotService iotService) {
         this(storageFactory.create("iot", "iot-indexing-configuration.json",
-                new TypeReference<Map<String, IotIndexingConfiguration>>() {}));
+                new TypeReference<Map<String, IotIndexingConfiguration>>() {}), iotService);
     }
 
-    IotFleetIndexingService(StorageBackend<String, IotIndexingConfiguration> store) {
+    IotFleetIndexingService(StorageBackend<String, IotIndexingConfiguration> store, IotService iotService) {
         this.store = store;
+        this.iotService = iotService;
     }
 
     public void updateIndexingConfiguration(JsonNode request, String region) {
@@ -114,10 +130,7 @@ public class IotFleetIndexingService {
         List<Field> groupManagedFields = fields(groupNode.path("managedFields"), groupPrefix + ".managedFields",
                 errors);
         fields(groupNode.path("customFields"), groupPrefix + ".customFields", errors);
-        if (!errors.isEmpty()) {
-            throw invalid(errors.size() + (errors.size() == 1 ? " validation error" : " validation errors")
-                    + " detected: " + String.join("; ", errors));
-        }
+        rejectViolations(errors);
         if (thing != null) {
             thing = validateThing(thing, managedFields);
         }
@@ -137,16 +150,168 @@ public class IotFleetIndexingService {
 
     /** The schema of an enabled index. */
     public String describeIndex(String indexName, String region) {
-        IotIndexingConfiguration configuration = getIndexingConfiguration(region);
-        String schema = switch (indexName) {
-            case THINGS_INDEX -> thingsSchema(configuration.thing());
-            case THING_GROUPS_INDEX -> "OFF".equals(configuration.thingGroupIndexingMode()) ? null : "REGISTRY";
-            default -> throw invalid("Unrecognized indexName " + indexName);
-        };
+        String schema = schema(indexName, getIndexingConfiguration(region));
         if (schema == null) {
             throw new AwsException("ResourceNotFoundException", "Index " + indexName + " does not exist", 404);
         }
         return schema;
+    }
+
+    /**
+     * SearchIndex over the things of the caller's account and region, in thing name order. A
+     * request is checked in the order measured on AWS: the body and member types, member
+     * constraints, an empty index name, the query version, an unknown or disabled index, the query,
+     * then the page token. The token names the request it continues (its query string, index name
+     * and version as sent) and the last thing returned, so a page continues after that thing
+     * whatever was deleted before it. It also carries a checksum, so an edited token is invalid.
+     */
+    public IotService.Page<ObjectNode> searchIndex(JsonNode request, String region) {
+        if (!request.isObject()) {
+            throw serializationError("request body", JsonNodeType.OBJECT);
+        }
+        String queryString = text(request.path("queryString"), "queryString");
+        JsonNode maxResults = request.path("maxResults");
+        if (present(maxResults) && !maxResults.isNumber()) {
+            throw serializationError("maxResults", JsonNodeType.NUMBER);
+        }
+        // AWS truncates maxResults toward zero and saturates it at the int range, as this cast does.
+        int pageSize = present(maxResults) ? (int) maxResults.asDouble() : Integer.MAX_VALUE;
+        String requestedIndexName = text(request.path("indexName"), "indexName");
+        String queryVersion = text(request.path("queryVersion"), "queryVersion");
+        String nextToken = text(request.path("nextToken"), "nextToken");
+        List<String> errors = new ArrayList<>();
+        if (queryString == null) {
+            errors.add("Value null at 'queryString' failed to satisfy constraint: Member must not be null");
+        } else if (queryString.isEmpty()) {
+            errors.add("Value '' at 'queryString' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1");
+        } else if (queryString.codePointCount(0, queryString.length()) > MAX_QUERY_STRING_LENGTH) {
+            errors.add("Value '" + queryString + "' at 'queryString' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to " + MAX_QUERY_STRING_LENGTH);
+        }
+        if (pageSize < 1) {
+            errors.add("Value '" + pageSize + "' at 'maxResults' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 1");
+        }
+        rejectViolations(errors);
+        String indexName = requestedIndexName == null ? THINGS_INDEX : requestedIndexName;
+        if (indexName.isEmpty()) {
+            throw invalid("indexName cannot be empty.");
+        }
+        if (queryVersion != null && !"2017-09-30".equals(queryVersion)) {
+            throw invalid("Invalid queryVersion. Expected one of: [2017-09-30]");
+        }
+        IotIndexingConfiguration configuration = getIndexingConfiguration(region);
+        if (schema(indexName, configuration) == null) {
+            throw new AwsException("ResourceNotFoundException", "Index " + indexName
+                    + " does not exist. Please enable index by calling UpdateIndexingConfiguration", 404);
+        }
+        if (THING_GROUPS_INDEX.equals(indexName)) {
+            // ponytail: thing group documents are not modeled; refusing beats an empty result.
+            throw invalid("Floci does not support searching AWS_ThingGroups");
+        }
+        ThingIndexing indexing = configuration.thing();
+        Predicate<JsonNode> query = IotFleetIndexQuery.parse(queryString, indexing);
+        String parameters = pageParameters(requestedIndexName, queryVersion, queryString);
+        String after = pageAfter(nextToken, parameters);
+        Map<String, List<String>> thingGroupNames = thingGroupNames(region);
+        List<ObjectNode> matches = new ArrayList<>();
+        for (Thing thing : iotService.listThings(region)) {
+            String thingName = thing.getThingName();
+            if (after != null && thingName.compareTo(after) <= 0) {
+                continue;
+            }
+            ObjectNode document = document(thing, thingGroupNames.getOrDefault(thingName, List.of()));
+            if (query.test(document)) {
+                matches.add(document);
+                if (matches.size() > pageSize) {
+                    break;
+                }
+            }
+        }
+        if (matches.size() <= pageSize) {
+            return new IotService.Page<>(matches, null);
+        }
+        matches.removeLast();
+        return new IotService.Page<>(matches, pageToken(parameters, matches.getLast().path("thingName").asText()));
+    }
+
+    /**
+     * A digest of the members a page token is bound to, each as sent: AWS treats an omitted index
+     * name or version as different from its explicit default.
+     */
+    private static String pageParameters(String indexName, String queryVersion, String queryString) {
+        // The index name and version were validated against closed sets, so only the query can hold a newline.
+        return UUID.nameUUIDFromBytes((indexName + "\n" + queryVersion + "\n" + queryString)
+                .getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
+    /** The thing name a page token continues after, null for the first page. */
+    private static String pageAfter(String nextToken, String parameters) {
+        if (nextToken == null) {
+            return null;
+        }
+        Matcher token;
+        try {
+            token = PAGE_TOKEN.matcher(new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException e) {
+            throw invalid("Invalid nextToken");
+        }
+        if (!token.matches() || !token.group(2).equals(pageCheck(token.group(1), token.group(3)))) {
+            throw invalid("Invalid nextToken");
+        }
+        if (!token.group(1).equals(parameters)) {
+            throw invalid("nextToken was from a request with different parameters");
+        }
+        return token.group(3);
+    }
+
+    private static String pageToken(String parameters, String thingName) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(
+                (parameters + pageCheck(parameters, thingName) + thingName).getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** A checksum of a token's parameters and cursor, so an edited or truncated token is invalid, as on AWS. */
+    private static String pageCheck(String parameters, String thingName) {
+        return UUID.nameUUIDFromBytes((parameters + thingName).getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
+    /** The thing groups each thing of the region is a direct member of, in group name order. */
+    private Map<String, List<String>> thingGroupNames(String region) {
+        Map<String, List<String>> groups = new HashMap<>();
+        for (IotThingGroup group : iotService.listThingGroups(region, null, null).items()) {
+            for (String thingName : iotService.listThingsInThingGroup(group.getThingGroupName(), region)) {
+                groups.computeIfAbsent(thingName, ignored -> new ArrayList<>()).add(group.getThingGroupName());
+            }
+        }
+        return groups;
+    }
+
+    /** A thing's index document; like AWS it leaves out a member the thing does not have. */
+    private static ObjectNode document(Thing thing, List<String> thingGroupNames) {
+        ObjectNode document = JsonNodeFactory.instance.objectNode();
+        document.put("thingName", thing.getThingName());
+        document.put("thingId", thing.getThingId());
+        if (thing.getThingTypeName() != null) {
+            document.put("thingTypeName", thing.getThingTypeName());
+        }
+        if (!thingGroupNames.isEmpty()) {
+            thingGroupNames.forEach(document.putArray("thingGroupNames")::add);
+        }
+        if (thing.getAttributes() != null && !thing.getAttributes().isEmpty()) {
+            ObjectNode attributes = document.putObject("attributes");
+            thing.getAttributes().forEach(attributes::put);
+        }
+        return document;
+    }
+
+    /** The schema of the named index, null while it is disabled. */
+    private static String schema(String indexName, IotIndexingConfiguration configuration) {
+        return switch (indexName) {
+            case THINGS_INDEX -> thingsSchema(configuration.thing());
+            case THING_GROUPS_INDEX -> "OFF".equals(configuration.thingGroupIndexingMode()) ? null : "REGISTRY";
+            default -> throw invalid("Unrecognized indexName " + indexName);
+        };
     }
 
     /** The managed fields AWS derives from the thing indexing modes; none while indexing is OFF. */
@@ -287,6 +452,13 @@ public class IotFleetIndexingService {
             errors.add(enumError(value, prefix + "." + member, allowed));
         }
         return value;
+    }
+
+    private static void rejectViolations(List<String> errors) {
+        if (!errors.isEmpty()) {
+            throw invalid(errors.size() + (errors.size() == 1 ? " validation error" : " validation errors")
+                    + " detected: " + String.join("; ", errors));
+        }
     }
 
     private static String enumError(String value, String path, List<String> allowed) {

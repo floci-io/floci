@@ -45,7 +45,7 @@ Current MVP 2 limitations:
 - `SendDirectMessage` publishes to the requested MQTT topic through the embedded broker. Unlike AWS IoT Core, it does not yet bypass subscription matching to deliver to a client that is not subscribed to that topic.
 - `GetConnection` and `ListSubscriptions` report live in-memory broker state only; offline persistent session subscription reporting is not modeled yet.
 - Jobs reserved MQTT topics remain follow-up scope; Jobs Data HTTP APIs are implemented first.
-- Dynamic thing groups, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled. Fleet indexing has its configuration only, see [Fleet Indexing](#fleet-indexing).
+- Dynamic thing groups, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled. Fleet indexing has its configuration and a bounded `SearchIndex` subset, see [Fleet Indexing](#fleet-indexing).
 
 ## Domain Configurations
 
@@ -104,7 +104,7 @@ Current limitations:
 
 ## Fleet Indexing
 
-Status: configuration only.
+Status: configuration and a bounded SearchIndex subset.
 
 `UpdateIndexingConfiguration` and `GetIndexingConfiguration` (`/indexing/config`) and `DescribeIndex` (`/indices/{indexName}`) are served on the REST-JSON paths the AWS SDKs use, with the AWS shapes, error codes and validation messages:
 
@@ -115,9 +115,50 @@ Status: configuration only.
 - A member of the wrong JSON type, or content after the JSON body, fails with `SerializationException`.
 - `DescribeIndex` reports `AWS_Things` and `AWS_ThingGroups` with the schema the modes select. The index is `ACTIVE` as soon as it is enabled: Floci has no `BUILDING` or `REBUILDING` window. A disabled index is `ResourceNotFoundException`, any other index name `InvalidRequestException`.
 
+### SearchIndex
+
+`SearchIndex` (`POST /indices/search`) searches the things of the caller's account and region in the `AWS_Things` index, the default index name. Floci evaluates this part of the query language:
+
+- `field:value`. Values match case-insensitively, field names exactly: `attributes.Site:north` matches nothing when the attribute is named `site`.
+- `*` (any run of characters) and `?` (one character) inside a value, and `\` to escape one character. A quoted value such as `thingName:"x"` matches literally.
+- `field:*` matches the things that have the field. A bare `*` matches every thing.
+- `AND`, `OR` and `NOT` in upper case, their forms `&&`, `||` and `!`, a leading `-` for negation, and parentheses.
+- Precedence as measured on AWS: `NOT` binds tightest, then `AND`, then `OR`. Whitespace is an `AND` that binds looser than `OR`, so `a OR b c` means `(a OR b) AND c`.
+
+The fields are `thingName`, `thingId`, `thingTypeName`, `thingGroupNames` (direct memberships) and `attributes.<name>`.
+
+Errors follow AWS, with AWS's messages. The body and member types are checked first, then the member constraints, then the index, then the query, then `nextToken`:
+
+- `InvalidRequestException` for a missing or empty `queryString`, a `queryString` longer than 1000 characters, a `maxResults` below 1 (AWS truncates it toward zero and caps it at the 32-bit integer range), an empty `indexName`, a `queryVersion` other than `2017-09-30`, an unknown index name, a `nextToken` that is empty, was not issued by `SearchIndex`, or was edited or truncated (`Invalid nextToken`), and a `nextToken` issued for a different `queryString`, `indexName` or `queryVersion` (`nextToken was from a request with different parameters`).
+- `ResourceNotFoundException` for an index that is not enabled.
+- `InvalidQueryException` for invalid syntax, an invalid field name (including a `shadow.name.<shadow>.<field>` whose shadow is not in the named shadow filter), more than 12 terms, more than two `*` wildcards in a value, a value starting with `?`, the `+` operator, and fuzzy, regular expression and boost queries.
+- `InvalidRequestException` for a `connectivity.*`, `shadow.*` or `deviceDefender.*` field while that indexing is off. A classic `shadow.*` field needs `REGISTRY_AND_SHADOW`; a `shadow.name.*` field is also served by named shadow indexing.
+- `SerializationException` for a body that is not a JSON object, malformed JSON or content after it, a `queryString`, `indexName`, `queryVersion` or `nextToken` that is not a string, and a `maxResults` that is not a number.
+
+Within the query, invalid syntax is reported before more than 12 terms, and more than 12 terms before any other query error, including a `connectivity.*`, `shadow.*` or `deviceDefender.*` field while that indexing is off and the constructs Floci refuses below. Each value of a field group counts as a term, the field before it does not. The field of a group is checked like any other field, before the group is refused. A range is one term: two bounds, separated by spaces and optionally by `TO`, in `[` or `{` and `]` or `}`. An unclosed or otherwise malformed range, and an unescaped `[`, `]`, `{` or `}` outside a range, is invalid syntax, as on AWS.
+
+Syntax AWS accepts but Floci does not evaluate is refused with `InvalidQueryException` and the message `Floci does not support <construct> in fleet index queries, query string: <query>`. It never answers with an empty result. This covers:
+
+- range queries (`field:[a TO b]`, `field:{a TO b}`)
+- comparisons (`>`, `<`, `>=`, `<=`)
+- free text terms without a field, including lower case `and`, `or` and `not`
+- field grouping (`field:(a OR b)`)
+- every `connectivity.*`, `shadow.*` and `deviceDefender.*` field once its indexing is on. While that indexing is off the answer is AWS's `InvalidRequestException` above.
+
+Searching `AWS_ThingGroups` is refused with `InvalidRequestException` and `Floci does not support searching AWS_ThingGroups` while that index is enabled. While it is disabled the answer is AWS's `ResourceNotFoundException`.
+
+Results:
+
+- A thing has `thingName` and `thingId`, and `thingTypeName`, `thingGroupNames` and `attributes` only when it has them. `shadow` and `deviceDefender` are never returned: Floci keeps no indexed shadow document.
+- `connectivity` is never returned either. AWS adds it while `thingConnectivityIndexingMode` is `STATUS`, where a thing that never connected shows `connected` `false` and `timestamp` `0`.
+- Things come in thing name order. AWS does not specify an order.
+- `maxResults` and `nextToken` page the results. Without `maxResults` every match comes in one page. The token marks the last thing returned, so the next page continues after it even when things before it were deleted, as on AWS. A token continues only the request that issued it: the same `queryString`, and `indexName` and `queryVersion` sent the same way, since an omitted member differs from its explicit default. `maxResults` may change between pages.
+- An index answers at once: a thing is searchable as soon as it is created, where AWS takes a few seconds.
+
 Current limitations:
 
-- `SearchIndex`, `ListIndices` and the statistics and aggregation APIs (`GetStatistics`, `GetCardinality`, `GetPercentiles`, `GetBucketsAggregation`) are not modeled yet.
+- `ListIndices` and the statistics and aggregation APIs (`GetStatistics`, `GetCardinality`, `GetPercentiles`, `GetBucketsAggregation`) are not modeled yet.
+- `customFields` types are not applied to search: attribute values are matched as strings.
 - `managedFields` and `customFields` sent in the thing group configuration are checked (the custom fields for their types only) but not stored: `GetIndexingConfiguration` reports the managed fields the mode selects and no custom fields.
 
 ## MQTT Broker
