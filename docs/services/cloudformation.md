@@ -186,6 +186,18 @@ Set `floci.services.cloudformation.allow-stub-unsupported-resource-types` to `fa
 resource instead: it reaches `CREATE_FAILED` and the stack rolls back. Use it in a pipeline that
 must not pass over a resource it never got.
 
+## EventBridge Scheduler Schedules
+
+`AWS::Scheduler::Schedule` creates a real schedule. `Ref` returns its name and `Fn::GetAtt Arn`
+returns its ARN. A group move preserves the name, removes the old group address, and restores the
+original configuration if the stack update rolls back.
+
+If `DeleteStack` cannot remove a failed update's schedule orphan, it leaves the stack in
+`DELETE_FAILED` and keeps the orphan's address for a later deletion retry. This is separate from
+committed update cleanup, which abandons an old schedule after three failed attempts.
+`UpdateReplacePolicy: Retain` keeps a name replacement's old schedule, but does not keep a group
+move's old address or an orphan created by a failed update.
+
 ## EventBridge Event Buses
 
 `AWS::Events::EventBus` creates a real custom EventBridge bus. `Name` is required, `Ref` returns

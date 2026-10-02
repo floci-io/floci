@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -417,6 +418,69 @@ class SchedulerScheduleCfnProvisionerTest {
         provisioner.provision(retained, properties("retained-old", "a"), context(null));
         provisioner.provision(retained, properties("retained-new", "b"), context("retained-old"));
         assertTrue(provisioner.completeDeleteCleanup(retained).complete());
+        verify(scheduler, never()).deleteSchedule("retained-old", "a", REGION);
+    }
+
+    @Test
+    void exhaustedDeleteCleanupKeepsEveryOwedAddressForTheNextStackDelete() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "a"), context(null));
+        ReplacementCleanup.recordOrphan(resource, "b/orphan-one", resource.getResourceType(), REGION);
+        ReplacementCleanup.recordOrphan(resource, "c/orphan-two", resource.getResourceType(), REGION);
+        doThrow(new AwsException("InternalServerException", "delete unavailable", 500))
+                .when(scheduler).deleteSchedule("orphan-one", "b", REGION);
+        doThrow(new AwsException("InternalServerException", "delete unavailable", 500))
+                .when(scheduler).deleteSchedule("orphan-two", "c", REGION);
+
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            UpdateCleanupResult failed = provisioner.completeDeleteCleanup(resource);
+            assertFalse(failed.complete());
+            assertEquals(attempt, failed.attempts());
+        }
+        provisioner.clearDeleteCleanup(resource);
+
+        assertTrue(provisioner.hasReplacementUpdate(resource));
+        assertEquals("b/orphan-one", provisioner.updateCleanupPhysicalId(resource));
+        assertThrows(IllegalStateException.class, () -> provisioner.delete(resource, REGION));
+        assertTrue(provisioner.hasReplacementUpdate(resource));
+        doNothing().when(scheduler).deleteSchedule("orphan-one", "b", REGION);
+        UpdateCleanupResult partlyRecovered = provisioner.completeDeleteCleanup(resource);
+        assertFalse(partlyRecovered.complete());
+        assertEquals("c/orphan-two", partlyRecovered.previousPhysicalId());
+        assertEquals("c/orphan-two", provisioner.updateCleanupPhysicalId(resource));
+        doNothing().when(scheduler).deleteSchedule("orphan-two", "c", REGION);
+        assertTrue(provisioner.completeDeleteCleanup(resource).complete());
+        provisioner.clearDeleteCleanup(resource);
+        assertFalse(provisioner.hasReplacementUpdate(resource));
+        verify(scheduler, times(1)).deleteSchedule("current", "a", REGION);
+    }
+
+    @Test
+    void deleteRetryRetainsTheOldNameButStillDeletesFailedUpdateOrphans() throws Exception {
+        StackResource resource = resource();
+        resource.setUpdateReplacePolicy("Retain");
+        provisioner.provision(resource, properties("retained-old", "a"), context(null));
+        provisioner.provision(resource, properties("current", "b"), context("retained-old"));
+        ReplacementCleanup.recordOrphan(resource, "b/current", resource.getResourceType(), REGION);
+        ReplacementCleanup.recordOrphan(resource, "c/orphan", resource.getResourceType(), REGION);
+        doThrow(new AwsException("InternalServerException", "delete unavailable", 500))
+                .when(scheduler).deleteSchedule("orphan", "c", REGION);
+
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            assertFalse(provisioner.completeDeleteCleanup(resource).complete());
+        }
+        provisioner.clearDeleteCleanup(resource);
+        assertEquals("true", resource.getAttributes().get("__FlociSchedulerNameReplacement"));
+        assertEquals("c/orphan", provisioner.updateCleanupPhysicalId(resource));
+        verify(scheduler, never()).deleteSchedule("retained-old", "a", REGION);
+        verify(scheduler, never()).deleteSchedule("current", "b", REGION);
+
+        doNothing().when(scheduler).deleteSchedule("orphan", "c", REGION);
+        assertTrue(provisioner.completeDeleteCleanup(resource).complete());
+        provisioner.clearDeleteCleanup(resource);
+        assertFalse(resource.getAttributes().containsKey("__FlociSchedulerNameReplacement"));
+        provisioner.delete(resource, REGION);
+        verify(scheduler).deleteSchedule("current", "b", REGION);
         verify(scheduler, never()).deleteSchedule("retained-old", "a", REGION);
     }
 

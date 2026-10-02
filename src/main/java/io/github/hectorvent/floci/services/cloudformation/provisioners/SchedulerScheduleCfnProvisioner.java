@@ -228,7 +228,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
     public void delete(StackResource resource, String region) {
         deleteAddress(address(resource.getAttributes().getOrDefault(GROUP_ATTR, "default"),
                 resource.getPhysicalId()), region);
-        UpdateCleanupResult result = ReplacementCleanup.complete(cleanupResource(resource), this::deleteAddress);
+        UpdateCleanupResult result = ReplacementCleanup.completeForDelete(cleanupResource(resource), this::deleteAddress);
         if (result.applicable() && !result.complete()) {
             throw new IllegalStateException(result.failureReason());
         }
@@ -292,13 +292,15 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
-        return ReplacementCleanup.complete(cleanupResource(resource), this::deleteAddress);
+        return ReplacementCleanup.completeForDelete(cleanupResource(resource), this::deleteAddress);
     }
 
     @Override
     public void clearDeleteCleanup(StackResource resource) {
-        ReplacementCleanup.clear(resource);
-        resource.getAttributes().remove(NAME_REPLACEMENT_ATTR);
+        ReplacementCleanup.clearForDelete(resource);
+        if (!ReplacementCleanup.hasReplacement(resource)) {
+            resource.getAttributes().remove(NAME_REPLACEMENT_ATTR);
+        }
     }
 
     @Override

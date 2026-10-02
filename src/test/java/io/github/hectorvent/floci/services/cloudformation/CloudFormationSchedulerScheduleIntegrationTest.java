@@ -322,6 +322,40 @@ class CloudFormationSchedulerScheduleIntegrationTest {
         sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
     }
 
+    @Test
+    void failedStackDeletionDoesNotForgetAnExhaustedGroupMoveOrphan() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-orphan-delete-" + suffix;
+        String name = "orphan-delete-" + suffix;
+        String group = "orphan-group-" + suffix;
+        createGroup(group);
+        Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
+        cloudFormation(stack, "CreateStack", externalQueueTemplate("", queue), Map.of("Name", name));
+        outputs(stack, "CREATE_COMPLETE");
+        doThrow(new AwsException("InternalServerException", "orphan deletion unavailable", 500))
+                .when(scheduler).deleteSchedule(name, group, "us-east-1");
+
+        cloudFormation(stack, "UpdateStack", externalQueueTemplate(FAILURE, queue),
+                Map.of("Name", name, "Group", group));
+        outputs(stack, "UPDATE_ROLLBACK_FAILED");
+        getSchedule(name, "default").then().statusCode(200);
+        getSchedule(name, group).then().statusCode(200).body("State", equalTo("DISABLED"));
+
+        cloudFormation(stack, "DeleteStack", null, Map.of());
+        outputs(stack, "DELETE_FAILED");
+        assertTrue(scheduleResource(stack).getAttributes().containsKey("__FlociReplacementCleanup"));
+        getSchedule(name, group).then().statusCode(200);
+
+        doCallRealMethod().when(scheduler).deleteSchedule(name, group, "us-east-1");
+        deleteStack(stack);
+        getSchedule(name, "default").then().statusCode(404);
+        getSchedule(name, group).then().statusCode(404);
+        assertTrue(sqs.getQueueAttributes(queue.getQueueUrl(), List.of("QueueArn"), "us-east-1")
+                .get("QueueArn").endsWith(":external-" + suffix));
+        deleteGroup(group);
+        sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+    }
+
     private void prepareFailedRollback(String stack, String name, Queue queue) {
         cloudFormation(stack, "CreateStack", externalQueueTemplate("", queue), Map.of("Name", name));
         outputs(stack, "CREATE_COMPLETE");
