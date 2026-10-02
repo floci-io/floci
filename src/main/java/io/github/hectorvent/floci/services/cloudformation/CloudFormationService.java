@@ -54,6 +54,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * CloudFormation stack lifecycle management — Create, Update, Delete stacks via ChangeSets.
@@ -474,6 +475,7 @@ public class CloudFormationService implements ResourceProvider {
             return List.of();
         }
         Stack stack = getStackOrThrow(cs.getStackName(), region);
+        String accountId = ownerAccount(stack);
         try {
             JsonNode newTemplate = parseTemplate(cs.getTemplateBody());
             // Merge Fn::Transform/AWS::Include snippets before SAM expansion, matching AWS order:
@@ -488,9 +490,12 @@ public class CloudFormationService implements ResourceProvider {
             JsonNode newResources = newTemplate.path("Resources");
             boolean createType = "CREATE".equalsIgnoreCase(cs.getChangeSetType())
                     || stack.getTemplateBody() == null;
-            JsonNode oldResources = createType
-                    ? objectMapper.createObjectNode()
-                    : parseTemplate(stack.getTemplateBody()).path("Resources");
+            JsonNode oldTemplate = createType
+                    ? null
+                    : parseTemplate(stack.getTemplateBody());
+            JsonNode oldResources = oldTemplate != null
+                    ? oldTemplate.path("Resources")
+                    : objectMapper.createObjectNode();
 
             Map<String, String> oldParams = stack.parametersSnapshot();
             // Prefer the SSM-resolved values captured by the last executeTemplate run; fall back to
@@ -537,11 +542,25 @@ public class CloudFormationService implements ResourceProvider {
             // deleteRemovedOrConditionFalseResources), so the preview must evaluate Conditions too
             // rather than only scanning each resource's own Ref/Sub usage. A resource is "active" in
             // the deployed stack precisely when it's present in stack.getResources() - the same
-            // ground truth execution uses - so no separate old-conditions evaluation is needed.
+            Map<String, Boolean> oldConditions = oldTemplate != null
+                    ? resolveConditions(oldTemplate, oldResolvedParams, stack, region, regionResolver.getAccountId())
+                    : Map.of();
             Map<String, Boolean> newConditions = resolveConditions(
                     newTemplate, newResolvedParams, null, region, regionResolver.getAccountId());
+            Set<String> changedConditions = new HashSet<>();
+            newConditions.forEach((name, val) -> {
+                if (!Objects.equals(val, oldConditions.get(name))) {
+                    changedConditions.add(name);
+                }
+            });
+            oldConditions.forEach((name, val) -> {
+                if (!newConditions.containsKey(name)) {
+                    changedConditions.add(name);
+                }
+            });
             Set<String> deployedIds = stack.resourcesSnapshot().keySet();
 
+            Set<String> replacedResourceIds = new HashSet<>();
             List<ResourceChange> changes = new ArrayList<>();
             newResources.fields().forEachRemaining(e -> {
                 String logicalId = e.getKey();
@@ -568,11 +587,19 @@ public class CloudFormationService implements ResourceProvider {
                     // it now.
                     changes.add(new ResourceChange("Add", logicalId, null, resourceType, null));
                 } else if (newActive
-                        && (!oldDef.equals(newDef) || referencesAnyParameter(newDef, changedParams))) {
+                        && (!oldDef.equals(newDef)
+                        || ("AWS::CloudFormation::Stack".equals(resourceType) && isNestedStackChanged(stack, logicalId, newDef, region, accountId))
+                        || referencesAnyParameter(newDef, changedParams)
+                        || referencesAnyCondition(newDef, changedConditions))) {
                     boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
+                    boolean replacement = typeChanged
+                            || requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams, changedConditions);
+                    if (replacement) {
+                        replacedResourceIds.add(logicalId);
+                    }
                     changes.add(new ResourceChange("Modify", logicalId,
                             resourcePhysicalId(stack, logicalId), resourceType,
-                            typeChanged ? "True" : "False"));
+                            replacement ? "True" : "False"));
                 }
             });
             oldResources.fields().forEachRemaining(e -> {
@@ -582,6 +609,96 @@ public class CloudFormationService implements ResourceProvider {
                             e.getValue().path("Type").asText(), null));
                 }
             });
+
+            Set<String> alreadyChangedIds = changes.stream()
+                    .map(ResourceChange::logicalResourceId)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            Map<String, Set<String>> inPlaceChangedAttributes = new HashMap<>();
+            for (ResourceChange change : changes) {
+                if ("Modify".equals(change.action()) && !replacedResourceIds.contains(change.logicalResourceId())) {
+                    String logicalId = change.logicalResourceId();
+                    JsonNode oldDef = oldResources.get(logicalId);
+                    JsonNode newDef = newResources.get(logicalId);
+                    String resourceType = newDef != null ? newDef.path("Type").asText() : "";
+                    Set<String> attrs = expectedChangedAttributes(resourceType, oldDef, newDef);
+                    if (!attrs.isEmpty()) {
+                        inPlaceChangedAttributes.put(logicalId, attrs);
+                    }
+                }
+            }
+
+            if (!replacedResourceIds.isEmpty() || !inPlaceChangedAttributes.isEmpty()) {
+                Set<String> allResourceIds = new LinkedHashSet<>();
+                newResources.fieldNames().forEachRemaining(allResourceIds::add);
+
+                List<String> sortedLogicalIds = topologicalSort(newResources, newConditions);
+                boolean anyNewChange = true;
+                while (anyNewChange) {
+                    anyNewChange = false;
+                    for (String logicalId : sortedLogicalIds) {
+                        JsonNode newDef = newResources.get(logicalId);
+                        String newConditionName = newDef.path("Condition").asText(null);
+                        boolean newActive = newConditionName == null
+                                || newConditions.getOrDefault(newConditionName, false);
+                        if (!newActive || !deployedIds.contains(logicalId)) {
+                            continue;
+                        }
+                        Set<String> propertyDependencies = new LinkedHashSet<>();
+                        collectDependencies(newDef.path("Properties"), allResourceIds, propertyDependencies, newConditions);
+
+                        boolean dependsOnReplaced = propertyDependencies.stream().anyMatch(replacedResourceIds::contains);
+                        boolean referencesChangedAttr = false;
+                        if (!dependsOnReplaced) {
+                            for (Map.Entry<String, Set<String>> entry : inPlaceChangedAttributes.entrySet()) {
+                                if (referencesAnyAttribute(newDef.path("Properties"), entry.getKey(), entry.getValue(), newConditions)) {
+                                    referencesChangedAttr = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (dependsOnReplaced || referencesChangedAttr) {
+                            String resourceType = newDef.path("Type").asText();
+                            JsonNode oldDef = oldResources.get(logicalId);
+                            boolean typeChanged = oldDef != null && !oldDef.path("Type").asText().equals(resourceType);
+
+                            boolean createOnlyReferencesReplaced = false;
+                            JsonNode props = newDef.path("Properties");
+                            if (props != null && props.isObject()) {
+                                for (Iterator<String> it = props.fieldNames(); it.hasNext(); ) {
+                                    String field = it.next();
+                                    if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field)) {
+                                        Set<String> fieldDeps = new LinkedHashSet<>();
+                                        collectDependencies(props.get(field), allResourceIds, fieldDeps, newConditions);
+                                        if (fieldDeps.stream().anyMatch(replacedResourceIds::contains)) {
+                                            createOnlyReferencesReplaced = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            boolean replacement = typeChanged
+                                    || (oldDef != null && requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams, changedConditions))
+                                    || createOnlyReferencesReplaced;
+                            if (replacement && replacedResourceIds.add(logicalId)) {
+                                anyNewChange = true;
+                            }
+                            if (!alreadyChangedIds.contains(logicalId)) {
+                                alreadyChangedIds.add(logicalId);
+                                changes.add(new ResourceChange("Modify", logicalId,
+                                        resourcePhysicalId(stack, logicalId), resourceType,
+                                        replacement ? "True" : "False"));
+                                anyNewChange = true;
+                                Set<String> attrs = expectedChangedAttributes(resourceType, oldDef, newDef);
+                                if (!attrs.isEmpty()) {
+                                    inPlaceChangedAttributes.put(logicalId, attrs);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             return changes;
         } catch (AwsException e) {
             throw e;
@@ -600,6 +717,49 @@ public class CloudFormationService implements ResourceProvider {
         String json = resourceDef.toString();
         for (String name : parameterNames) {
             if (json.contains("\"Ref\":\"" + name + "\"") || json.contains("${" + name + "}")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** True if a resource's definition references any of the given condition names. */
+    private boolean referencesAnyCondition(JsonNode resourceDef, Set<String> conditionNames) {
+        if (conditionNames.isEmpty()) {
+            return false;
+        }
+        String json = resourceDef.toString();
+        for (String name : conditionNames) {
+            if (json.contains("\"Condition\":\"" + name + "\"")
+                    || json.contains("\"Fn::If\":[\"" + name + "\"")
+                    || json.contains("[\"" + name + "\"")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean requiresReplacement(String resourceType, JsonNode oldProps, JsonNode newProps,
+                                        Set<String> changedParams, Set<String> changedConditions) {
+        if (oldProps == null || newProps == null || oldProps.isMissingNode() || newProps.isMissingNode()) {
+            return false;
+        }
+        for (Iterator<String> it = newProps.fieldNames(); it.hasNext(); ) {
+            String field = it.next();
+            if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field)) {
+                JsonNode oldVal = oldProps.get(field);
+                JsonNode newVal = newProps.get(field);
+                if (oldVal != null && !oldVal.equals(newVal)) {
+                    return true;
+                }
+                if (newVal != null && (referencesAnyParameter(newVal, changedParams) || referencesAnyCondition(newVal, changedConditions))) {
+                    return true;
+                }
+            }
+        }
+        for (Iterator<String> it = oldProps.fieldNames(); it.hasNext(); ) {
+            String field = it.next();
+            if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field) && !newProps.has(field)) {
                 return true;
             }
         }
@@ -738,7 +898,7 @@ public class CloudFormationService implements ResourceProvider {
         String templateBody = cs.getTemplateBody();
         Map<String, String> params = cs.getParameters() != null ? cs.getParameters() : Map.of();
 
-        return submitOperation(() -> runUnderAccount(accountId, () -> {
+        return submitOperation(() -> runUnderScope(accountId, region, () -> {
             executeTemplate(stack, templateBody, params, isCreate, region, accountId);
             String status = stack.getStatus();
             cs.setExecutionStatus(status != null && (status.contains("ROLLBACK") || status.endsWith("_FAILED"))
@@ -748,11 +908,10 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * Runs {@code body} under a synthetic CDI request scope whose account is {@code accountId}, so
-     * that account-aware storage in the downstream services namespaces provisioned resources under
-     * the intended account. Mirrors the pattern used by other background workers.
+     * Runs {@code body} under the stack's account and region, so downstream services resolve the
+     * same scope as the CloudFormation request that submitted this background operation.
      */
-    private void runUnderAccount(String accountId, Runnable body) {
+    private void runUnderScope(String accountId, String region, Runnable body) {
         ManagedContext requestContext = Arc.container().requestContext();
         boolean alreadyActive = requestContext.isActive();
         if (!alreadyActive) {
@@ -760,12 +919,18 @@ public class CloudFormationService implements ResourceProvider {
         }
         // Background workers normally have no active scope, so a fresh one is activated and
         // terminated below. But if we ran inside an already-active scope, restore its previous
-        // account afterwards so we never leave the overridden account ID behind on a reused thread.
+        // scope afterwards so we never leave the overridden values behind on a reused thread.
         RequestContext ctx = Arc.container().instance(RequestContext.class).get();
         String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
+        String previousRegion = alreadyActive ? ctx.getRegion() : null;
+        String previousPartition = alreadyActive ? ctx.getPartition() : null;
         try {
             if (accountId != null) {
                 ctx.setAccountId(accountId);
+            }
+            if (region != null) {
+                ctx.setRegion(region);
+                ctx.setPartition(regionResolver.partitionForRegion(region));
             }
             body.run();
         } finally {
@@ -773,6 +938,8 @@ public class CloudFormationService implements ResourceProvider {
                 requestContext.terminate();
             } else {
                 ctx.setAccountId(previousAccountId);
+                ctx.setRegion(previousRegion);
+                ctx.setPartition(previousPartition);
             }
         }
     }
@@ -836,7 +1003,7 @@ public class CloudFormationService implements ResourceProvider {
                 "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
 
         try {
-            return submitOperation(() -> runUnderAccount(accountId,
+            return submitOperation(() -> runUnderScope(accountId, region,
                     () -> deleteStackResources(stack, region, accountId)));
         } catch (AwsException e) {
             if ("LimitExceededException".equals(e.getErrorCode())) {
@@ -1242,6 +1409,9 @@ public class CloudFormationService implements ResourceProvider {
         boolean updateCommitted = false;
         Set<String> attemptedResourceIds = new LinkedHashSet<>();
         try {
+            Set<String> changedResourceIds = isCreate
+                    ? Set.of()
+                    : changedResourceIds(stack, templateBody, params, region);
             JsonNode template = parseTemplate(templateBody);
             stack.setOriginalTemplateBody(templateBody);
 
@@ -1288,7 +1458,7 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, Map<String, String>> resourceAttrs = new LinkedHashMap<>();
 
             // First pass: collect existing physicalIds
-            for (var r : stack.resourcesSnapshot().values()) {
+            for (StackResource r : stack.resourcesSnapshot().values()) {
                 if (r.getPhysicalId() != null) {
                     physicalIds.put(r.getLogicalId(), r.getPhysicalId());
                     resourceAttrs.put(r.getLogicalId(), r.getAttributes());
@@ -1300,6 +1470,9 @@ public class CloudFormationService implements ResourceProvider {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
 
                 for (String logicalId : sortedLogicalIds) {
+                    if (!isCreate && !changedResourceIds.contains(logicalId)) {
+                        continue;
+                    }
                     JsonNode resDef = resources.get(logicalId);
                     String type = resDef.path("Type").asText();
                     String deletionPolicy = resDef.path("DeletionPolicy").asText(null);
@@ -1313,6 +1486,15 @@ public class CloudFormationService implements ResourceProvider {
 
                     StackResource resource = stack.getResources().get(logicalId);
                     StackResource previousResource = resource;
+                    String priorId = previousResource != null ? previousResource.getPhysicalId() : null;
+                    Map<String, String> priorAttrs = new HashMap<>();
+                    if (previousResource != null && previousResource.getAttributes() != null) {
+                        for (Map.Entry<String, String> entry : previousResource.getAttributes().entrySet()) {
+                            if (entry.getValue() != null) {
+                                priorAttrs.put(entry.getKey(), entry.getValue());
+                            }
+                        }
+                    }
                     if (resource == null) {
                         resource = new StackResource();
                         resource.setLogicalId(logicalId);
@@ -1358,6 +1540,51 @@ public class CloudFormationService implements ResourceProvider {
 
                     physicalIds.put(logicalId, resource.getPhysicalId());
                     resourceAttrs.put(logicalId, resource.getAttributes());
+
+                    if (!isCreate) {
+                        boolean replaced = dispatcher.hasReplacementUpdate(resource)
+                                || (priorId != null && !priorId.equals(resource.getPhysicalId()));
+                        if (replaced) {
+                            Set<String> allResourceIds = new LinkedHashSet<>();
+                            resources.fieldNames().forEachRemaining(allResourceIds::add);
+                            for (String candidateId : sortedLogicalIds) {
+                                if (!changedResourceIds.contains(candidateId)) {
+                                    Set<String> deps = new LinkedHashSet<>();
+                                    collectDependencies(resources.path(candidateId).path("Properties"),
+                                            allResourceIds, deps, conditions);
+                                    if (deps.contains(logicalId)) {
+                                        changedResourceIds.add(candidateId);
+                                    }
+                                }
+                            }
+                        } else {
+                            // In-place updates can still change attributes (e.g. LatestVersionNumber of LaunchTemplate)
+                            Map<String, String> newAttrs = resource.getAttributes();
+                            Set<String> changedAttrNames = new HashSet<>();
+                            if (newAttrs != null) {
+                                for (Map.Entry<String, String> entry : newAttrs.entrySet()) {
+                                    if (!Objects.equals(entry.getValue(), priorAttrs.get(entry.getKey()))) {
+                                        changedAttrNames.add(entry.getKey());
+                                    }
+                                }
+                            }
+                            for (String priorKey : priorAttrs.keySet()) {
+                                if (newAttrs == null || !newAttrs.containsKey(priorKey)) {
+                                    changedAttrNames.add(priorKey);
+                                }
+                            }
+                            if (!changedAttrNames.isEmpty()) {
+                                for (String candidateId : sortedLogicalIds) {
+                                    if (!changedResourceIds.contains(candidateId)) {
+                                        if (referencesAnyAttribute(resources.path(candidateId).path("Properties"),
+                                                logicalId, changedAttrNames, conditions)) {
+                                            changedResourceIds.add(candidateId);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     addEvent(stack, logicalId, resource.getPhysicalId(), type,
                             resource.getStatus(), resource.getStatusReason());
@@ -1506,6 +1733,55 @@ public class CloudFormationService implements ResourceProvider {
                 rollbackFailedUpdate(
                         stack, region, previousState, attemptedResourceIds, e.getMessage());
             }
+        }
+    }
+
+    private Set<String> changedResourceIds(Stack stack, String templateBody, Map<String, String> params,
+                                           String region) {
+        ChangeSet changeSet = new ChangeSet();
+        changeSet.setStackName(stack.getStackName());
+        changeSet.setStackId(stack.getStackId());
+        changeSet.setChangeSetType("UPDATE");
+        changeSet.setTemplateBody(templateBody);
+        changeSet.setParameters(params);
+
+        Set<String> changedResourceIds = new LinkedHashSet<>();
+        for (ResourceChange change : computeChangeSetChanges(changeSet, region)) {
+            if ("Add".equals(change.action()) || "Modify".equals(change.action())) {
+                changedResourceIds.add(change.logicalResourceId());
+            }
+        }
+        return changedResourceIds;
+    }
+
+
+    private boolean isNestedStackChanged(Stack parentStack, String logicalId, JsonNode newDef,
+                                         String region, String accountId) {
+        if (parentStack == null) {
+            return false;
+        }
+        StackResource existingResource = parentStack.getResources().get(logicalId);
+        if (existingResource == null || existingResource.getPhysicalId() == null) {
+            return true;
+        }
+        Stack childStack = resolveStack(existingResource.getPhysicalId(), region, accountId);
+        if (childStack == null) {
+            return true;
+        }
+        String templateUrl = newDef.path("Properties").path("TemplateURL").asText(null);
+        if (templateUrl == null || templateUrl.isBlank()) {
+            return false;
+        }
+        try {
+            String newChildTemplate = fetchTemplateFromS3(templateUrl);
+            String currentChildTemplate = childStack.getOriginalTemplateBody() != null
+                    ? childStack.getOriginalTemplateBody()
+                    : childStack.getTemplateBody();
+            return newChildTemplate != null && !newChildTemplate.equals(currentChildTemplate);
+        } catch (Exception ignored) {
+            // Safe to ignore: if TemplateURL is inaccessible and parent definition didn't change,
+            // treat the nested stack as unchanged so the parent update is not blocked.
+            return false;
         }
     }
 
@@ -2914,6 +3190,128 @@ public class CloudFormationService implements ResourceProvider {
                 deps.add(resourcePart);
             }
         }
+    }
+
+    private Set<String> expectedChangedAttributes(String resourceType, JsonNode oldDef, JsonNode newDef) {
+        Set<String> changedAttrs = new HashSet<>();
+        if ("AWS::EC2::LaunchTemplate".equals(resourceType)) {
+            changedAttrs.add("LatestVersionNumber");
+        }
+        JsonNode oldProps = oldDef != null ? oldDef.path("Properties") : null;
+        JsonNode newProps = newDef != null ? newDef.path("Properties") : null;
+        if (oldProps != null && newProps != null && oldProps.isObject() && newProps.isObject()) {
+            newProps.fieldNames().forEachRemaining(field -> {
+                if (!Objects.equals(newProps.get(field), oldProps.get(field))) {
+                    changedAttrs.add(field);
+                }
+            });
+        }
+        return changedAttrs;
+    }
+
+    /**
+     * Checks whether a template node references any changed attribute of targetLogicalId
+     * (via Fn::GetAtt or Fn::Sub). Used to pull in dependent resources when a resource
+     * is updated in-place with modified attributes (e.g. LatestVersionNumber of LaunchTemplate).
+     */
+    private boolean referencesAnyAttribute(JsonNode node, String targetLogicalId, Set<String> targetAttrNames,
+                                           Map<String, Boolean> conditions) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return false;
+        }
+        if (node.isObject()) {
+            if (node.has("Fn::GetAtt")) {
+                JsonNode getAtt = node.get("Fn::GetAtt");
+                String logicalId = null;
+                if (getAtt.isArray() && getAtt.size() >= 2) {
+                    logicalId = getAtt.get(0).asText();
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 1; i < getAtt.size(); i++) {
+                        if (i > 1) {
+                            sb.append('.');
+                        }
+                        sb.append(getAtt.get(i).asText());
+                    }
+                    if (targetLogicalId.equals(logicalId)
+                            && (targetAttrNames.contains(sb.toString()) || targetAttrNames.contains(getAtt.get(1).asText()))) {
+                        return true;
+                    }
+                } else if (getAtt.isTextual()) {
+                    String[] parts = getAtt.textValue().split("\\.", 2);
+                    logicalId = parts[0];
+                    String attrName = parts.length > 1 ? parts[1] : null;
+                    if (targetLogicalId.equals(logicalId) && attrName != null && targetAttrNames.contains(attrName)) {
+                        return true;
+                    }
+                }
+            }
+            if (node.has("Fn::If")) {
+                JsonNode fnIf = node.get("Fn::If");
+                if (fnIf.isArray() && fnIf.size() == 3) {
+                    if (conditions != null && conditions.containsKey(fnIf.get(0).asText())) {
+                        boolean condition = conditions.get(fnIf.get(0).asText());
+                        return referencesAnyAttribute(fnIf.get(condition ? 1 : 2), targetLogicalId, targetAttrNames, conditions);
+                    }
+                    return referencesAnyAttribute(fnIf.get(1), targetLogicalId, targetAttrNames, conditions)
+                            || referencesAnyAttribute(fnIf.get(2), targetLogicalId, targetAttrNames, conditions);
+                }
+            }
+            if (node.has("Fn::Sub")) {
+                if (subReferencesAttribute(node.get("Fn::Sub"), targetLogicalId, targetAttrNames, conditions)) {
+                    return true;
+                }
+            }
+            for (Iterator<JsonNode> it = node.elements(); it.hasNext(); ) {
+                if (referencesAnyAttribute(it.next(), targetLogicalId, targetAttrNames, conditions)) {
+                    return true;
+                }
+            }
+            return false;
+        } else if (node.isArray()) {
+            for (JsonNode item : node) {
+                if (referencesAnyAttribute(item, targetLogicalId, targetAttrNames, conditions)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean subReferencesAttribute(JsonNode sub, String targetLogicalId, Set<String> targetAttrNames,
+                                           Map<String, Boolean> conditions) {
+        String template;
+        Set<String> explicitVars = new HashSet<>();
+
+        if (sub.isTextual()) {
+            template = sub.textValue();
+        } else if (sub.isArray() && sub.size() >= 1) {
+            template = sub.get(0).asText();
+            if (sub.size() >= 2 && sub.get(1).isObject()) {
+                sub.get(1).fieldNames().forEachRemaining(explicitVars::add);
+                if (referencesAnyAttribute(sub.get(1), targetLogicalId, targetAttrNames, conditions)) {
+                    return true;
+                }
+            }
+        } else {
+            return false;
+        }
+
+        Matcher matcher = SUB_VAR_PATTERN.matcher(template);
+        while (matcher.find()) {
+            String varName = matcher.group(1);
+            if (varName.startsWith("AWS::") || explicitVars.contains(varName)) {
+                continue;
+            }
+            int dot = varName.indexOf('.');
+            if (dot > 0) {
+                String resourcePart = varName.substring(0, dot);
+                String attrPart = varName.substring(dot + 1);
+                if (targetLogicalId.equals(resourcePart) && targetAttrNames.contains(attrPart)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static String stackStorageKey(String stackName, String region) {

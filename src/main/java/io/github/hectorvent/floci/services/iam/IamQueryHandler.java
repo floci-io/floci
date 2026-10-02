@@ -16,15 +16,18 @@ import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedJob;
+import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -90,11 +93,22 @@ public class IamQueryHandler {
             case "TagUser" -> handleTagUser(params);
             case "UntagUser" -> handleUntagUser(params);
             case "ListUserTags" -> handleListUserTags(params);
-            case "ListMFADevices" -> handleListMFADevices(params);
             case "CreateLoginProfile" -> handleCreateLoginProfile(params, authorization);
             case "GetLoginProfile" -> handleGetLoginProfile(params, authorization);
             case "UpdateLoginProfile" -> handleUpdateLoginProfile(params);
             case "DeleteLoginProfile" -> handleDeleteLoginProfile(params, authorization);
+
+            // Multi-factor authentication
+            case "CreateVirtualMFADevice" -> handleCreateVirtualMFADevice(params);
+            case "ListVirtualMFADevices" -> handleListVirtualMFADevices(params);
+            case "DeleteVirtualMFADevice" -> handleDeleteVirtualMFADevice(params);
+            case "EnableMFADevice" -> handleEnableMFADevice(params);
+            case "DeactivateMFADevice" -> handleDeactivateMFADevice(params, authorization);
+            case "ResyncMFADevice" -> handleResyncMFADevice(params);
+            case "ListMFADevices" -> handleListMFADevices(params, authorization);
+            case "TagMFADevice" -> handleTagMFADevice(params);
+            case "UntagMFADevice" -> handleUntagMFADevice(params);
+            case "ListMFADeviceTags" -> handleListMFADeviceTags(params);
 
             // Identity providers & server certificates
             case "ListSAMLProviders" -> handleListSAMLProviders(authorization);
@@ -342,15 +356,129 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("ListUserTags", AwsNamespaces.IAM, result)).build();
     }
 
-    private Response handleListMFADevices(MultivaluedMap<String, String> params) {
-        // MFA device state is not modeled; return the wire-accurate empty result
-        // (MFADevices list + IsTruncated=false). Real AWS returns NoSuchEntity
-        // (HTTP 404) for an unknown user — Floci returns an empty list regardless.
+    /**
+     * {@code Base32StringSeed} and {@code QRCodePNG} are both typed as base64-encoded binary, so
+     * the base32 seed string goes out base64-wrapped. The QR code is not returned: encoding a PNG
+     * would mean a new dependency for an optional field, and the {@code otpauth://} URI it encodes
+     * is derivable from the seed that is returned. {@code aws iam create-virtual-mfa-device} works
+     * against this with {@code --bootstrap-method Base32StringSeed}, and fails only when asked for
+     * the QR code specifically.
+     */
+    private Response handleCreateVirtualMFADevice(MultivaluedMap<String, String> params) {
+        VirtualMfaDevice device = iamService.createVirtualMfaDevice(
+                getParam(params, "VirtualMFADeviceName"), getParam(params, "Path"),
+                extractTags(params, false));
         String result = new XmlBuilder()
-                .start("MFADevices").end("MFADevices")
-                .elem("IsTruncated", false)
+                .start("VirtualMFADevice")
+                .elem("SerialNumber", device.getSerialNumber())
+                .elem("Base32StringSeed", base64(device.getBase32Seed()))
+                .raw(tagsElement(new TreeMap<>(device.getTags())))
+                .end("VirtualMFADevice")
                 .build();
-        return Response.ok(AwsQueryResponse.envelope("ListMFADevices", AwsNamespaces.IAM, result)).build();
+        return Response.ok(AwsQueryResponse.envelope("CreateVirtualMFADevice", AwsNamespaces.IAM, result)).build();
+    }
+
+    /**
+     * Neither the seed nor the tags appear here: AWS notes that "IAM resource-listing operations
+     * return a subset of the available attributes for the resource... this operation does not
+     * return tags", and handing the seed back on an unauthenticated-by-device list call would
+     * leak the shared secret of every device in the account.
+     */
+    private Response handleListVirtualMFADevices(MultivaluedMap<String, String> params) {
+        Page<VirtualMfaDevice> page = paginate(
+                iamService.listVirtualMfaDevices(getParam(params, "AssignmentStatus")), params);
+        XmlBuilder xml = new XmlBuilder().start("VirtualMFADevices");
+        for (VirtualMfaDevice device : page.items()) {
+            xml.start("member").elem("SerialNumber", device.getSerialNumber());
+            if (device.isAssigned()) {
+                xml.elem("EnableDate", isoDate(device.getEnableDate()));
+                // Looked up rather than required: DeleteUser will not let a user go while a device
+                // is still assigned, so a device pointing at a missing user means the two stores
+                // have drifted on disk. User is an optional member, so this one device loses it
+                // instead of the whole account-wide listing failing.
+                iamService.findUser(device.getUserName())
+                        .ifPresent(user -> xml.start("User").raw(userXml(user, false)).end("User"));
+            }
+            xml.end("member");
+        }
+        xml.end("VirtualMFADevices").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListVirtualMFADevices", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleDeleteVirtualMFADevice(MultivaluedMap<String, String> params) {
+        iamService.deleteVirtualMfaDevice(getParam(params, "SerialNumber"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteVirtualMFADevice", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleEnableMFADevice(MultivaluedMap<String, String> params) {
+        iamService.enableMfaDevice(getParam(params, "UserName"), getParam(params, "SerialNumber"),
+                getParam(params, "AuthenticationCode1"), getParam(params, "AuthenticationCode2"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("EnableMFADevice", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleDeactivateMFADevice(MultivaluedMap<String, String> params, String authorization) {
+        // UserName is optional here, unlike on Enable/Resync: "If no user name is included, it
+        // defaults to the principal making the request."
+        iamService.deactivateMfaDevice(resolveUserName(params, authorization),
+                getParam(params, "SerialNumber"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeactivateMFADevice", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleResyncMFADevice(MultivaluedMap<String, String> params) {
+        iamService.resyncMfaDevice(getParam(params, "UserName"), getParam(params, "SerialNumber"),
+                getParam(params, "AuthenticationCode1"), getParam(params, "AuthenticationCode2"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("ResyncMFADevice", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleListMFADevices(MultivaluedMap<String, String> params, String authorization) {
+        String userName = resolveUserName(params, authorization);
+        Page<VirtualMfaDevice> page = paginate(iamService.listMfaDevices(userName), params);
+        XmlBuilder xml = new XmlBuilder().start("MFADevices");
+        for (VirtualMfaDevice device : page.items()) {
+            xml.start("member")
+                    .elem("UserName", device.getUserName())
+                    .elem("SerialNumber", device.getSerialNumber())
+                    .elem("EnableDate", isoDate(device.getEnableDate()))
+                    .end("member");
+        }
+        xml.end("MFADevices").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListMFADevices", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleTagMFADevice(MultivaluedMap<String, String> params) {
+        iamService.tagMfaDevice(getParam(params, "SerialNumber"), extractTags(params, false));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("TagMFADevice", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleUntagMFADevice(MultivaluedMap<String, String> params) {
+        iamService.untagMfaDevice(getParam(params, "SerialNumber"), extractTagKeys(params));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UntagMFADevice", AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * Unlike IAM's other tag readers here, this one honours {@code Marker} and {@code MaxItems}:
+     * AWS models both on ListMFADeviceTags, and a client asking for a one-item page should be able
+     * to walk the result. Tags are sorted by key first, as AWS documents ("the returned list of
+     * tags is sorted by tag key"), so the marker names a stable position.
+     */
+    private Response handleListMFADeviceTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new TreeMap<>(iamService.listMfaDeviceTags(getParam(params, "SerialNumber")));
+        Page<Map.Entry<String, String>> page = paginate(List.copyOf(tags.entrySet()), params);
+        XmlBuilder xml = new XmlBuilder().start("Tags");
+        for (Map.Entry<String, String> tag : page.items()) {
+            xml.start("member").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("member");
+        }
+        xml.end("Tags").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListMFADeviceTags", AwsNamespaces.IAM, xml.build())).build();
     }
 
     private Response handleCreateLoginProfile(MultivaluedMap<String, String> params, String authorization) {
@@ -1895,7 +2023,7 @@ public class IamQueryHandler {
         // An AWS-managed policy carries the literal "aws" in the account field
         // (arn:aws:iam::aws:policy/...) and is served from the global catalog, so it is not a
         // foreign account and must not be rejected as one.
-        boolean awsManaged = "aws".equals(parsed.accountId());
+        boolean awsManaged = "aws".equals(parsed.accountId()); // partition-literal: managed-policy account
         if (!awsManaged && parsed.accountId() != null && !parsed.accountId().isEmpty()
                 && !parsed.accountId().equals(accountId)) {
             throw new AwsException("NoSuchEntity", "The ARN " + arn + " cannot be found.", 404);
@@ -2360,6 +2488,11 @@ public class IamQueryHandler {
     private String isoDate(Instant instant) {
         if (instant == null) return "";
         return DateTimeFormatter.ISO_INSTANT.format(instant);
+    }
+
+    /** For a member AWS types as a blob, which the Query protocol carries base64-encoded. */
+    private String base64(String value) {
+        return Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8));
     }
 
     private Response handleTagInstanceProfile(MultivaluedMap<String, String> params) {

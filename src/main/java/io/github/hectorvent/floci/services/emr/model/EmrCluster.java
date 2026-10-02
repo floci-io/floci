@@ -44,6 +44,9 @@ public class EmrCluster {
     private String ec2Attributes;
     private String applications;
     private String configurations;
+    // The cluster's ManagedScalingPolicy and AutoTerminationPolicy as given, raw JSON; null when none.
+    private String managedScalingPolicy;
+    private String autoTerminationPolicy;
     private String region;
     private Instant creationDateTime;
     private Instant readyDateTime;
@@ -153,6 +156,12 @@ public class EmrCluster {
 
     public String getConfigurations() { return configurations; }
     public void setConfigurations(String configurations) { this.configurations = configurations; }
+
+    public String getManagedScalingPolicy() { return managedScalingPolicy; }
+    public void setManagedScalingPolicy(String managedScalingPolicy) { this.managedScalingPolicy = managedScalingPolicy; }
+
+    public String getAutoTerminationPolicy() { return autoTerminationPolicy; }
+    public void setAutoTerminationPolicy(String autoTerminationPolicy) { this.autoTerminationPolicy = autoTerminationPolicy; }
 
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }

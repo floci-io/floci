@@ -6706,6 +6706,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return launchTemplate;
     }
 
+    public void deleteLaunchTemplateVersion(String region, String id, String version) {
+        ensureDefaultResources(region);
+        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, null);
+        ensureLaunchTemplateVersions(launchTemplate);
+        launchTemplate.getVersions().remove(version);
+        launchTemplate.getVersionDescriptions().remove(version);
+        int max = launchTemplate.getVersions().keySet().stream()
+                .mapToInt(this::parseLaunchTemplateVersion)
+                .max()
+                .orElse(1);
+        String maxStr = String.valueOf(max);
+        launchTemplate.setLatestVersionNumber(maxStr);
+        LaunchTemplateData latestData = launchTemplate.getVersions().get(maxStr);
+        if (latestData != null) {
+            launchTemplate.setData(new LaunchTemplateData(latestData));
+        }
+        launchTemplate.setVersionDescription(launchTemplate.getVersionDescriptions().get(maxStr));
+        launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
+    }
+
     /**
      * EC2 spells the two not-found codes asymmetrically —
      * {@code InvalidLaunchTemplateName.NotFoundException} but {@code InvalidLaunchTemplateId.NotFound},

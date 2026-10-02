@@ -1139,16 +1139,14 @@ public class SecretsManagerService implements ResourceProvider {
         // One full ARN for the permission check, the lookup and the invoke, so all three reach the same
         // function: a name or partial ARN would otherwise be invoked in whatever account the rotation
         // thread resolves, which is not necessarily the one that was checked.
-        AwsArnUtils.Arn secretArn = AwsArnUtils.parse(secret.getArn());
-        String functionArn = serviceManaged
-                ? null
-                : LambdaArnUtils.functionArn(finalLambdaArn, secretArn.partition(), region, secretArn.accountId());
+        String functionArn = serviceManaged ? null : rotationFunctionArn(finalLambdaArn, secret, region);
         if (!serviceManaged) {
             authorizeInvoke.accept(functionArn);
         }
 
-        // A function that cannot be invoked is reported the way AWS reports it, whatever the reason:
-        // AccessDeniedException with HTTP 400, and the secret left as it was.
+        // A function that cannot be found is reported the way AWS reports it, AccessDeniedException with
+        // HTTP 400; any other reference Lambda refuses is an invalid RotationLambdaARN. Either way the
+        // secret is left as it was.
         if (!serviceManaged && lambdaService != null) {
             try {
                 lambdaService.getFunction(region, functionArn);
@@ -1158,6 +1156,9 @@ public class SecretsManagerService implements ResourceProvider {
                             "Secrets Manager cannot invoke the specified Lambda function. Ensure that the function "
                                     + "policy grants access to the principal " + ServicePrincipals.of("secretsmanager")
                                     + ".", 400);
+                }
+                if (e.getHttpStatus() == 400) {
+                    throw invalidRotationFunction(e.getMessage());
                 }
                 throw e;
             }
@@ -1214,6 +1215,39 @@ public class SecretsManagerService implements ResourceProvider {
         return secret;
     }
 
+    /**
+     * The full ARN of the rotation function {@code reference} names, in the secret's partition and
+     * account unless the reference names its own. A reference Lambda cannot read is refused with
+     * Secrets Manager's {@code InvalidParameterException}: Lambda's codes for it,
+     * {@code InvalidParameterValueException} and {@code ValidationException}, are not among the
+     * errors {@code RotateSecret} declares, so an SDK client could not type them.
+     */
+    private static String rotationFunctionArn(String reference, Secret secret, String region) {
+        AwsArnUtils.Arn secretArn = AwsArnUtils.parse(secret.getArn());
+        String functionArn;
+        try {
+            functionArn = LambdaArnUtils.functionArn(reference, secretArn.partition(), region, secretArn.accountId());
+        } catch (AwsException e) {
+            throw invalidRotationFunction(e.getMessage());
+        }
+        // Lambda refuses a function ARN from another Region; refusing it here keeps it with the other
+        // bad references, ahead of the caller check.
+        String functionRegion = AwsArnUtils.parse(functionArn).region();
+        if (!region.equals(functionRegion)) {
+            throw invalidRotationFunction(
+                    "Region '" + functionRegion + "' in ARN does not match request region '" + region + "'");
+        }
+        return functionArn;
+    }
+
+    /**
+     * RotateSecret's own error for a function reference Lambda refuses, keeping Lambda's reason: the
+     * operation declares {@code InvalidParameterException} and none of Lambda's codes.
+     */
+    private static AwsException invalidRotationFunction(String reason) {
+        return new AwsException("InvalidParameterException",
+                "RotationLambdaARN is not a valid Lambda function reference: " + reason, 400);
+    }
 
     /**
      * The outcome of {@link #cancelRotateSecret}: the secret with rotation turned off, plus the id

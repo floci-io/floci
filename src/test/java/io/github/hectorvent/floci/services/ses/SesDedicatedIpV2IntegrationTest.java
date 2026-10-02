@@ -195,17 +195,32 @@ class SesDedicatedIpV2IntegrationTest {
 
     @Test
     @Order(15)
-    void putAccountAutoWarmup_stringCoercesToTrue() {
-        // AWS's Jackson layer coerces a JSON string to true for SES v2 booleans.
+    void putAccountAutoWarmup_stringCoercesByText() {
+        // SES v2 coerces a JSON string only when it names a boolean.
         given().contentType("application/json").header("Authorization", AUTH_HEADER)
-            .body("{\"AutoWarmupEnabled\": \"nonsense\"}")
+            .body("{\"AutoWarmupEnabled\": \"no\"}")
         .when().put("/v2/email/account/dedicated-ips/warmup")
         .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/account")
+        .then().statusCode(200)
+            .body("DedicatedIpAutoWarmupEnabled", equalTo(false));
 
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"AutoWarmupEnabled\": \"yes\"}")
+        .when().put("/v2/email/account/dedicated-ips/warmup")
+        .then().statusCode(200);
         given().header("Authorization", AUTH_HEADER)
         .when().get("/v2/email/account")
         .then().statusCode(200)
             .body("DedicatedIpAutoWarmupEnabled", equalTo(true));
+
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"AutoWarmupEnabled\": \"nonsense\"}")
+        .when().put("/v2/email/account/dedicated-ips/warmup")
+        .then().statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("STRING_VALUE can not be converted to an Boolean"));
     }
 
     @Test

@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -232,9 +233,9 @@ class ApiGatewayIntegrationTransportOptionsTest {
                 .generateCertificate(new ByteArrayInputStream(
                         generated.certificatePem().getBytes(StandardCharsets.UTF_8)));
 
-        // RSA keys are emitted as PKCS#1 ("RSA PRIVATE KEY"), not PKCS#8, so use the generator's
-        // own parser rather than PKCS8EncodedKeySpec.
-        PrivateKey privateKey = generator.parsePrivateKey(generated.privateKeyPem());
+        // RSA keys are emitted as PKCS#1 ("RSA PRIVATE KEY"), not PKCS#8, so use Pem's parser
+        // rather than PKCS8EncodedKeySpec.
+        PrivateKey privateKey = Pem.parsePrivateKey(generated.privateKeyPem());
 
         return contextFor(certificate, privateKey);
     }

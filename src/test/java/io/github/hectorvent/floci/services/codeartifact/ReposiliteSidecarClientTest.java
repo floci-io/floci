@@ -267,6 +267,74 @@ class ReposiliteSidecarClientTest {
     }
 
     @Test
+    void deployArtifactShortCircuitsToTwoHundredWithoutPuttingWhenContentIsByteIdentical() {
+        byte[] content = "hello".getBytes(StandardCharsets.UTF_8);
+        List<String> methodsSeen = new CopyOnWriteArrayList<>();
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> {
+            methodsSeen.add(exchange.getRequestMethod());
+            respond(exchange, 200, "hello");
+        });
+
+        int status = client.deployArtifact("dom--repo", "com/example/a/1.0/a-1.0.jar", content);
+
+        assertThat(status, is(200));
+        assertThat(methodsSeen, equalTo(List.of("GET")));
+    }
+
+    @Test
+    void deployArtifactStillPutsWhenExistingContentDiffers() {
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        List<String> methodsSeen = new CopyOnWriteArrayList<>();
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> {
+            methodsSeen.add(exchange.getRequestMethod());
+            if ("PUT".equals(exchange.getRequestMethod())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                // Reposilite's real redeployment:false response for a genuine content mismatch;
+                // this must pass straight through unchanged.
+                respond(exchange, 409, "{\"status\":409,\"message\":\"Redeployment is not allowed\"}");
+            } else {
+                respond(exchange, 200, "goodbye");
+            }
+        });
+
+        int status = client.deployArtifact("dom--repo", "com/example/a/1.0/a-1.0.jar",
+                "hello".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(status, is(409));
+        assertThat(methodsSeen, equalTo(List.of("GET", "PUT")));
+        assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), putBody.get());
+    }
+
+    @Test
+    void deployArtifactStillPutsWhenThePreflightCheckFails() {
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        List<String> methodsSeen = new CopyOnWriteArrayList<>();
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> {
+            methodsSeen.add(exchange.getRequestMethod());
+            if ("PUT".equals(exchange.getRequestMethod())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                // Simulates a dropped connection on the preflight GET (a timeout, a transient
+                // network error): closing without ever sending a response is what the client sees
+                // as an IOException, not a clean 4xx/5xx. The PUT must still go through. The JDK's
+                // own HttpClient transparently retries an idempotent GET once on this kind of
+                // connection-level failure before giving up, so more than one GET landing here
+                // first is expected and not itself part of what this test is checking.
+                exchange.close();
+            }
+        });
+
+        int status = client.deployArtifact("dom--repo", "com/example/a/1.0/a-1.0.jar",
+                "hello".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(status, is(200));
+        assertTrue(methodsSeen.stream().allMatch(m -> m.equals("GET") || m.equals("PUT")));
+        assertThat(methodsSeen.get(methodsSeen.size() - 1), equalTo("PUT"));
+        assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), putBody.get());
+    }
+
+    @Test
     void fetchArtifactReturnsBytesAndContentTypeOnSuccess() {
         server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> {
             exchange.getResponseHeaders().set("Content-Type", "application/java-archive");

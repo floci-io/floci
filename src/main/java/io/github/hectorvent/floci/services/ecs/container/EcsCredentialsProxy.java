@@ -40,7 +40,8 @@ public class EcsCredentialsProxy implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(EcsCredentialsProxy.class);
     private static final String CREDENTIALS_ADDRESS = "169.254.170.2";
-    private static final String OWNS_NETWORK_LABEL = "floci.ecs-task-role-credentials-proxy";
+    private static final String OWNS_NETWORK_LABEL = ContainerStorageHelper.ECS_CREDENTIALS_PROXY_LABEL;
+    private static final ContainerStorageHelper.LabelAliases ALIASES = ContainerStorageHelper.CONTAINER_LABEL_ALIASES;
     private static final int VERIFY_ATTEMPTS = 30;
     private static final long VERIFY_INTERVAL_MILLIS = 200;
     private static final int EXEC_TIMEOUT_SECONDS = 10;
@@ -70,7 +71,7 @@ public class EcsCredentialsProxy implements ContainerTeardown {
      * credential routing depend on which one wins ARP. Remove any surviving one this exact process
      * owned before minting new ones.
      *
-     * <p>Scoped to this instance's own {@code floci_owner_port}, the same convention {@code
+     * <p>Scoped to this instance's own {@code io.floci.owner}, the same convention {@code
      * SecurityGroupFirewallManager} uses: several Floci processes can share one Docker daemon, and
      * a label match alone would let one instance's restart tear down another's still-running,
      * still-in-use proxy.
@@ -85,10 +86,12 @@ public class EcsCredentialsProxy implements ContainerTeardown {
             return;
         }
         try {
-            dockerClient.listContainersCmd().withShowAll(true)
-                    .withLabelFilter(Map.of(OWNS_NETWORK_LABEL, "true"))
-                    .exec().stream()
-                    .filter(container -> owner().equals(container.getLabels().get(ContainerStorageHelper.OWNER_LABEL)))
+            ALIASES.listByLabels(Map.of(OWNS_NETWORK_LABEL, "true"),
+                            filter -> dockerClient.listContainersCmd().withShowAll(true)
+                                    .withLabelFilter(filter).exec(),
+                            Container::getId).stream()
+                    .filter(container -> ALIASES.consistent(container.getId(), container.getLabels())
+                            && ALIASES.matches(container.getLabels(), ContainerStorageHelper.OWNER_LABEL, owner()))
                     .forEach(container -> lifecycleManager.removeIfExists(container.getId()));
         } catch (Exception e) {
             LOG.warnv("Could not reap surviving ECS credentials proxy containers: {0}", e.getMessage());
@@ -189,8 +192,8 @@ public class EcsCredentialsProxy implements ContainerTeardown {
 
     /**
      * Removes a container by this exact name only when it is safe to: it must actually be one of
-     * this label's proxy containers, and it must be either unowned (predates the {@code
-     * floci_owner_port} convention) or owned by this same Floci instance. A same-named proxy
+     * this label's proxy containers, and it must be either unowned (predates the owner label
+     * convention) or owned by this same Floci instance. A same-named proxy
      * belonging to a different instance sharing this daemon is left alone; removing it would
      * interrupt that instance's tasks mid-flight, which a name collision here does not justify.
      */
@@ -203,9 +206,12 @@ public class EcsCredentialsProxy implements ContainerTeardown {
                     continue;
                 }
                 Map<String, String> labels = candidate.getLabels();
-                boolean isOurProxy = labels != null && "true".equals(labels.get(OWNS_NETWORK_LABEL));
-                String candidateOwner = labels == null ? null : labels.get(ContainerStorageHelper.OWNER_LABEL);
-                if (isOurProxy && (candidateOwner == null || owner().equals(candidateOwner))) {
+                if (!ALIASES.consistent(candidate.getId(), labels)) {
+                    continue;
+                }
+                boolean isOurProxy = ALIASES.matches(labels, OWNS_NETWORK_LABEL, "true");
+                boolean unowned = ALIASES.labelValue(labels, ContainerStorageHelper.OWNER_LABEL) == null;
+                if (isOurProxy && (unowned || ALIASES.matches(labels, ContainerStorageHelper.OWNER_LABEL, owner()))) {
                     lifecycleManager.removeIfExists(candidate.getId());
                 }
             }
