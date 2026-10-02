@@ -45,7 +45,7 @@ Current MVP 2 limitations:
 - `SendDirectMessage` publishes to the requested MQTT topic through the embedded broker. Unlike AWS IoT Core, it does not yet bypass subscription matching to deliver to a client that is not subscribed to that topic.
 - `GetConnection` and `ListSubscriptions` report live in-memory broker state only; offline persistent session subscription reporting is not modeled yet.
 - Jobs reserved MQTT topics remain follow-up scope; Jobs Data HTTP APIs are implemented first.
-- Dynamic thing groups, fleet indexing, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled.
+- Dynamic thing groups, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled. Fleet indexing has its configuration only, see [Fleet Indexing](#fleet-indexing).
 
 ## Domain Configurations
 
@@ -101,6 +101,23 @@ Current limitations:
 - The MQTT over TLS listener (8883) authenticates by device certificate only.
 - On a connection, the authorizer is looked up in Floci's default account and region.
 - The MQTT password reaches the function as the broker decodes it, as UTF-8 text, so password bytes that are not valid UTF-8 arrive altered. The broker library, Vert.x MQTT, exposes the password only as a string.
+
+## Fleet Indexing
+
+Status: configuration only.
+
+`UpdateIndexingConfiguration` and `GetIndexingConfiguration` (`/indexing/config`) and `DescribeIndex` (`/indices/{indexName}`) are served on the REST-JSON paths the AWS SDKs use, with the AWS shapes, error codes and validation messages:
+
+- There is one configuration per account and region. Before the first update both indexes are `OFF`.
+- An update may carry the thing configuration, the thing group configuration, or both; the one it leaves out keeps its value. Turning `thingIndexingMode` to `OFF` clears the whole thing configuration, as on AWS.
+- `managedFields` in `GetIndexingConfiguration` are derived from the modes, as AWS derives them. Managed fields sent in an update are only checked: every entry must be a field AWS manages, with its type, or the update fails with `InvalidRequestException`. A custom shadow path such as `shadow.name.<shadow>.reported.<field>` is rejected this way on AWS too.
+- The thing configuration's `customFields` and `filter` (named shadow names, geolocations, socket information) are stored and returned as sent.
+- `DescribeIndex` reports `AWS_Things` and `AWS_ThingGroups` with the schema the modes select. The index is `ACTIVE` as soon as it is enabled: Floci has no `BUILDING` or `REBUILDING` window. A disabled index is `ResourceNotFoundException`, any other index name `InvalidRequestException`.
+
+Current limitations:
+
+- `SearchIndex`, `ListIndices` and the statistics and aggregation APIs (`GetStatistics`, `GetCardinality`, `GetPercentiles`, `GetBucketsAggregation`) are not modeled yet.
+- `managedFields` and `customFields` sent in the thing group configuration are ignored.
 
 ## MQTT Broker
 
