@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
@@ -125,8 +126,8 @@ class CloudFormationWafV2WebAclAssociationIntegrationTest {
     }
 
     private static String output(String describeXml, String key) {
-        return describeXml.split("<OutputKey>" + key + "</OutputKey>")[1]
-                .split("<OutputValue>")[1].split("</OutputValue>")[0];
+        return XmlPath.from(describeXml).getString("DescribeStacksResponse.DescribeStacksResult.Stacks.member"
+                + ".Outputs.member.find { it.OutputKey == '" + key + "' }.OutputValue");
     }
 
     private void cfn(String action, String stackName, String template) {

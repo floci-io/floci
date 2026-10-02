@@ -34,6 +34,7 @@ class WafV2CfnProvisionerTest {
 
     private static final String ASSOCIATION = "AWS::WAFv2::WebACLAssociation";
     private static final String POOL = "arn:aws:cognito-idp:us-east-1:111122223333:userpool/us-east-1_pool";
+    private static final String POOL_2 = "arn:aws:cognito-idp:us-east-1:111122223333:userpool/us-east-1_pool2";
     private static final String ACL_A = "arn:aws:wafv2:us-east-1:111122223333:regional/webacl/a/acl-a";
     private static final String ACL_B = "arn:aws:wafv2:us-east-1:111122223333:regional/webacl/b/acl-b";
 
@@ -277,6 +278,44 @@ class WafV2CfnProvisionerTest {
     }
 
     @Test
+    void replacingResourceArnCleanupDisassociatesTheOldResource() {
+        StackResource resource = associationResource();
+        resource.setPhysicalId(POOL + "|" + ACL_A);
+
+        provisioner.provision(resource, associationProps(POOL_2, ACL_A), updateContext(POOL + "|" + ACL_A));
+
+        assertEquals(POOL_2 + "|" + ACL_A, resource.getPhysicalId());
+        verify(wafV2).associateWebAcl(ACL_A, POOL_2);
+        assertTrue(provisioner.hasReplacementUpdate(resource));
+        assertEquals(POOL + "|" + ACL_A, provisioner.updateCleanupPhysicalId(resource));
+        when(wafV2.getWebAclForResource(POOL)).thenReturn(aclWithArn(ACL_A));
+
+        UpdateCleanupResult result = provisioner.completeUpdate(resource);
+
+        assertTrue(result.complete());
+        verify(wafV2).disassociateWebAcl(POOL);
+        verify(wafV2, never()).disassociateWebAcl(POOL_2);
+    }
+
+    @Test
+    void rollbackOfResourceArnReplacementRestoresTheOldResource() {
+        StackResource resource = associationResource();
+        resource.setPhysicalId(POOL + "|" + ACL_A);
+        provisioner.provision(resource, associationProps(POOL_2, ACL_A), updateContext(POOL + "|" + ACL_A));
+        when(wafV2.getWebAclForResource(POOL_2)).thenReturn(aclWithArn(ACL_A));
+
+        assertTrue(provisioner.rollbackUpdate(resource));
+
+        assertEquals(POOL + "|" + ACL_A, resource.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(resource));
+        InOrder order = inOrder(wafV2);
+        order.verify(wafV2).associateWebAcl(ACL_A, POOL_2);
+        order.verify(wafV2).disassociateWebAcl(POOL_2);
+        order.verify(wafV2).associateWebAcl(ACL_A, POOL);
+        verify(wafV2, never()).disassociateWebAcl(POOL);
+    }
+
+    @Test
     void rollbackUpdateWithoutReplacementSucceedsWithoutTouchingWafV2() {
         StackResource resource = associationResource();
         resource.setPhysicalId(POOL + "|" + ACL_A);
@@ -296,7 +335,11 @@ class WafV2CfnProvisionerTest {
     }
 
     private ObjectNode associationProps(String webAclArn) {
-        return mapper.createObjectNode().put("ResourceArn", POOL).put("WebACLArn", webAclArn);
+        return associationProps(POOL, webAclArn);
+    }
+
+    private ObjectNode associationProps(String resourceArn, String webAclArn) {
+        return mapper.createObjectNode().put("ResourceArn", resourceArn).put("WebACLArn", webAclArn);
     }
 
     private ProvisionContext updateContext(String priorPhysicalId) {
