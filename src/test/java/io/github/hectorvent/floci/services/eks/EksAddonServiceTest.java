@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.eks;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.eks.model.Addon;
 import io.github.hectorvent.floci.services.eks.model.AddonInfo;
 import io.github.hectorvent.floci.services.eks.model.AddonPodIdentityAssociation;
+import io.github.hectorvent.floci.services.eks.model.AddonVersionInfo;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
 import io.github.hectorvent.floci.services.eks.model.CreateAddonRequest;
@@ -15,11 +17,17 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -90,7 +98,7 @@ class EksAddonServiceTest {
         );
 
         Addon created = fixture.service.create(fixture.cluster, request);
-        assertEquals("v1.18.1-eksbuild.1", created.addonVersion());
+        assertEquals(catalogDefault("vpc-cni", "1.29"), created.addonVersion());
     }
 
     @Test
@@ -423,9 +431,9 @@ class EksAddonServiceTest {
         Fixture fixture = fixture();
         fixture.cluster.setVersion("1.29");
 
-        // v1.16.0-eksbuild.1 is only compatible with k8s 1.28
+        // v1.14.0-eksbuild.3 is only compatible with k8s 1.28
         CreateAddonRequest reqIncompatible = new CreateAddonRequest(
-                "vpc-cni", "v1.16.0-eksbuild.1", null, null, null, null, null, null);
+                "vpc-cni", "v1.14.0-eksbuild.3", null, null, null, null, null, null);
         AwsException exCreate = assertThrows(AwsException.class, () ->
                 fixture.service.create(fixture.cluster, reqIncompatible));
         assertEquals("InvalidParameterException", exCreate.getErrorCode());
@@ -439,7 +447,7 @@ class EksAddonServiceTest {
 
         // Updating to incompatible version fails
         UpdateAddonRequest updateIncompatible = new UpdateAddonRequest(
-                "v1.16.0-eksbuild.1", null, null, null, null, null);
+                "v1.14.0-eksbuild.3", null, null, null, null, null);
         AwsException exUpdate = assertThrows(AwsException.class, () ->
                 fixture.service.update(fixture.cluster, "vpc-cni", updateIncompatible));
         assertEquals("InvalidParameterException", exUpdate.getErrorCode());
@@ -449,7 +457,7 @@ class EksAddonServiceTest {
     @Test
     void clusterVersionOutsideCatalogRangeAllowsCatalogVersionsAndResolvesDefault() {
         Fixture fixture = fixture();
-        fixture.cluster.setVersion("1.35");
+        fixture.cluster.setVersion("1.40");
 
         // Create with no version resolves a default version from the catalog without error
         CreateAddonRequest reqDefault = new CreateAddonRequest(
@@ -482,15 +490,47 @@ class EksAddonServiceTest {
         CreateAddonRequest reqKubeProxy = new CreateAddonRequest(
                 "kube-proxy", null, null, null, null, null, null, null);
         Addon created = fixture.service.create(fixture.cluster, reqKubeProxy);
-        assertEquals("v1.32.0-eksbuild.1", created.addonVersion());
+        assertEquals(catalogDefault("kube-proxy", "1.32"), created.addonVersion());
 
-        // Incompatible version (v1.16.0 only compatible with 1.28) is rejected
+        // Incompatible version (v1.14.0 only compatible with 1.28) is rejected
         CreateAddonRequest reqIncompatible = new CreateAddonRequest(
-                "vpc-cni", "v1.16.0-eksbuild.1", null, null, null, null, null, null);
+                "vpc-cni", "v1.14.0-eksbuild.3", null, null, null, null, null, null);
         AwsException ex = assertThrows(AwsException.class, () ->
                 fixture.service.create(fixture.cluster, reqIncompatible));
         assertEquals("InvalidParameterException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void everySupportedKubernetesVersionResolvesEveryAddonAndAcceptsItsOldestBuild() {
+        Fixture fixture = fixture();
+        for (String clusterVersion : catalogClusterVersions()) {
+            for (String addon : List.of("vpc-cni", "coredns", "kube-proxy", "eks-pod-identity-agent",
+                    "aws-ebs-csi-driver", "amazon-cloudwatch-observability")) {
+                assertEquals(Optional.of(catalogDefault(addon, clusterVersion)),
+                        fixture.catalog.resolveDefaultVersion(addon, clusterVersion), addon + " " + clusterVersion);
+                String oldest = catalogCompatible(addon, clusterVersion).getLast();
+                assertTrue(fixture.catalog.isVersionSupported(addon, oldest, clusterVersion), addon + " " + oldest);
+            }
+        }
+        // Infrastructure pins older builds, as paynet does on 1.34 with coredns v1.13.2-eksbuild.10.
+        fixture.cluster.setVersion("1.34");
+        String pinned = catalogCompatible("coredns", "1.34").getLast();
+        assertEquals(pinned, fixture.service.create(fixture.cluster, new CreateAddonRequest(
+                "coredns", pinned, null, null, null, null, null, null)).addonVersion());
+    }
+
+    @Test
+    void versionFilteredAnswerKeepsOnlyThatVersionsCompatibility() {
+        Fixture fixture = fixture();
+        AddonInfo coredns = fixture.service.describeAddonVersions(
+                "coredns", "1.34", null, null, null, null, null).addons().getFirst();
+        assertTrue(coredns.addonVersions().stream().flatMap(v -> v.compatibilities().stream())
+                .allMatch(c -> "1.34".equals(c.clusterVersion())));
+        // The first entry flagged default is 1.34's default, not a newer release that is 1.35's.
+        assertEquals(catalogDefault("coredns", "1.34"), coredns.addonVersions().stream()
+                .filter(v -> v.compatibilities().stream().anyMatch(c -> Boolean.TRUE.equals(c.defaultVersion())))
+                .findFirst().orElseThrow().addonVersion());
     }
 
     @Test
@@ -571,17 +611,9 @@ class EksAddonServiceTest {
         Fixture fixture = fixture();
 
         // The default version resolves for each cluster version the catalog covers
-        Map<String, String> expectedDefaults = Map.of(
-                "1.28", "v1.26.1-eksbuild.1",
-                "1.29", "v1.28.0-eksbuild.1",
-                "1.30", "v1.31.0-eksbuild.1",
-                "1.31", "v1.35.0-eksbuild.1",
-                "1.32", "v1.38.1-eksbuild.1"
-        );
-        for (Map.Entry<String, String> entry : expectedDefaults.entrySet()) {
-            fixture.cluster.setVersion(entry.getKey());
-            assertEquals(Optional.of(entry.getValue()),
-                    fixture.catalog.resolveDefaultVersion("aws-ebs-csi-driver", entry.getKey()));
+        for (String clusterVersion : catalogClusterVersions()) {
+            assertEquals(Optional.of(catalogDefault("aws-ebs-csi-driver", clusterVersion)),
+                    fixture.catalog.resolveDefaultVersion("aws-ebs-csi-driver", clusterVersion), clusterVersion);
         }
 
         // CreateAddon for aws-ebs-csi-driver succeeds and DescribeAddon returns it
@@ -590,7 +622,7 @@ class EksAddonServiceTest {
                 "aws-ebs-csi-driver", null, ROLE, null, null, null, null, null);
         Addon created = fixture.service.create(fixture.cluster, req);
         assertEquals("aws-ebs-csi-driver", created.addonName());
-        assertEquals("v1.31.0-eksbuild.1", created.addonVersion());
+        assertEquals(catalogDefault("aws-ebs-csi-driver", "1.30"), created.addonVersion());
         assertEquals("ACTIVE", created.status());
         assertEquals("aws", created.owner());
         assertEquals("eks", created.publisher());
@@ -607,14 +639,18 @@ class EksAddonServiceTest {
         assertEquals("storage", addonInfo.type());
         assertEquals("aws", addonInfo.owner());
         assertEquals("eks", addonInfo.publisher());
-        assertEquals(5, addonInfo.addonVersions().size());
+        assertTrue(addonInfo.addonVersions().size() > 1);
 
         // Filtering by addon name and cluster version works
         EksAddonService.AddonVersionsPage byCluster = fixture.service.describeAddonVersions(
                 "aws-ebs-csi-driver", "1.32", null, null, null, null, null);
         assertEquals(1, byCluster.addons().size());
-        assertEquals(1, byCluster.addons().getFirst().addonVersions().size());
-        assertEquals("v1.38.1-eksbuild.1", byCluster.addons().getFirst().addonVersions().getFirst().addonVersion());
+        List<AddonVersionInfo> for132 = byCluster.addons().getFirst().addonVersions();
+        assertTrue(for132.stream().allMatch(v -> v.compatibilities().stream()
+                .allMatch(c -> "1.32".equals(c.clusterVersion()))));
+        assertEquals(List.of(catalogDefault("aws-ebs-csi-driver", "1.32")), for132.stream()
+                .filter(v -> Boolean.TRUE.equals(v.compatibilities().getFirst().defaultVersion()))
+                .map(AddonVersionInfo::addonVersion).toList());
 
         // The four existing addons are unchanged
         for (String existing : List.of("vpc-cni", "coredns", "kube-proxy", "eks-pod-identity-agent")) {
@@ -631,6 +667,56 @@ class EksAddonServiceTest {
         assertEquals("InvalidParameterException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
         assertTrue(ex.getMessage().contains("unsupported-addon"));
+    }
+
+    // Expectations read the vendored catalog directly, so a regeneration does not rewrite these tests.
+    private static JsonNode catalogAddon(String addon) {
+        try (InputStream in = EksAddonServiceTest.class.getResourceAsStream("/eks/addon-versions.json")) {
+            for (JsonNode node : new ObjectMapper().readTree(in).path("addons")) {
+                if (addon.equals(node.path("addonName").asText())) {
+                    return node;
+                }
+            }
+        } catch (IOException exception) {
+            throw new UncheckedIOException(exception);
+        }
+        throw new AssertionError("no " + addon + " in the vendored catalog");
+    }
+
+    private static List<String> catalogCompatible(String addon, String clusterVersion) {
+        List<String> versions = new ArrayList<>();
+        for (JsonNode version : catalogAddon(addon).path("addonVersions")) {
+            for (JsonNode compatibility : version.path("compatibilities")) {
+                if (clusterVersion.equals(compatibility.path("clusterVersion").asText())) {
+                    versions.add(version.path("addonVersion").asText());
+                }
+            }
+        }
+        return versions;
+    }
+
+    static String catalogDefault(String addon, String clusterVersion) {
+        List<String> defaults = new ArrayList<>();
+        for (JsonNode version : catalogAddon(addon).path("addonVersions")) {
+            for (JsonNode compatibility : version.path("compatibilities")) {
+                if (clusterVersion.equals(compatibility.path("clusterVersion").asText())
+                        && compatibility.path("defaultVersion").asBoolean()) {
+                    defaults.add(version.path("addonVersion").asText());
+                }
+            }
+        }
+        assertEquals(1, defaults.size(), addon + " defaults for " + clusterVersion);
+        return defaults.getFirst();
+    }
+
+    private static Set<String> catalogClusterVersions() {
+        Set<String> versions = new TreeSet<>();
+        for (JsonNode version : catalogAddon("vpc-cni").path("addonVersions")) {
+            version.path("compatibilities").forEach(compatibility ->
+                    versions.add(compatibility.path("clusterVersion").asText()));
+        }
+        assertTrue(versions.containsAll(List.of("1.28", "1.33", "1.34", "1.35", "1.36")), versions.toString());
+        return versions;
     }
 
     private static Fixture fixture() {
