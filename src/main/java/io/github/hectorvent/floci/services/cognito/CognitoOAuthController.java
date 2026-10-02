@@ -492,7 +492,10 @@ public class CognitoOAuthController {
                                 String domainPoolId) {
         String grantType = trimToNull(formParams.getFirst("grant_type"));
         if (grantType == null) {
-            return oauthError("invalid_request", "grant_type is required");
+            return oauthError("invalid_request");
+        }
+        if ("refresh_token".equals(grantType)) {
+            return refreshTokens(authorization, formParams, domainPoolId);
         }
         BasicCredentials basicCredentials;
         try {
@@ -524,7 +527,8 @@ public class CognitoOAuthController {
             return redeemAuthorizationCode(clientId, clientSecret, formParams, domainPoolId);
         }
         if (!"client_credentials".equals(grantType)) {
-            return oauthError("unsupported_grant_type", "Only client_credentials and authorization_code are supported");
+            return oauthError("unsupported_grant_type",
+                    "Only client_credentials, authorization_code and refresh_token are supported");
         }
         String scope = trimToNull(formParams.getFirst("scope"));
 
@@ -567,8 +571,7 @@ public class CognitoOAuthController {
         } catch (AwsException e) {
             return oauthError("invalid_client", "Client not found");
         }
-        if (client.getClientSecret() != null && !client.getClientSecret().isBlank()
-                && !secretsEqual(client.getClientSecret(), clientSecret)) {
+        if (!clientSecretMatches(client, clientSecret)) {
             return oauthError("invalid_client", "Client secret is invalid");
         }
 
@@ -598,21 +601,88 @@ public class CognitoOAuthController {
             CognitoUser user = cognitoService.adminGetUser(consumedCode.userPoolId(), consumedCode.userId());
             Map<String, Object> authentication = cognitoService.generateAuthResultForHostedAuth(user, pool, client,
                     nonceClaim(consumedCode.nonce()), consumedCode.scopes());
-            ObjectNode body = objectMapper.createObjectNode();
-            body.put("access_token", (String) authentication.get("AccessToken"));
-            // Minted only for a grant with openid; AWS leaves the field out otherwise.
-            if (authentication.get("IdToken") instanceof String idToken) {
-                body.put("id_token", idToken);
-            }
-            body.put("refresh_token", (String) authentication.get("RefreshToken"));
-            body.put("expires_in", ((Number) authentication.get("ExpiresIn")).longValue());
-            body.put("token_type", (String) authentication.get("TokenType"));
-            return Response.ok(body).type(MediaType.APPLICATION_JSON)
-                    .header("Cache-Control", "no-store").header("Pragma", "no-cache").build();
+            return tokenResponse(authentication);
         } catch (AwsException e) {
             LOG.error("Failed to redeem Cognito authorization code", e);
             return oauthError("invalid_grant", e.getMessage());
         }
+    }
+
+    /**
+     * Renews a session through the refresh shared with {@code GetTokensFromRefreshToken}, answering as
+     * AWS does. The client is checked before the refresh token: a Basic header names it whatever the
+     * body says, and authenticates it with the header's secret. A public client has none, so a secret
+     * there is wrong and an empty one names no client; its body {@code client_secret} is ignored.
+     * On a custom domain it must be a client of the domain's pool. Unlike the API's refresh, AWS does
+     * not require {@code ALLOW_REFRESH_TOKEN_AUTH} or any OAuth setting here. A refreshed access token
+     * keeps the scopes of the original grant, so no {@code scope} is read, and, as refresh token
+     * rotation is not implemented, no new refresh token is issued.
+     */
+    private Response refreshTokens(String authorization, MultivaluedMap<String, String> formParams,
+                                   String domainPoolId) {
+        BasicCredentials basic;
+        try {
+            basic = parseBasicCredentials(authorization);
+        } catch (IllegalArgumentException e) {
+            return oauthError("invalid_client");
+        }
+        String clientId = basic != null ? basic.clientId() : trimToNull(formParams.getFirst("client_id"));
+        String clientSecret = basic != null ? basic.clientSecret() : trimToNull(formParams.getFirst("client_secret"));
+        UserPoolClient client = clientId == null ? null : clientOfDomain(clientId, domainPoolId);
+        if (client == null || (basic != null && !hasSecret(client) && clientSecret == null)) {
+            return oauthError("invalid_client");
+        }
+        if (!clientSecretMatches(client, clientSecret) || (basic != null && !hasSecret(client))) {
+            return oauthError("invalid_client", "invalid_client_secret");
+        }
+        String refreshToken = trimToNull(formParams.getFirst("refresh_token"));
+        if (refreshToken == null) {
+            return oauthError("invalid_request", "invalid_refresh_token");
+        }
+        try {
+            Map<String, Object> result = cognitoService.getTokensFromRefreshToken(clientId, refreshToken);
+            return tokenResponse((Map<?, ?>) result.get("AuthenticationResult"));
+        } catch (AwsException e) {
+            LOG.debugv("Refused a refresh_token grant for client {0}: {1} {2}", clientId, e.getErrorCode(),
+                    e.getMessage());
+            return oauthError("invalid_grant");
+        }
+    }
+
+    /** The client, or null when it does not exist or, on a custom domain, belongs to another pool. */
+    private UserPoolClient clientOfDomain(String clientId, String domainPoolId) {
+        UserPoolClient client;
+        try {
+            client = cognitoService.findClientById(clientId);
+        } catch (AwsException e) {
+            return null;
+        }
+        return domainPoolId == null || domainPoolId.equals(client.getUserPoolId()) ? client : null;
+    }
+
+    private static boolean hasSecret(UserPoolClient client) {
+        return client.getClientSecret() != null && !client.getClientSecret().isBlank();
+    }
+
+    /** A client with a secret must present it; a public client needs none. */
+    private boolean clientSecretMatches(UserPoolClient client, String clientSecret) {
+        return !hasSecret(client) || secretsEqual(client.getClientSecret(), clientSecret);
+    }
+
+    /** The token endpoint's answer for minted tokens, with an ID or refresh token only when one was minted. */
+    private Response tokenResponse(Map<?, ?> authentication) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("access_token", (String) authentication.get("AccessToken"));
+        if (authentication.get("IdToken") instanceof String idToken) {
+            body.put("id_token", idToken);
+        }
+        if (authentication.get("RefreshToken") instanceof String refreshToken) {
+            body.put("refresh_token", refreshToken);
+        }
+        body.put("expires_in", ((Number) authentication.get("ExpiresIn")).longValue());
+        body.put("token_type", (String) authentication.get("TokenType"));
+        return Response.ok(body).type(MediaType.APPLICATION_JSON)
+                .header("Cache-Control", "no-store").header("Pragma", "no-cache").build();
     }
 
     private Response redirect(String redirectUri, Map<String, String> parameters) {
@@ -977,6 +1047,11 @@ public class CognitoOAuthController {
             }
         }
         return scopes;
+    }
+
+    /** A 400 with no {@code error_description}, as AWS answers several token endpoint errors. */
+    private Response oauthError(String error) {
+        return oauthError(Response.Status.BAD_REQUEST, error, null);
     }
 
     private Response oauthError(String error, String description) {

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.SignedInUser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -28,6 +29,7 @@ import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFix
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.expect;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.jwtPayload;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.refresh;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.refreshGrant;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.requestCertificate;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.signIn;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.tokenRequest;
@@ -37,6 +39,8 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.emptyString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -50,6 +54,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CognitoCustomDomainOAuthContractIntegrationTest {
 
     private static final String DOMAIN = "auth-c-" + System.nanoTime() + ".teos.localhost.floci.io";
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private static String poolA;
     private static String poolB;
@@ -334,5 +339,63 @@ class CognitoCustomDomainOAuthContractIntegrationTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    @Order(16)
+    void refreshGrantIsServedOnTheCustomDomain() throws Exception {
+        SignedInUser user = signIn(poolA);
+
+        Response response = refreshGrant(DOMAIN, user.clientId(), user.refreshToken());
+
+        response.then()
+                .statusCode(200)
+                .header("Cache-Control", equalTo("no-store"))
+                .body("token_type", equalTo("Bearer"))
+                .body("$", not(hasKey("refresh_token")));
+        JsonNode claims = jwtPayload(response.path("access_token"));
+        assertEquals(FLOCI_URL + "/" + poolA, claims.path("iss").asText());
+        assertEquals(user.clientId(), claims.path("client_id").asText());
+    }
+
+    /** AWS: a client of another pool does not exist on a pool's custom domain. */
+    @Test
+    @Order(17)
+    void refreshGrantRefusesAClientOfAnotherPool() throws Exception {
+        SignedInUser user = signIn(poolB);
+
+        assertBody(refreshGrant(DOMAIN, user.clientId(), user.refreshToken()), "{\"error\":\"invalid_client\"}");
+
+        refreshGrant(null, user.clientId(), user.refreshToken()).then().statusCode(200);
+    }
+
+    /** AWS: the pool's own client cannot refresh another pool's refresh token on the pool's custom domain. */
+    @Test
+    @Order(18)
+    void refreshGrantRefusesARefreshTokenOfAnotherPool() throws Exception {
+        SignedInUser poolAUser = signIn(poolA);
+        SignedInUser poolBUser = signIn(poolB);
+
+        assertBody(refreshGrant(DOMAIN, poolAUser.clientId(), poolBUser.refreshToken()),
+                "{\"error\":\"invalid_grant\"}");
+    }
+
+    /** AWS: a client of a pool, with its own refresh token, does not exist on another pool's custom domain. */
+    @Test
+    @Order(19)
+    void refreshGrantOnAnotherPoolsDomainRefusesTheClient() throws Exception {
+        String poolBDomain = "auth-c-b-" + System.nanoTime() + ".teos.localhost.floci.io";
+        cognitoJson("CreateUserPoolDomain", customDomain(poolBDomain, poolB, requestCertificate(poolBDomain)));
+        SignedInUser poolAUser = signIn(poolA);
+
+        assertBody(refreshGrant(poolBDomain, poolAUser.clientId(), poolAUser.refreshToken()),
+                "{\"error\":\"invalid_client\"}");
+    }
+
+    /** A 400 without a WWW-Authenticate challenge, whose JSON body is exactly {@code expectedBody}. */
+    private static void assertBody(Response response, String expectedBody) throws Exception {
+        response.then().statusCode(400).contentType(containsString("application/json"))
+                .header("WWW-Authenticate", nullValue());
+        assertEquals(OBJECT_MAPPER.readTree(expectedBody), OBJECT_MAPPER.readTree(response.asString()));
     }
 }

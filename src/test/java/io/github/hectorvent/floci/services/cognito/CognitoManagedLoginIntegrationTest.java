@@ -27,6 +27,7 @@ import java.util.regex.Pattern;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.customDomain;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.jwtPayload;
+import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.refreshGrant;
 import static io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFixtures.requestCertificate;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
@@ -36,6 +37,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -313,6 +315,100 @@ class CognitoManagedLoginIntegrationTest {
                     "scope=" + requested);
             assertEquals(Set.of(requested), scopes(tokens.path("access_token")));
         }
+    }
+
+    /**
+     * AWS: an app that signed in through managed login refreshes at the token endpoint. The new
+     * access token keeps the code's scope claim exactly, its family and its auth_time; an ID token
+     * comes exactly when the redemption issued one, which is with {@code openid}; and, without
+     * refresh token rotation, no new refresh token is issued.
+     */
+    @Test
+    void refreshKeepsTheGrantedScopesAndIssuesAnIdTokenOnlyWithOpenid() throws Exception {
+        Pool pool = newPool(List.of("openid", "email", ADMIN_SCOPE));
+        Map<String, Set<String>> expectedFields = new LinkedHashMap<>();
+        expectedFields.put("openid email", Set.of("access_token", "id_token", "expires_in", "token_type"));
+        expectedFields.put("email", Set.of("access_token", "expires_in", "token_type"));
+        expectedFields.put(ADMIN_SCOPE, Set.of("access_token", "expires_in", "token_type"));
+
+        for (Map.Entry<String, Set<String>> request : expectedFields.entrySet()) {
+            Map<String, String> query = withField(authorizeRequest(pool.clientId()), "scope", request.getKey());
+            Response tokens = redeem(null, pool.clientId(), code(signIn(null, pool, query)), VERIFIER);
+            tokens.then().statusCode(200);
+
+            Response refreshed = refreshGrant(null, pool.clientId(), tokens.path("refresh_token"));
+
+            refreshed.then().statusCode(200).body("token_type", equalTo("Bearer")).body("expires_in", equalTo(3600));
+            assertEquals(request.getValue(), fieldNames(refreshed), "scope=" + request.getKey());
+            JsonNode redeemedClaims = jwtPayload(tokens.path("access_token"));
+            JsonNode refreshedClaims = jwtPayload(refreshed.path("access_token"));
+            assertEquals(request.getKey(), refreshedClaims.path("scope").asText());
+            assertEquals(redeemedClaims.path("scope").asText(), refreshedClaims.path("scope").asText());
+            assertNotEquals(redeemedClaims.path("jti").asText(), refreshedClaims.path("jti").asText());
+            assertEquals(redeemedClaims.path("origin_jti").asText(), refreshedClaims.path("origin_jti").asText());
+            assertEquals(redeemedClaims.path("auth_time").asLong(), refreshedClaims.path("auth_time").asLong());
+        }
+    }
+
+    /** AWS ignores a scope parameter on the refresh grant, so a refresh cannot change the granted scopes. */
+    @Test
+    void refreshIgnoresAScopeParameter() throws Exception {
+        Pool pool = newPool(List.of("openid", "email", ADMIN_SCOPE));
+        String refreshToken = redeem(null, pool.clientId(),
+                code(signIn(null, pool, withField(authorizeRequest(pool.clientId()), "scope", "email"))), VERIFIER)
+                .then().statusCode(200).extract().path("refresh_token");
+
+        Response refreshed = given()
+                .formParam("grant_type", "refresh_token")
+                .formParam("client_id", pool.clientId())
+                .formParam("refresh_token", refreshToken)
+                .formParam("scope", "openid email " + ADMIN_SCOPE)
+                .when().post("/cognito-idp/oauth2/token");
+
+        refreshed.then().statusCode(200);
+        assertEquals(Set.of("access_token", "expires_in", "token_type"), fieldNames(refreshed));
+        assertEquals("email", jwtPayload(refreshed.path("access_token")).path("scope").asText());
+    }
+
+    @Test
+    void refreshAfterTheRevocationEndpointOrRevokeTokenIsInvalidGrant() throws Exception {
+        Pool pool = newPool();
+        String revokedAtTheEndpoint = refreshToken(pool);
+        String revokedThroughTheApi = refreshToken(pool);
+
+        given().formParam("token", revokedAtTheEndpoint).formParam("client_id", pool.clientId())
+                .when().post("/cognito-idp/oauth2/revoke").then().statusCode(200);
+        cognitoAction("RevokeToken", """
+                {"Token":"%s","ClientId":"%s"}
+                """.formatted(revokedThroughTheApi, pool.clientId())).then().statusCode(200);
+
+        for (String refreshToken : List.of(revokedAtTheEndpoint, revokedThroughTheApi)) {
+            assertInvalidGrant(refreshGrant(null, pool.clientId(), refreshToken));
+        }
+    }
+
+    @Test
+    void refreshWithATokenIssuedToAnotherClientIsInvalidGrant() throws Exception {
+        Pool pool = newPool();
+        String anotherClient = codeClient(pool.poolId());
+
+        assertInvalidGrant(refreshGrant(null, anotherClient, refreshToken(pool)));
+    }
+
+    @Test
+    void refreshOnTheCustomDomainKeepsTheGrantedScopes() throws Exception {
+        Pool pool = newPool(List.of("openid", "email", ADMIN_SCOPE));
+        String domain = "managed-login-refresh-" + System.nanoTime() + ".teos.localhost.floci.io";
+        cognitoJson("CreateUserPoolDomain", customDomain(domain, pool.poolId(), requestCertificate(domain)));
+        String refreshToken = redeem(domain, pool.clientId(),
+                code(signIn(domain, pool, withField(authorizeRequest(pool.clientId()), "scope", "email"))), VERIFIER)
+                .then().statusCode(200).extract().path("refresh_token");
+
+        Response refreshed = refreshGrant(domain, pool.clientId(), refreshToken);
+
+        refreshed.then().statusCode(200);
+        assertEquals(Set.of("access_token", "expires_in", "token_type"), fieldNames(refreshed));
+        assertEquals(Set.of("email"), scopes(refreshed.path("access_token")));
     }
 
     /**
@@ -1353,6 +1449,12 @@ class CognitoManagedLoginIntegrationTest {
                 .then().statusCode(200).extract().path("access_token");
     }
 
+    /** The refresh token of a fresh sign-in of the pool's user. */
+    private static String refreshToken(Pool pool) {
+        return redeem(null, pool.clientId(), code(signIn(null, pool, authorizeRequest(pool.clientId()))), VERIFIER)
+                .then().statusCode(200).extract().path("refresh_token");
+    }
+
     private static String code(Response callbackRedirect) {
         callbackRedirect.then().statusCode(302);
         String code = queryOf(callbackRedirect.getHeader("Location")).get("code");
@@ -1361,6 +1463,12 @@ class CognitoManagedLoginIntegrationTest {
     }
 
     // ──────────────────────────── Parsing ────────────────────────────
+
+    /** AWS's answer to a refresh token it refuses: 400 and exactly {@code {"error":"invalid_grant"}}. */
+    private static void assertInvalidGrant(Response response) throws Exception {
+        response.then().statusCode(400);
+        assertEquals(MAPPER.readTree("{\"error\":\"invalid_grant\"}"), MAPPER.readTree(response.asString()));
+    }
 
     /** The access token's scopes, as a set: AWS does not promise their order. */
     private static Set<String> scopes(String accessToken) throws Exception {

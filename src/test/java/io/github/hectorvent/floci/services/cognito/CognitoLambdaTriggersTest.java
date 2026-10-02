@@ -906,6 +906,28 @@ class CognitoLambdaTriggersTest {
         assertEquals(List.of(), scopes, "a client allowed no scopes grants the trigger none");
     }
 
+    /** A refresh of a code grant's refresh token tells a V2 trigger the scopes its access token carries. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void preTokenGenerationForARefreshOfACodeGrantIsToldTheGrantedScopes() throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createOAuthClient(pool, List.of("openid", "email"));
+        CognitoUser user = service.adminGetUser(pool.getId(), "alice");
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of()));
+        String refreshToken = (String) service.generateAuthResultForHostedAuth(user, pool, client, null,
+                List.of("openid", "email")).get("RefreshToken");
+
+        service.getTokensFromRefreshToken(client.getClientId(), refreshToken);
+
+        Map<String, Object> event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+        assertEquals("TokenGeneration_RefreshTokens", event.get("triggerSource"));
+        assertEquals(List.of("openid", "email"), ((Map<String, Object>) event.get("request")).get("scopes"),
+                "a V2 lambda may branch on the scopes of the grant being refreshed");
+    }
+
     /**
      * The OIDC flow owns {@code nonce}, and AWS lists it among the claims this trigger cannot
      * override or suppress. A trigger that tries must not displace the request's value.

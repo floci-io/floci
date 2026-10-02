@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,6 +30,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -533,6 +535,186 @@ class CognitoOAuthControllerTest {
         verify(cognitoService, never()).generateAuthResult(any(CognitoUser.class), any(UserPool.class), any(), any());
     }
 
+    /** AWS: a public client names itself; without refresh token rotation, no new refresh token is issued. */
+    @Test
+    void tokenRefreshesThroughTheSharedRefreshForAPublicClient() {
+        refreshesTo(Map.of("AccessToken", "access-token", "IdToken", "id-token", "ExpiresIn", 3600,
+                "TokenType", "Bearer"));
+
+        Response response = controller.token(null, requestContext(null), refreshForm());
+
+        assertEquals(200, response.getStatus());
+        assertEquals(MediaType.APPLICATION_JSON_TYPE, response.getMediaType());
+        assertEquals("no-store", response.getHeaderString("Cache-Control"));
+        JsonNode body = (JsonNode) response.getEntity();
+        assertEquals(List.of("access_token", "id_token", "expires_in", "token_type"), fieldNames(body));
+        assertEquals("access-token", body.path("access_token").asText());
+        assertEquals("id-token", body.path("id_token").asText());
+        assertEquals(3600, body.path("expires_in").asInt());
+        assertEquals("Bearer", body.path("token_type").asText());
+    }
+
+    @Test
+    void tokenRefreshLeavesTheIdTokenOutWhenNoneWasMinted() {
+        refreshesTo(Map.of("AccessToken", "access-token", "ExpiresIn", 3600, "TokenType", "Bearer"));
+
+        Response response = controller.token(null, requestContext(null), refreshForm());
+
+        assertEquals(200, response.getStatus());
+        assertEquals(List.of("access_token", "expires_in", "token_type"), fieldNames((JsonNode) response.getEntity()));
+    }
+
+    /** AWS: Basic credentials authenticate a confidential client, with or without a client_id in the body. */
+    @Test
+    void tokenRefreshAuthenticatesAConfidentialClientWithBasicCredentials() {
+        client.setClientSecret("client-secret");
+        refreshesTo(Map.of("AccessToken", "access-token", "ExpiresIn", 3600, "TokenType", "Bearer"));
+
+        Response withoutClientId = controller.token(basicAuthorization(CLIENT_ID, "client-secret"),
+                requestContext(null), form("grant_type", "refresh_token", "refresh_token", "refresh-token"));
+        Response withClientId = controller.token(basicAuthorization(CLIENT_ID, "client-secret"),
+                requestContext(null), refreshForm());
+
+        assertEquals(200, withoutClientId.getStatus());
+        assertEquals(200, withClientId.getStatus());
+    }
+
+    @Test
+    void tokenRefreshAuthenticatesAConfidentialClientWithTheSecretInTheBody() {
+        client.setClientSecret("client-secret");
+        refreshesTo(Map.of("AccessToken", "access-token", "ExpiresIn", 3600, "TokenType", "Bearer"));
+
+        Response response = controller.token(null, requestContext(null), form("grant_type", "refresh_token",
+                "client_id", CLIENT_ID, "client_secret", "client-secret", "refresh_token", "refresh-token"));
+
+        assertEquals(200, response.getStatus());
+    }
+
+    /** AWS refreshes for the client of the Basic header when the body names another. */
+    @Test
+    void tokenRefreshTakesTheClientOfTheBasicHeaderOverTheBody() {
+        UserPoolClient confidential = client("confidential-client");
+        confidential.setClientSecret("client-secret");
+        when(cognitoService.findClientById("confidential-client")).thenReturn(confidential);
+        when(cognitoService.getTokensFromRefreshToken("confidential-client", "refresh-token"))
+                .thenReturn(Map.of("AuthenticationResult",
+                        Map.of("AccessToken", "access-token", "ExpiresIn", 3600, "TokenType", "Bearer")));
+
+        Response response = controller.token(basicAuthorization("confidential-client", "client-secret"),
+                requestContext(null), refreshForm());
+
+        assertEquals(200, response.getStatus());
+        verify(cognitoService, never()).getTokensFromRefreshToken(eq(CLIENT_ID), any());
+    }
+
+    /** AWS: a missing secret, or a wrong one in the body or the Basic header, is the same 400. */
+    @Test
+    void tokenRefreshRefusesAConfidentialClientWithoutItsSecret() throws Exception {
+        client.setClientSecret("client-secret");
+        Map<String, Response> responses = new LinkedHashMap<>();
+        responses.put("no secret", controller.token(null, requestContext(null), refreshForm()));
+        responses.put("wrong secret in the body", controller.token(null, requestContext(null),
+                form("grant_type", "refresh_token", "client_id", CLIENT_ID, "client_secret", "wrong-secret",
+                        "refresh_token", "refresh-token")));
+        responses.put("wrong secret in Basic", controller.token(basicAuthorization(CLIENT_ID, "wrong-secret"),
+                requestContext(null), form("grant_type", "refresh_token", "refresh_token", "refresh-token")));
+
+        for (Map.Entry<String, Response> response : responses.entrySet()) {
+            assertOAuthBody(response.getKey(), response.getValue(),
+                    "{\"error\":\"invalid_client\",\"error_description\":\"invalid_client_secret\"}");
+        }
+        verify(cognitoService, never()).getTokensFromRefreshToken(any(), any());
+    }
+
+    /**
+     * AWS answers 400 invalid_client, without a description, for a client it cannot identify, and
+     * checks the client before the refresh token. A public client has no secret to send in Basic.
+     */
+    @Test
+    void tokenRefreshRefusesAClientItCannotIdentifyBeforeLookingAtTheToken() throws Exception {
+        when(cognitoService.findClientById("missing-client"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Client not found", 400));
+        Map<String, Response> responses = new LinkedHashMap<>();
+        responses.put("unknown client", controller.token(null, requestContext(null),
+                form("grant_type", "refresh_token", "client_id", "missing-client", "refresh_token", "not-a-token")));
+        responses.put("no client", controller.token(null, requestContext(null),
+                form("grant_type", "refresh_token", "refresh_token", "refresh-token")));
+        responses.put("public client in Basic", controller.token(basicAuthorization(CLIENT_ID, ""),
+                requestContext(null), form("grant_type", "refresh_token", "refresh_token", "refresh-token")));
+        responses.put("malformed Basic", controller.token("Basic not-base64!", requestContext(null),
+                refreshForm()));
+        responses.put("client of another pool on a custom domain", controller.token(null,
+                requestContext("other-pool"), refreshForm()));
+
+        for (Map.Entry<String, Response> response : responses.entrySet()) {
+            assertOAuthBody(response.getKey(), response.getValue(), "{\"error\":\"invalid_client\"}");
+        }
+        verify(cognitoService, never()).getTokensFromRefreshToken(any(), any());
+    }
+
+    /** AWS: an empty or absent refresh_token. */
+    @Test
+    void tokenRefreshWithoutARefreshTokenIsInvalidRequest() throws Exception {
+        Response absent = controller.token(null, requestContext(null),
+                form("grant_type", "refresh_token", "client_id", CLIENT_ID));
+        Response empty = controller.token(null, requestContext(null),
+                form("grant_type", "refresh_token", "client_id", CLIENT_ID, "refresh_token", ""));
+
+        String expected = "{\"error\":\"invalid_request\",\"error_description\":\"invalid_refresh_token\"}";
+        assertOAuthBody("absent", absent, expected);
+        assertOAuthBody("empty", empty, expected);
+        verify(cognitoService, never()).getTokensFromRefreshToken(any(), any());
+    }
+
+    @Test
+    void tokenRefreshOnTheCustomDomainOfTheClientsPoolRefreshes() {
+        refreshesTo(Map.of("AccessToken", "access-token", "ExpiresIn", 3600, "TokenType", "Bearer"));
+
+        Response response = controller.token(null, requestContext(POOL_ID), refreshForm());
+
+        assertEquals(200, response.getStatus());
+    }
+
+    /** AWS refreshes at the token endpoint whatever the client's ExplicitAuthFlows and OAuth settings. */
+    @Test
+    void tokenRefreshDoesNotRequireTheRefreshFlowOrAnOAuthClient() {
+        client.setExplicitAuthFlows(List.of("ALLOW_USER_PASSWORD_AUTH"));
+        client.setAllowedOAuthFlowsUserPoolClient(false);
+        client.setAllowedOAuthFlows(List.of());
+        client.setSupportedIdentityProviders(List.of());
+        refreshesTo(Map.of("AccessToken", "access-token", "ExpiresIn", 3600, "TokenType", "Bearer"));
+
+        Response response = controller.token(null, requestContext(null), refreshForm());
+
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void tokenWithoutAGrantTypeIsInvalidRequestWithoutADescription() throws Exception {
+        Response response = controller.token(null, requestContext(null),
+                form("client_id", CLIENT_ID, "refresh_token", "refresh-token"));
+
+        assertOAuthBody("no grant_type", response, "{\"error\":\"invalid_request\"}");
+    }
+
+    /** AWS: an invalid, expired or revoked refresh token, or one of another client, without a description. */
+    @ParameterizedTest
+    @CsvSource({
+            "NotAuthorizedException, Invalid Refresh Token",
+            "NotAuthorizedException, Refresh Token has expired",
+            "NotAuthorizedException, Refresh Token has been revoked",
+            "NotAuthorizedException, Refresh Token has different Client",
+            "UserNotFoundException, User does not exist."
+    })
+    void tokenRefreshMapsARefusedRefreshTokenToInvalidGrant(String errorCode, String message) throws Exception {
+        when(cognitoService.getTokensFromRefreshToken(CLIENT_ID, "refresh-token"))
+                .thenThrow(new AwsException(errorCode, message, 400));
+
+        Response response = controller.token(null, requestContext(null), refreshForm());
+
+        assertOAuthBody(message, response, "{\"error\":\"invalid_grant\"}");
+    }
+
     @Test
     void revokeAnswersOkWithAnEmptyBodyForAPublicClient() {
         Response response = controller.revoke(null, requestContext(null),
@@ -705,6 +887,15 @@ class CognitoOAuthControllerTest {
         return form;
     }
 
+    private void refreshesTo(Map<String, Object> authenticationResult) {
+        when(cognitoService.getTokensFromRefreshToken(CLIENT_ID, "refresh-token"))
+                .thenReturn(Map.of("AuthenticationResult", authenticationResult));
+    }
+
+    private static MultivaluedHashMap<String, String> refreshForm() {
+        return form("grant_type", "refresh_token", "client_id", CLIENT_ID, "refresh_token", "refresh-token");
+    }
+
     private static MultivaluedHashMap<String, String> validAuthorizationCodeForm(String code) {
         return form("grant_type", "authorization_code", "client_id", CLIENT_ID, "code", code, "redirect_uri", CALLBACK_URI);
     }
@@ -782,6 +973,13 @@ class CognitoOAuthControllerTest {
         List<String> names = new ArrayList<>();
         body.fieldNames().forEachRemaining(names::add);
         return names;
+    }
+
+    /** A 400 whose JSON body is exactly {@code expectedBody}, without a WWW-Authenticate challenge. */
+    private void assertOAuthBody(String message, Response response, String expectedBody) throws Exception {
+        assertEquals(400, response.getStatus(), message);
+        assertEquals(objectMapper.readTree(expectedBody), response.getEntity(), message);
+        assertNull(response.getHeaderString(HttpHeaders.WWW_AUTHENTICATE), message);
     }
 
     private void assertOAuthError(Response response, String error) {

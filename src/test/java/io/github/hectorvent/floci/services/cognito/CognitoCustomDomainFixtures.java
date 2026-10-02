@@ -139,6 +139,18 @@ final class CognitoCustomDomainFixtures {
                 """.formatted(user.clientId(), user.refreshToken()));
     }
 
+    /** A public client's refresh_token grant at the token endpoint, on {@code host} when one is given. */
+    static Response refreshGrant(String host, String clientId, String refreshToken) {
+        RequestSpecification request = given()
+                .formParam("grant_type", "refresh_token")
+                .formParam("client_id", clientId)
+                .formParam("refresh_token", refreshToken);
+        if (host != null) {
+            request.header("Host", host);
+        }
+        return request.when().post(host == null ? "/cognito-idp/oauth2/token" : "/oauth2/token");
+    }
+
     /** A client-credentials request with Basic authentication, on {@code host} when one is given. */
     static Response tokenRequest(String host, String clientId, String secret, String path) {
         RequestSpecification request = given()
