@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.UpdateServiceRequest;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayDeque;
@@ -38,6 +39,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -227,6 +229,33 @@ class EcsServiceDeploymentCircuitBreakerTest {
         assertEquals("STOPPED", deploymentOf(service, "cb-alarm", id).getStatus());
     }
 
+    @Test
+    void updatedAlarmNamesMatchTheNamesReportedOnTheDeployment() {
+        CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("new-alarm");
+        alarm.setStateValue("ALARM");
+        when(metricsService.describeAlarms(List.of("new-alarm"), null, REGION))
+                .thenReturn(List.of(alarm));
+        EcsService service = newService(new InMemoryStorageFactory(), metricsService);
+        EcsServiceModel model = createServiceWithDeploymentConfiguration(service, "cb-alarm-update", 1,
+                Map.of("alarms", Map.of("enable", true, "rollback", false,
+                        "alarmNames", List.of("old-alarm"))));
+        UpdateServiceRequest request = new UpdateServiceRequest();
+        request.setCluster("cb-alarm-update-cluster");
+        request.setService("cb-alarm-update");
+        request.setDeploymentConfiguration(Map.of("alarms", Map.of("enable", true, "rollback", false,
+                "alarmNames", List.of("new-alarm"))));
+        service.updateService(request, REGION);
+
+        service.reconcileServices();
+
+        ServiceDeployment deployment = deploymentOf(service, "cb-alarm-update", model.getDeploymentId());
+        assertEquals("STOP_REQUESTED", deployment.getStatus());
+        assertEquals(List.of("new-alarm"), deployment.getAlarmNames());
+        assertEquals(List.of("new-alarm"), deployment.getTriggeredAlarmNames());
+    }
+
     /** A failed initial deployment has no successful revision to roll back to. */
     @Test
     void withRollbackOnAnInitialDeploymentEndsAsRollbackFailed() {
@@ -255,6 +284,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
         healthy = true;
         String successfulDeploymentId = createService(service, "cb-rollback", 1, breaker(true, true))
                 .getDeploymentId();
+        service.reconcileServices();
         service.reconcileServices();
         EcsTask original = runningTasks(service).getFirst();
         String originalTaskDefinition = service.serviceByArn(original.getOwningServiceArn()).getTaskDefinition();
@@ -288,7 +318,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
         assertEquals(List.of(original.getTaskArn()), runningTasks(service).stream().map(EcsTask::getTaskArn).toList());
         assertEquals("SUCCESSFUL", deploymentOf(service, "cb-rollback", successfulDeploymentId).getStatus());
         assertEquals("COMPLETED", liveDeployment(service, "cb-rollback").getRolloutState());
-        verify(publisher).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"),
+        verify(publisher, times(2)).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"),
                 argThat(reason -> reason.contains(successfulDeploymentId)), eq(REGION));
     }
 

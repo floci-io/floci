@@ -4122,13 +4122,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         deployment.setStartedAt(now);
         deployment.setUpdatedAt(now);
         deployment.setTargetServiceRevisionArn(revisionArn);
-        Map<String, Object> alarms = deploymentAlarmsOf(svc);
-        if (flag(alarms.get("enable"), false) && alarms.get("alarmNames") instanceof List<?> names) {
-            deployment.setAlarmNames(names.stream().filter(String.class::isInstance)
-                    .map(String.class::cast).toList());
-            deployment.setTriggeredAlarmNames(List.of());
-            deployment.setAlarmStatus("MONITORING");
-        }
+        refreshDeploymentAlarms(deployment, svc);
         return deployment;
     }
 
@@ -5025,21 +5019,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         ServiceDeployment deployment = deploymentRecordForReconciliation(svc, key, region);
         if (deployment != null && DEPLOYMENT_STATUS_IN_PROGRESS.equals(deployment.getStatus())) {
-            List<String> triggeredAlarms = triggeredDeploymentAlarms(svc, region);
-            if (!triggeredAlarms.isEmpty()) {
-                Map<String, Object> alarms = deploymentAlarmsOf(svc);
-                synchronized (deployment) {
-                    if (deployment.getAlarmNames() == null && alarms.get("alarmNames") instanceof List<?> names) {
-                        deployment.setAlarmNames(names.stream().filter(String.class::isInstance)
-                                .map(String.class::cast).toList());
+            synchronized (svc) {
+                refreshDeploymentAlarms(deployment, svc);
+                List<String> triggeredAlarms = triggeredDeploymentAlarms(svc, region);
+                if (!triggeredAlarms.isEmpty()) {
+                    Map<String, Object> alarms = deploymentAlarmsOf(svc);
+                    synchronized (deployment) {
+                        deployment.setTriggeredAlarmNames(triggeredAlarms);
+                        deployment.setAlarmStatus("TRIGGERED");
                     }
-                    deployment.setTriggeredAlarmNames(triggeredAlarms);
-                    deployment.setAlarmStatus("TRIGGERED");
+                    requestDeploymentFailure(svc, deployment,
+                            ALARM_FAILURE_REASON + " Alarms: " + String.join(", ", triggeredAlarms),
+                            flag(alarms.get("rollback"), false));
+                    return;
                 }
-                requestDeploymentFailure(svc, deployment,
-                        ALARM_FAILURE_REASON + " Alarms: " + String.join(", ", triggeredAlarms),
-                        flag(alarms.get("rollback"), false));
-                return;
             }
         }
         String clusterName = extractClusterNameFromServiceKey(key);
@@ -5184,6 +5177,26 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         Map<String, Object> config = svc.getDeploymentConfiguration();
         Object alarms = config == null ? null : config.get("alarms");
         return alarms instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
+    }
+
+    private void refreshDeploymentAlarms(ServiceDeployment deployment, EcsServiceModel svc) {
+        Map<String, Object> alarms = deploymentAlarmsOf(svc);
+        synchronized (deployment) {
+            if (!flag(alarms.get("enable"), false)
+                    || !(alarms.get("alarmNames") instanceof List<?> names)) {
+                deployment.setAlarmNames(null);
+                deployment.setTriggeredAlarmNames(null);
+                deployment.setAlarmStatus(null);
+                return;
+            }
+            List<String> currentNames = names.stream().filter(String.class::isInstance)
+                    .map(String.class::cast).toList();
+            if (!currentNames.equals(deployment.getAlarmNames())) {
+                deployment.setAlarmNames(currentNames);
+                deployment.setTriggeredAlarmNames(List.of());
+                deployment.setAlarmStatus("MONITORING");
+            }
+        }
     }
 
     private List<String> triggeredDeploymentAlarms(EcsServiceModel svc, String region) {
