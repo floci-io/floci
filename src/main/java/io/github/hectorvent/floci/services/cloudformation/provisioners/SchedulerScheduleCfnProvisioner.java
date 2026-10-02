@@ -70,7 +70,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         Map<String, String> attributesBefore = Map.copyOf(resource.getAttributes());
-        String explicitName = ctx.resolveOptional(props, "Name");
+        String explicitName = optional(props, "Name", ctx);
         if (explicitName != null && explicitName.isBlank()) {
             throw validation("Name must not be blank");
         }
@@ -79,7 +79,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
                 && "explicit".equals(attributesBefore.get(NAME_MODE_ATTR));
         String name = removedName ? ctx.generatePhysicalName(resource.getLogicalId(), 64, false)
                 : ctx.stablePhysicalName(explicitName, resource.getLogicalId(), 64, false);
-        String explicitGroup = ctx.resolveOptional(props, "GroupName");
+        String explicitGroup = optional(props, "GroupName", ctx);
         if (explicitGroup != null && explicitGroup.isBlank()) {
             throw validation("GroupName must not be blank");
         }
@@ -172,28 +172,28 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         ScheduleRequest request = new ScheduleRequest();
         request.setName(name);
         request.setGroupName(group);
-        String expression = ctx.resolveOptional(props, "ScheduleExpression");
+        String expression = optional(props, "ScheduleExpression", ctx);
         if (expression == null || expression.isBlank()) {
             throw validation("requires ScheduleExpression");
         }
         request.setScheduleExpression(expression);
         request.setFlexibleTimeWindow(requiredObject(props, "FlexibleTimeWindow", FlexibleTimeWindow.class, ctx));
         request.setTarget(requiredObject(props, "Target", Target.class, ctx));
-        request.setDescription(ctx.resolveOptional(props, "Description"));
-        request.setScheduleExpressionTimezone(ctx.resolveOptional(props, "ScheduleExpressionTimezone"));
-        String state = ctx.resolveOptional(props, "State");
+        request.setDescription(optional(props, "Description", ctx));
+        request.setScheduleExpressionTimezone(optional(props, "ScheduleExpressionTimezone", ctx));
+        String state = optional(props, "State", ctx);
         if (state != null && !Set.of("ENABLED", "DISABLED").contains(state)) {
             throw validation("State must be ENABLED or DISABLED");
         }
         request.setState(state);
-        request.setKmsKeyArn(ctx.resolveOptional(props, "KmsKeyArn"));
+        request.setKmsKeyArn(optional(props, "KmsKeyArn", ctx));
         request.setStartDate(date(props, "StartDate", ctx));
         request.setEndDate(date(props, "EndDate", ctx));
         return request;
     }
 
     private static <T> T requiredObject(JsonNode props, String property, Class<T> type, ProvisionContext ctx) {
-        JsonNode resolved = props == null ? null : ctx.engine().resolveNode(props.get(property));
+        JsonNode resolved = props == null ? null : ctx.engine().resolveNodeOmittingNoValue(props.get(property));
         if (resolved == null || !resolved.isObject()) {
             throw validation("requires an object for " + property);
         }
@@ -204,8 +204,19 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    private static String optional(JsonNode props, String property, ProvisionContext ctx) {
+        JsonNode resolved = props == null ? null : ctx.engine().resolveNodeOmittingNoValue(props.get(property));
+        if (resolved == null || resolved.isNull() || resolved.isMissingNode()) {
+            return null;
+        }
+        if (!resolved.isValueNode()) {
+            throw validation("requires a scalar for " + property);
+        }
+        return resolved.asText();
+    }
+
     private static Instant date(JsonNode props, String property, ProvisionContext ctx) {
-        String value = ctx.resolveOptional(props, property);
+        String value = optional(props, property, ctx);
         if (value == null) {
             return null;
         }

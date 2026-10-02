@@ -192,6 +192,10 @@ must not pass over a resource it never got.
 returns its ARN. A group move preserves the name, removes the old group address, and restores the
 original configuration if the stack update rolls back.
 
+`Fn::If` values that select `AWS::NoValue` omit optional schedule properties and nested target
+or time-window fields. `ScheduleExpression`, `Target`, `FlexibleTimeWindow`, and their required
+fields still must be present and valid.
+
 If `DeleteStack` cannot remove a failed update's schedule orphan, it leaves the stack in
 `DELETE_FAILED` and keeps the orphan's address for a later deletion retry. This is separate from
 committed update cleanup, which abandons an old schedule after three failed attempts.

@@ -2,6 +2,9 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.MissingNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -220,6 +223,56 @@ public class CloudFormationTemplateEngine {
                 arr.add(resolveNode(item));
             }
             return arr;
+        }
+        return node;
+    }
+
+    /** Resolves optional structured properties, omitting only selected AWS::NoValue expressions. */
+    public JsonNode resolveNodeOmittingNoValue(JsonNode node) {
+        return resolveNode(omitNoValue(node));
+    }
+
+    private JsonNode omitNoValue(JsonNode node) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return node;
+        }
+        if (node.isObject()) {
+            if (node.size() == 1 && "AWS::NoValue".equals(node.path("Ref").asText())) {
+                return MissingNode.getInstance();
+            }
+            if (node.size() == 1 && node.has("Fn::If")) {
+                JsonNode branch = selectIfBranch(node.get("Fn::If"));
+                if (branch != null) {
+                    return omitNoValue(branch);
+                }
+            }
+            if (node.has("Ref") || node.has("Fn::Sub") || node.has("Fn::Join")
+                    || node.has("Fn::Select") || node.has("Fn::Base64") || node.has("Fn::GetAtt")
+                    || node.has("Fn::ImportValue") || node.has("Fn::FindInMap")
+                    || node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")
+                    || node.has("Fn::If")) {
+                return node;
+            }
+            ObjectNode resolved = objectMapper.createObjectNode();
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                JsonNode value = omitNoValue(field.getValue());
+                if (!value.isMissingNode()) {
+                    resolved.set(field.getKey(), value);
+                }
+            }
+            return resolved;
+        }
+        if (node.isArray()) {
+            ArrayNode resolved = objectMapper.createArrayNode();
+            for (JsonNode item : node) {
+                JsonNode value = omitNoValue(item);
+                if (!value.isMissingNode()) {
+                    resolved.add(value);
+                }
+            }
+            return resolved;
         }
         return node;
     }

@@ -20,10 +20,13 @@ import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -674,6 +677,291 @@ class CloudFormationSchedulerScheduleIntegrationTest {
             deleteGroup(group);
             sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
         }
+    }
+
+    @Test
+    void conditionalNoValueScalarsCreateGeneratedScheduleWithDefaults() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-no-value-" + suffix;
+        Queue queue = sqs.createQueue("conditional-" + suffix, Map.of(), "us-east-1");
+        String conditional = conditionalScheduleTemplate(queue, true, true, false);
+        try {
+            cloudFormation(stack, "CreateStack", conditional,
+                    Map.of("Name", "unused-" + suffix, "UseOptions", "false"));
+            Map<String, String> output = outputs(stack, "CREATE_COMPLETE");
+            String generated = output.get("ScheduleRef");
+            assertFalse(generated.equals("unused-" + suffix));
+            JsonNode schedule = new ObjectMapper().readTree(getSchedule(generated, "default")
+                    .then().statusCode(200).extract().asString());
+            assertEquals(output.get("ScheduleArn"), schedule.path("Arn").asText());
+            assertEquals("default", schedule.path("GroupName").asText());
+            assertEquals("ENABLED", schedule.path("State").asText());
+            assertOptionalScalarsAbsent(schedule);
+        } finally {
+            deleteStack(stack);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
+    }
+
+    @Test
+    void conditionalNoValueNestedTargetAndWindowPropertiesAreOmitted() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-nested-no-value-" + suffix;
+        String name = "nested-" + suffix;
+        Queue queue = sqs.createQueue("conditional-" + suffix, Map.of(), "us-east-1");
+        try {
+            cloudFormation(stack, "CreateStack", conditionalScheduleTemplate(queue, false, false, true),
+                    Map.of("Name", name, "UseOptions", "false"));
+            Map<String, String> output = outputs(stack, "CREATE_COMPLETE");
+            JsonNode schedule = new ObjectMapper().readTree(getSchedule(name, "default")
+                    .then().statusCode(200).extract().asString());
+            assertEquals(name, output.get("ScheduleRef"));
+            assertEquals(output.get("ScheduleArn"), schedule.path("Arn").asText());
+            assertEquals("OFF", schedule.path("FlexibleTimeWindow").path("Mode").asText());
+            assertFalse(schedule.path("FlexibleTimeWindow").has("MaximumWindowInMinutes"));
+            assertFalse(schedule.path("Target").has("RetryPolicy"));
+            assertFalse(schedule.path("Target").has("DeadLetterConfig"));
+            assertFalse(schedule.path("Target").has("Input"));
+            assertEquals(sqs.getQueueAttributes(queue.getQueueUrl(), List.of("QueueArn"), "us-east-1")
+                    .get("QueueArn"), schedule.path("Target").path("Arn").asText());
+            assertTrue(schedule.path("Target").path("RoleArn").asText().endsWith(":role/scheduler"));
+        } finally {
+            deleteStack(stack);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
+    }
+
+    @Test
+    void conditionalUpdatesRemoveAndRestoreOptionalPropertiesInPlace() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-conditional-update-" + suffix;
+        String name = "conditional-update-" + suffix;
+        Queue queue = sqs.createQueue("conditional-" + suffix, Map.of(), "us-east-1");
+        String conditional = conditionalScheduleTemplate(queue, false, true, true);
+        try {
+            cloudFormation(stack, "CreateStack", conditional, Map.of("Name", name, "UseOptions", "true"));
+            Map<String, String> created = outputs(stack, "CREATE_COMPLETE");
+            JsonNode before = new ObjectMapper().readTree(getSchedule(name, "default")
+                    .then().statusCode(200).extract().asString());
+            assertEquals("conditional", before.path("Description").asText());
+            assertEquals(15, before.path("FlexibleTimeWindow").path("MaximumWindowInMinutes").asInt());
+            assertEquals(2, before.path("Target").path("RetryPolicy").path("MaximumRetryAttempts").asInt());
+
+            cloudFormation(stack, "UpdateStack", conditional, Map.of("Name", name, "UseOptions", "false"));
+            assertEquals(created, outputs(stack, "UPDATE_COMPLETE"));
+            JsonNode omitted = new ObjectMapper().readTree(getSchedule(name, "default")
+                    .then().statusCode(200).extract().asString());
+            assertEquals("ENABLED", omitted.path("State").asText());
+            assertOptionalScalarsAbsent(omitted);
+            assertFalse(omitted.path("Target").has("Input"));
+            assertFalse(omitted.path("Target").has("RetryPolicy"));
+            assertFalse(omitted.path("Target").has("DeadLetterConfig"));
+            assertEquals("OFF", omitted.path("FlexibleTimeWindow").path("Mode").asText());
+            assertFalse(omitted.path("FlexibleTimeWindow").has("MaximumWindowInMinutes"));
+
+            cloudFormation(stack, "UpdateStack", conditional, Map.of("Name", name, "UseOptions", "true"));
+            assertEquals(created, outputs(stack, "UPDATE_COMPLETE"));
+            JsonNode restored = new ObjectMapper().readTree(getSchedule(name, "default")
+                    .then().statusCode(200).extract().asString());
+            assertEquals(before.path("Target"), restored.path("Target"));
+            assertEquals(before.path("FlexibleTimeWindow"), restored.path("FlexibleTimeWindow"));
+            for (String field : List.of("Description", "State", "ScheduleExpressionTimezone", "StartDate",
+                    "EndDate", "KmsKeyArn")) {
+                assertEquals(before.get(field), restored.get(field), field);
+            }
+        } finally {
+            deleteStack(stack);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
+    }
+
+    @Test
+    void conditionalAddressUpdatesReplaceAndCleanOldSchedules() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-conditional-address-" + suffix;
+        String name = "conditional-address-" + suffix;
+        String group = "conditional-group-" + suffix;
+        Queue queue = sqs.createQueue("conditional-" + suffix, Map.of(), "us-east-1");
+        createGroup(group);
+        String conditional = conditionalScheduleTemplate(queue, true, false, false);
+        try {
+            cloudFormation(stack, "CreateStack", conditional,
+                    Map.of("Name", name, "Group", group, "UseOptions", "true"));
+            Map<String, String> named = outputs(stack, "CREATE_COMPLETE");
+            getSchedule(name, group).then().statusCode(200).body("Arn", equalTo(named.get("ScheduleArn")));
+
+            cloudFormation(stack, "UpdateStack", conditional,
+                    Map.of("Name", name, "Group", group, "UseOptions", "false"));
+            Map<String, String> generated = outputs(stack, "UPDATE_COMPLETE");
+            String generatedName = generated.get("ScheduleRef");
+            assertFalse(name.equals(generatedName));
+            getSchedule(name, group).then().statusCode(404);
+            getSchedule(generatedName, "default").then().statusCode(200)
+                    .body("Arn", equalTo(generated.get("ScheduleArn")));
+
+            cloudFormation(stack, "UpdateStack", conditional,
+                    Map.of("Name", name, "Group", group, "UseOptions", "false", "Payload", "second"));
+            assertEquals(generated, outputs(stack, "UPDATE_COMPLETE"));
+            getSchedule(generatedName, "default").then().statusCode(200).body("Target.Input", equalTo("payload:second"));
+
+            cloudFormation(stack, "UpdateStack", conditional,
+                    Map.of("Name", name, "Group", group, "UseOptions", "true"));
+            assertEquals(named, outputs(stack, "UPDATE_COMPLETE"));
+            getSchedule(generatedName, "default").then().statusCode(404);
+            getSchedule(name, group).then().statusCode(200);
+        } finally {
+            deleteStack(stack);
+            getSchedule(name, group).then().statusCode(404);
+            deleteGroup(group);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Target", "FlexibleTimeWindow", "ScheduleExpression", "Target.Arn", "Target.RoleArn",
+            "FlexibleTimeWindow.Mode"})
+    void requiredPropertiesSelectedAsNoValueStillFail(String property) throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-required-no-value-" + suffix;
+        String name = "required-" + suffix;
+        Queue queue = sqs.createQueue("conditional-" + suffix, Map.of(), "us-east-1");
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode root = (ObjectNode) mapper.readTree(conditionalScheduleTemplate(queue, false, false, false));
+        ObjectNode props = (ObjectNode) root.path("Resources").path("Schedule").path("Properties");
+        String[] path = property.split("\\.");
+        ObjectNode parent = path.length == 1 ? props : (ObjectNode) props.get(path[0]);
+        String field = path[path.length - 1];
+        parent.set(field, conditionalOption(parent.get(field)));
+        try {
+            cloudFormation(stack, "CreateStack", root.toString(), Map.of("Name", name, "UseOptions", "false"));
+            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack);
+            assertEquals("ROLLBACK_COMPLETE", state.status(), property);
+            assertTrue(state.reason().toLowerCase(Locale.ROOT).contains(field.toLowerCase(Locale.ROOT)), state.reason());
+            getSchedule(name, "default").then().statusCode(404);
+        } finally {
+            deleteStack(stack);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Name", "GroupName", "State", "StartDate", "EndDate", "ScheduleExpression"})
+    void literalEmptyInvalidScalarsAreNotTreatedAsNoValue(String property) throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-empty-control-" + suffix;
+        String name = "empty-control-" + suffix;
+        Queue queue = sqs.createQueue("conditional-" + suffix, Map.of(), "us-east-1");
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode root = (ObjectNode) mapper.readTree(externalQueueTemplate("", queue));
+        ((ObjectNode) root.path("Resources").path("Schedule").path("Properties")).put(property, "");
+        try {
+            cloudFormation(stack, "CreateStack", root.toString(), Map.of("Name", name));
+            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack);
+            assertEquals("ROLLBACK_COMPLETE", state.status(), property);
+            assertTrue(state.reason().contains(property), state.reason());
+            getSchedule(name, "default").then().statusCode(404);
+        } finally {
+            deleteStack(stack);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Name", "GroupName", "Description", "Target.Input"})
+    void conditionalObjectAndArrayScalarsAreRejected(String property) throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        for (JsonNode invalid : List.of(mapper.createObjectNode(), mapper.createArrayNode())) {
+            String suffix = Long.toString(System.nanoTime(), 36);
+            String stack = "cfn-schedule-shape-control-" + suffix;
+            String name = "shape-control-" + suffix;
+            Queue queue = sqs.createQueue("conditional-" + suffix, Map.of(), "us-east-1");
+            ObjectNode root = (ObjectNode) mapper.readTree(conditionalScheduleTemplate(queue, false, false, false));
+            ObjectNode props = (ObjectNode) root.path("Resources").path("Schedule").path("Properties");
+            String[] path = property.split("\\.");
+            ObjectNode parent = path.length == 1 ? props : (ObjectNode) props.get(path[0]);
+            parent.set(path[path.length - 1], conditionalOption(invalid));
+            try {
+                cloudFormation(stack, "CreateStack", root.toString(), Map.of("Name", name, "UseOptions", "true"));
+                assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack).status(), property + invalid);
+                getSchedule(name, "default").then().statusCode(404);
+            } finally {
+                deleteStack(stack);
+                sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+            }
+        }
+    }
+
+    @Test
+    void literalEmptyDescriptionAndInputRemainPresent() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-schedule-empty-allowed-" + suffix;
+        String name = "empty-allowed-" + suffix;
+        Queue queue = sqs.createQueue("conditional-" + suffix, Map.of(), "us-east-1");
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode root = (ObjectNode) mapper.readTree(externalQueueTemplate("", queue));
+        ObjectNode props = (ObjectNode) root.path("Resources").path("Schedule").path("Properties");
+        props.put("Description", "");
+        ((ObjectNode) props.get("Target")).put("Input", "");
+        try {
+            cloudFormation(stack, "CreateStack", root.toString(), Map.of("Name", name));
+            outputs(stack, "CREATE_COMPLETE");
+            JsonNode schedule = mapper.readTree(getSchedule(name, "default").then().statusCode(200).extract().asString());
+            assertTrue(schedule.has("Description"));
+            assertEquals("", schedule.path("Description").asText());
+            assertTrue(schedule.path("Target").has("Input"));
+            assertEquals("", schedule.path("Target").path("Input").asText());
+        } finally {
+            deleteStack(stack);
+            sqs.deleteQueue(queue.getQueueUrl(), "us-east-1");
+        }
+    }
+
+    private static void assertOptionalScalarsAbsent(JsonNode schedule) {
+        for (String field : List.of("Description", "ScheduleExpressionTimezone", "StartDate", "EndDate", "KmsKeyArn")) {
+            assertFalse(schedule.has(field), field);
+        }
+    }
+
+    private String conditionalScheduleTemplate(Queue queue, boolean conditionalAddress,
+                                                boolean scalarOptions, boolean nestedOptions) throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode root = (ObjectNode) mapper.readTree(externalQueueTemplate("", queue));
+        ((ObjectNode) root.path("Parameters")).putObject("UseOptions").put("Type", "String").put("Default", "true");
+        root.putObject("Conditions").set("UseOptions", mapper.readTree("""
+                {"Fn::Equals":[{"Ref":"UseOptions"},"true"]}
+                """));
+        ObjectNode props = (ObjectNode) root.path("Resources").path("Schedule").path("Properties");
+        props.put("ScheduleExpression", "at(2100-01-01T00:00:00)");
+        if (conditionalAddress) {
+            props.set("Name", conditionalOption(mapper.readTree("{\"Ref\":\"Name\"}")));
+            props.set("GroupName", conditionalOption(mapper.readTree("{\"Ref\":\"Group\"}")));
+        }
+        if (scalarOptions) {
+            for (Map.Entry<String, String> field : Map.of("Description", "conditional", "State", "DISABLED",
+                    "ScheduleExpressionTimezone", "UTC", "StartDate", "2099-01-01T00:00:00Z",
+                    "EndDate", "2101-01-01T00:00:00Z").entrySet()) {
+                props.set(field.getKey(), conditionalOption(mapper.valueToTree(field.getValue())));
+            }
+            props.set("KmsKeyArn", conditionalOption(mapper.readTree("""
+                    {"Fn::Sub":"arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/conditional"}
+                    """)));
+        }
+        if (nestedOptions) {
+            ObjectNode window = (ObjectNode) props.get("FlexibleTimeWindow");
+            window.set("Mode", mapper.readTree("{\"Fn::If\":[\"UseOptions\",\"FLEXIBLE\",\"OFF\"]}"));
+            window.set("MaximumWindowInMinutes", conditionalOption(mapper.valueToTree(15)));
+            ObjectNode target = (ObjectNode) props.get("Target");
+            target.set("Input", conditionalOption(target.get("Input")));
+            target.set("RetryPolicy", conditionalOption(mapper.readTree("{\"MaximumRetryAttempts\":2}")));
+            target.set("DeadLetterConfig", conditionalOption(mapper.createObjectNode().set("Arn", target.get("Arn"))));
+        }
+        return root.toString();
+    }
+
+    private static JsonNode conditionalOption(JsonNode value) {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode noValue = mapper.createObjectNode().put("Ref", "AWS::NoValue");
+        return mapper.createObjectNode().set("Fn::If", mapper.createArrayNode().add("UseOptions").add(value).add(noValue));
     }
 
     private void prepareFailedRollback(String stack, String name, Queue queue) {

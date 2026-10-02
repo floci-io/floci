@@ -774,6 +774,20 @@ class SchedulerScheduleCfnProvisionerTest {
     }
 
     @Test
+    void requiredObjectNullAndInvalidShapesFailBeforeCreating() throws Exception {
+        for (String property : new String[] {"FlexibleTimeWindow", "Target"}) {
+            for (JsonNode invalid : new JsonNode[] {mapper.nullNode(), mapper.createArrayNode(),
+                    mapper.valueToTree("not-an-object"), mapper.valueToTree(false)}) {
+                ObjectNode props = properties("same", "default");
+                props.set(property, invalid);
+                assertThrows(AwsException.class, () -> provisioner.provision(resource(), props, context(null)),
+                        property + ": " + invalid);
+            }
+        }
+        verify(scheduler, never()).createSchedule(any(), eq(REGION));
+    }
+
+    @Test
     void unsupportedTargetParametersAreRejectedInsteadOfDiscarded() throws Exception {
         ObjectNode props = properties("same", "default");
         ((ObjectNode) props.get("Target")).putObject("KinesisParameters").put("PartitionKey", "key");
@@ -840,6 +854,7 @@ class SchedulerScheduleCfnProvisionerTest {
     private ProvisionContext context(String prior) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
