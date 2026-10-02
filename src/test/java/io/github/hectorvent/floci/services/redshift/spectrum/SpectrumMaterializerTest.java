@@ -27,7 +27,7 @@ class SpectrumMaterializerTest {
     void materializesRowsWithGeneratedIdentifierAndCopyFraming() throws Exception {
         try (ServerSocket listener = new ServerSocket(0); Socket backend = new Socket("localhost", listener.getLocalPort())) {
             ExecutorService executor = Executors.newSingleThreadExecutor();
-            Future<byte[]> captured = executor.submit(() -> serve(listener));
+            Future<BackendCapture> captured = executor.submit(() -> serve(listener));
             SpectrumS3Reader reader = mock(SpectrumS3Reader.class);
             when(reader.read(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
                     .thenReturn(Stream.of(new SpectrumRow(Arrays.asList("1", null)), new SpectrumRow(List.of("two", "x"))));
@@ -40,20 +40,21 @@ class SpectrumMaterializerTest {
                     .materialize(backend, table, null, reader);
             new SpectrumMaterializer().cleanup(backend, materialization);
 
-            byte[] copy = captured.get();
+            BackendCapture capture = captured.get();
             assertTrue(materialization.identifier().startsWith("spectrum_tmp_"));
             assertFalse(materialization.identifier().contains("events"));
-            assertTrue(new String(copy, StandardCharsets.UTF_8).contains("1\t\\N\ntwo\tx\n"));
+            assertTrue(capture.createSql().contains("\"value\" VARCHAR(256)"));
+            assertTrue(new String(capture.copyRows(), StandardCharsets.UTF_8).contains("1\t\\N\ntwo\tx\n"));
             executor.shutdownNow();
         }
     }
 
-    private static byte[] serve(ServerSocket listener) throws IOException {
+    private static BackendCapture serve(ServerSocket listener) throws IOException {
         try (Socket socket = listener.accept()) {
             InputStream input = socket.getInputStream();
             OutputStream output = socket.getOutputStream();
             ByteArrayOutputStream copyRows = new ByteArrayOutputStream();
-            readQuery(input);
+            String createSql = readQuery(input);
             send(output, 'C', "CREATE 0\0".getBytes(StandardCharsets.UTF_8));
             send(output, 'Z', new byte[]{'I'});
             readQuery(input);
@@ -72,15 +73,16 @@ class SpectrumMaterializerTest {
             readQuery(input);
             send(output, 'C', "DROP TABLE\0".getBytes(StandardCharsets.UTF_8));
             send(output, 'Z', new byte[]{'I'});
-            return copyRows.toByteArray();
+            return new BackendCapture(createSql, copyRows.toByteArray());
         }
     }
 
-    private static void readQuery(InputStream input) throws IOException {
+    private static String readQuery(InputStream input) throws IOException {
         Frame frame = readFrame(input);
         if (frame.type() != 'Q') {
             throw new IOException("expected query");
         }
+        return new String(frame.body(), 0, frame.body().length - 1, StandardCharsets.UTF_8);
     }
 
     private static Frame readFrame(InputStream input) throws IOException {
@@ -106,5 +108,8 @@ class SpectrumMaterializerTest {
     }
 
     private record Frame(char type, byte[] body) {
+    }
+
+    private record BackendCapture(String createSql, byte[] copyRows) {
     }
 }
