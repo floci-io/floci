@@ -53,6 +53,10 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
             ",\n\"TimeToLiveSpecification\": {\"AttributeName\": \"expiresAt\", \"Enabled\": true}";
     private static final String TTL_DISABLED =
             ",\n\"TimeToLiveSpecification\": {\"AttributeName\": \"expiresAt\", \"Enabled\": false}";
+    private static final String TTL_RENAMED =
+            ",\n\"TimeToLiveSpecification\": {\"AttributeName\": \"deleteAfter\", \"Enabled\": true}";
+    private static final String TTL_WITHOUT_ATTRIBUTE =
+            ",\n\"TimeToLiveSpecification\": {\"Enabled\": true}";
     private static final String STREAMED =
             ",\n\"StreamSpecification\": {\"StreamViewType\": \"NEW_AND_OLD_IMAGES\"}";
 
@@ -199,6 +203,58 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
             .body("__type", containsString("ResourceNotFoundException"));
 
         deleteStack(stack);
+    }
+
+    /** As measured on AWS: the rename fails the table before any DynamoDB change and the update rolls back. */
+    @Test
+    void renamingAnEnabledAttributeFailsWithTheAwsReasonAndRollsBack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-rename-" + suffix;
+        String table = "ttl-rename-table-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", TTL_ENABLED, ""));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+        cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(table, "dev", TTL_RENAMED, ""));
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+        describeStackEvents(stack).body(containsString("<ResourceStatusReason>Invalid request provided: Cannot change"
+                + " time-to-live attribute name. To update this property, you must first disable TTL then enable"
+                + " TTL with the new attribute name.</ResourceStatusReason>"));
+        describeTimeToLive(table)
+            .body("TimeToLiveDescription.TimeToLiveStatus", equalTo("ENABLED"))
+            .body("TimeToLiveDescription.AttributeName", equalTo("expiresAt"));
+
+        deleteStack(stack);
+    }
+
+    /** As measured on AWS: the create fails with the reason below and leaves no table. */
+    @Test
+    void enablingWithoutAnAttributeNameFailsTheCreateWithTheAwsReason() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-noattr-" + suffix;
+        String table = "ttl-noattr-table-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", TTL_WITHOUT_ATTRIBUTE, ""));
+        assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+        describeStackEvents(stack).body(containsString("<ResourceStatusReason>Invalid request provided: AttributeName"
+                + " property of TimeToLiveSpecification is required when TTL status is enabled or when enabling"
+                + " TTL.</ResourceStatusReason>"));
+        dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(400)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        deleteStack(stack);
+    }
+
+    private ValidatableResponse describeStackEvents(String stack) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stack)
+        .when().post("/").then().statusCode(200);
     }
 
     private void failNextUpdateTimeToLive() {
