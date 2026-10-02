@@ -448,6 +448,23 @@ class EcsCfnProvisionerTest {
         verify(ecs, never()).updateClusterSettings(anyString(), any(), anyString());
     }
 
+    @Test
+    void conditionalClusterSettingsAreResolvedBeforeTheyAreRead() {
+        when(ecs.createCluster("web", REGION)).thenReturn(cluster("web"));
+        StackResource r = resource("AWS::ECS::Cluster", "Cluster");
+        ObjectNode props = clusterWithInsights("enabled");
+        JsonNode resolved = props.get("ClusterSettings");
+        ObjectNode conditional = mapper.createObjectNode();
+        conditional.putArray("Fn::If").add("Insights").add(resolved).addObject().put("Ref", "AWS::NoValue");
+        props.set("ClusterSettings", conditional);
+        ProvisionContext ctx = ctx();
+        when(ctx.engine().resolveNode(conditional)).thenReturn(resolved);
+
+        provisioner.provision(r, props, ctx);
+
+        verify(ecs).updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enabled")), REGION);
+    }
+
     private ObjectNode clusterWithInsights(String value) {
         ObjectNode props = mapper.createObjectNode().put("ClusterName", "web");
         props.putArray("ClusterSettings").addObject().put("Name", "containerInsights").put("Value", value);
