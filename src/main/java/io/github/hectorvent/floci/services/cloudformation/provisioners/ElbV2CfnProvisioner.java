@@ -471,17 +471,32 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         try {
             return Integer.parseInt(value.trim());
         } catch (NumberFormatException e) {
-            throw new AwsException("ValidationError", "Value of property " + property + " must be an integer.", 400);
+            throw notAnInteger(property);
         }
     }
 
-    /** An absent property stays unset for the service to default; anything present has to be an integer. */
+    /**
+     * An omitted property stays unset for the service to default, and so does one an intrinsic resolves
+     * to nothing: the engine resolves {@code AWS::NoValue} to blank, which is how the common
+     * {@code Fn::If [cond, value, AWS::NoValue]} drops a property. A value written into the template
+     * has to be an integer, a literal blank included, as CloudFormation's schema type check requires.
+     * A {@code Ref} to a parameter whose value is blank cannot be told apart from {@code AWS::NoValue}
+     * here, so it stays unset too.
+     */
     private static Integer optionalInt(JsonNode props, ProvisionContext ctx, String property) {
         String value = ctx.resolveOptional(props, property);
-        if (value == null || value.isBlank()) {
+        if (value == null || (value.isBlank() && !props.get(property).isTextual())) {
             return null;
         }
-        return parseInt(value, property, 0);
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw notAnInteger(property);
+        }
+    }
+
+    private static AwsException notAnInteger(String property) {
+        return new AwsException("ValidationError", "Value of property " + property + " must be an integer.", 400);
     }
 
     private static Boolean parseBooleanOrNull(String value) {
