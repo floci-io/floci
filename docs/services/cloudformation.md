@@ -12,6 +12,7 @@
 | `CreateStack` | Deploy a CloudFormation template |
 | `UpdateStack` | Update an existing stack |
 | `DeleteStack` | Delete a stack and its resources |
+| `ContinueUpdateRollback` | Retry the rollback of a stack in `UPDATE_ROLLBACK_FAILED`, optionally skipping resources (see [Failed update rollbacks](#failed-update-rollbacks)) |
 | `UpdateTerminationProtection` | - |
 | `CreateChangeSet` | Create a change set |
 | `DescribeChangeSet` | Get change set details with a computed Add/Modify/Remove resource diff |
@@ -412,6 +413,41 @@ Lambda. floci supports two shapes:
 
 The handler's `Data` keys resolve through `Fn::GetAtt`, except keys that begin with `__Floci`. Floci
 reserves that prefix for its own resource state, which no template can read.
+## Failed update rollbacks
+
+When an update fails, Floci rolls back the resources it changed. A resource whose rollback fails
+is left `UPDATE_FAILED`, and the stack settles in `UPDATE_ROLLBACK_FAILED`. As on AWS, `UpdateStack`
+and an `UPDATE` change set are then refused with `ValidationError` (`Stack:<arn> is in
+UPDATE_ROLLBACK_FAILED state and can not be updated.`). Two ways out remain:
+
+- `DeleteStack` deletes the stack and its resources, the `UPDATE_FAILED` ones included (see
+  [Deletion Policies](#deletion-policies)).
+- `ContinueUpdateRollback` runs the rollback again for the resources still owed one, starting with
+  an `UPDATE_ROLLBACK_IN_PROGRESS` stack event whose reason is `User Initiated`. A retry re-runs
+  the restore of each resource still owed one; a resource whose restore cannot be redone fails
+  again, leaving the stack in `UPDATE_ROLLBACK_FAILED`, and can be passed in `ResourcesToSkip`.
+  `ResourcesToSkip`
+  names `UPDATE_FAILED` resources to report as `UPDATE_COMPLETE` with the reason `Resource skipped
+  during UpdateRollback`, without rolling them back; a skipped resource keeps the state the failed
+  update left it in. Once every other resource rolled back, the stack reaches
+  `UPDATE_ROLLBACK_COMPLETE` with the template, parameters and outputs from before the failed
+  update, and takes updates again.
+
+`ContinueUpdateRollback` on a stack in any other status is refused with `ValidationError`
+(`RollbackUpdatedStack cannot be called from current stack status`). As on AWS, `ResourcesToSkip`
+is checked after the call is accepted: a skip that is not a resource of the stack, or not
+`UPDATE_FAILED`, returns the stack to `UPDATE_ROLLBACK_FAILED` with the reason, touching no
+resource, and a later call can still finish the rollback. `RoleARN` and `ClientRequestToken` are
+accepted and have no effect.
+
+Known difference: `ResourcesToSkip` does not support a nested stack's resource
+(`NestedStackName.ResourceLogicalID`). When the prefix names a nested stack of the stack, the
+rollback fails again with a reason saying Floci does not support it, where AWS would skip that
+resource.
+
+A stack that reached `UPDATE_ROLLBACK_FAILED` under an earlier Floci version kept no record of its
+state before the update. `ContinueUpdateRollback` then retries every `UPDATE_FAILED` resource and
+keeps the template the stack holds.
 
 ## Deleted Stacks
 
