@@ -133,7 +133,6 @@ class TlsConfigSourceLearnedHostnamesTest {
         // A runtime reissue whose certificate rename succeeded and whose metadata rename did not:
         // the served leaf carries the learned name, the metadata knows nothing about it.
         FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
-        CertificateGenerator gen = new CertificateGenerator();
         X509Certificate served = parseCertificate(tlsDir.resolve("floci-server.crt"));
         KeyPair keyPair = new KeyPair(served.getPublicKey(),
                 Pem.parsePrivateKey(Files.readString(tlsDir.resolve("floci-server.key"))));

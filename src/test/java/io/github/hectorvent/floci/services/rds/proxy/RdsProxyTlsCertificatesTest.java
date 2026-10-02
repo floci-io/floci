@@ -80,7 +80,6 @@ class RdsProxyTlsCertificatesTest {
         RdsProxyTlsCertificates certs = newCertificates();
         certs.ensureHost("172.17.0.5");
 
-        CertificateGenerator generator = new CertificateGenerator();
         X509Certificate firstCertificate = Pem.parseCertificate(
                 Files.readString(tempDir.resolve("tls").resolve("rds-ca.crt")));
 
@@ -118,7 +117,6 @@ class RdsProxyTlsCertificatesTest {
         RdsProxyTlsCertificates certs = newCertificates();
         certs.ensureHost("172.17.0.5");
 
-        CertificateGenerator generator = new CertificateGenerator();
         X509Certificate certificate = Pem.parseCertificate(
                 Files.readString(tempDir.resolve("tls").resolve("rds-ca.crt")));
 

@@ -497,9 +497,7 @@ class TlsCertificateHostnameTest {
     // ==================== Helper Methods ====================
 
     private X509Certificate parseCertificate(Path certFile) throws Exception {
-        String certPem = Files.readString(certFile);
-        CertificateGenerator gen = new CertificateGenerator();
-        return Pem.parseCertificate(certPem);
+        return Pem.parseCertificate(Files.readString(certFile));
     }
 
     private List<String> extractSansFromCertificate(X509Certificate cert) throws Exception {

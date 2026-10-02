@@ -233,8 +233,8 @@ class ApiGatewayIntegrationTransportOptionsTest {
                 .generateCertificate(new ByteArrayInputStream(
                         generated.certificatePem().getBytes(StandardCharsets.UTF_8)));
 
-        // RSA keys are emitted as PKCS#1 ("RSA PRIVATE KEY"), not PKCS#8, so use the generator's
-        // own parser rather than PKCS8EncodedKeySpec.
+        // RSA keys are emitted as PKCS#1 ("RSA PRIVATE KEY"), not PKCS#8, so use Pem's parser
+        // rather than PKCS8EncodedKeySpec.
         PrivateKey privateKey = Pem.parsePrivateKey(generated.privateKeyPem());
 
         return contextFor(certificate, privateKey);

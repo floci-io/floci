@@ -61,7 +61,6 @@ import static org.mockito.Mockito.when;
  */
 class IotMqttBrokerDeviceVerificationTest {
 
-
     private static Vertx vertx;
     private static FlociCertificateAuthority ca;
     private static CertificateGenerator.GeneratedCertificate serverLeaf;
