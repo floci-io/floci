@@ -19,11 +19,15 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -33,7 +37,9 @@ import static org.mockito.Mockito.when;
 
 /**
  * The DynamoDB CFN provisioner in isolation: the exact {@code Fn::GetAtt} keys the registry
- * schema declares, and the delete contract for each of its three types. The stream and replica
+ * schema declares, the delete contract for each of its three types, the
+ * {@code TimeToLiveSpecification} reconcile, and the snapshot a failed table update rolls back
+ * from. The stream and replica
  * behaviour keeps its own coverage in {@code DynamoDbStreamSpecificationCfnProvisionerTest} and
  * {@code DynamoDbReplicaCfnProvisionerTest}, which reach this class through the fixture.
  */
@@ -310,7 +316,7 @@ class DynamoDbCfnProvisionerTest {
         assertEquals(priorName, r.getPhysicalId());
         verify(dynamoDb).createTable(eq(priorName), anyList(), anyList(), any(), any(), anyList(), anyList(),
                 eq("us-east-1"));
-        verify(dynamoDb).describeTable(priorName, "us-east-1");
+        verify(dynamoDb, atLeastOnce()).describeTable(priorName, "us-east-1");
     }
 
     @Test
@@ -325,5 +331,178 @@ class DynamoDbCfnProvisionerTest {
 
         verify(dynamoDb).untagResource(TABLE_ARN, List.of("old"), "us-east-1");
         verify(dynamoDb).tagResource(TABLE_ARN, Map.of("env", "prod"), "us-east-1");
+    }
+
+    private TableDefinition withTimeToLive(TableDefinition table, String attributeName) {
+        table.setTtlEnabled(true);
+        table.setTtlAttributeName(attributeName);
+        return table;
+    }
+
+    /** The update path: the table already exists and reports {@code current}. */
+    private void existingTable(TableDefinition current) {
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(current);
+    }
+
+    @Test
+    void createWithTimeToLiveEnablesItOnce() throws Exception {
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenReturn(table(false));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+                + "{\"AttributeName\":\"expiresAt\",\"Enabled\":true}}"), ctx());
+
+        verify(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", true, "us-east-1");
+    }
+
+    @Test
+    void enabledGivenAsAStringIsResolvedThroughTheEngine() throws Exception {
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenReturn(table(false));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
+        ProvisionContext ctx = ctx();
+        when(ctx.engine().resolve(any())).thenAnswer(inv -> {
+            JsonNode node = inv.getArgument(0);
+            if (node != null && node.has("Ref")) {
+                return "true";
+            }
+            return node == null ? null : node.asText();
+        });
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+                + "{\"AttributeName\":\"expiresAt\",\"Enabled\":{\"Ref\":\"TtlOn\"}}}"), ctx);
+
+        verify(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", true, "us-east-1");
+    }
+
+    @Test
+    void updateWithTheSameTimeToLiveMakesNoTimeToLiveCall() throws Exception {
+        existingTable(withTimeToLive(table(false), "expiresAt"));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+                + "{\"AttributeName\":\"expiresAt\",\"Enabled\":true}}"), updateCtx(TABLE_NAME));
+
+        verify(dynamoDb, never()).updateTimeToLive(anyString(), any(), anyBoolean(), anyString());
+    }
+
+    @Test
+    void updateWithEnabledFalseDisablesTheCurrentAttribute() throws Exception {
+        existingTable(withTimeToLive(table(false), "expiresAt"));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":{\"Enabled\":false}}"),
+                updateCtx(TABLE_NAME));
+
+        verify(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", false, "us-east-1");
+    }
+
+    @Test
+    void updateThatRemovesTheTimeToLiveBlockDisablesIt() throws Exception {
+        existingTable(withTimeToLive(table(false), "expiresAt"));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\"}"), updateCtx(TABLE_NAME));
+
+        verify(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", false, "us-east-1");
+    }
+
+    /** CloudFormation renames a TTL attribute by disabling it in one update and enabling the new one in a later one. */
+    @Test
+    void updateThatRenamesAnEnabledTimeToLiveAttributeFailsBeforeChangingAnything() throws Exception {
+        existingTable(withTimeToLive(table(false), "expiresAt"));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        JsonNode props = props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}],"
+                + "\"TimeToLiveSpecification\":{\"AttributeName\":\"deleteAfter\",\"Enabled\":true}}");
+        ProvisionContext ctx = updateCtx(TABLE_NAME);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertEquals("TimeToLive is active on a different AttributeName", e.getMessage());
+        verify(dynamoDb, never()).updateTimeToLive(anyString(), any(), anyBoolean(), anyString());
+        verify(dynamoDb, never()).tagResource(anyString(), any(), anyString());
+    }
+
+    @Test
+    void enabledTimeToLiveWithoutAnAttributeNameFailsBeforeTheTableIsCreated() throws Exception {
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":{\"Enabled\":true}}");
+        ProvisionContext ctx = ctx();
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        verifyNoInteractions(dynamoDb);
+    }
+
+    @Test
+    void rollbackUpdateRestoresTagsStreamAndTimeToLive() throws Exception {
+        existingTable(table(true));
+        when(dynamoDb.listTagsOfResource(TABLE_ARN, "us-east-1")).thenReturn(Map.of("env", "dev"));
+        when(dynamoDb.disableStream(TABLE_NAME, "us-east-1")).thenReturn(table(false));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        r.getAttributes().put("StreamArn", STREAM_ARN);
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}],"
+                + "\"TimeToLiveSpecification\":{\"AttributeName\":\"expiresAt\",\"Enabled\":true}}"),
+                updateCtx(TABLE_NAME));
+        // The table as the update left it: retagged, streamless and expiring.
+        when(dynamoDb.listTagsOfResource(TABLE_ARN, "us-east-1")).thenReturn(Map.of("env", "prod"));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(withTimeToLive(table(false), "expiresAt"));
+        when(dynamoDb.enableStream(TABLE_NAME, "NEW_AND_OLD_IMAGES", "us-east-1")).thenReturn(table(true));
+
+        boolean rolledBack = provisioner.rollbackUpdate(r);
+
+        assertTrue(rolledBack);
+        verify(dynamoDb).tagResource(TABLE_ARN, Map.of("env", "dev"), "us-east-1");
+        verify(dynamoDb).enableStream(TABLE_NAME, "NEW_AND_OLD_IMAGES", "us-east-1");
+        verify(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", false, "us-east-1");
+        assertEquals(STREAM_ARN, r.getAttributes().get("StreamArn"));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void rollbackUpdateThatFailsKeepsTheSnapshotForTheNextAttempt() throws Exception {
+        existingTable(table(false));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}"),
+                updateCtx(TABLE_NAME));
+        when(dynamoDb.listTagsOfResource(TABLE_ARN, "us-east-1")).thenReturn(Map.of("env", "prod"));
+        doThrow(new AwsException("InternalServerError", "boom", 500))
+                .when(dynamoDb).untagResource(TABLE_ARN, List.of("env"), "us-east-1");
+
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertTrue(r.getAttributes().containsKey(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    /**
+     * A snapshot describes the update in flight. One left by an earlier update is dropped, so a
+     * replacing update, which takes none, cannot roll the new table back to the old one's state.
+     */
+    @Test
+    void replacingUpdateDropsAStaleSnapshotAndReportsNoRollback() throws Exception {
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenReturn(table(false));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(table(false));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId("orders-v1");
+        r.getAttributes().put(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR, "{}");
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\"}"), updateCtx("orders-v1"));
+
+        assertFalse(r.getAttributes().containsKey(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR));
+        assertFalse(provisioner.rollbackUpdate(r));
     }
 }
