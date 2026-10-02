@@ -798,7 +798,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * just mounts the volume read-only, turning a ~95s per-container copy into a ~0.2s mount.
      */
     String ensureCodeVolume(LambdaFunction fn, String image) {
-        String volName = codeVolumeName(resolveContainerNamePrefix(config), fn);
+        String volName = codeVolumeName(config, fn);
         // Held for the whole resolve-and-reconcile, not just the populate branch: this is the same
         // lock cleanupSupersededVolumes acquires before claiming a volume for deletion, so a launch
         // that resolves a volume can never race a sweep that's about to delete that exact volume out
@@ -951,7 +951,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
         // tar-copy the code into it, then discard it — the data persists in the volume.
         ContainerBuilder.Builder helperBuilder = containerBuilder.newContainer(image)
-                .withName(resolveContainerNamePrefix(config) + "-codevol-" + fn.getFunctionName() + "-" + shortId)
+                .withName(ContainerStorageHelper.prefixedDockerName(config, resolveContainerNamePrefix(config),
+                        "codevol-" + fn.getFunctionName() + "-" + shortId))
                 .withEnv(java.util.List.of())
                 .withEntrypoint(java.util.List.of("sleep"))
                 .withCmd(java.util.List.of("3600"))
@@ -1054,10 +1055,11 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             return;
         }
         // Markers are named after their volume, so the prune filter must track the configured
-        // name prefix. Markers written under a previously configured prefix are left alone —
-        // an orphaned marker file is harmless, and pruning only what this configuration could
-        // have written can never delete a concurrent process's live markers.
-        String markerPrefix = resolveContainerNamePrefix(config) + "-code-";
+        // name prefix and resource namespace. Markers written under a previously configured
+        // prefix or namespace are left alone: an orphaned marker file is harmless, and pruning
+        // only what this configuration could have written can never delete a concurrent
+        // process's live markers.
+        String markerPrefix = codeVolumeNamePrefix(config);
         try (java.util.stream.Stream<Path> markers = Files.list(markerDir)) {
             markers.filter(path -> Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS))
                     .filter(path -> path.getFileName().toString().startsWith(markerPrefix))
@@ -1122,6 +1124,25 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
     /** {@link #codeVolumeName(LambdaFunction)} with a configured base prefix in place of {@code floci}. */
     static String codeVolumeName(String namePrefix, LambdaFunction fn) {
+        return namePrefix + "-code-" + codeVolumeSuffix(fn);
+    }
+
+    /**
+     * The code volume name this configuration uses: the configured base prefix plus the resource
+     * namespace when one is set ({@code <prefix>-<namespace>-code-<function>-<hash>}), matching
+     * the Lambda container names. Without a namespace it equals
+     * {@link #codeVolumeName(String, LambdaFunction)} with the resolved prefix.
+     */
+    static String codeVolumeName(EmulatorConfig config, LambdaFunction fn) {
+        return codeVolumeNamePrefix(config) + codeVolumeSuffix(fn);
+    }
+
+    /** Leading part shared by every code volume (and completion marker) this configuration names. */
+    static String codeVolumeNamePrefix(EmulatorConfig config) {
+        return ContainerStorageHelper.prefixedDockerName(config, resolveContainerNamePrefix(config), "code-");
+    }
+
+    private static String codeVolumeSuffix(LambdaFunction fn) {
         String key = fn.getCodeSha256();
         if (key == null || key.isBlank()) {
             key = Long.toString(fn.getLastModified());
@@ -1134,7 +1155,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             h = "0";
         }
         String fname = fn.getFunctionName().replaceAll("[^a-zA-Z0-9_.-]", "-");
-        return namePrefix + "-code-" + fname + "-" + h;
+        return fname + "-" + h;
     }
 
     /**

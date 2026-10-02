@@ -75,6 +75,11 @@ class ContainerLauncherCodeVolumeReuseTest {
     @BeforeEach
     void setUp() {
         lifecycleManager = mock(ContainerLifecycleManager.class);
+        launcher = new RecordingLauncher(lifecycleManager, config(null));
+    }
+
+    /** Config with the container-name prefix unset and an optional resource namespace. */
+    private EmulatorConfig config(String namespace) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -85,7 +90,12 @@ class ContainerLauncherCodeVolumeReuseTest {
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambda);
         when(lambda.containerNamePrefix()).thenReturn(Optional.empty());
-        launcher = new RecordingLauncher(lifecycleManager, config);
+        if (namespace != null) {
+            EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+            when(config.docker()).thenReturn(docker);
+            when(docker.resourceNamespace()).thenReturn(Optional.of(namespace));
+        }
+        return config;
     }
 
     private static LambdaFunction fn(String sha) {
@@ -217,6 +227,63 @@ class ContainerLauncherCodeVolumeReuseTest {
         assertFalse(Files.exists(markerDir.resolve(orphan)));
         assertTrue(Files.isRegularFile(markerDir.resolve("unrelated-marker")),
                 "marker cleanup must not delete files outside Floci's code-volume namespace");
+    }
+
+    @Test
+    void namespacedPopulationUsesNamespacedVolumeAndPrunesOnlyItsOwnMarkers() throws Exception {
+        EmulatorConfig config = config("ci1");
+        launcher = new RecordingLauncher(lifecycleManager, config);
+        LambdaFunction fn = fn("sha-v1-abcdef0123456789");
+        String vol = ContainerLauncher.codeVolumeName(config, fn);
+        assertEquals("floci-aws-ci1-code-orders-shav1abcdef012345678", vol);
+        String orphan = "floci-aws-ci1-code-orphan";
+        String otherNamespace = "floci-aws-ci2-code-orders-shav1abcdef012345678";
+        String unnamespaced = "floci-aws-code-orders-shav1abcdef012345678";
+        writeMarker(orphan);
+        writeMarker(otherNamespace);
+        writeMarker(unnamespaced);
+        when(lifecycleManager.tryListVolumeNames()).thenReturn(Optional.of(Set.of(vol)));
+
+        launcher.ensureCodeVolume(fn, "img");
+
+        assertEquals(List.of(vol), launcher.populated);
+        Path markerDir = tempDir.resolve("lambda-codevol-markers");
+        assertTrue(Files.isRegularFile(markerDir.resolve(vol)));
+        assertFalse(Files.exists(markerDir.resolve(orphan)),
+                "orphan markers under this namespace should be pruned");
+        assertTrue(Files.isRegularFile(markerDir.resolve(otherNamespace)),
+                "another namespace's markers must be left alone");
+        assertTrue(Files.isRegularFile(markerDir.resolve(unnamespaced)),
+                "un-namespaced markers must be left alone");
+    }
+
+    @Test
+    void populateHelperContainerNameIncludesNamespace() {
+        assertEquals("floci-aws-ci1-codevol-orders-", populateHelperNamePrefix(config("ci1")));
+        assertEquals("floci-aws-codevol-orders-", populateHelperNamePrefix(config(null)));
+    }
+
+    /** Runs the real populateCodeVolume up to the helper spec build and returns the helper name minus its random id. */
+    private String populateHelperNamePrefix(EmulatorConfig config) {
+        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class,
+                org.mockito.Answers.RETURNS_SELF);
+        when(containerBuilder.newContainer("img")).thenReturn(builder);
+        when(builder.build()).thenThrow(new IllegalStateException("stop before Docker"));
+        ContainerLauncher real = new ContainerLauncher(containerBuilder, lifecycleManager,
+                mock(ContainerLogStreamer.class), mock(ImageResolver.class),
+                mock(RuntimeApiServerFactory.class), mock(DockerHostResolver.class), config,
+                mock(EcrRegistryManager.class), mock(LambdaLayerService.class),
+                mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class));
+
+        assertThrows(IllegalStateException.class,
+                () -> real.populateCodeVolume("vol", fn("sha"), "img"));
+
+        org.mockito.ArgumentCaptor<String> name = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(builder).withName(name.capture());
+        String helperName = name.getValue();
+        assertTrue(helperName.matches(".*-[0-9a-f]{8}"), helperName);
+        return helperName.substring(0, helperName.length() - 8);
     }
 
     @Test
