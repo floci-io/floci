@@ -15,6 +15,8 @@ import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactor
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Answers;
+import org.mockito.ArgumentCaptor;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,7 +30,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -235,9 +240,9 @@ class ContainerLauncherCodeVolumeReuseTest {
         launcher = new RecordingLauncher(lifecycleManager, config);
         LambdaFunction fn = fn("sha-v1-abcdef0123456789");
         String vol = ContainerLauncher.codeVolumeName(config, fn);
-        assertEquals("floci-aws-ci1-code-orders-shav1abcdef012345678", vol);
+        assertEquals("floci-aws-ci1-code-orders-shav1abcdef012345678-490320b73797", vol);
         String orphan = "floci-aws-ci1-code-orphan";
-        String otherNamespace = "floci-aws-ci2-code-orders-shav1abcdef012345678";
+        String otherNamespace = "floci-aws-ci2-code-orders-shav1abcdef012345678-becd7a27094d";
         String unnamespaced = "floci-aws-code-orders-shav1abcdef012345678";
         writeMarker(orphan);
         writeMarker(otherNamespace);
@@ -267,7 +272,7 @@ class ContainerLauncherCodeVolumeReuseTest {
     private String populateHelperNamePrefix(EmulatorConfig config) {
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class,
-                org.mockito.Answers.RETURNS_SELF);
+                Answers.RETURNS_SELF);
         when(containerBuilder.newContainer("img")).thenReturn(builder);
         when(builder.build()).thenThrow(new IllegalStateException("stop before Docker"));
         ContainerLauncher real = new ContainerLauncher(containerBuilder, lifecycleManager,
@@ -279,8 +284,8 @@ class ContainerLauncherCodeVolumeReuseTest {
         assertThrows(IllegalStateException.class,
                 () -> real.populateCodeVolume("vol", fn("sha"), "img"));
 
-        org.mockito.ArgumentCaptor<String> name = org.mockito.ArgumentCaptor.forClass(String.class);
-        org.mockito.Mockito.verify(builder).withName(name.capture());
+        ArgumentCaptor<String> name = ArgumentCaptor.forClass(String.class);
+        verify(builder).withName(name.capture());
         String helperName = name.getValue();
         assertTrue(helperName.matches(".*-[0-9a-f]{8}"), helperName);
         return helperName.substring(0, helperName.length() - 8);
@@ -314,12 +319,12 @@ class ContainerLauncherCodeVolumeReuseTest {
         java.io.InputStream[] capturedInput = {null};
         when(dockerClient.copyArchiveToContainerCmd("container-123")).thenReturn(copyCommand);
         when(copyCommand.withRemotePath("/var/task")).thenReturn(copyCommand);
-        when(copyCommand.withTarInputStream(org.mockito.ArgumentMatchers.any()))
+        when(copyCommand.withTarInputStream(any()))
                 .thenAnswer(invocation -> {
                     capturedInput[0] = invocation.getArgument(0);
                     return copyCommand;
                 });
-        org.mockito.Mockito.doAnswer(invocation -> {
+        doAnswer(invocation -> {
             capturedInput[0].transferTo(java.io.OutputStream.nullOutputStream());
             return null;
         }).when(copyCommand).exec();

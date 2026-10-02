@@ -939,6 +939,23 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * The labels on a named volume, or empty when it does not exist or the runtime cannot be
+     * queried, so a caller deciding whether a volume is its own can fail closed.
+     */
+    public Optional<Map<String, String>> tryVolumeLabels(String name) {
+        try {
+            Map<String, String> labels = dockerClient.inspectVolumeCmd(name).exec().getLabels();
+            return Optional.of(labels == null ? Map.of() : labels);
+        } catch (NotFoundException e) {
+            LOG.debugv("Volume ''{0}'' not found while reading its labels", name);
+            return Optional.empty();
+        } catch (DockerException e) {
+            LOG.warnv("Failed to read labels of volume ''{0}'': {1}", name, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
      * Attempts to take an authoritative snapshot of all named volumes in the container runtime.
      * An empty optional means the runtime could not be queried; it is intentionally distinct from
      * a successful query that returned an empty set so cleanup callers fail closed.

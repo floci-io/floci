@@ -81,7 +81,7 @@ class ContainerLauncherNamePrefixTest {
 
         String name = ContainerLauncher.codeVolumeName(config(null, "ci1"), fn);
 
-        assertEquals("floci-aws-ci1-code-my-fn-abc123def456", name);
+        assertEquals("floci-aws-ci1-code-my-fn-abc123def456-490320b73797", name);
         assertTrue(DOCKER_NAME.matcher(name).matches(),
                 "must be a docker-volume-safe name, was: " + name);
         assertEquals("floci-aws-ci1-code-", ContainerLauncher.codeVolumeNamePrefix(config(null, "ci1")));
@@ -91,7 +91,7 @@ class ContainerLauncherNamePrefixTest {
     void codeVolumeNameCombinesCustomPrefixAndNamespace() {
         LambdaFunction fn = fn();
 
-        assertEquals("acme-ci1-code-my-fn-abc123def456",
+        assertEquals("acme-ci1-code-my-fn-abc123def456-490320b73797",
                 ContainerLauncher.codeVolumeName(config("acme", "ci1"), fn));
         assertEquals("acme-ci1-code-", ContainerLauncher.codeVolumeNamePrefix(config("acme", "ci1")));
     }
@@ -106,6 +106,23 @@ class ContainerLauncherNamePrefixTest {
         assertNotEquals(a, b, "two namespaced instances must not share a code volume");
         assertFalse(b.startsWith(ContainerLauncher.codeVolumeNamePrefix(config(null, "ci1"))),
                 "one namespace's marker prefix must not match another namespace's volumes");
+    }
+
+    /**
+     * Namespaces and function names may both contain dashes, so the prefix and suffix alone can
+     * spell one name for two namespaces; the namespace hash keeps them apart.
+     */
+    @Test
+    void codeVolumeNameKeepsDashedNamespacesAndFunctionNamesApart() {
+        LambdaFunction fooCodeBar = fn();
+        fooCodeBar.setFunctionName("foo-code-bar");
+        LambdaFunction bar = fn();
+        bar.setFunctionName("bar");
+
+        String a = ContainerLauncher.codeVolumeName(config(null, "ci"), fooCodeBar);
+        String b = ContainerLauncher.codeVolumeName(config(null, "ci-code-foo"), bar);
+
+        assertNotEquals(a, b, "two namespaces must never spell the same code volume name");
     }
 
     private static LambdaFunction fn() {

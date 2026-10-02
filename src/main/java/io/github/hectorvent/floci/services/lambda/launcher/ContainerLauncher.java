@@ -48,6 +48,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
@@ -730,6 +731,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     // nothing under that name, silently mounting an empty /var/task into the next container.
     // ensureCodeVolume re-checks lifecycleManager.volumeExists() rather than trusting this alone.
     private static final String CODE_VOLUME_MARKER_DIR = "lambda-codevol-markers";
+    private static final String NAMESPACE_LABEL = "floci_namespace";
     private final java.util.Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
     // Deliberately never pruned: removing an entry while a caller elsewhere still held a reference
     // to its lock object let a third caller's computeIfAbsent create a replacement lock for the same
@@ -874,6 +876,19 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     }
 
     /**
+     * Whether a code volume carries this process's {@code floci_namespace} label (none when no
+     * namespace is set). The superseded sweep works from this process's own map of names, so it
+     * checks the label before deleting rather than trusting that a name it tracked is still its
+     * own. A volume whose labels cannot be read is left to {@code removeVolume}'s own checks.
+     */
+    private boolean inThisResourceNamespace(String volName) {
+        return lifecycleManager.tryVolumeLabels(volName)
+                .map(labels -> Objects.equals(labels.get(NAMESPACE_LABEL),
+                        ContainerStorageHelper.defaultLabels(config).get(NAMESPACE_LABEL)))
+                .orElse(true);
+    }
+
+    /**
      * Removes superseded code volumes whose grace period has elapsed. Scheduled at the same
      * interval as the grace period itself, so a volume is deleted within roughly one to two
      * intervals of becoming superseded. Not a hard deadline, since this is best-effort cleanup,
@@ -909,6 +924,11 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     continue;
                 }
                 volumesPendingCleanup.remove(volName, stillQueuedAt);
+                if (!inThisResourceNamespace(volName)) {
+                    LOG.debugv("Left superseded code volume {0} alone: it belongs to another resource namespace",
+                            volName);
+                    continue;
+                }
                 if (lifecycleManager.removeVolume(volName)) {
                     populatedCodeVolumes.remove(volName);
                     LOG.debugv("Removed superseded code volume {0}", volName);
@@ -1129,12 +1149,24 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
     /**
      * The code volume name this configuration uses: the configured base prefix plus the resource
-     * namespace when one is set ({@code <prefix>-<namespace>-code-<function>-<hash>}), matching
-     * the Lambda container names. Without a namespace it equals
+     * namespace when one is set ({@code <prefix>-<namespace>-code-<function>-<hash>-<namespace hash>}),
+     * matching the Lambda container names. Without a namespace it equals
      * {@link #codeVolumeName(String, LambdaFunction)} with the resolved prefix.
      */
     static String codeVolumeName(EmulatorConfig config, LambdaFunction fn) {
-        return codeVolumeNamePrefix(config) + codeVolumeSuffix(fn);
+        return codeVolumeNamePrefix(config) + codeVolumeSuffix(fn) + namespaceDisambiguator(config);
+    }
+
+    /**
+     * A namespace and a function name may both contain dashes, so namespace {@code ci} with function
+     * {@code foo-code-bar} and namespace {@code ci-code-foo} with function {@code bar} would spell
+     * the same volume name for the same code. A short hash of the namespace keeps their volumes
+     * apart. Empty without a namespace, so those names are unchanged.
+     */
+    private static String namespaceDisambiguator(EmulatorConfig config) {
+        String namespace = config.docker() == null || config.docker().resourceNamespace() == null
+                ? "" : config.docker().resourceNamespace().orElse("").trim();
+        return namespace.isEmpty() ? "" : "-" + sha256Hex(namespace).substring(0, 12);
     }
 
     /** Leading part shared by every code volume (and completion marker) this configuration names. */
