@@ -111,7 +111,10 @@ class KarapaceManager {
                 // is the REST Proxy's own dedicated process, config-driven entirely by KARAPACE_* env.
                 .withEntrypoint(List.of("/venv/bin/karapace_rest_proxy"))
                 .withEnv(env)
-                .withLabels(Map.of("floci.component", "pipes-kafka-rest-bridge"));
+                // Shared by every Pipe reading this bootstrap target, in any account or region,
+                // so the identity names the service only.
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels("pipes", null, null, null))
+                .withLabels(Map.of(ContainerStorageHelper.COMPONENT_LABEL, "pipes-kafka-rest-bridge"));
 
         int hostPort = 0;
         if (!containerDetector.isRunningInContainer()) {

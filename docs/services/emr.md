@@ -35,6 +35,16 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `ListSecurityConfigurations` | Lists all security configurations |
 | `AddTags` | Adds tags to a cluster |
 | `RemoveTags` | Removes tags from a cluster |
+| `PutManagedScalingPolicy` | Sets a cluster's managed scaling policy |
+| `GetManagedScalingPolicy` | Returns a cluster's managed scaling policy |
+| `RemoveManagedScalingPolicy` | Removes a cluster's managed scaling policy |
+| `PutAutoTerminationPolicy` | Sets a cluster's idle timeout auto termination policy |
+| `GetAutoTerminationPolicy` | Returns a cluster's auto termination policy |
+| `RemoveAutoTerminationPolicy` | Removes a cluster's auto termination policy |
+| `PutAutoScalingPolicy` | Attaches an automatic scaling policy to a core or task instance group |
+| `RemoveAutoScalingPolicy` | Removes an instance group's automatic scaling policy |
+| `GetBlockPublicAccessConfiguration` | Returns the account's block public access configuration for the Region |
+| `PutBlockPublicAccessConfiguration` | Sets the account's block public access configuration for the Region |
 <!-- floci:actions:end -->
 
 ## Example

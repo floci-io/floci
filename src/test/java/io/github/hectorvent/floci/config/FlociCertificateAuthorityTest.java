@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.config;
 
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -268,7 +269,7 @@ class FlociCertificateAuthorityTest {
         var generator = new CertificateGenerator();
         var forged = generator.generateIssuedCertificate("localhost", List.of(), KeyAlgorithm.RSA_2048, null,
                 new CertificateGenerator.Issuer(parse(impostor.certificatePem()),
-                        generator.parsePrivateKey(impostor.privateKeyPem())),
+                        Pem.parsePrivateKey(impostor.privateKeyPem())),
                 CertificateGenerator.LeafUsage.SERVER);
 
         assertFalse(ca.isIssuedByUs(parse(forged.certificatePem())), "same issuer name, wrong signature");
@@ -332,6 +333,6 @@ class FlociCertificateAuthorityTest {
     }
 
     private static X509Certificate parse(String pem) {
-        return new CertificateGenerator().parseCertificate(pem);
+        return Pem.parseCertificate(pem);
     }
 }

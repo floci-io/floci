@@ -251,12 +251,32 @@ class SesListPagingTest {
     @Test
     void scope_bindsATokenToWhatTheRequestSelected() {
         SesListPaging paging = SesListPaging.V2_LIST_TENANT_RESOURCES;
-        String token = paging.page(REGION, "/tenant-a", ITEMS, Function.identity(), 1, null).nextToken();
+        String token = paging.page(REGION, "tenant-a", ITEMS, Function.identity(), 1, null).nextToken();
 
-        assertThat(paging.page(REGION, "/tenant-a", ITEMS, Function.identity(), 1, token).items(), contains("b"));
+        assertThat(paging.page(REGION, "tenant-a", ITEMS, Function.identity(), 1, token).items(), contains("b"));
         assertError("BadRequestException", "Invalid Next Token",
-                () -> paging.page(REGION, "/tenant-b", ITEMS, Function.identity(), 1, token));
+                () -> paging.page(REGION, "tenant-b", ITEMS, Function.identity(), 1, token));
         assertError("BadRequestException", "Invalid Next Token", () -> page(paging, 1, token));
+
+        // A request that selected nothing has an empty scope, and its token is refused once one is added.
+        String unscoped = page(paging, 1, null).nextToken();
+        assertError("BadRequestException", "Invalid Next Token",
+                () -> paging.page(REGION, "tenant-a", ITEMS, Function.identity(), 1, unscoped));
+    }
+
+    @Test
+    void scope_isNotMatchedByAScopeItMerelyStartsWith() {
+        SesListPaging paging = SesListPaging.V2_LIST_RESOURCE_TENANTS;
+        // An identity name may hold the separator the token ends its scope with.
+        String longer = paging.page(REGION, "identity/a:b", ITEMS, Function.identity(), 1, null).nextToken();
+        String shorter = paging.page(REGION, "identity/a", ITEMS, Function.identity(), 1, null).nextToken();
+
+        assertError("BadRequestException", "Invalid Next Token",
+                () -> paging.page(REGION, "identity/a", ITEMS, Function.identity(), 1, longer));
+        assertError("BadRequestException", "Invalid Next Token",
+                () -> paging.page(REGION, "identity/a:b", ITEMS, Function.identity(), 1, shorter));
+        assertThat(paging.page(REGION, "identity/a:b", ITEMS, Function.identity(), 1, longer).items(),
+                contains("b"));
     }
 
     @Test

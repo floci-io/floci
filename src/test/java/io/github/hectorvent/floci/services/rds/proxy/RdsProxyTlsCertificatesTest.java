@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -11,6 +12,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.cert.X509Certificate;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -78,13 +80,12 @@ class RdsProxyTlsCertificatesTest {
         RdsProxyTlsCertificates certs = newCertificates();
         certs.ensureHost("172.17.0.5");
 
-        CertificateGenerator generator = new CertificateGenerator();
-        var firstCertificate = generator.parseCertificate(
+        X509Certificate firstCertificate = Pem.parseCertificate(
                 Files.readString(tempDir.resolve("tls").resolve("rds-ca.crt")));
 
         certs.ensureHost("host.docker.internal");
 
-        var secondCertificate = generator.parseCertificate(
+        X509Certificate secondCertificate = Pem.parseCertificate(
                 Files.readString(tempDir.resolve("tls").resolve("rds-ca.crt")));
 
         assertEquals(firstCertificate.getPublicKey(), secondCertificate.getPublicKey(),
@@ -116,8 +117,7 @@ class RdsProxyTlsCertificatesTest {
         RdsProxyTlsCertificates certs = newCertificates();
         certs.ensureHost("172.17.0.5");
 
-        CertificateGenerator generator = new CertificateGenerator();
-        var certificate = generator.parseCertificate(
+        X509Certificate certificate = Pem.parseCertificate(
                 Files.readString(tempDir.resolve("tls").resolve("rds-ca.crt")));
 
         assertEquals(certificate.getIssuerX500Principal(), certificate.getSubjectX500Principal());

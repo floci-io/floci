@@ -2,7 +2,7 @@ package io.github.hectorvent.floci.services.iot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.iot.IotService.RegisteredDevice;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
@@ -38,7 +38,6 @@ class IotServiceDeviceAuthTest {
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = IotServiceTestSupport.ACCOUNT;
     private static final String OTHER_ACCOUNT = "111111111111";
-    private static final CertificateGenerator GENERATOR = new CertificateGenerator();
 
     private static final String CONNECT_ANY_CLIENT = statement("Allow", "arn:aws:iot:*:*:client/*", null);
     private static final String CONNECT_AS_THING =
@@ -76,7 +75,7 @@ class IotServiceDeviceAuthTest {
     @Test
     void unknownCertificateIsNotFoundEvenWhenTheFlociCaSignedIt() {
         service.createKeysAndCertificate(true, REGION);
-        X509Certificate stranger = GENERATOR.parseCertificate(ca.issueClientCertificate("stranger").certificatePem());
+        X509Certificate stranger = Pem.parseCertificate(ca.issueClientCertificate("stranger").certificatePem());
 
         assertTrue(service.findRegisteredCertificate(stranger).isEmpty());
     }
@@ -108,7 +107,7 @@ class IotServiceDeviceAuthTest {
         assertEquals(REGION, device.region());
         assertTrue(plain.isConnectAllowed(device, "sensor-1", "127.0.0.1", null));
         assertTrue(plain.findRegisteredCertificate(
-                GENERATOR.parseCertificate(ca.issueClientCertificate("stranger").certificatePem())).isEmpty());
+                Pem.parseCertificate(ca.issueClientCertificate("stranger").certificatePem())).isEmpty());
     }
 
     /**
@@ -412,7 +411,7 @@ class IotServiceDeviceAuthTest {
     }
 
     private static X509Certificate parse(IotCertificate certificate) {
-        return GENERATOR.parseCertificate(certificate.getCertificatePem());
+        return Pem.parseCertificate(certificate.getCertificatePem());
     }
 
     private static String statement(String effect, String resource, String condition) {

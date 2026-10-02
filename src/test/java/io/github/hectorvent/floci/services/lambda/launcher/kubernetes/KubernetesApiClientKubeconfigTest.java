@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
 
 import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -16,8 +17,10 @@ import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.security.PrivateKey;
 import java.security.Security;
 import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -73,8 +76,8 @@ class KubernetesApiClientKubeconfigTest {
         var generator = new CertificateGenerator();
         var generated = generator.generateSelfSignedCertificate(
                 "127.0.0.1", List.of("127.0.0.1"), KeyAlgorithm.RSA_2048);
-        var cert = generator.parseCertificate(generated.certificatePem());
-        var privateKey = generator.parsePrivateKey(generated.privateKeyPem());
+        X509Certificate cert = Pem.parseCertificate(generated.certificatePem());
+        PrivateKey privateKey = Pem.parsePrivateKey(generated.privateKeyPem());
 
         var keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
         keyStore.load(null, null);

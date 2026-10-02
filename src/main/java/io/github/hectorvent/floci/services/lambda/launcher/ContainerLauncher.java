@@ -48,6 +48,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
@@ -730,6 +731,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     // nothing under that name, silently mounting an empty /var/task into the next container.
     // ensureCodeVolume re-checks lifecycleManager.volumeExists() rather than trusting this alone.
     private static final String CODE_VOLUME_MARKER_DIR = "lambda-codevol-markers";
+    private static final String NAMESPACE_LABEL = "floci_namespace";
     private final java.util.Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
     // Deliberately never pruned: removing an entry while a caller elsewhere still held a reference
     // to its lock object let a third caller's computeIfAbsent create a replacement lock for the same
@@ -798,7 +800,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * just mounts the volume read-only, turning a ~95s per-container copy into a ~0.2s mount.
      */
     String ensureCodeVolume(LambdaFunction fn, String image) {
-        String volName = codeVolumeName(resolveContainerNamePrefix(config), fn);
+        String volName = codeVolumeName(config, fn);
         // Held for the whole resolve-and-reconcile, not just the populate branch: this is the same
         // lock cleanupSupersededVolumes acquires before claiming a volume for deletion, so a launch
         // that resolves a volume can never race a sweep that's about to delete that exact volume out
@@ -874,6 +876,19 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     }
 
     /**
+     * Whether a code volume carries this process's {@code floci_namespace} label (none when no
+     * namespace is set). The superseded sweep works from this process's own map of names, so it
+     * checks the label before deleting rather than trusting that a name it tracked is still its
+     * own. A volume whose labels cannot be read is left to {@code removeVolume}'s own checks.
+     */
+    private boolean inThisResourceNamespace(String volName) {
+        return lifecycleManager.tryVolumeLabels(volName)
+                .map(labels -> Objects.equals(labels.get(NAMESPACE_LABEL),
+                        ContainerStorageHelper.defaultLabels(config).get(NAMESPACE_LABEL)))
+                .orElse(true);
+    }
+
+    /**
      * Removes superseded code volumes whose grace period has elapsed. Scheduled at the same
      * interval as the grace period itself, so a volume is deleted within roughly one to two
      * intervals of becoming superseded. Not a hard deadline, since this is best-effort cleanup,
@@ -909,6 +924,11 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     continue;
                 }
                 volumesPendingCleanup.remove(volName, stillQueuedAt);
+                if (!inThisResourceNamespace(volName)) {
+                    LOG.debugv("Left superseded code volume {0} alone: it belongs to another resource namespace",
+                            volName);
+                    continue;
+                }
                 if (lifecycleManager.removeVolume(volName)) {
                     populatedCodeVolumes.remove(volName);
                     LOG.debugv("Removed superseded code volume {0}", volName);
@@ -951,7 +971,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
         // tar-copy the code into it, then discard it — the data persists in the volume.
         ContainerBuilder.Builder helperBuilder = containerBuilder.newContainer(image)
-                .withName(resolveContainerNamePrefix(config) + "-codevol-" + fn.getFunctionName() + "-" + shortId)
+                .withName(ContainerStorageHelper.prefixedDockerName(config, resolveContainerNamePrefix(config),
+                        "codevol-" + fn.getFunctionName() + "-" + shortId))
                 .withEnv(java.util.List.of())
                 .withEntrypoint(java.util.List.of("sleep"))
                 .withCmd(java.util.List.of("3600"))
@@ -1054,10 +1075,11 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             return;
         }
         // Markers are named after their volume, so the prune filter must track the configured
-        // name prefix. Markers written under a previously configured prefix are left alone —
-        // an orphaned marker file is harmless, and pruning only what this configuration could
-        // have written can never delete a concurrent process's live markers.
-        String markerPrefix = resolveContainerNamePrefix(config) + "-code-";
+        // name prefix and resource namespace. Markers written under a previously configured
+        // prefix or namespace are left alone: an orphaned marker file is harmless, and pruning
+        // only what this configuration could have written can never delete a concurrent
+        // process's live markers.
+        String markerPrefix = codeVolumeNamePrefix(config);
         try (java.util.stream.Stream<Path> markers = Files.list(markerDir)) {
             markers.filter(path -> Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS))
                     .filter(path -> path.getFileName().toString().startsWith(markerPrefix))
@@ -1122,6 +1144,37 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
     /** {@link #codeVolumeName(LambdaFunction)} with a configured base prefix in place of {@code floci}. */
     static String codeVolumeName(String namePrefix, LambdaFunction fn) {
+        return namePrefix + "-code-" + codeVolumeSuffix(fn);
+    }
+
+    /**
+     * The code volume name this configuration uses: the configured base prefix plus the resource
+     * namespace when one is set ({@code <prefix>-<namespace>-code-<function>-<hash>-<namespace hash>}),
+     * matching the Lambda container names. Without a namespace it equals
+     * {@link #codeVolumeName(String, LambdaFunction)} with the resolved prefix.
+     */
+    static String codeVolumeName(EmulatorConfig config, LambdaFunction fn) {
+        return codeVolumeNamePrefix(config) + codeVolumeSuffix(fn) + namespaceDisambiguator(config);
+    }
+
+    /**
+     * A namespace and a function name may both contain dashes, so namespace {@code ci} with function
+     * {@code foo-code-bar} and namespace {@code ci-code-foo} with function {@code bar} would spell
+     * the same volume name for the same code. A short hash of the namespace keeps their volumes
+     * apart. Empty without a namespace, so those names are unchanged.
+     */
+    private static String namespaceDisambiguator(EmulatorConfig config) {
+        String namespace = config.docker() == null || config.docker().resourceNamespace() == null
+                ? "" : config.docker().resourceNamespace().orElse("").trim();
+        return namespace.isEmpty() ? "" : "-" + sha256Hex(namespace).substring(0, 12);
+    }
+
+    /** Leading part shared by every code volume (and completion marker) this configuration names. */
+    static String codeVolumeNamePrefix(EmulatorConfig config) {
+        return ContainerStorageHelper.prefixedDockerName(config, resolveContainerNamePrefix(config), "code-");
+    }
+
+    private static String codeVolumeSuffix(LambdaFunction fn) {
         String key = fn.getCodeSha256();
         if (key == null || key.isBlank()) {
             key = Long.toString(fn.getLastModified());
@@ -1134,7 +1187,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             h = "0";
         }
         String fname = fn.getFunctionName().replaceAll("[^a-zA-Z0-9_.-]", "-");
-        return namePrefix + "-code-" + fname + "-" + h;
+        return fname + "-" + h;
     }
 
     /**

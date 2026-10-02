@@ -238,8 +238,8 @@ public class SesConfigurationSetController {
         String region = regionResolver.resolveRegion(headers);
         try {
             // Reuse the AWS-aligned SendingEnabled deserialization shared with CreateConfigurationSet:
-            // absent -> false, string -> true, null/number -> SerializationException. An empty body
-            // / {} therefore disables sending (200). Verified against real AWS.
+            // absent -> false, otherwise SesV2Json.coerceBoolean. An empty body / {} therefore
+            // disables sending (200). Verified against real AWS.
             boolean enabled = parseSendingEnabled(
                     readOptionBody(objectMapper, body).path("SendingEnabled"));
             configSetService.setSendingEnabled(name, enabled, region);

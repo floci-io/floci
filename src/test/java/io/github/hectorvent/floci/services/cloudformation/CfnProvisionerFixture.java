@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.transfer.TransferService;
 import io.github.hectorvent.floci.services.wafv2.WafV2Service;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AcmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayAccountCfnProvisioner;
@@ -90,6 +91,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftC
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleGroupCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.TransferCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretsManagerCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SnsCfnProvisioner;
@@ -199,6 +201,7 @@ final class CfnProvisionerFixture {
         private Route53Service route53Service;
         private CloudTrailService cloudTrailService;
         private SchedulerService schedulerService;
+        private TransferService transferService;
         // Services that back a provisioner without being a constructor argument of the
         // dispatcher. They exist only so inferredProvisioners() can wire their provisioner.
         private FlowLogService flowLogService;
@@ -420,6 +423,9 @@ final class CfnProvisionerFixture {
             if (schedulerService != null) {
                 discovered.add(new SchedulerScheduleGroupCfnProvisioner(schedulerService));
             }
+            if (transferService != null) {
+                discovered.add(new TransferCfnProvisioner(transferService));
+            }
             if (redshiftService != null) {
                 discovered.add(new RedshiftClusterCfnProvisioner(redshiftService));
             }
@@ -566,6 +572,11 @@ final class CfnProvisionerFixture {
 
         public Builder scheduler(SchedulerService v) {
             this.schedulerService = v;
+            return this;
+        }
+
+        public Builder transfer(TransferService v) {
+            this.transferService = v;
             return this;
         }
 

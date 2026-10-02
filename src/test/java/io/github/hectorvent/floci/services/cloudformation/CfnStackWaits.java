@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 
 import java.util.Set;
 
@@ -36,15 +37,21 @@ final class CfnStackWaits {
      * ten seconds without a terminal status fails too.
      */
     static StackState awaitTerminal(String stackName) {
+        return awaitTerminal(stackName, null);
+    }
+
+    static StackState awaitTerminal(String stackName, String authorization) {
         long deadline = System.currentTimeMillis() + 10_000;
         StackState last = new StackState(null, "");
         while (System.currentTimeMillis() < deadline) {
-            Response response = given()
+            RequestSpecification request = given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-            .when()
-                .post("/");
+                .formParam("StackName", stackName);
+            if (authorization != null) {
+                request.header("Authorization", authorization);
+            }
+            Response response = request.when().post("/");
             if (response.statusCode() != 200) {
                 fail("DescribeStacks " + stackName + " answered " + response.statusCode() + ": " + response.asString());
             }
@@ -71,15 +78,21 @@ final class CfnStackWaits {
      * DELETE_FAILED or after ten seconds.
      */
     static void awaitStackDeleted(String stackName) {
+        awaitStackDeleted(stackName, null);
+    }
+
+    static void awaitStackDeleted(String stackName, String authorization) {
         long deadline = System.currentTimeMillis() + 10_000;
         String body = "";
         while (System.currentTimeMillis() < deadline) {
-            Response response = given()
+            RequestSpecification request = given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-            .when()
-                .post("/");
+                .formParam("StackName", stackName);
+            if (authorization != null) {
+                request.header("Authorization", authorization);
+            }
+            Response response = request.when().post("/");
             body = response.asString();
             assertThat(body, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
             if (response.statusCode() == 400) {

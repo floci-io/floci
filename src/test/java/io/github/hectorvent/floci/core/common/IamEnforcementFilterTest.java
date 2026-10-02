@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccoun
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
+import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
@@ -44,6 +45,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -99,7 +101,7 @@ class IamEnforcementFilterTest {
         when(arnBuilder.build(any(), any(), any(), any())).thenReturn("*");
         // Default: scopes are already canonical. Alias handling is asserted explicitly below.
         when(catalog.canonicalCredentialScope(anyString())).thenAnswer(inv -> inv.getArgument(0));
-        when(evaluator.evaluateResourcePolicy(any(), any(), any(), any(), any()))
+        when(evaluator.evaluateResourcePolicyFor(any(), any(), any(), any(), any()))
                 .thenReturn(ResourcePolicyDecision.NEUTRAL);
     }
 
@@ -1295,6 +1297,32 @@ class IamEnforcementFilterTest {
         verify(arnBuilder).buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account));
     }
 
+    @Test
+    void aRoleSessionReachesResourcePoliciesAsItsRoleWithItsPath() {
+        // The session ARN names the role without its path; a Principal naming the role is matched
+        // against the role's own ARN, which the caller lookup returns alongside it.
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String account = "111122223333";
+        String akid = "ASIASESSIONEXAMPLE";
+        String auth = "AWS4-HMAC-SHA256 Credential=" + akid
+                + "/20260629/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId(account);
+        requestContext.setRegion("us-east-1");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn(akid);
+        when(accountResolver.resolve(auth)).thenReturn(account);
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext(akid)).thenReturn(CallerContext.of(List.of()));
+        String sessionArn = "arn:aws:sts::" + account + ":assumed-role/App/s";
+        String roleArn = "arn:aws:iam::" + account + ":role/team/App";
+        when(iamService.resolveCallerArns(akid)).thenReturn(Optional.of(new CallerArns(sessionArn, roleArn)));
+
+        newFilter().filter(containerRequest);
+
+        verify(evaluator, atLeastOnce()).evaluateResourcePolicyFor(
+                any(), eq(RequestPrincipal.roleSession(sessionArn, roleArn)), any(), any(), any());
+    }
+
     // --- Presigned URL query-string credential (#3195): a presigned PUT/GET carries its
     // SigV4 credential in X-Amz-Credential, never in the Authorization header, so the filter
     // must fall back to the query parameter instead of bypassing IAM evaluation entirely.
@@ -1530,7 +1558,7 @@ class IamEnforcementFilterTest {
                 conditions, "arn:aws:s3:::partner-bucket", "us-east-1", "222233334444", "111111111111");
         assertEquals(List.of("111111111111"), expected.get("aws:ResourceAccount"));
 
-        when(evaluator.evaluateResourcePolicy(any(), any(), anyString(), anyString(), any()))
+        when(evaluator.evaluateResourcePolicyFor(any(), any(), anyString(), anyString(), any()))
                 .thenReturn(ResourcePolicyDecision.NEUTRAL);
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
