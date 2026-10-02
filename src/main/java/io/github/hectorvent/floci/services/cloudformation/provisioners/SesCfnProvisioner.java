@@ -110,7 +110,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void delete(StackResource resource, String region) {
-        UpdateCleanupResult cleanup = ReplacementCleanup.complete(resource, this::delete);
+        UpdateCleanupResult cleanup = ReplacementCleanup.completeForDelete(resource, this::delete);
         if (cleanup.applicable() && !cleanup.complete()) {
             throw new AwsException("InternalFailure",
                     "Could not delete displaced SES identity " + cleanup.previousPhysicalId()
@@ -146,12 +146,12 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
-        return ReplacementCleanup.complete(resource, this::delete);
+        return ReplacementCleanup.completeForDelete(resource, this::delete);
     }
 
     @Override
     public void clearDeleteCleanup(StackResource resource) {
-        ReplacementCleanup.clear(resource);
+        ReplacementCleanup.clearForDelete(resource);
     }
 
     @Override

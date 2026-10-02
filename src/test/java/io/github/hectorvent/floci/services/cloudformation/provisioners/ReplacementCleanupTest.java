@@ -74,6 +74,27 @@ class ReplacementCleanupTest {
     }
 
     @Test
+    void committedUpdateStillStopsAfterThreeFailuresAndAbandonsTheExhaustedEntity() {
+        StackResource r = resource("subnet-prior");
+        List<String> attempted = new ArrayList<>();
+        ReplacementCleanup.recordOrphan(r, "subnet-replacement", r.getResourceType(), "us-east-1");
+        ReplacementCleanup.Deleter unavailable = (type, id, region) -> {
+            attempted.add(id);
+            throw new IllegalStateException("still in use");
+        };
+
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            UpdateCleanupResult result = ReplacementCleanup.complete(r, unavailable);
+            assertFalse(result.complete());
+            assertEquals(Math.min(attempt, 3), result.attempts());
+        }
+        assertEquals(3, attempted.size());
+        ReplacementCleanup.clear(r);
+        assertFalse(ReplacementCleanup.hasReplacement(r));
+        assertFalse(ReplacementCleanup.complete(r, unavailable).applicable());
+    }
+
+    @Test
     void mergingNothingLeavesTheTargetUntouched() {
         StackResource previous = resource("subnet-prior");
 

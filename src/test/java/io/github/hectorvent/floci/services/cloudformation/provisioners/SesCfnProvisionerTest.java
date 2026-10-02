@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -426,6 +427,71 @@ class SesCfnProvisionerTest {
         assertThrows(AwsException.class, () -> provisioner.delete(resource, "us-east-1"));
 
         verify(ses, never()).deleteIdentity("other.example.com", "us-east-1");
+    }
+
+    @Test
+    void exhaustedStackDeleteKeepsEveryOwedIdentityForRetry() throws Exception {
+        StackResource resource = resource();
+        resource.setPhysicalId("current.example.com");
+        resource.setUpdateReplacePolicy("Retain");
+        resource.getAttributes().put("__FlociSesUpdateSnapshot", "{\"managedTags\":\"[]\"}");
+        ReplacementCleanup.recordOrphan(resource, "orphan-one.example.com", resource.getResourceType(), "us-east-1");
+        ReplacementCleanup.recordOrphan(resource, "orphan-two.example.com", resource.getResourceType(), "us-east-1");
+        ReplacementCleanup.recordOrphan(resource, resource.getPhysicalId(), resource.getResourceType(), "us-east-1");
+        doThrow(new AwsException("ServiceUnavailableException", "delete unavailable", 503))
+                .when(ses).deleteIdentity("orphan-one.example.com", "us-east-1");
+        doThrow(new AwsException("ServiceUnavailableException", "delete unavailable", 503))
+                .when(ses).deleteIdentity("orphan-two.example.com", "us-east-1");
+
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            UpdateCleanupResult failed = provisioner.completeDeleteCleanup(resource);
+            assertFalse(failed.complete());
+            assertEquals(attempt, failed.attempts());
+        }
+        provisioner.clearDeleteCleanup(resource);
+
+        assertTrue(provisioner.hasReplacementUpdate(resource));
+        assertEquals("orphan-one.example.com", provisioner.updateCleanupPhysicalId(resource));
+        assertThrows(AwsException.class, () -> provisioner.delete(resource, "us-east-1"));
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
+        verify(ses, never()).deleteIdentity("current.example.com", "us-east-1");
+
+        doNothing().when(ses).deleteIdentity("orphan-one.example.com", "us-east-1");
+        UpdateCleanupResult partlyRecovered = provisioner.completeDeleteCleanup(resource);
+        assertFalse(partlyRecovered.complete());
+        assertTrue(partlyRecovered.attempts() > 3);
+        assertEquals("orphan-two.example.com", partlyRecovered.previousPhysicalId());
+        assertEquals("orphan-two.example.com", provisioner.updateCleanupPhysicalId(resource));
+        provisioner.clearDeleteCleanup(resource);
+        assertTrue(provisioner.hasReplacementUpdate(resource));
+
+        doNothing().when(ses).deleteIdentity("orphan-two.example.com", "us-east-1");
+        provisioner.delete(resource, "us-east-1");
+        assertFalse(provisioner.hasReplacementUpdate(resource));
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
+        verify(ses, times(1)).deleteIdentity("current.example.com", "us-east-1");
+    }
+
+    @Test
+    void stackDeleteKeepsRetainedReplacementAndDeletesTheCurrentIdentity() throws Exception {
+        Identity replacement = domain("other.example.com");
+        when(ses.createEmailIdentity(eq("other.example.com"), isNull(), eq(List.of()), eq("us-east-1")))
+                .thenReturn(replacement);
+        when(identities.getIdentityVerificationAttributes("other.example.com", "us-east-1"))
+                .thenReturn(replacement);
+        when(ses.listResourceTags(anyString(), eq("us-east-1"))).thenReturn(List.of());
+        StackResource resource = resource();
+        resource.setUpdateReplacePolicy("Retain");
+        provisioner.provision(resource, props("{\"EmailIdentity\":\"other.example.com\"}"),
+                context("example.com"));
+
+        assertTrue(provisioner.completeDeleteCleanup(resource).complete());
+        provisioner.clearDeleteCleanup(resource);
+        provisioner.delete(resource, "us-east-1");
+
+        verify(ses, never()).deleteIdentity("example.com", "us-east-1");
+        verify(ses).deleteIdentity("other.example.com", "us-east-1");
+        assertFalse(provisioner.hasReplacementUpdate(resource));
     }
 
     private Identity domain(String name) {

@@ -197,9 +197,10 @@ If a failed update cannot restore the identity snapshot, a subsequent update tha
 identity retries that restoration before changing or replacing it. An update that skips the
 identity cannot discard the pending snapshot: it stays in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`
 and rejects further updates. `DeleteStack` can delete the current managed identity without first
-restoring its snapshot; deletion failures remain visible and can be retried. Displaced-resource
-cleanup still uses the shared retry limit. This is a recovery limitation, not support for
-`ContinueUpdateRollback`.
+restoring its snapshot. Failed stack deletion keeps displaced-identity cleanup records for a later
+`DeleteStack` retry, including records whose previous attempts failed. Committed update cleanup
+still gives each displaced identity three deletion attempts, then leaves it outside stack management,
+matching AWS. This does not implement `ContinueUpdateRollback`.
 
 ## EventBridge Event Buses
 
