@@ -225,6 +225,27 @@ class SesTenantPagingIntegrationTest {
                 .body("message", equalTo("Invalid Next Token"));
     }
 
+    @Test
+    @Order(10)
+    void aTokenIsNotTakenForAResourceWhoseNameItsOwnStartsWith() {
+        // The second name holds the ':' that ends the scope inside a token.
+        for (String identity : new String[] {"colon.page.test", "colon.page.test:x"}) {
+            v2().body("{\"EmailIdentity\":\"" + identity + "\"}")
+            .when().post("/v2/email/identities").then().statusCode(200);
+            associate("page-b", ARN_PREFIX + "identity/" + identity);
+            associate("page-c", ARN_PREFIX + "identity/" + identity);
+        }
+        String longer = v2().body("{\"ResourceArn\":\"" + ARN_PREFIX + "identity/colon.page.test:x\",\"PageSize\":1}")
+        .when().post("/v2/email/resources/tenants/list").then().statusCode(200).extract().path("NextToken");
+
+        v2().body("{\"ResourceArn\":\"" + ARN_PREFIX + "identity/colon.page.test\",\"NextToken\":\"" + longer + "\"}")
+        .when().post("/v2/email/resources/tenants/list").then().statusCode(400)
+                .body("message", equalTo("Invalid Next Token"));
+        v2().body("{\"ResourceArn\":\"" + ARN_PREFIX + "identity/colon.page.test:x\",\"NextToken\":\"" + longer + "\"}")
+        .when().post("/v2/email/resources/tenants/list").then().statusCode(200)
+                .body("ResourceTenants.TenantName", contains("page-c"));
+    }
+
     private static void associate(String tenant, String arn) {
         v2().body("{\"TenantName\":\"" + tenant + "\",\"ResourceArn\":\"" + arn + "\"}")
         .when().post("/v2/email/tenants/resources").then().statusCode(200);
