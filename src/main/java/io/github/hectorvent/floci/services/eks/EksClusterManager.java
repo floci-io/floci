@@ -640,7 +640,8 @@ public class EksClusterManager
 
         ContainerInfo info;
         try {
-            info = lifecycleManager.adopt(containerId, List.of(K3S_API_SERVER_PORT));
+            info = lifecycleManager.adopt(containerId, List.of(K3S_API_SERVER_PORT),
+                    containerBuilder.resolveDockerNetwork(config.services().eks().dockerNetwork()));
         } catch (Exception e) {
             LOG.warnv("Could not adopt surviving k3s container {0} for EKS cluster {1} ({2}); recreating it",
                     cluster.getDockerName(), cluster.getName(), e.getMessage());
