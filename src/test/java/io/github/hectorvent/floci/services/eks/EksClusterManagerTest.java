@@ -249,6 +249,16 @@ class EksClusterManagerTest {
     }
 
     @Test
+    void nodeNameIsTheDockerNameMadeValidForKubernetes() {
+        // A fixed node name keeps pods bound to the node (local-path volumes) schedulable after the
+        // k3s container is recreated on restore.
+        assertEquals("floci-eks-111111111111.spike", EksClusterManager.nodeNameFor("floci-eks-111111111111.spike"));
+        assertEquals("floci-eks-my-cluster", EksClusterManager.nodeNameFor("floci-eks-My_Cluster"));
+        assertEquals(63, EksClusterManager.nodeNameFor("floci-eks-" + "a".repeat(100)).length());
+        assertEquals("floci-eks-x", EksClusterManager.nodeNameFor("floci-eks-x_"));
+    }
+
+    @Test
     void rshareEntrypointIsPosixShCompatible() {
         String script = EksClusterManager.RSHARE_ENTRYPOINT.get(2);
 
@@ -1681,6 +1691,23 @@ class EksClusterManagerTest {
 
             verify(copyCmd, never()).withHostResource(anyString());
             assertFalse(Files.exists(tempDir.resolve("keys")));
+        }
+
+        @Test
+        void startClusterPinsTheNodeNameToTheClusterDockerName(@TempDir Path tempDir) {
+            when(eks.irsaSigningKey()).thenReturn(false);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+
+            Cluster cluster = new Cluster();
+            cluster.setName("My_Cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+
+            assertTrue(cmdCaptor.getValue().contains("--node-name=floci-aws-eks-my-cluster"), cmdCaptor.getValue()::toString);
         }
 
         @Test
