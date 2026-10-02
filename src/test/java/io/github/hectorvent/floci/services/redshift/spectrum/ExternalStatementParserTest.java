@@ -93,7 +93,16 @@ class ExternalStatementParserTest {
         assertThat(table.columns().get(1).name(), equalTo("payload"));
         assertThat(table.columns().get(1).type(), equalTo("binary"));
         assertThat(table.columns().get(2).name(), equalTo("memo"));
-        assertThat(table.columns().get(2).type(), equalTo("char"));
+        assertThat(table.columns().get(2).type(), equalTo("char(1)"));
+    }
+
+    @Test
+    void defaultsUnsizedCharacterVaryingColumnsToRedshiftLength() {
+        ExternalStatement.CreateTable table = (ExternalStatement.CreateTable) parser.parse(
+                "CREATE EXTERNAL TABLE analytics.events (memo CHARACTER VARYING) "
+                        + "STORED AS PARQUET LOCATION 's3://bucket/events/'").orElseThrow();
+
+        assertThat(table.columns().get(0).type(), equalTo("varchar(256)"));
     }
 
     @Test

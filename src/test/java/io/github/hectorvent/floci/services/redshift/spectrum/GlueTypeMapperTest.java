@@ -48,9 +48,11 @@ class GlueTypeMapperTest {
         assertThat(GlueTypeMapper.canonicalGlueType("INT8"), equalTo("bigint"));
         assertThat(GlueTypeMapper.canonicalGlueType("bool"), equalTo("boolean"));
         assertThat(GlueTypeMapper.canonicalGlueType("character varying(20)"), equalTo("varchar(20)"));
-        assertThat(GlueTypeMapper.canonicalGlueType("CHARACTER VARYING"), equalTo("varchar"));
+        assertThat(GlueTypeMapper.canonicalGlueType("CHARACTER VARYING"), equalTo("varchar(256)"));
+        assertThat(GlueTypeMapper.canonicalGlueType("VARCHAR"), equalTo("varchar(256)"));
         assertThat(GlueTypeMapper.canonicalGlueType("CHARACTER(10)"), equalTo("char(10)"));
-        assertThat(GlueTypeMapper.canonicalGlueType("character"), equalTo("char"));
+        assertThat(GlueTypeMapper.canonicalGlueType("character"), equalTo("char(1)"));
+        assertThat(GlueTypeMapper.canonicalGlueType("CHAR"), equalTo("char(1)"));
         assertThat(GlueTypeMapper.canonicalGlueType("VARBYTE"), equalTo("binary"));
         assertThat(GlueTypeMapper.canonicalGlueType("varbyte(64000)"), equalTo("binary"));
         assertThat(GlueTypeMapper.canonicalGlueType("VARBINARY"), equalTo("binary"));

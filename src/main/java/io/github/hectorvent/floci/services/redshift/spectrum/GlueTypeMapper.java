@@ -17,10 +17,12 @@ public final class GlueTypeMapper {
     public static String canonicalGlueType(String type) {
         String normalized = normalize(type);
         if (isTypeOrSized(normalized, "charactervarying")) {
-            return "varchar" + normalized.substring("charactervarying".length());
+            String length = normalized.substring("charactervarying".length());
+            return "varchar" + (length.isEmpty() ? "(256)" : length);
         }
         if (isTypeOrSized(normalized, "character")) {
-            return "char" + normalized.substring("character".length());
+            String length = normalized.substring("character".length());
+            return "char" + (length.isEmpty() ? "(1)" : length);
         }
         if (isTypeOrSized(normalized, "numeric")) {
             return "decimal" + normalized.substring("numeric".length());
@@ -29,6 +31,8 @@ public final class GlueTypeMapper {
             return "binary";
         }
         return switch (normalized) {
+            case "varchar" -> "varchar(256)";
+            case "char" -> "char(1)";
             case "doubleprecision", "float8" -> "double";
             case "real", "float4" -> "float";
             case "int2" -> "smallint";
