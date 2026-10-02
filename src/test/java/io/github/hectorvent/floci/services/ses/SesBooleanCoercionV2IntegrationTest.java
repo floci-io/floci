@@ -40,7 +40,7 @@ class SesBooleanCoercionV2IntegrationTest {
                 .statusCode(200);
         send("POST", "/v2/email/configuration-sets/" + CS + "/event-destinations", """
                 {"EventDestinationName": "%s",
-                 "EventDestination": {"Enabled": "no", "MatchingEventTypes": ["SEND"],
+                 "EventDestination": {"Enabled": "yes", "MatchingEventTypes": ["SEND"],
                    "SnsDestination": {"TopicArn": "arn:aws:sns:%s:000000000000:coercion"}}}
                 """.formatted(ED, REGION)).statusCode(200);
         created = true;
@@ -94,8 +94,11 @@ class SesBooleanCoercionV2IntegrationTest {
     void eventDestinationEnabled_coercesStringsAndDefaultsToFalse() {
         String path = "/v2/email/configuration-sets/" + CS + "/event-destinations/" + ED;
         String read = "/v2/email/configuration-sets/" + CS + "/event-destinations";
-        get(read).body("EventDestinations[0].Enabled", equalTo(false));
+        // Created with "yes": a create path that ignored the string would read back the false default.
+        get(read).body("EventDestinations[0].Enabled", equalTo(true));
 
+        send("PUT", path, eventDestination("\"Enabled\": \"no\",")).statusCode(200);
+        get(read).body("EventDestinations[0].Enabled", equalTo(false));
         send("PUT", path, eventDestination("\"Enabled\": \"yes\",")).statusCode(200);
         get(read).body("EventDestinations[0].Enabled", equalTo(true));
         send("PUT", path, eventDestination("")).statusCode(200);
