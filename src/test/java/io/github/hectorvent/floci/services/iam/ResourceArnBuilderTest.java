@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
@@ -60,6 +61,47 @@ class ResourceArnBuilderTest {
             when(ctx.getEntityStream()).thenReturn(newIn);
             return null;
         }).when(ctx).setEntityStream(any(InputStream.class));
+    }
+
+    /** A Query-protocol POST, as the AWS SDKs and CLI send STS, SNS and IAM calls. */
+    private void setFormBody(String form) {
+        setJsonBody(form);
+        when(ctx.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
+    }
+
+    // ── STS ──────────────────────────────────────────────────────────────────────
+
+    @Test
+    void stsAssumeRoleIsAuthorizedAgainstTheRoleItNames() {
+        setFormBody("Action=AssumeRole&Version=2011-06-15"
+                + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin&RoleSessionName=robin");
+        String arn = builder.build("sts", ctx, "ap-southeast-1", "729951873967");
+        assertEquals("arn:aws:iam::729951873967:role/Admin", arn);
+    }
+
+    @Test
+    void stsAssumeRoleIgnoresARoleArnInTheUrlOfAFormPost() {
+        // The handler acts on the body's RoleArn, so authorization must check that one, never a
+        // decoy in the query string.
+        queryParams.add("RoleArn", "arn:aws:iam::729951873967:role/Allowed");
+        setFormBody("Action=AssumeRole&Version=2011-06-15"
+                + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin&RoleSessionName=robin");
+        String arn = builder.build("sts", ctx, "ap-southeast-1", "729951873967");
+        assertEquals("arn:aws:iam::729951873967:role/Admin", arn);
+    }
+
+    @Test
+    void sqsBuildsArnFromFormBodyQueueUrl() {
+        setFormBody("Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2Forders&MessageBody=x");
+        String arn = builder.build("sqs", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:orders", arn);
+    }
+
+    @Test
+    void stsActionWithoutARoleIsAuthorizedAgainstEveryResource() {
+        setFormBody("Action=GetSessionToken&Version=2011-06-15");
+        String arn = builder.build("sts", ctx, "us-east-1", "000000000000");
+        assertEquals("*", arn);
     }
 
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
@@ -306,6 +348,13 @@ class ResourceArnBuilderTest {
     }
 
     // ── SNS ─────────────────────────────────────────────────────────────────────
+
+    @Test
+    void snsBuildsArnFromFormBodyTopicArn() {
+        setFormBody("Action=Publish&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A000000000000%3Aalerts&Message=hi");
+        String arn = builder.build("sns", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:sns:us-east-1:000000000000:alerts", arn);
+    }
 
     @Test
     void snsBuildsArnFromJsonTopicArn() {

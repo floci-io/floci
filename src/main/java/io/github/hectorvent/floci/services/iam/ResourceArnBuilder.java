@@ -59,6 +59,7 @@ public class ResourceArnBuilder {
             case "secretsmanager" -> List.of(buildSecretsManagerArn(ctx, region, accountId));
             case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
             case "kms"            -> List.of(buildKmsArn(path, region, accountId));
+            case "sts"            -> List.of(buildStsArn(ctx));
             default               -> List.of("*");
         };
     }
@@ -390,9 +391,23 @@ public class ResourceArnBuilder {
         return slash > 0 ? after.substring(0, slash) : after;
     }
 
+    // ── STS ─────────────────────────────────────────────────────────────────────
+    // AssumeRole and its variants are authorized against the role they name, so a policy can
+    // allow assuming one role and not another.
+    private String buildStsArn(ContainerRequestContext ctx) {
+        String roleArn = firstFormParam(ctx, "RoleArn");
+        return roleArn == null || roleArn.isBlank() ? "*" : roleArn.trim();
+    }
+
+    /**
+     * A Query-protocol parameter, read from the same place the handler reads it. For a form POST
+     * that is the body alone: {@code AwsQueryController} dispatches on the form parameters and never
+     * sees the URL query, so authorizing a URL value would check one resource and act on another.
+     */
     private String firstFormParam(ContainerRequestContext ctx, String name) {
-        // Form params are typically available as query params in REST-Assured / JAX-RS
-        String v = ctx.getUriInfo().getQueryParameters().getFirst(name);
-        return v;
+        if (RequestBodyReader.isForm(ctx)) {
+            return RequestBodyReader.formField(ctx, name);
+        }
+        return ctx.getUriInfo().getQueryParameters().getFirst(name);
     }
 }
