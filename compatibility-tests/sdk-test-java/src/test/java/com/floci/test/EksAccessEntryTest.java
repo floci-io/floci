@@ -39,6 +39,27 @@ class EksAccessEntryTest {
                 assertThat(eks.describeAccessEntry(builder -> builder.clusterName(cluster).principalArn(first))
                         .accessEntry().principalArn()).isEqualTo(first);
                 eks.createAccessEntry(builder -> builder.clusterName(cluster).principalArn(second));
+                String admin = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
+                AssociateAccessPolicyResponse associated = eks.associateAccessPolicy(builder -> builder
+                        .clusterName(cluster).principalArn(second).policyArn(admin)
+                        .accessScope(scope -> scope.type(AccessScopeType.NAMESPACE).namespaces("dev-*", "payments")));
+                assertThat(associated.principalArn()).isEqualTo(second);
+                assertThat(associated.associatedAccessPolicy().associatedAt()).isNotNull();
+                ListAssociatedAccessPoliciesResponse policies = eks.listAssociatedAccessPolicies(builder -> builder
+                        .clusterName(cluster).principalArn(second));
+                assertThat(policies.associatedAccessPolicies()).singleElement().satisfies(policy -> {
+                    assertThat(policy.policyArn()).isEqualTo(admin);
+                    assertThat(policy.accessScope().type()).isEqualTo(AccessScopeType.NAMESPACE);
+                    assertThat(policy.accessScope().namespaces()).containsExactly("dev-*", "payments");
+                });
+                assertThatThrownBy(() -> eks.associateAccessPolicy(builder -> builder.clusterName(cluster)
+                        .principalArn(first).policyArn(admin).accessScope(scope -> scope.type(AccessScopeType.CLUSTER))))
+                        .isInstanceOf(InvalidRequestException.class);
+                eks.disassociateAccessPolicy(builder -> builder.clusterName(cluster).principalArn(second).policyArn(admin));
+                assertThat(eks.listAssociatedAccessPolicies(builder -> builder.clusterName(cluster).principalArn(second))
+                        .associatedAccessPolicies()).isEmpty();
+                assertThatThrownBy(() -> eks.disassociateAccessPolicy(builder -> builder.clusterName(cluster)
+                        .principalArn(second).policyArn(admin))).isInstanceOf(ResourceNotFoundException.class);
                 ListAccessEntriesResponse page = eks.listAccessEntries(builder -> builder.clusterName(cluster).maxResults(1));
                 assertThat(page.accessEntries()).hasSize(1);
                 assertThat(page.nextToken()).isNotBlank();
