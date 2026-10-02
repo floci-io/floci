@@ -180,6 +180,21 @@ class EcrIntegrationTest {
             .body("registryId", not(emptyString()))
             .body("repositoryName", equalTo(REPO))
             .body("imageScanningConfiguration.scanOnPush", equalTo(true));
+
+        given()
+            .header("X-Amz-Target", PREFIX + "PutImageScanningConfiguration")
+            .contentType(CT)
+            .body("""
+                {
+                  "repositoryName": "%s",
+                  "imageScanningConfiguration": { "scanOnPush": "yes" }
+                }
+                """.formatted(REPO))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
     }
 
     @Test

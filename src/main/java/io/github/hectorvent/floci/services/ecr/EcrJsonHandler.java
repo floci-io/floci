@@ -236,7 +236,12 @@ public class EcrJsonHandler {
 
         String repositoryName = request.path("repositoryName").asText(null);
         String registryId = request.path("registryId").asText(null);
-        boolean scanOnPush = scanningConfiguration.path("scanOnPush").asBoolean(false);
+        JsonNode scanOnPushNode = scanningConfiguration.path("scanOnPush");
+        if (!scanOnPushNode.isMissingNode() && !scanOnPushNode.isBoolean()) {
+            throw new AwsException("InvalidParameterException",
+                    "scanOnPush must be a boolean", 400);
+        }
+        boolean scanOnPush = scanOnPushNode.asBoolean(false);
         Repository updated = service.putImageScanningConfiguration(
                 repositoryName, registryId, scanOnPush, region);
 
