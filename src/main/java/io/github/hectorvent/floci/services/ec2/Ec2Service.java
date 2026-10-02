@@ -704,7 +704,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (portForwardManager != null) {
             portForwardManager.setPersister(inst -> {
                 if (inst != null && inst.getRegion() != null && inst.getInstanceId() != null) {
-                    instances.put(key(inst.getRegion(), inst.getInstanceId()), inst);
+                    putInstanceForOwner(key(inst.getRegion(), inst.getInstanceId()), inst);
                 }
             });
         }
@@ -715,27 +715,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         restoreVpcNetworks();
 
         int restored = 0;
-        for (String key : instances.keys()) {
-            Instance instance = instances.get(key).orElse(null);
-            if (!needsMetadataRegistration(instance)) {
-                continue;
-            }
-            try {
-                restoreInstanceFirewall(instance);
-            } catch (Exception e) {
-                LOG.warnv("Could not restore EC2 firewall for {0}: {1}", instance.getInstanceId(), e.getMessage());
-                containerManager.stopForShutdown(instance);
-                instance.setState(InstanceState.stopped());
-                instances.put(key, instance);
-                continue;
-            }
-            if (containerManager.restoreMetadataRegistration(instance)) {
-                instances.put(key, instance);
+        for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
+            if (needsMetadataRegistration(entry.value())
+                    && RequestScopes.callAs(entry.accountId(), () -> restoreInstance(entry))) {
                 restored++;
-                // Container is running: re-reserve host ports and recreate any missing socat sidecars.
-                if (portForwardManager != null) {
-                    portForwardManager.restore(instance);
-                }
             }
         }
         if (restored > 0) {
@@ -748,6 +731,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // Runs after the restore loop, so anything legitimately revived above is already
         // accounted for and only genuine leftovers are left to collect.
         containerManager.reconcileOrphanedContainers(this::instanceContainerStillWanted);
+    }
+
+    /**
+     * Runs as the instance's own account, so the security groups, prefix lists and port-forward
+     * writes it resolves along the way come from that account rather than the default one.
+     */
+    private boolean restoreInstance(AccountAwareStorageBackend.AccountEntry<Instance> entry) {
+        Instance instance = entry.value();
+        try {
+            restoreInstanceFirewall(instance);
+        } catch (Exception e) {
+            LOG.warnv("Could not restore EC2 firewall for {0}: {1}", instance.getInstanceId(), e.getMessage());
+            containerManager.stopForShutdown(instance);
+            instance.setState(InstanceState.stopped());
+            putForOwner(instances, entry, instance);
+            return false;
+        }
+        if (!containerManager.restoreMetadataRegistration(instance)) {
+            return false;
+        }
+        putForOwner(instances, entry, instance);
+        // Container is running: re-reserve host ports and recreate any missing socat sidecars.
+        if (portForwardManager != null) {
+            portForwardManager.restore(instance);
+        }
+        return true;
     }
 
     private void restoreAttachedVolumesOnStartup() {
@@ -845,14 +854,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (vpcNetworkManager == null || !vpcNetworkManager.enabled()) {
             return;
         }
-        vpcNetworkManager.reconcileOrphans((region, vpcId) -> vpcs.get(key(region, vpcId)).isPresent());
-        for (String storageKey : vpcs.keys()) {
-            vpcs.get(storageKey).ifPresent(vpc ->
-                    vpcNetworkManager.declareVpc(vpc.getRegion(), vpc.getVpcId(), vpc.getCidrBlock()));
+        vpcNetworkManager.reconcileOrphans((region, vpcId) -> findAnyVpcEntry(region, vpcId).isPresent());
+        // declareVpc is first-wins on overlapping CIDRs, so declare in a stable order, default account first.
+        List<AccountAwareStorageBackend.AccountEntry<Vpc>> restoredVpcs = new ArrayList<>(entriesOfEveryAccount(vpcs));
+        restoredVpcs.sort(Comparator
+                .comparing((AccountAwareStorageBackend.AccountEntry<Vpc> entry) -> !defaultAccountId.equals(entry.accountId()))
+                .thenComparing(entry -> String.valueOf(entry.accountId()))
+                .thenComparing(AccountAwareStorageBackend.AccountEntry::key));
+        for (AccountAwareStorageBackend.AccountEntry<Vpc> entry : restoredVpcs) {
+            Vpc vpc = entry.value();
+            vpcNetworkManager.declareVpc(vpc.getRegion(), vpc.getVpcId(), vpc.getCidrBlock());
         }
-        for (String storageKey : subnets.keys()) {
-            subnets.get(storageKey).ifPresent(subnet -> vpcNetworkManager.declareSubnet(
-                    subnet.getRegion(), subnet.getVpcId(), subnet.getSubnetId(), subnet.getCidrBlock()));
+        for (AccountAwareStorageBackend.AccountEntry<Subnet> entry : entriesOfEveryAccount(subnets)) {
+            Subnet subnet = entry.value();
+            vpcNetworkManager.declareSubnet(
+                    subnet.getRegion(), subnet.getVpcId(), subnet.getSubnetId(), subnet.getCidrBlock());
         }
         reserveRestoredPrivateIps();
     }
@@ -872,8 +888,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private void reserveRestoredPrivateIps() {
         int reserved = 0;
         int skipped = 0;
-        for (String storageKey : instances.keys()) {
-            Instance instance = instances.get(storageKey).orElse(null);
+        for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
+            Instance instance = entry.value();
             if (instance == null || instance.getSubnetId() == null
                     || instance.getPrivateIpAddress() == null
                     || instance.getState() == null
@@ -892,6 +908,58 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             LOG.debugv("Re-reserved {0} private address(es) held by restored instances; {1} could not be "
                     + "reserved", String.valueOf(reserved), String.valueOf(skipped));
         }
+    }
+
+    /**
+     * Every stored entry, whichever account owns it. Startup restore and shutdown run outside
+     * any request, where an account-aware {@code keys()} sees only the default account.
+     * A pre-multi-account key is migrated to the default account it is reported under, so it is
+     * listed once and later writes and deletes reach the only copy.
+     */
+    private static <T> List<AccountAwareStorageBackend.AccountEntry<T>> entriesOfEveryAccount(
+            StorageBackend<String, T> store) {
+        if (store instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<T> accountAware = (AccountAwareStorageBackend<T>) rawAccountAware;
+            Map<String, AccountAwareStorageBackend.AccountEntry<T>> unique = new LinkedHashMap<>();
+            Set<String> legacy = new HashSet<>();
+            for (AccountAwareStorageBackend.AccountEntry<T> scanned : accountAware.scanAllAccountEntries(key -> true)) {
+                String owned = scanned.accountId() + "/" + scanned.key();
+                if (unique.putIfAbsent(owned, scanned) != null
+                        || accountAware.getForAccount(scanned.accountId(), scanned.key()).isEmpty()) {
+                    legacy.add(owned);
+                }
+            }
+            List<AccountAwareStorageBackend.AccountEntry<T>> entries = new ArrayList<>();
+            for (Map.Entry<String, AccountAwareStorageBackend.AccountEntry<T>> listed : unique.entrySet()) {
+                AccountAwareStorageBackend.AccountEntry<T> scanned = listed.getValue();
+                if (!legacy.contains(listed.getKey())) {
+                    entries.add(scanned);
+                    continue;
+                }
+                // Moves the legacy copy under its account, or drops it when a scoped twin already exists.
+                accountAware.getForAccountMigratingLegacyKeys(scanned.accountId(), scanned.key(), List.of(), value -> true)
+                        .ifPresent(value -> entries.add(
+                                new AccountAwareStorageBackend.AccountEntry<>(scanned.accountId(), scanned.key(), value)));
+            }
+            return entries;
+        }
+        List<AccountAwareStorageBackend.AccountEntry<T>> entries = new ArrayList<>();
+        for (String key : store.keys()) {
+            store.get(key).ifPresent(value -> entries.add(new AccountAwareStorageBackend.AccountEntry<>(null, key, value)));
+        }
+        return entries;
+    }
+
+    private static <T> void putForOwner(StorageBackend<String, T> store,
+            AccountAwareStorageBackend.AccountEntry<T> entry, T value) {
+        if (store instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<T> accountAware = (AccountAwareStorageBackend<T>) rawAccountAware;
+            accountAware.putForAccount(entry.accountId(), entry.key(), value);
+            return;
+        }
+        store.put(entry.key(), value);
     }
 
     private void declareVpcNetwork(String region, String vpcId, String cidrBlock) {
@@ -3600,8 +3668,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (config.services().ec2().mock()) {
             return;
         }
-        for (String storeKey : Set.copyOf(instances.keys())) {
-            Instance inst = instances.get(storeKey).orElse(null);
+        for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
+            Instance inst = entry.value();
             if (inst == null || inst.getDockerContainerId() == null
                     || inst.getState() == null || !"running".equals(inst.getState().getName())) {
                 continue;
@@ -3609,7 +3677,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             try {
                 containerManager.stopForShutdown(inst);
                 inst.setState(InstanceState.stopped());
-                instances.put(storeKey, inst);
+                putForOwner(instances, entry, inst);
             } catch (Exception e) {
                 LOG.warnv("Failed to stop EC2 instance container {0} on shutdown: {1}",
                         inst.getDockerContainerId(), e.getMessage());
@@ -8028,6 +8096,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             return accountAware.findAnyAccount(storageKey);
         }
         return instances.get(storageKey);
+    }
+
+    /**
+     * The port-forward persister also runs on container executor threads, outside any request,
+     * where a plain put would copy another account's instance into the default account.
+     */
+    private void putInstanceForOwner(String storageKey, Instance instance) {
+        if (instances instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Instance> accountAware = (AccountAwareStorageBackend<Instance>) rawAccountAware;
+            Optional<AccountAwareStorageBackend.OwnedEntry<Instance>> owner = accountAware.findAnyAccountEntry(storageKey);
+            if (owner.isPresent()) {
+                accountAware.putForAccount(owner.get().account(), storageKey, instance);
+                return;
+            }
+        }
+        instances.put(storageKey, instance);
     }
 
     private Optional<AccountAwareStorageBackend.OwnedEntry<Vpc>> findAnyVpcEntry(String region, String vpcId) {
