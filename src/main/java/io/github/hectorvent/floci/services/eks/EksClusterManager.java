@@ -235,6 +235,9 @@ public class EksClusterManager
 
     @Override
     public List<DnsForwardingRule> rulesFor(String accountId, String region, String vpcId) {
+        if (vpcId == null || vpcId.isBlank()) {
+            return List.of();
+        }
         List<DnsForwardingRule> rules = new ArrayList<>();
         for (ClusterNodeRecord record : clusterNodeInstances.values()) {
             if (accountId != null && !accountId.isBlank() && !accountId.equals(record.accountId())) {
@@ -245,7 +248,7 @@ public class EksClusterManager
             }
             Instance inst = record.instance();
             if (inst != null && inst.getPrivateDnsName() != null && !inst.getPrivateDnsName().isBlank()) {
-                if (inst.getVpcId() == null || vpcId == null || inst.getVpcId().equals(vpcId)) {
+                if (vpcId.equals(inst.getVpcId())) {
                     rules.add(DnsForwardingRule.system(inst.getPrivateDnsName()));
                 }
             }

@@ -1512,6 +1512,17 @@ class EksClusterManagerTest {
             // Wrong account or VPC returns no rules
             assertTrue(manager.rulesFor("999999999999", "us-east-1", "vpc-12345678").isEmpty());
             assertTrue(manager.rulesFor("123456789012", "us-east-1", "vpc-other").isEmpty());
+            assertTrue(manager.rulesFor("123456789012", "us-east-1", null).isEmpty());
+            assertTrue(manager.rulesFor("123456789012", "us-east-1", "").isEmpty());
+
+            // Cluster without VPC does not emit rules for any VPC
+            Cluster clusterNoVpc = new Cluster();
+            clusterNoVpc.setName("novpc-cluster");
+            clusterNoVpc.setArn("arn:aws:eks:us-east-1:123456789012:cluster/novpc-cluster");
+            manager.registerClusterNodeInstance(clusterNoVpc, "container-novpc");
+            assertTrue(manager.rulesFor("123456789012", "us-east-1", "vpc-12345678").stream()
+                    .noneMatch(r -> r.domainName().contains("novpc-cluster")));
+            manager.unregisterMetadataEndpoint(clusterNoVpc);
 
             // After unregistering, rule disappears
             manager.unregisterMetadataEndpoint(cluster);
