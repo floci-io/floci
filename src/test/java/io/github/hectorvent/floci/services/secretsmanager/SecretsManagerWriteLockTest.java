@@ -1,6 +1,12 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -9,10 +15,16 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiPredicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Every write to a secret goes through the same per-secret monitor, including the writes a primary
@@ -57,6 +69,54 @@ class SecretsManagerWriteLockTest {
     }
 
     @Test
+    void deletingASecretWaitsForAnInFlightUpdate() throws Exception {
+        storage.parkOn(REGION + "::" + SECRET_NAME);
+        Watched update = start("update", () ->
+                service.updateSecret(SECRET_NAME, "from-update", null, REGION));
+        assertTrue(storage.awaitEntered(), "UpdateSecret never reached the store write");
+
+        Watched delete = start("delete", () -> service.deleteSecret(SECRET_NAME, null, true, REGION));
+        assertTrue(delete.awaitBlocked(), "DeleteSecret did not wait for the in-flight UpdateSecret");
+
+        storage.release();
+        update.awaitSuccess();
+        delete.awaitSuccess();
+
+        // The delete ran after the update's write, so the secret stays deleted.
+        assertThrows(AwsException.class, () -> service.describeSecret(SECRET_NAME, REGION));
+    }
+
+    @Test
+    void deletingASecretWaitsForTheFinalSaveOfARotation() throws Exception {
+        LambdaService lambda = mock(LambdaService.class);
+        when(lambda.getFunction(anyString(), anyString())).thenReturn(new LambdaFunction());
+        InvokeResult ok = new InvokeResult();
+        ok.setStatusCode(200);
+        when(lambda.invoke(anyString(), anyString(), any(byte[].class), any())).thenReturn(ok);
+        SecretsManagerService rotating = new SecretsManagerService(
+                storage, 30, new RegionResolver(REGION, "000000000000"), lambda, new ObjectMapper());
+        try {
+            // The rotation's last write is the one that records LastRotatedDate.
+            storage.parkOn((key, secret) -> secret.getLastRotatedDate() != null);
+            rotating.rotateSecret(SECRET_NAME, "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                    "arn:aws:lambda:us-east-1:000000000000:function:rotator", null, true, REGION, functionArn -> { });
+            assertTrue(storage.awaitEntered(), "The rotation never reached its final save");
+
+            Watched delete = start("delete", () -> rotating.deleteSecret(SECRET_NAME, null, true, REGION));
+            assertTrue(delete.awaitBlocked(), "DeleteSecret did not wait for the rotation's final save");
+
+            storage.release();
+            delete.awaitSuccess();
+
+            // Deleted after the final save, not before it, so the save cannot bring the secret back.
+            assertThrows(AwsException.class, () -> rotating.describeSecret(SECRET_NAME, REGION));
+        } finally {
+            // Rotation workers are not daemon threads; leave none behind.
+            rotating.shutdown();
+        }
+    }
+
+    @Test
     void promotingAReplicaWaitsForAnInFlightSyncFromItsPrimary() throws Exception {
         service.replicateSecretToRegions(SECRET_NAME,
                 List.of(new SecretsManagerService.ReplicaRegion(REPLICA_REGION, null)), false, REGION);
@@ -89,15 +149,19 @@ class SecretsManagerWriteLockTest {
         return watched;
     }
 
-    /** Parks the first write to one chosen key so another thread can race the caller holding it. */
+    /** Parks the first matching write so another thread can race the caller holding it. */
     private static final class ParkingStorage extends InMemoryStorage<String, Secret> {
 
         private final CountDownLatch entered = new CountDownLatch(1);
         private final CountDownLatch released = new CountDownLatch(1);
-        private volatile String parkKey;
+        private volatile BiPredicate<String, Secret> parkWhen;
 
         void parkOn(String key) {
-            this.parkKey = key;
+            parkOn((written, secret) -> written.equals(key));
+        }
+
+        void parkOn(BiPredicate<String, Secret> condition) {
+            this.parkWhen = condition;
         }
 
         boolean awaitEntered() throws InterruptedException {
@@ -110,8 +174,9 @@ class SecretsManagerWriteLockTest {
 
         @Override
         public void put(String key, Secret value) {
-            if (key.equals(parkKey)) {
-                parkKey = null;
+            BiPredicate<String, Secret> condition = parkWhen;
+            if (condition != null && condition.test(key, value)) {
+                parkWhen = null;
                 entered.countDown();
                 try {
                     released.await(5, TimeUnit.SECONDS);
