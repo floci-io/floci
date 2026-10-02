@@ -91,6 +91,19 @@ class SesBooleanCoercionV2IntegrationTest {
     }
 
     @Test
+    void createConfigurationSet_emptyReputationOptions_disablesMetrics() {
+        // Without ReputationOptions the metrics stay on; an empty block means the member is false.
+        send("POST", "/v2/email/configuration-sets", """
+                {"ConfigurationSetName": "coercion-cs-empty", "ReputationOptions": {}}
+                """).statusCode(200);
+        get("/v2/email/configuration-sets/coercion-cs-empty")
+                .body("ReputationOptions.ReputationMetricsEnabled", equalTo(false));
+        send("POST", "/v2/email/configuration-sets", """
+                {"ConfigurationSetName": "coercion-cs-null", "ReputationOptions": {"ReputationMetricsEnabled": null}}
+                """).statusCode(400).body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
     void eventDestinationEnabled_coercesStringsAndDefaultsToFalse() {
         String path = "/v2/email/configuration-sets/" + CS + "/event-destinations/" + ED;
         String read = "/v2/email/configuration-sets/" + CS + "/event-destinations";

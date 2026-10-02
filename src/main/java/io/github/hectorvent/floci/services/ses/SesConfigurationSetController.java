@@ -36,7 +36,6 @@ import org.jboss.logging.Logger;
 
 import java.util.List;
 
-import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBoolean;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrFalse;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseOptionString;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseSuppressedReasons;
@@ -113,10 +112,8 @@ public class SesConfigurationSetController {
             JsonNode reputationNode = request.path("ReputationOptions");
             if (!reputationNode.isMissingNode() && !reputationNode.isNull()) {
                 requireOptionObject(reputationNode);
-                Boolean rme = parseReputationMetricsEnabled(reputationNode.path("ReputationMetricsEnabled"));
-                if (rme != null) {
-                    cs.setReputationMetricsEnabled(rme);
-                }
+                cs.setReputationMetricsEnabled(
+                        coerceBooleanOrFalse(reputationNode.path("ReputationMetricsEnabled")));
             }
             JsonNode trackingNode = request.path("TrackingOptions");
             if (!trackingNode.isMissingNode() && !trackingNode.isNull()) {
@@ -340,13 +337,6 @@ public class SesConfigurationSetController {
         if (!node.isObject()) {
             throw new AwsException("SerializationException", "Expected null", 400);
         }
-    }
-
-    private static Boolean parseReputationMetricsEnabled(JsonNode node) {
-        if (node.isMissingNode() || node.isNull()) {
-            return null;
-        }
-        return coerceBoolean(node);
     }
 
     // Enabled takes the shared SES v2 boolean coercion, which Jackson's own binding does not match.
