@@ -3213,6 +3213,13 @@ public interface EmulatorConfig {
         String endpointMode();
 
         /**
+         * Hostname advertised for {@code endpoint-mode=host} endpoints instead of {@code localhost}, for
+         * clients on other machines. It is also added to the k3s server certificate as a SAN, so the
+         * endpoint still verifies against the cluster CA.
+         */
+        Optional<String> endpointHost();
+
+        /**
          * When true, wires a token-authentication webhook into k3s so that the bearer token
          * produced by {@code aws eks get-token} is validated by Floci and mapped to cluster-admin.
          * This makes the native {@code aws eks update-kubeconfig} + {@code kubectl} flow work.
