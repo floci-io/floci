@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentialsServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheMemcachedService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
@@ -101,6 +102,7 @@ class EmulatorLifecycleTest {
     @Mock private io.github.hectorvent.floci.services.elbv2.ElbV2Service elbV2Service;
     @Mock private io.github.hectorvent.floci.services.elb.ElbClassicService elbClassicService;
     @Mock private EcsService ecsService;
+    @Mock private EksService eksService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
     @Mock private KinesisEventSourcePoller kinesisPoller;
@@ -159,7 +161,7 @@ class EmulatorLifecycleTest {
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, containerTeardowns, persistentPathValidator,
-                dynamoDbRuntime, redshiftZeroEtlConsumer);
+                dynamoDbRuntime, redshiftZeroEtlConsumer, eksService);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(java.util.Collections.emptyIterator());
     }
@@ -276,6 +278,48 @@ class EmulatorLifecycleTest {
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(elbV2Service).restorePersistedRuntime();
         inOrder.verify(ecsService).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresPersistedEksClustersAtBootAfterStorageLoad() {
+        // EksService is created lazily, and creating it is what restarts each persisted cluster's
+        // k3s container. Without this call a restart leaves every cluster down until the first EKS
+        // request.
+        stubStorageConfig();
+        when(eksServiceConfig.enabled()).thenReturn(true);
+        when(eksServiceConfig.mock()).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, eksService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(eksService).restorePersistedRuntime();
+    }
+
+    @Test
+    void leavesEksUntouchedAtBootWhenEksIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(eksService, Mockito.never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void leavesEksUntouchedAtBootInMockMode() {
+        stubStorageConfig();
+        when(eksServiceConfig.enabled()).thenReturn(true);
+        when(eksServiceConfig.mock()).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(eksService, Mockito.never()).restorePersistedRuntime();
     }
 
     @Test

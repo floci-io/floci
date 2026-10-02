@@ -149,6 +149,20 @@ public class EksService implements TagHandler, ResourceProvider {
                 oidcService, accessEntries, null, null);
     }
 
+    /**
+     * Called by {@code EmulatorLifecycle} once storage has loaded, like
+     * {@code EcsService#restorePersistedRuntime}. CDI creates this bean on first use, and creating it
+     * runs {@link #init()}, which restarts each persisted cluster's k3s container. Without this call
+     * the bean was first created by an EKS request, so after a Floci restart no cluster came back
+     * (and its workloads stayed down) until someone called the EKS API.
+     */
+    public void restorePersistedRuntime() {
+        int persistedClusters = allClusterEntries().size();
+        if (persistedClusters > 0) {
+            LOG.infov("Found {0} persisted EKS cluster record(s)", persistedClusters);
+        }
+    }
+
     @PostConstruct
     public void init() {
         backfillOidcIdentities();

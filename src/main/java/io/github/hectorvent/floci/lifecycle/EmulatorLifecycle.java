@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentialsServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
 import io.github.hectorvent.floci.services.amazonmq.container.RabbitMqManager;
 import io.github.hectorvent.floci.services.kinesisanalytics.container.FlinkContainerManager;
@@ -110,6 +111,7 @@ public class EmulatorLifecycle {
     private final StepFunctionsService stepFunctionsService;
     private final Instance<ContainerTeardown> containerTeardowns;
     private final PersistentPathValidator persistentPathValidator;
+    private final EksService eksService;
     private final DynamoDbRuntime dynamoDbRuntime;
     private final RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer;
 
@@ -151,7 +153,8 @@ public class EmulatorLifecycle {
                              Instance<ContainerTeardown> containerTeardowns,
                              PersistentPathValidator persistentPathValidator,
                              DynamoDbRuntime dynamoDbRuntime,
-                             RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer) {
+                             RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer,
+                             EksService eksService) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -189,6 +192,7 @@ public class EmulatorLifecycle {
         this.stepFunctionsService = stepFunctionsService;
         this.containerTeardowns = containerTeardowns;
         this.persistentPathValidator = persistentPathValidator;
+        this.eksService = eksService;
         this.dynamoDbRuntime = dynamoDbRuntime;
         this.redshiftZeroEtlConsumer = redshiftZeroEtlConsumer;
     }
@@ -266,6 +270,11 @@ public class EmulatorLifecycle {
         // After the load balancers: the reconciler registers the tasks it starts as their targets.
         if (config.services().ecs().enabled()) {
             ecsService.restorePersistedRuntime();
+        }
+        // As for ECS: creating EksService is what restarts each persisted cluster's k3s container,
+        // so a cluster comes back at startup, not on the first EKS request.
+        if (config.services().eks().enabled() && !config.services().eks().mock()) {
+            eksService.restorePersistedRuntime();
         }
 
         if (isMetadataServerNeeded()) {
