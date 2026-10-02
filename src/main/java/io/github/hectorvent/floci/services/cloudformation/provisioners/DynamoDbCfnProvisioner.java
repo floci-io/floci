@@ -201,8 +201,10 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
 
         Scope scope = new Scope(ctx.accountId(), region);
         TableDefinition table;
+        boolean created = false;
         try {
             table = dynamoDb.tables().createTable(scope, tableName, keySchema, attrDefs, null, null, gsis, lsis);
+            created = true;
         } catch (AwsException e) {
             if (!"ResourceInUseException".equals(e.getErrorCode())) {
                 throw e;
@@ -210,62 +212,89 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             table = dynamoDb.tables().describeTable(scope, tableName);
         }
 
-        // TTL is read when the template declares it or an in-place update may have removed it, so
-        // UpdateTimeToLive is called only when something differs. A rename of an enabled TTL
-        // attribute fails here, and the rollback snapshot is taken here, before anything changes.
-        boolean inPlaceUpdate = ctx.reusesPriorEntity(tableName);
-        TimeToLive currentTtl = null;
-        if (ttlDeclared || inPlaceUpdate) {
-            currentTtl = dynamoDb.tables().timeToLive(scope, tableName);
-            requireTimeToLiveChangeAllowed(currentTtl, desiredTtl);
-        }
-        Map<String, String> currentTags = dynamoDb.tables().listTagsOfResource(scope, table.getTableArn());
-        if (inPlaceUpdate && TABLE.equals(r.getResourceType())) {
-            snapshotBeforeUpdate(r, scope, tableName, table, currentTags, currentTtl);
-        }
+        try {
+            // TTL is read when the template declares it or an in-place update may have removed it, so
+            // UpdateTimeToLive is called only when something differs. A rename of an enabled TTL
+            // attribute fails here, and the rollback snapshot is taken here, before anything changes.
+            // A table this attempt created has no prior state to snapshot; a failure deletes it instead.
+            boolean inPlaceUpdate = !created && ctx.reusesPriorEntity(tableName);
+            TimeToLive currentTtl = null;
+            if (ttlDeclared || inPlaceUpdate) {
+                currentTtl = dynamoDb.tables().timeToLive(scope, tableName);
+                requireTimeToLiveChangeAllowed(currentTtl, desiredTtl);
+            }
+            Map<String, String> currentTags = dynamoDb.tables().listTagsOfResource(scope, table.getTableArn());
+            if (inPlaceUpdate && TABLE.equals(r.getResourceType())) {
+                snapshotBeforeUpdate(r, scope, tableName, table, currentTags, currentTtl);
+            }
 
-        reconcileTags(scope, table.getTableArn(), currentTags,
-                parseCfnTags(props != null ? props.get("Tags") : null, engine));
+            reconcileTags(scope, table.getTableArn(), currentTags,
+                    parseCfnTags(props != null ? props.get("Tags") : null, engine));
 
-        // A template that declares StreamSpecification wants a stream. Unlike the DynamoDB API,
-        // the CloudFormation property carries no StreamEnabled flag: declaring the block IS the
-        // request, so its presence alone turns the stream on. Without this the table is created
-        // streamless and an event source mapping polls its ARN forever.
-        //
-        // Removing the block on an update is the inverse request: the stream is reconciled off,
-        // or a table updated out of streaming would keep emitting records to whatever still holds
-        // its ARN.
-        JsonNode streamSpec = props != null ? props.path("StreamSpecification") : null;
-        if (streamSpec != null && streamSpec.isObject()) {
-            String viewType = streamSpec.has("StreamViewType")
-                    ? engine.resolve(streamSpec.get("StreamViewType"))
-                    : null;
-            table = dynamoDb.tables().enableStream(scope, tableName, viewType);
-        } else if (table.isStreamEnabled()) {
-            table = dynamoDb.tables().disableStream(scope, tableName);
-        }
+            // A template that declares StreamSpecification wants a stream. Unlike the DynamoDB API,
+            // the CloudFormation property carries no StreamEnabled flag: declaring the block IS the
+            // request, so its presence alone turns the stream on. Without this the table is created
+            // streamless and an event source mapping polls its ARN forever.
+            //
+            // Removing the block on an update is the inverse request: the stream is reconciled off,
+            // or a table updated out of streaming would keep emitting records to whatever still holds
+            // its ARN.
+            JsonNode streamSpec = props != null ? props.path("StreamSpecification") : null;
+            if (streamSpec != null && streamSpec.isObject()) {
+                String viewType = streamSpec.has("StreamViewType")
+                        ? engine.resolve(streamSpec.get("StreamViewType"))
+                        : null;
+                table = dynamoDb.tables().enableStream(scope, tableName, viewType);
+            } else if (table.isStreamEnabled()) {
+                table = dynamoDb.tables().disableStream(scope, tableName);
+            }
 
-        // TimeToLiveSpecification is reconciled like the stream: declaring it enabled turns TTL on
-        // for the attribute, and Enabled false or a block removed on an update turns it off.
-        if (currentTtl != null) {
-            reconcileTimeToLive(scope, tableName, currentTtl, desiredTtl);
-        }
+            // TimeToLiveSpecification is reconciled like the stream: declaring it enabled turns TTL on
+            // for the attribute, and Enabled false or a block removed on an update turns it off.
+            if (currentTtl != null) {
+                reconcileTimeToLive(scope, tableName, currentTtl, desiredTtl);
+            }
 
-        r.setPhysicalId(tableName);
-        r.getAttributes().put("Arn", table.getTableArn());
-        // Only the global table's registry schema declares TableId read-only; a plain table exposes
-        // Arn and StreamArn alone, so publishing it there would accept a Fn::GetAtt CloudFormation
-        // rejects. DescribeTable reports the same value, so Fn::GetAtt and the API agree.
-        if (GLOBAL_TABLE.equals(r.getResourceType())) {
-            r.getAttributes().put("TableId", table.getTableId());
-            reconcileGlobalTableReplicas(tableName, props, ctx);
+            r.setPhysicalId(tableName);
+            r.getAttributes().put("Arn", table.getTableArn());
+            // Only the global table's registry schema declares TableId read-only; a plain table exposes
+            // Arn and StreamArn alone, so publishing it there would accept a Fn::GetAtt CloudFormation
+            // rejects. DescribeTable reports the same value, so Fn::GetAtt and the API agree.
+            if (GLOBAL_TABLE.equals(r.getResourceType())) {
+                r.getAttributes().put("TableId", table.getTableId());
+                reconcileGlobalTableReplicas(tableName, props, ctx);
+            }
+            // Only a live stream has an ARN worth handing to Fn::GetAtt. Publishing one unconditionally
+            // resolved to nothing on a streamless table; publishing the retained ARN of a stream that
+            // has since been switched off would resolve to something no longer running. An update
+            // starts from the previous attributes, so the stale entry has to be removed rather than
+            // merely left unwritten.
+            publishStreamArn(r, table);
+        } catch (RuntimeException failure) {
+            // A table this attempt created would outlive the failure otherwise: the create rollback
+            // deletes only a resource that carries its physical id, and a replacing update puts the
+            // previous resource back. An adopted table, or one an in-place update changes, is kept.
+            if (created) {
+                deleteCreatedTable(r, scope, tableName);
+            }
+            throw failure;
         }
-        // Only a live stream has an ARN worth handing to Fn::GetAtt. Publishing one unconditionally
-        // resolved to nothing on a streamless table; publishing the retained ARN of a stream that
-        // has since been switched off would resolve to something no longer running. An update
-        // starts from the previous attributes, so the stale entry has to be removed rather than
-        // merely left unwritten.
-        publishStreamArn(r, table);
+    }
+
+    /**
+     * Deletes the table a failed provision created. A delete that fails leaves the table owned by
+     * the resource, so the stack's create rollback retries it.
+     */
+    private void deleteCreatedTable(StackResource r, Scope scope, String tableName) {
+        try {
+            CfnDeletes.safeDelete("DynamoDB table", tableName,
+                    () -> dynamoDb.tables().deleteTable(scope, tableName), "ResourceNotFoundException");
+        } catch (RuntimeException cleanupFailure) {
+            LOG.warnv("Could not delete DynamoDB table {0} created by the failed provision of {1}: {2}",
+                    tableName, r.getLogicalId(), cleanupFailure.getMessage());
+            r.setPhysicalId(tableName);
+            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+        }
     }
 
     private static void publishStreamArn(StackResource r, TableDefinition table) {
@@ -336,6 +365,16 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         snapshot.put("ttlEnabled", ttl.enabled());
         snapshot.put("ttlAttributeName", ttl.attributeName());
         r.getAttributes().put(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    /**
+     * An in-place update that failed after its snapshot may already have changed the table, so the
+     * engine keeps this attempt for {@link #rollbackUpdate} instead of putting the previous resource
+     * back over it. A failure before the snapshot changed nothing and is left to the engine.
+     */
+    @Override
+    public boolean retainsFailedUpdateState(StackResource resource) {
+        return resource.getAttributes().containsKey(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);
     }
 
     /**
