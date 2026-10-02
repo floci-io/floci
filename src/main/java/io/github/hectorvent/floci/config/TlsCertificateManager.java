@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
@@ -163,8 +164,8 @@ public class TlsCertificateManager implements Resettable {
             return false;
         }
         try {
-            X509Certificate cert = generator.parseCertificate(Files.readString(certFile));
-            keyPair = new KeyPair(cert.getPublicKey(), generator.parsePrivateKey(Files.readString(keyFile)));
+            X509Certificate cert = Pem.parseCertificate(Files.readString(certFile));
+            keyPair = new KeyPair(cert.getPublicKey(), Pem.parsePrivateKey(Files.readString(keyFile)));
             keyAlgorithm = generator.detectKeyAlgorithm(cert.getPublicKey());
             Set<String> sans = sansOf(cert);
 
@@ -215,7 +216,7 @@ public class TlsCertificateManager implements Resettable {
         listenerBehindFiles = true;
         reloadServer();
         listenerBehindFiles = false;
-        knownHostnames = sansOf(generator.parseCertificate(issued.certificatePem()));
+        knownHostnames = sansOf(Pem.parseCertificate(issued.certificatePem()));
     }
 
     /** Re-reads the files into the registry and swaps the listener; throws when either did not happen. */

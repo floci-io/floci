@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.config;
 
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.junit.jupiter.api.AfterEach;
@@ -86,7 +87,7 @@ class ContainerCaBundleTest {
         List<X509Certificate> certificates = parseAll(bundle.getBytes());
         int size = certificates.size();
         assertEquals(ca.certificate(), certificates.get(size - 1));
-        assertEquals(new CertificateGenerator().parseCertificate(leaf.certificatePem()), certificates.get(size - 2));
+        assertEquals(Pem.parseCertificate(leaf.certificatePem()), certificates.get(size - 2));
     }
 
     @Test

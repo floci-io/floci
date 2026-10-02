@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iot;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.iot.IotService.RegisteredDevice;
@@ -59,8 +60,6 @@ import static org.mockito.Mockito.when;
  * evaluation is given, and that a refusal touches nothing else.
  */
 class IotMqttBrokerDeviceVerificationTest {
-
-    private static final CertificateGenerator GENERATOR = new CertificateGenerator();
 
     private static Vertx vertx;
     private static FlociCertificateAuthority ca;
@@ -318,7 +317,7 @@ class IotMqttBrokerDeviceVerificationTest {
     }
 
     private static X509Certificate certificate(CertificateGenerator.GeneratedCertificate leaf) {
-        return GENERATOR.parseCertificate(leaf.certificatePem());
+        return Pem.parseCertificate(leaf.certificatePem());
     }
 
     private static SSLContext sslContext(KeyManager[] clientKeys) throws Exception {
@@ -335,8 +334,8 @@ class IotMqttBrokerDeviceVerificationTest {
     private static KeyManager[] keyManagers(CertificateGenerator.GeneratedCertificate leaf) throws Exception {
         KeyStore keys = KeyStore.getInstance(KeyStore.getDefaultType());
         keys.load(null, null);
-        keys.setKeyEntry("device", GENERATOR.parsePrivateKey(leaf.privateKeyPem()), new char[0],
-                new Certificate[] {GENERATOR.parseCertificate(leaf.certificatePem())});
+        keys.setKeyEntry("device", Pem.parsePrivateKey(leaf.privateKeyPem()), new char[0],
+                new Certificate[] {Pem.parseCertificate(leaf.certificatePem())});
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         kmf.init(keys, new char[0]);
         return kmf.getKeyManagers();

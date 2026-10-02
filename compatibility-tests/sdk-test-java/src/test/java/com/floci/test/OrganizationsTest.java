@@ -61,14 +61,16 @@ public class OrganizationsTest {
         // 1. Create the organization.
         Organization organization = client.createOrganization(r -> r.featureSet(OrganizationFeatureSet.ALL))
                 .organization();
-        assertThat(organization.id()).matches("o-[a-z0-9]{10}");
-        assertThat(organization.featureSet()).isEqualTo(OrganizationFeatureSet.ALL);
-        assertThat(organization.arn()).startsWith("arn:aws:organizations::");
-        assertThat(organization.masterAccountId()).isNotBlank();
-
         String managementAccountId = organization.masterAccountId();
 
+        // Every assertion runs inside the try, so a failure still deletes the organization: one left
+        // behind makes the caller its management account for every later test in the run.
         try {
+            assertThat(organization.id()).matches("o-[a-z0-9]{10}");
+            assertThat(organization.featureSet()).isEqualTo(OrganizationFeatureSet.ALL);
+            assertThat(organization.arn()).startsWith("arn:aws:organizations::");
+            assertThat(managementAccountId).isNotBlank();
+
             assertThat(client.describeOrganization().organization().id()).isEqualTo(organization.id());
 
             // 2. The root exists with no policy types enabled, and carries the AWS-managed

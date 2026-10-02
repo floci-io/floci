@@ -226,7 +226,7 @@ public class SesAccountController {
             JsonNode enabledNode = request.path("AutoWarmupEnabled");
             // AutoWarmupEnabled has a default of false: the SDK omits it when false, so a missing
             // member is treated as false rather than rejected. A present value goes through the
-            // shared SES v2 boolean coercion (string→true, null/number/container→SerializationException).
+            // shared SES v2 boolean coercion.
             boolean enabled = enabledNode.isMissingNode() ? false : coerceBoolean(enabledNode);
             accountService.setDedicatedIpAutoWarmup(region, enabled);
             LOG.infov("SES V2 PutAccountDedicatedIpWarmupAttributes: {0}", enabled);
