@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -67,6 +68,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -1438,6 +1440,50 @@ class EksClusterManagerTest {
             manager.unregisterMetadataEndpoint(cluster);
             assertTrue(manager.findInstance("123456789012", "us-east-1", registered.getInstanceId()).isEmpty());
             assertTrue(manager.listInstances("123456789012", "us-east-1").isEmpty());
+        }
+
+        @Test
+        void dnsRecordSourceResolvesRegisteredNodePrivateDnsName() {
+            Cluster cluster = new Cluster();
+            cluster.setName("dns-cluster");
+            cluster.setArn("arn:aws:eks:us-east-1:123456789012:cluster/dns-cluster");
+
+            manager.registerClusterNodeInstance(cluster, "container-dns");
+            Instance registered = manager.getRegisteredClusterNodeInstance(cluster);
+            assertNotNull(registered);
+
+            String dnsName = registered.getPrivateDnsName();
+            assertNotNull(dnsName);
+            String ip = registered.getPrivateIpAddress();
+            assertNotNull(ip);
+
+            // Exact match
+            Optional<DnsAnswer> answer = manager.resolveIpv4(dnsName);
+            assertTrue(answer.isPresent());
+            assertEquals(List.of(ip), answer.get().addresses());
+
+            // Case-insensitive match
+            Optional<DnsAnswer> upperAnswer = manager.resolveIpv4(dnsName.toUpperCase(Locale.ROOT));
+            assertTrue(upperAnswer.isPresent());
+            assertEquals(List.of(ip), upperAnswer.get().addresses());
+
+            // Trailing dot match
+            Optional<DnsAnswer> trailingDotAnswer = manager.resolveIpv4(dnsName + ".");
+            assertTrue(trailingDotAnswer.isPresent());
+            assertEquals(List.of(ip), trailingDotAnswer.get().addresses());
+
+            // Unknown host
+            assertTrue(manager.resolveIpv4("unknown.ec2.internal").isEmpty());
+            assertTrue(manager.resolveIpv4(null).isEmpty());
+            assertTrue(manager.resolveIpv4("").isEmpty());
+
+            // Other DNS types preserve ownership
+            assertTrue(manager.resolve(dnsName, 1).isPresent());
+            assertTrue(manager.resolve(dnsName, 28).isPresent());
+
+            // After unregistering, name no longer resolves
+            manager.unregisterMetadataEndpoint(cluster);
+            assertTrue(manager.resolveIpv4(dnsName).isEmpty());
         }
 
         @Test

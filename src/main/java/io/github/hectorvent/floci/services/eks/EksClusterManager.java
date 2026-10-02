@@ -9,8 +9,10 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource;
 import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
+import io.github.hectorvent.floci.core.common.dns.DnsRecordSource;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerExec;
@@ -70,6 +72,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -85,7 +88,7 @@ import java.util.stream.Collectors;
  */
 @ApplicationScoped
 public class EksClusterManager
-        implements ClusterNodeInstanceProvider, VpcRouteTableListener, DnsClientVpcSource {
+        implements ClusterNodeInstanceProvider, VpcRouteTableListener, DnsClientVpcSource, DnsRecordSource {
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
@@ -203,6 +206,28 @@ public class EksClusterManager
         }
         return Optional.ofNullable(clusterNodeVpcs.get(clientAddress.trim()))
                 .map(ClusterNodeVpc::clientVpc);
+    }
+
+    @Override
+    public Optional<DnsAnswer> resolveIpv4(String queryName) {
+        if (queryName == null || queryName.isBlank()) {
+            return Optional.empty();
+        }
+        String name = queryName.toLowerCase(Locale.ROOT);
+        if (name.endsWith(".")) {
+            name = name.substring(0, name.length() - 1);
+        }
+        for (ClusterNodeRecord record : clusterNodeInstances.values()) {
+            Instance inst = record.instance();
+            if (inst != null && inst.getPrivateDnsName() != null && inst.getPrivateIpAddress() != null
+                    && !inst.getPrivateIpAddress().isBlank()) {
+                String nodeDnsName = inst.getPrivateDnsName().toLowerCase(Locale.ROOT);
+                if (name.equals(nodeDnsName)) {
+                    return Optional.of(DnsAnswer.records(List.of(inst.getPrivateIpAddress()), DnsAnswer.DEFAULT_TTL_SECONDS));
+                }
+            }
+        }
+        return Optional.empty();
     }
 
     private void registerClusterNodeVpc(Cluster cluster, String accountId, String region,
