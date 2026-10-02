@@ -34,7 +34,7 @@ public class SchedulerService {
     private static final Pattern NAME_PATTERN = Pattern.compile("[0-9a-zA-Z\\-_.]{1,64}");
     private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
             "arn:(?:" + AwsArnUtils.PARTITION_REGEX + "):iam::\\d{12}:role/[\\w+=,.@/-]+");
-    private static final String ROLE_ARN_MODEL_PATTERN = "^arn:aws(-[a-z]+)?:iam::\\d{12}:role\\/[\\w+=,.@\\/-]+$";
+    private static final String ROLE_ARN_MODEL_PATTERN = "^arn:aws(-[a-z]+)?:iam::\\d{12}:role\\/[\\w+=,.@\\/-]+$"; // partition-literal: the Scheduler model's RoleArn pattern, quoted verbatim in the error message
     private static final String DEFAULT_GROUP = "default";
     // FAIL_ON_TRAILING_TOKENS matters here: without it an Input of "{} garbage" parses as the
     // leading object and the rest is silently dropped, so a value AWS rejects would be stored.
