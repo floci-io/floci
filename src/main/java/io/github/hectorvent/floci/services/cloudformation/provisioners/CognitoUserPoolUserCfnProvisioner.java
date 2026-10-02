@@ -77,9 +77,15 @@ public class CognitoUserPoolUserCfnProvisioner implements CfnResourceProvisioner
         // DesiredDeliveryMediums, ValidationData and ClientMetadata only reach a message transport
         // or a Lambda trigger, neither of which AdminCreateUser drives here, so they only take part
         // in the createOnly record.
-        CognitoUser user = cognitoService.adminCreateUser(userPoolId,
-                customNamed ? username : ctx.generatePhysicalName(r.getLogicalId(), 128, false),
-                userAttributes, null, text(resolved, "MessageAction"),
+        String name = customNamed ? username : ctx.generatePhysicalName(r.getLogicalId(), 128, false);
+        String messageAction = text(resolved, "MessageAction");
+        if ("RESEND".equalsIgnoreCase(messageAction)) {
+            // RESEND hands back an existing user the stack never created, and AWS refuses it as a name conflict.
+            CognitoUser existing = cognitoService.adminGetUser(userPoolId, name);
+            throw new AwsException("AlreadyExists", "Resource of type 'AWS::Cognito::UserPoolUser' with identifier '"
+                    + userPoolId + "|" + existing.getUsername() + "' already exists.", 400);
+        }
+        CognitoUser user = cognitoService.adminCreateUser(userPoolId, name, userAttributes, null, messageAction,
                 Boolean.parseBoolean(text(resolved, "ForceAliasCreation")));
 
         r.setPhysicalId(user.getUsername());

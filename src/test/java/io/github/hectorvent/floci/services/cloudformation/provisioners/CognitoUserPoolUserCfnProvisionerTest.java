@@ -19,6 +19,7 @@ import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -114,6 +115,36 @@ class CognitoUserPoolUserCfnProvisionerTest {
         assertEquals("ValidationError", thrown.getErrorCode());
         assertEquals("AWS::Cognito::UserPoolUser requires UserPoolId", thrown.getMessage());
         verifyNoInteractions(cognito);
+    }
+
+    @Test
+    void resendForAnExistingUserFailsWithoutAdoptingIt() throws Exception {
+        CognitoUser existing = new CognitoUser();
+        existing.setUsername("alice");
+        when(cognito.adminGetUser("pool-a", "alice")).thenReturn(existing);
+        StackResource r = resource(null);
+
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"UserPoolId": "pool-a", "Username": "alice", "MessageAction": "RESEND"}"""), ctx(null)));
+
+        assertEquals("AlreadyExists", thrown.getErrorCode());
+        assertEquals("Resource of type 'AWS::Cognito::UserPoolUser' with identifier 'pool-a|alice' already exists.",
+                thrown.getMessage());
+        verify(cognito, never()).adminCreateUser(any(), any(), any(), any(), any(), anyBoolean());
+        assertNull(r.getPhysicalId());
+    }
+
+    @Test
+    void resendForAMissingUserFailsUserNotFound() throws Exception {
+        when(cognito.adminGetUser("pool-a", "alice"))
+                .thenThrow(new AwsException("UserNotFoundException", "User does not exist.", 400));
+        StackResource r = resource(null);
+
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"UserPoolId": "pool-a", "Username": "alice", "MessageAction": "RESEND"}"""), ctx(null)));
+
+        assertEquals("UserNotFoundException", thrown.getErrorCode());
+        verify(cognito, never()).adminCreateUser(any(), any(), any(), any(), any(), anyBoolean());
     }
 
     @Test
