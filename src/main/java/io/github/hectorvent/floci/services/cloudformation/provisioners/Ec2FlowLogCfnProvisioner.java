@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.ec2.model.FlowLog;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -28,10 +29,12 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
     private static final String DEFAULT_LOG_DESTINATION_TYPE = "s3";
 
     private final FlowLogService flowLogService;
+    private final Ec2Service ec2Service;
 
     @Inject
-    public Ec2FlowLogCfnProvisioner(FlowLogService flowLogService) {
+    public Ec2FlowLogCfnProvisioner(FlowLogService flowLogService, Ec2Service ec2Service) {
         this.flowLogService = flowLogService;
+        this.ec2Service = ec2Service;
     }
 
     @Override
@@ -53,6 +56,7 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
                 // reused log and a change to any of them is a replacement. Reusing regardless would
                 // report the stack complete while DescribeFlowLogs kept serving the old config.
                 requireUnchanged(existing, props, ctx);
+                Ec2Tags.reconcile(ec2Service, ctx.region(), existingId, ctx.resolveTags(props, "Tags"));
                 r.getAttributes().put("Id", existingId);
                 return;
             }
@@ -68,6 +72,7 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
                 props != null && props.hasNonNull("MaxAggregationInterval")
                         ? props.get("MaxAggregationInterval").asInt()
                         : DEFAULT_MAX_AGGREGATION_INTERVAL);
+        Ec2Tags.reconcile(ec2Service, ctx.region(), fl.getFlowLogId(), ctx.resolveTags(props, "Tags"));
         r.setPhysicalId(fl.getFlowLogId());
         r.getAttributes().put("Id", fl.getFlowLogId());
     }

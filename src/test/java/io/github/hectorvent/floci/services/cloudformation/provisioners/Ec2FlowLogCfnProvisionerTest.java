@@ -6,12 +6,16 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.ec2.model.FlowLog;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -29,7 +33,8 @@ import static org.mockito.Mockito.when;
 class Ec2FlowLogCfnProvisionerTest {
 
     private final FlowLogService flowLogs = mock(FlowLogService.class);
-    private final Ec2FlowLogCfnProvisioner provisioner = new Ec2FlowLogCfnProvisioner(flowLogs);
+    private final Ec2Service ec2 = mock(Ec2Service.class);
+    private final Ec2FlowLogCfnProvisioner provisioner = new Ec2FlowLogCfnProvisioner(flowLogs, ec2);
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx() {
@@ -38,6 +43,7 @@ class Ec2FlowLogCfnProvisionerTest {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
         });
+        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
     }
 
@@ -90,6 +96,46 @@ class Ec2FlowLogCfnProvisionerTest {
         provisioner.provision(resource(), mapper.createObjectNode().put("ResourceId", "vpc-9"), ctx());
 
         verify(flowLogs).createFlowLog("us-east-1", "vpc-9", null, null, null, null, null, null, 600);
+    }
+
+    @Test
+    void createAppliesTheTemplateTags() {
+        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt()))
+                .thenReturn(flowLog("fl-0abc"));
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "Environment").put("Value", "dev");
+
+        provisioner.provision(resource(), props, ctx());
+
+        assertEquals(List.of("Environment=dev"), createdTags("fl-0abc"));
+    }
+
+    @Test
+    void updateBringsTheReusedLogsTagsToTheTemplate() {
+        StackResource r = resource();
+        r.setPhysicalId("fl-0abc");
+        FlowLog existing = flowLog("fl-0abc");
+        existing.setResourceId("vpc-123");
+        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc"))).thenReturn(List.of(existing));
+        when(ec2.describeTags("us-east-1", Map.of("resource-id", List.of("fl-0abc"))))
+                .thenReturn(List.of(Map.of("key", "Old", "value", "x")));
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "Environment").put("Value", "dev");
+
+        provisioner.provision(r, props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Tag>> removed = ArgumentCaptor.forClass(List.class);
+        verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("fl-0abc")), removed.capture());
+        assertEquals(List.of("Old"), removed.getValue().stream().map(Tag::getKey).toList());
+        assertEquals(List.of("Environment=dev"), createdTags("fl-0abc"));
+    }
+
+    private List<String> createdTags(String id) {
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
+        verify(ec2).createTags(eq("us-east-1"), eq(List.of(id)), tags.capture());
+        return tags.getValue().stream().map(t -> t.getKey() + "=" + t.getValue()).toList();
     }
 
     @Test
