@@ -193,6 +193,20 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
         return RequestScopes.callAs(scope.accountId(), () -> dynamoDbService.disableStream(tableName, scope.region()));
     }
 
+    // Mirrors the native DescribeTimeToLive: no attribute name is reported while TTL is off.
+    @Override
+    public TimeToLive timeToLive(Scope scope, String tableName) {
+        TableDefinition table = describeTable(scope, tableName);
+        boolean enabled = table.isTtlEnabled() && table.getTtlAttributeName() != null;
+        return new TimeToLive(enabled, enabled ? table.getTtlAttributeName() : null);
+    }
+
+    @Override
+    public void updateTimeToLive(Scope scope, String tableName, String attributeName, boolean enabled) {
+        RequestScopes.runAs(scope.accountId(),
+                () -> dynamoDbService.updateTimeToLive(tableName, attributeName, enabled, scope.region()));
+    }
+
     @Override
     public Map<String, String> listTagsOfResource(Scope scope, String resourceArn) {
         return RequestScopes.callAs(scope.accountId(),
