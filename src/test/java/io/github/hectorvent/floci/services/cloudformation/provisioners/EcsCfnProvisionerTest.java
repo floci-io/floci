@@ -465,6 +465,29 @@ class EcsCfnProvisionerTest {
         verify(ecs).updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enabled")), REGION);
     }
 
+    @Test
+    void clusterSettingsThatFailToResolveCreateNoCluster() {
+        ObjectNode props = clusterWithInsights("enabled");
+        ProvisionContext ctx = ctx();
+        when(ctx.engine().resolveNode(props.get("ClusterSettings"))).thenThrow(new IllegalStateException("unresolvable"));
+
+        assertThrows(IllegalStateException.class,
+                () -> provisioner.provision(resource("AWS::ECS::Cluster", "Cluster"), props, ctx));
+
+        verify(ecs, never()).createCluster(anyString(), anyString());
+    }
+
+    @Test
+    void aClusterSettingResolvedToNoValueIsDropped() {
+        when(ecs.createCluster("web", REGION)).thenReturn(cluster("web"));
+        ObjectNode props = clusterWithInsights("enabled");
+        ((ArrayNode) props.get("ClusterSettings")).add("");
+
+        provisioner.provision(resource("AWS::ECS::Cluster", "Cluster"), props, ctx());
+
+        verify(ecs).updateClusterSettings("web", List.of(new ClusterSetting("containerInsights", "enabled")), REGION);
+    }
+
     private ObjectNode clusterWithInsights(String value) {
         ObjectNode props = mapper.createObjectNode().put("ClusterName", "web");
         props.putArray("ClusterSettings").addObject().put("Name", "containerInsights").put("Value", value);
