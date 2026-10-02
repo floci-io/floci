@@ -9,9 +9,11 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * The replacement lifecycle for provisioners whose replacing update simply creates the new entity
@@ -119,6 +121,22 @@ public final class ReplacementCleanup {
     static boolean hasReplacement(StackResource r) {
         ObjectNode cleanup = read(r);
         return cleanup != null && cleanup.path("displaced").size() > 0;
+    }
+
+    /** The physical ids still owed a delete. */
+    static Set<String> owedPhysicalIds(StackResource r) {
+        Set<String> owed = new HashSet<>();
+        ObjectNode cleanup = read(r);
+        if (cleanup == null) {
+            return owed;
+        }
+        for (JsonNode entry : cleanup.path("displaced")) {
+            String physicalId = entry.path("physicalId").asText(null);
+            if (physicalId != null) {
+                owed.add(physicalId);
+            }
+        }
+        return owed;
     }
 
     /**

@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -45,6 +46,7 @@ class CognitoUserPoolUserCfnProvisionerTest {
 
     private static final String TYPE = "AWS::Cognito::UserPoolUser";
     private static final String CREATE_ONLY_ATTR = "__FlociCreateOnly";
+    private static final String POOLS_ATTR = "__FlociCognitoUserPools";
 
     private final CognitoService cognito = mock(CognitoService.class);
     private final CognitoUserPoolUserCfnProvisioner provisioner = new CognitoUserPoolUserCfnProvisioner(cognito);
@@ -290,6 +292,35 @@ class CognitoUserPoolUserCfnProvisionerTest {
 
         verify(cognito, times(2)).adminDeleteUser("pool-b", "user-b");
         verify(cognito, never()).adminDeleteUser("pool-c", "user-b");
+        verify(cognito).adminDeleteUser("pool-a", "user-a");
+    }
+
+    @Test
+    void poolRecordKeepsOnlyTheCurrentUserAndUsersStillOwedADelete() throws Exception {
+        stubCreateEchoingTheUsername();
+        StackResource r = resource(null);
+        provisioner.provision(r, props("""
+                {"UserPoolId": "pool-a", "Username": "alice"}"""), ctx(null));
+        provisioner.provision(r, props("""
+                {"UserPoolId": "pool-b", "Username": "bob"}"""), ctx("alice"));
+        provisioner.completeUpdate(r);
+        provisioner.clearUpdate(r);
+        verify(cognito).adminDeleteUser("pool-a", "alice");
+
+        provisioner.provision(r, props("""
+                {"UserPoolId": "pool-c", "Username": "carol"}"""), ctx("bob"));
+
+        JsonNode pools = mapper.readTree(r.getAttributes().get(POOLS_ATTR));
+        Set<String> recorded = new HashSet<>();
+        pools.fieldNames().forEachRemaining(recorded::add);
+        assertEquals(Set.of("bob", "carol"), recorded, "a user deleted by a committed cleanup must leave the record");
+        assertEquals("pool-b", pools.path("bob").asText());
+        assertEquals("pool-c", pools.path("carol").asText());
+
+        provisioner.completeUpdate(r);
+
+        verify(cognito).adminDeleteUser("pool-b", "bob");
+        verify(cognito, never()).adminDeleteUser(any(), eq("carol"));
     }
 
     @Test

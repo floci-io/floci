@@ -31,7 +31,10 @@ public class CognitoUserPoolUserCfnProvisioner implements CfnResourceProvisioner
     private static final String TYPE = "AWS::Cognito::UserPoolUser";
     private static final String CREATE_ONLY_ATTR = "__FlociCreateOnly";
     private static final String CREATE_ONLY_PRIOR_ATTR = "__FlociCreateOnlyPrior";
-    /** Physical id to pool id, so a displaced user is deleted in its own pool, not the current one. */
+    /**
+     * Physical id to pool id for the current user and every user still owed a delete, so a displaced
+     * user is deleted in its own pool, not the current one.
+     */
     private static final String POOLS_ATTR = "__FlociCognitoUserPools";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -89,8 +92,8 @@ public class CognitoUserPoolUserCfnProvisioner implements CfnResourceProvisioner
 
         r.setPhysicalId(user.getUsername());
         r.getAttributes().put(CREATE_ONLY_ATTR, resolved.toString());
-        recordPool(r, attributesBefore, userPoolId);
         ReplacementCleanup.record(r, ctx, attributesBefore);
+        recordPool(r, attributesBefore, userPoolId);
         if (ctx.isUpdate() && !ctx.priorPhysicalId().equals(r.getPhysicalId())) {
             r.getAttributes().put(CREATE_ONLY_PRIOR_ATTR, attributesBefore.getOrDefault(CREATE_ONLY_ATTR, ""));
         }
@@ -152,12 +155,20 @@ public class CognitoUserPoolUserCfnProvisioner implements CfnResourceProvisioner
     }
 
     /**
-     * Adds the pool of the user the resource now names to every pool recorded before, so a user
-     * still owed a delete, from this update or an earlier one, is deleted in its own pool. An entry
-     * is overwritten whenever its username becomes current again, so each one stays correct.
+     * Keeps the pool of the user the resource now names and of every user still owed a delete, from
+     * this update or an earlier one, so each is deleted in its own pool. Every other entry is
+     * dropped, so the record stays bounded across repeated replacements. Call after
+     * {@link ReplacementCleanup#record}, so the user this update displaced is already owed.
      */
     private static void recordPool(StackResource r, Map<String, String> attributesBefore, String userPoolId) {
-        ObjectNode pools = pools(attributesBefore);
+        ObjectNode prior = pools(attributesBefore);
+        ObjectNode pools = MAPPER.createObjectNode();
+        for (String owed : ReplacementCleanup.owedPhysicalIds(r)) {
+            JsonNode pool = prior.get(owed);
+            if (pool != null) {
+                pools.set(owed, pool);
+            }
+        }
         pools.put(r.getPhysicalId(), userPoolId);
         r.getAttributes().put(POOLS_ATTR, pools.toString());
     }
