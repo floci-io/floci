@@ -39,7 +39,7 @@ public final class CfnCreateOnlyProperties {
     public static boolean isCreateOnly(String resourceType, String propertyName) {
         Set<String> createOnly = PROPERTIES.get(resourceType);
         if (createOnly != null) {
-            // Danh sách schema là authoritative cho kiểu tài nguyên này, kể cả khi rỗng
+            // The schema list is authoritative for this resource type, including when it is empty.
             if (createOnly.contains(propertyName)) {
                 return true;
             }

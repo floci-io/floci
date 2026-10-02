@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsServiceNamespaces;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.PolicyStatement;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -14,6 +15,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -381,53 +384,67 @@ public class IamPolicyEvaluator {
     }
 
     /**
-     * The service namespaces {@code policyDocuments} name explicitly in an {@code Allow}, backing
-     * the service list in {@code GetServiceLastAccessedDetails}.
+     * The service namespaces {@code policyDocuments} grant, backing the service list in
+     * {@code GetServiceLastAccessedDetails}.
      *
-     * <p>AWS lists a service the entity could reach even when it was never used, so the list is
-     * derived from the same permissions-policy logic as {@link #grantsServiceAccess}. Only
-     * namespaces written out literally can be enumerated: {@code Action: "*"}, a globbed prefix
-     * like {@code s3*}, and {@code NotAction} all denote a set no policy document enumerates, so
-     * they are reported through {@code grantsAllServices} for the caller to expand against
-     * whatever universe of services it knows.
+     * <p>AWS lists a service the entity could reach even when it was never used, so the list comes
+     * from the same permissions-policy logic as {@link #grantsServiceAccess}. A grant that names no
+     * namespace is expanded against {@link AwsServiceNamespaces}: {@code Action: "*"} yields every
+     * published namespace, a globbed prefix such as {@code s3*} yields the ones it matches, and an
+     * {@code Allow} with {@code NotAction} yields everything the list does not carve out entirely.
+     *
+     * <p>A namespace written out literally is kept whether or not the vendored catalog knows it, so
+     * a catalog that has fallen behind an AWS launch still reports a service the policy names
+     * outright; only wildcard expansion depends on the catalog being current.
+     *
+     * <p>A document that fails to parse grants nothing, matching {@link #parseAll} elsewhere here.
      */
-    public GrantedServices servicesGrantedBy(List<String> policyDocuments) {
-        List<String> namespaces = new ArrayList<>();
-        boolean all = false;
+    public List<String> servicesGrantedBy(List<String> policyDocuments) {
+        Set<String> granted = new TreeSet<>();
         for (PolicyStatement stmt : parseAll(policyDocuments)) {
             if (!"Allow".equalsIgnoreCase(stmt.getEffect())) {
                 continue;
             }
             if (stmt.getNotActions() != null) {
-                all = true;
+                for (String namespace : AwsServiceNamespaces.all()) {
+                    if (!excludesEntirely(stmt.getNotActions(), namespace)) {
+                        granted.add(namespace);
+                    }
+                }
                 continue;
             }
             if (stmt.getActions() == null) {
                 continue;
             }
             for (String pattern : stmt.getActions()) {
-                int colon = pattern == null ? -1 : pattern.indexOf(':');
-                if (colon < 0) {
-                    // "*" grants every service; anything else without a colon is malformed.
-                    all = all || "*".equals(pattern);
-                    continue;
-                }
-                String namespace = pattern.substring(0, colon);
-                if (namespace.indexOf('*') >= 0 || namespace.indexOf('?') >= 0) {
-                    all = true;
-                } else if (!namespaces.contains(namespace)) {
-                    namespaces.add(namespace);
-                }
+                collectGrantedNamespaces(pattern, granted);
             }
         }
-        return new GrantedServices(namespaces, all);
+        return List.copyOf(granted);
     }
 
-    /**
-     * Service namespaces an identity's policies grant: those named literally, plus whether some
-     * statement grants every service without naming any.
-     */
-    public record GrantedServices(List<String> namespaces, boolean grantsAllServices) {}
+    /** Adds whatever one action pattern's service part denotes: a name, a glob, or everything. */
+    private static void collectGrantedNamespaces(String pattern, Set<String> granted) {
+        if ("*".equals(pattern)) {
+            granted.addAll(AwsServiceNamespaces.all());
+            return;
+        }
+        int colon = pattern == null ? -1 : pattern.indexOf(':');
+        if (colon < 0) {
+            // Not "service:Action" and not "*"; IAM would reject it, so it grants nothing.
+            return;
+        }
+        String namespace = pattern.substring(0, colon);
+        if (namespace.indexOf('*') < 0 && namespace.indexOf('?') < 0) {
+            granted.add(namespace);
+            return;
+        }
+        for (String candidate : AwsServiceNamespaces.all()) {
+            if (globMatches(namespace, candidate)) {
+                granted.add(candidate);
+            }
+        }
+    }
 
     /** An action pattern reaches a namespace when its service part matches, whatever the verb is. */
     private static boolean actionPatternReaches(String pattern, String serviceNamespace) {
@@ -789,7 +806,7 @@ public class IamPolicyEvaluator {
             return false;
         }
         for (String pattern : patterns) {
-            if (globMatchesHelper(pattern, value, 0, 0)) {
+            if (globMatchesHelper(pattern, value)) {
                 return true;
             }
         }
@@ -803,6 +820,17 @@ public class IamPolicyEvaluator {
     // -----------------------------------------------------------------------
     // Condition evaluation (Phase 4)
     // -----------------------------------------------------------------------
+
+    /**
+     * Evaluates one statement's {@code Condition} element against a request context, with the
+     * same operator semantics as every other policy this class reads. For policies this class
+     * does not match statements for itself: trust policies carry no {@code Resource} element, so
+     * {@link AssumeRolePolicyEvaluator} matches their principal and action and asks here for the
+     * condition.
+     */
+    boolean conditionMatches(JsonNode condition, Map<String, List<String>> conditionCtx) {
+        return matchesConditions(parseConditions(condition), normalizeConditionContext(conditionCtx));
+    }
 
     /**
      * Evaluates all condition blocks. AND between blocks, OR within each block's value list.
@@ -908,6 +936,12 @@ public class IamPolicyEvaluator {
                 if (ifExists) {
                     continue; // key missing + IfExists → pass this key
                 }
+                // A negated operator asks for the key not to match, and an absent key matches
+                // nothing, so the condition holds (IAM User Guide, condition operators). The set
+                // operators keep their own rule for an absent key.
+                if (parsed.quantifier() == SetQuantifier.NONE && isNegatedOperator(baseOp)) {
+                    continue;
+                }
                 return false; // key missing, no IfExists → fail entire block
             }
 
@@ -951,10 +985,10 @@ public class IamPolicyEvaluator {
             case "StringNotEquals"           -> !ctxValue.equals(condValue);
             case "StringEqualsIgnoreCase"    -> ctxValue.equalsIgnoreCase(condValue);
             case "StringNotEqualsIgnoreCase" -> !ctxValue.equalsIgnoreCase(condValue);
-            case "StringLike"                -> globMatches(condValue, ctxValue);
-            case "StringNotLike"             -> !globMatches(condValue, ctxValue);
-            case "ArnEquals", "ArnLike"      -> globMatches(condValue, ctxValue);
-            case "ArnNotEquals", "ArnNotLike"-> !globMatches(condValue, ctxValue);
+            case "StringLike"                -> caseSensitiveGlobMatches(condValue, ctxValue);
+            case "StringNotLike"             -> !caseSensitiveGlobMatches(condValue, ctxValue);
+            case "ArnEquals", "ArnLike"      -> matchesArnCondition(condValue, ctxValue);
+            case "ArnNotEquals", "ArnNotLike"-> !matchesArnCondition(condValue, ctxValue);
             case "Bool"                      -> Boolean.parseBoolean(condValue) == Boolean.parseBoolean(ctxValue);
             case "NumericEquals"             -> compareNumeric(ctxValue, condValue) == 0;
             case "NumericNotEquals"          -> compareNumeric(ctxValue, condValue) != 0;
@@ -1033,36 +1067,56 @@ public class IamPolicyEvaluator {
         if (pattern == null || value == null) {
             return false;
         }
-        return globMatchesHelper(pattern.toLowerCase(), value.toLowerCase(), 0, 0);
+        return globMatchesHelper(pattern.toLowerCase(), value.toLowerCase());
     }
 
-    private static boolean globMatchesHelper(String pat, String val, int pi, int vi) {
-        while (pi < pat.length() && vi < val.length()) {
-            char p = pat.charAt(pi);
-            if (p == '*') {
-                while (pi < pat.length() && pat.charAt(pi) == '*') {
-                    pi++;
-                }
-                if (pi == pat.length()) {
-                    return true;
-                }
-                for (int i = vi; i <= val.length(); i++) {
-                    if (globMatchesHelper(pat, val, pi, i)) {
-                        return true;
-                    }
-                }
+    public static boolean caseSensitiveGlobMatches(String pattern, String value) {
+        return pattern != null && value != null && globMatchesHelper(pattern, value);
+    }
+
+    public static boolean matchesArnCondition(String pattern, String value) {
+        if (pattern == null || value == null) {
+            return false;
+        }
+        // The resource component may itself contain colons (for example Lambda qualifiers).
+        String[] patternComponents = pattern.split(":", 6);
+        String[] valueComponents = value.split(":", 6);
+        if (patternComponents.length != 6 || valueComponents.length != 6) {
+            return false;
+        }
+        for (int i = 0; i < patternComponents.length; i++) {
+            if (!caseSensitiveGlobMatches(patternComponents[i], valueComponents[i])) {
                 return false;
-            } else if (p == '?' || p == val.charAt(vi)) {
-                pi++;
-                vi++;
+            }
+        }
+        return true;
+    }
+
+    private static boolean globMatchesHelper(String pattern, String value) {
+        int patternIndex = 0;
+        int valueIndex = 0;
+        int starIndex = -1;
+        int starValueIndex = -1;
+
+        while (valueIndex < value.length()) {
+            if (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
+                starIndex = patternIndex++;
+                starValueIndex = valueIndex;
+            } else if (patternIndex < pattern.length()
+                    && (pattern.charAt(patternIndex) == '?' || pattern.charAt(patternIndex) == value.charAt(valueIndex))) {
+                patternIndex++;
+                valueIndex++;
+            } else if (starIndex >= 0) {
+                patternIndex = starIndex + 1;
+                valueIndex = ++starValueIndex;
             } else {
                 return false;
             }
         }
-        while (pi < pat.length() && pat.charAt(pi) == '*') {
-            pi++;
+        while (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
+            patternIndex++;
         }
-        return pi == pat.length() && vi == val.length();
+        return patternIndex == pattern.length();
     }
 
     // -----------------------------------------------------------------------
@@ -1191,8 +1245,12 @@ public class IamPolicyEvaluator {
         Map<String, Map<String, List<String>>> result = new LinkedHashMap<>();
         condNode.fields().forEachRemaining(opEntry -> {
             Map<String, List<String>> kvMap = new LinkedHashMap<>();
-            opEntry.getValue().fields().forEachRemaining(kvEntry ->
-                    kvMap.put(kvEntry.getKey(), nodeToList(kvEntry.getValue())));
+            boolean boolOperator = "Bool".equals(parseOperator(opEntry.getKey()).baseOp());
+            opEntry.getValue().fields().forEachRemaining(kvEntry -> {
+                JsonNode value = kvEntry.getValue();
+                kvMap.put(kvEntry.getKey(), boolOperator && value.isBoolean()
+                        ? List.of(value.asText()) : nodeToList(value));
+            });
             result.put(opEntry.getKey(), kvMap);
         });
         return result.isEmpty() ? null : result;

@@ -1737,8 +1737,8 @@ class S3AuthEnforcementIntegrationTest {
         .when()
             .get("/" + BUCKET_CONFIG_BUCKET + "?tagging")
         .then()
-            .statusCode(200)
-            .body(not(containsString("<Key>k</Key>")));
+            .statusCode(404)
+            .body(containsString("NoSuchTagSet"));
     }
 
     @Test
@@ -2280,6 +2280,121 @@ class S3AuthEnforcementIntegrationTest {
 
     private static String publicGetObjectPolicy(String bucket, String key) {
         return publicObjectActionPolicy(bucket, key, "s3:GetObject");
+    }
+
+    @Test
+    @Order(56)
+    void conditionalDeleteByETagAlsoNeedsGetObject() {
+        String bucket = "auth-conditional-delete-bucket";
+        given().filter(LOCAL_SIGNER).when().put("/" + bucket).then().statusCode(200);
+        String eTag = given().filter(LOCAL_SIGNER).body("etag-guarded")
+            .when().put("/" + bucket + "/etag.txt")
+            .then().statusCode(200).extract().header("ETag");
+        given().filter(LOCAL_SIGNER).body("batch-guarded")
+            .when().put("/" + bucket + "/batch.txt")
+            .then().statusCode(200);
+        given().filter(LOCAL_SIGNER).body("star-guarded")
+            .when().put("/" + bucket + "/star.txt")
+            .then().statusCode(200);
+        given()
+            .filter(LOCAL_SIGNER)
+            .contentType("application/json")
+            .body(publicObjectActionPolicy(bucket, "s3:DeleteObject"))
+        .when()
+            .put("/" + bucket + "?policy")
+        .then()
+            .statusCode(200);
+
+        // s3:DeleteObject alone: an ETag condition is refused, the existence check is allowed.
+        given()
+            .header("If-Match", eTag)
+        .when()
+            .delete("/" + bucket + "/etag.txt")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+        given()
+            .contentType("application/xml")
+            .body("<Delete><Object><Key>batch.txt</Key><ETag>" + eTag + "</ETag></Object></Delete>")
+        .when()
+            .post("/" + bucket + "?delete")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Error><Key>batch.txt</Key>"))
+            .body(containsString("<Code>AccessDenied</Code>"));
+        given()
+            .header("If-Match", "*")
+        .when()
+            .delete("/" + bucket + "/star.txt")
+        .then()
+            .statusCode(204);
+
+        // With s3:GetObject granted as well, the ETag condition is evaluated.
+        given()
+            .filter(LOCAL_SIGNER)
+            .contentType("application/json")
+            .body("""
+                {
+                  "Version": "2012-10-17",
+                  "Statement": {
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": ["s3:DeleteObject", "s3:GetObject"],
+                    "Resource": "arn:aws:s3:::%s/*"
+                  }
+                }
+                """.formatted(bucket))
+        .when()
+            .put("/" + bucket + "?policy")
+        .then()
+            .statusCode(200);
+        given()
+            .header("If-Match", eTag)
+        .when()
+            .delete("/" + bucket + "/etag.txt")
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(57)
+    void signedIamPrincipalMatchesPrincipalIsAwsServiceFalseInBucketPolicy() {
+        String bucket = "auth-principal-is-service-bucket";
+        given().filter(LOCAL_SIGNER).when().put("/" + bucket).then().statusCode(200);
+        given().filter(LOCAL_SIGNER).body("private data")
+            .when().put("/" + bucket + "/data.txt")
+            .then().statusCode(200);
+
+        String denyForIamPrincipals = """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": {
+                    "Effect": "Deny",
+                    "Principal": "*",
+                    "Action": "s3:GetObject",
+                    "Resource": "arn:aws:s3:::%s/*",
+                    "Condition": {"Bool": {"aws:PrincipalIsAWSService": "false"}}
+                  }
+                }""".formatted(bucket);
+        given().filter(LOCAL_SIGNER).contentType("application/json").body(denyForIamPrincipals)
+            .when().put("/" + bucket + "?policy")
+            .then().statusCode(200);
+
+        given().filter(LOCAL_SIGNER)
+            .when().get("/" + bucket + "/data.txt")
+            .then().statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        String denyForServicePrincipals = denyForIamPrincipals.replace(
+                "\"aws:PrincipalIsAWSService\": \"false\"",
+                "\"aws:PrincipalIsAWSService\": \"true\"");
+        given().filter(LOCAL_SIGNER).contentType("application/json").body(denyForServicePrincipals)
+            .when().put("/" + bucket + "?policy")
+            .then().statusCode(200);
+        given().filter(LOCAL_SIGNER)
+            .when().get("/" + bucket + "/data.txt")
+            .then().statusCode(200)
+            .body(equalTo("private data"));
     }
 
     private static String publicObjectActionPolicy(String bucket, String action) {

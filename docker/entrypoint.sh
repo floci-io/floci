@@ -25,11 +25,23 @@ if [ "$(id -u)" = '0' ]; then
         fi
     fi
 
-    # Re-own state dir for the case where a host bind-mount arrives with
-    # ownership the floci user cannot write to. Ignore errors (read-only
-    # mounts, unusual filesystems) so the container still starts.
-    if [ -d /app/data ]; then
-        chown -R floci:root /app/data 2>/dev/null || true
+    # Re-own the state dir for the case where a volume or host bind-mount
+    # arrives with ownership the floci user cannot write to. This is the same
+    # directory the writability probe below checks, so a volume mounted at a
+    # custom FLOCI_STORAGE_PERSISTENT_PATH is fixed up too. The path is resolved
+    # physically first, then compared by inode rather than by string: bash keeps a leading //
+    # (POSIX leaves it implementation-defined), so a string test would let // through.
+    # --preserve-root is the second guard. Ignore errors
+    # (read-only mounts, unusual filesystems) so the container still starts.
+    state_dir="${FLOCI_STORAGE_PERSISTENT_PATH:-/app/data}"
+    if [ -d "$state_dir" ]; then
+        # CDPATH is cleared so a relative path cannot be looked up elsewhere (and echoed).
+        state_dir_physical="$(CDPATH= cd -P -- "$state_dir" 2>/dev/null && pwd -P)" || state_dir_physical=''
+        if [ "$state_dir_physical" -ef / ]; then
+            echo "WARNING: not changing ownership of $state_dir, it resolves to /." >&2
+        elif [ -n "$state_dir_physical" ]; then
+            chown --preserve-root -R floci:root "$state_dir_physical" 2>/dev/null || true
+        fi
     fi
 
     # `chroot /` changes nothing but the identity: uid 1001, primary gid 0, plus the socket's

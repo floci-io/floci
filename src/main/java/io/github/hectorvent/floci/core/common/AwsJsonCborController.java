@@ -497,19 +497,7 @@ public class AwsJsonCborController {
     }
 
     private Response cborErrorResponse(AwsException e, String protocolHeader, String mediaType) {
-        try {
-            byte[] errBytes = CBOR_MAPPER.writeValueAsBytes(
-                    new AwsErrorResponse(e.jsonType(), e.getMessage()));
-            String queryErrorFault = (e.getHttpStatus() < 500) ? "Sender" : "Receiver";
-            return Response.status(e.getHttpStatus())
-                    .header(protocolHeader, "rpc-v2-cbor")
-                    .header("x-amzn-query-error", e.getErrorCode() + ";" + queryErrorFault)
-                    .type(mediaType)
-                    .entity(errBytes)
-                    .build();
-        } catch (Exception ex) {
-            return Response.status(e.getHttpStatus()).build();
-        }
+        return CborErrorResponses.of(e, mediaType);
     }
 
     private String responseContentType(HttpHeaders httpHeaders) {

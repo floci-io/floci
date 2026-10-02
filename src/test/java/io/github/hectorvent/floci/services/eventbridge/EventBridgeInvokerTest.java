@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.eventbridge;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
@@ -117,14 +118,15 @@ class EventBridgeInvokerTest {
     }
 
     @Test
-    void invokeTarget_stateMachineStartFailureDoesNotEscapeDelivery() {
+    void invokeTarget_stateMachineStartFailurePropagates() {
         String arn = "arn:aws:states:us-east-1:000000000000:stateMachine:missing";
         when(stepFunctionsService.startExecution(arn, null, "{}", "us-east-1"))
                 .thenThrow(new IllegalStateException("missing state machine"));
 
-        assertDoesNotThrow(() -> invoker.invokeTarget(
+        IllegalStateException error = assertThrows(IllegalStateException.class, () -> invoker.invokeTarget(
                 new Target("id1", arn, "{}", null), "{\"ignored\":true}", "us-east-1"));
 
+        assertEquals("missing state machine", error.getMessage());
         verify(stepFunctionsService).startExecution(arn, null, "{}", "us-east-1");
     }
 
@@ -608,6 +610,24 @@ class EventBridgeInvokerTest {
         invoker.invokeTarget(target, "{\"source\":\"aws.s3\"}", "eu-west-1");
 
         verify(eventBridgeService, never()).putEvents(anyList(), anyString(), any());
+    }
+
+    @Test
+    void invokeTarget_eventBusTargetRejectionThrows() {
+        when(eventBridgeService.putEvents(anyList(), anyString(), any()))
+                .thenReturn(new EventBridgeService.PutEventsResult(1, List.of(Map.of(
+                        "ErrorCode", "InvalidArgument",
+                        "ErrorMessage", "EventBus not found: my-target-bus"))));
+        Target target = new Target("id1",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/my-target-bus",
+                null, null);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> invoker.invokeTarget(target, "{\"source\":\"s\",\"detail\":{}}", "eu-west-1"));
+
+        assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals("EventBus not found: my-target-bus", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
     }
 
     @Test

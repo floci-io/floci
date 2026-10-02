@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -21,6 +22,7 @@ import io.github.hectorvent.floci.services.eks.model.LogSetup;
 import io.github.hectorvent.floci.services.eks.model.Logging;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
+import io.github.hectorvent.floci.testutil.LogCapture;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,7 +39,9 @@ import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.NetworkSettings;
+import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import org.junit.jupiter.api.BeforeEach;
@@ -63,6 +67,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -315,7 +321,8 @@ class EksClusterManagerTest {
                 "io.floci.service", "eks",
                 "io.floci.resource-id", "my-cluster",
                 "io.floci.account", "000000000000",
-                "io.floci.region", "us-east-1"));
+                "io.floci.region", "us-east-1",
+                "io.floci.eks.node-capacity", "m5.large:unbounded"));
     }
 
     @ParameterizedTest
@@ -358,6 +365,7 @@ class EksClusterManagerTest {
         private EmulatorConfig.StorageConfig storage;
         private ContainerLifecycleManager lifecycleManager;
         private PortAllocator portAllocator;
+        private DockerClient dockerClient;
         private EksClusterManager manager;
 
         @BeforeEach
@@ -384,6 +392,8 @@ class EksClusterManagerTest {
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
             when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
             portAllocator = Mockito.mock(PortAllocator.class);
+            dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
             manager = new EksClusterManager(containerBuilder, lifecycleManager,
                     Mockito.mock(ContainerDetector.class), portAllocator,
@@ -393,12 +403,14 @@ class EksClusterManagerTest {
 
         // Container's getters are final, so survivors are built from JSON instead of mocked.
         private Container survivingContainer(String id) {
-            return containerFromJson("{\"Id\":\"" + id + "\"}");
+            return containerFromJson("{\"Id\":\"" + id + "\","
+                    + "\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\"}}");
         }
 
         private Container survivingContainerOwnedBy(String id, String accountId) {
             return containerFromJson("{\"Id\":\"" + id + "\","
-                    + "\"Labels\":{\"io.floci.account\":\"" + accountId + "\"}}");
+                    + "\"Labels\":{\"io.floci.account\":\"" + accountId + "\","
+                    + "\"io.floci.eks.node-capacity\":\"m5.large:unbounded\"}}");
         }
 
         private Container containerFromJson(String json) {
@@ -440,6 +452,206 @@ class EksClusterManagerTest {
             // The port Docker already holds must not be handed out to another cluster.
             verify(portAllocator).markReserved(6512);
             verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void recreatesAnOldSurvivorWithoutCapacityLimits() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(containerFromJson("{\"Id\":\"cid-old\"}")));
+            when(lifecycleManager.adopt("cid-old", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            verify(lifecycleManager).create(any());
+            verify(portAllocator, never()).allocate(6440, 6499);
+            verify(dockerClient).stopContainerCmd("cid-old");
+        }
+
+        @Test
+        void restoresOldSurvivorWhenCapacityReplacementFails() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(containerFromJson("{\"Id\":\"cid-old\"}")));
+            when(lifecycleManager.adopt("cid-old", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenThrow(new RuntimeException("replacement failed"));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-old", cluster.getContainerId());
+            assertEquals(6440, cluster.getHostPort());
+            verify(lifecycleManager).removeIfExistsStrict("floci-eks-demo");
+            verify(dockerClient).stopContainerCmd("cid-old");
+            verify(portAllocator, never()).allocate(6440, 6499);
+        }
+
+        @Test
+        void firstNodeGroupReplacementKeepsTheClusterEndpoint() {
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenReturn(new ContainerInfo("cid-new", Map.of()));
+            Cluster cluster = cluster();
+            cluster.setDockerName("floci-eks-demo");
+            cluster.setContainerId("cid-old");
+            cluster.setHostPort(6441);
+            cluster.setNodeInstanceType("t3.medium");
+
+            assertTrue(manager.restartForNodeCapacity(cluster, "m5.large"));
+
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals(6441, cluster.getHostPort());
+            assertEquals("https://localhost:6441", cluster.getEndpoint());
+            verify(portAllocator, never()).allocate(6440, 6499);
+            verify(portAllocator, never()).release(6441);
+            verify(dockerClient).stopContainerCmd("cid-old");
+            verify(lifecycleManager, Mockito.times(2))
+                    .removeIfExistsStrict("floci-aws-eks-capacity-backup.demo");
+        }
+
+        @Test
+        void capacityBackupDoesNotCollideWithAnotherClusterName() {
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenReturn(new ContainerInfo("cid-new", Map.of()));
+            Cluster cluster = cluster();
+            cluster.setName("foo");
+            cluster.setDockerName("floci-eks-foo");
+            cluster.setContainerId("cid-foo");
+            cluster.setHostPort(6441);
+            cluster.setNodeInstanceType("t3.medium");
+            Cluster other = cluster();
+            other.setName("foo-capacity-backup");
+            other.setDockerName("floci-eks-foo-capacity-backup");
+            other.setContainerId("cid-other");
+
+            assertTrue(manager.restartForNodeCapacity(cluster, "m5.large"));
+            manager.stopCluster(cluster);
+
+            assertTrue(other.getName().matches(EksService.CLUSTER_NAME_REGEX));
+            assertFalse("foo.capacity-backup".matches(EksService.CLUSTER_NAME_REGEX));
+            assertEquals("floci-eks-foo-capacity-backup", manager.clusterResourceName(other));
+            verify(lifecycleManager, Mockito.times(3))
+                    .removeIfExistsStrict("floci-aws-eks-capacity-backup.foo");
+            verify(lifecycleManager, never()).removeIfExistsStrict(other.getDockerName());
+            verify(lifecycleManager, never()).stopAndRemove("cid-other", null);
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"floci-eks-", "floci-aws-eks-"})
+        void deletingNumericClusterDoesNotRemoveAnotherAccountsCluster(String prefix) {
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            Cluster cluster = cluster();
+            cluster.setAccountId("000000000000");
+            cluster.setName("999999999999");
+            cluster.setDockerName(prefix + cluster.getName());
+            cluster.setContainerId("cid-numeric");
+            String otherClusterName = "capacity-backup";
+            String otherDockerName = prefix + "999999999999." + otherClusterName;
+
+            assertTrue(cluster.getName().matches(EksService.CLUSTER_NAME_REGEX));
+            assertTrue(otherClusterName.matches(EksService.CLUSTER_NAME_REGEX));
+
+            manager.stopCluster(cluster);
+
+            verify(lifecycleManager).stopAndRemove("cid-numeric", null);
+            verify(lifecycleManager).removeIfExistsStrict("floci-aws-eks-capacity-backup.999999999999");
+            verify(lifecycleManager, never()).removeIfExistsStrict(otherDockerName);
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"floci-eks-", "floci-aws-eks-"})
+        void replacingNumericClusterDoesNotRemoveAnotherAccountsCluster(String prefix) {
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            stubFreshStart("cid-new", 6441);
+            Cluster cluster = cluster();
+            cluster.setAccountId("000000000000");
+            cluster.setName("999999999999");
+            cluster.setDockerName(prefix + cluster.getName());
+            cluster.setContainerId("cid-numeric");
+            cluster.setHostPort(6441);
+            cluster.setNodeInstanceType("t3.medium");
+            String otherDockerName = prefix + "999999999999.capacity-backup";
+
+            assertTrue(manager.restartForNodeCapacity(cluster, "m5.large"));
+
+            assertEquals("cid-new", cluster.getContainerId());
+            verify(lifecycleManager, Mockito.times(2))
+                    .removeIfExistsStrict("floci-aws-eks-capacity-backup.999999999999");
+            verify(dockerClient.renameContainerCmd("cid-numeric"))
+                    .withName("floci-aws-eks-capacity-backup.999999999999");
+            verify(lifecycleManager, never()).removeIfExistsStrict(otherDockerName);
+            verify(dockerClient.renameContainerCmd("cid-numeric"), never()).withName(otherDockerName);
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"000000000000", "111111111111", "999999999999"})
+        void capacityBackupsRespectAccountAndResourceNamespace(String accountId) {
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            EmulatorConfig.DockerConfig docker = Mockito.mock(EmulatorConfig.DockerConfig.class);
+            when(config.docker()).thenReturn(docker);
+            when(docker.resourceNamespace()).thenReturn(Optional.of("isolated"));
+            Cluster cluster = cluster();
+            cluster.setAccountId(accountId);
+            cluster.setName("demo");
+            cluster.setDockerName(manager.clusterResourceName(cluster));
+            cluster.setContainerId("cid-node");
+            String qualifiedName = accountId.equals("000000000000")
+                    ? cluster.getName() : accountId + "." + cluster.getName();
+
+            manager.stopCluster(cluster);
+
+            verify(lifecycleManager).removeIfExistsStrict(
+                    "floci-aws-isolated-eks-capacity-backup." + qualifiedName);
+            verify(lifecycleManager, never()).removeIfExistsStrict(cluster.getDockerName() + ".capacity-backup");
+            assertEquals("floci-aws-isolated-eks-" + qualifiedName, cluster.getDockerName());
+        }
+
+        @Test
+        void failedFirstNodeGroupReplacementRestoresPreviousContainerAndType() {
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenThrow(new IllegalStateException("replacement failed"));
+            when(lifecycleManager.adopt("cid-old", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6441)));
+            Cluster cluster = cluster();
+            cluster.setDockerName("floci-eks-demo");
+            cluster.setContainerId("cid-old");
+            cluster.setHostPort(6441);
+            cluster.setNodeInstanceType("t3.medium");
+
+            assertFalse(manager.restartForNodeCapacity(cluster, "m5.large"));
+
+            assertEquals("m5.large", cluster.getNodeInstanceType());
+            assertEquals("cid-old", cluster.getContainerId());
+            assertEquals(6441, cluster.getHostPort());
+            assertEquals("https://localhost:6441", cluster.getEndpoint());
+            verify(portAllocator, never()).allocate(6440, 6499);
+            verify(portAllocator, never()).release(6441);
+            verify(lifecycleManager, never()).removeVolume(anyString());
+        }
+
+        @Test
+        void backupCleanupFailureKeepsTheNewNodeRunning() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(containerFromJson("{\"Id\":\"cid-old\"}")));
+            when(lifecycleManager.adopt("cid-old", List.of(6443)))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            stubFreshStart("cid-new", 6440);
+            Mockito.doNothing().doThrow(new IllegalStateException("Docker cleanup failed"))
+                    .when(lifecycleManager).removeIfExistsStrict("floci-aws-eks-capacity-backup.demo");
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            verify(lifecycleManager, Mockito.times(1)).adopt("cid-old", List.of(6443));
+            verify(lifecycleManager, never()).removeIfExistsStrict("floci-eks-demo");
         }
 
         @Test
@@ -497,6 +709,20 @@ class EksClusterManagerTest {
 
             verify(lifecycleManager).stopAndRemove("cid-1", null);
             // The volume must survive so restoreCluster can bring the workloads back.
+            verify(lifecycleManager, never()).removeVolume(anyString());
+        }
+
+        @Test
+        void backupCleanupFailureDoesNotLeaveTheLiveNodeRunning() {
+            Cluster cluster = cluster();
+            cluster.setDockerName("floci-eks-demo");
+            cluster.setContainerId("cid-new");
+            Mockito.doThrow(new IllegalStateException("Docker cleanup failed"))
+                    .when(lifecycleManager).removeIfExistsStrict("floci-aws-eks-capacity-backup.demo");
+
+            assertThrows(IllegalStateException.class, () -> manager.stopCluster(cluster));
+
+            verify(lifecycleManager).stopAndRemove("cid-new", null);
             verify(lifecycleManager, never()).removeVolume(anyString());
         }
 
@@ -1000,6 +1226,60 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void clusterNodeAddressesResolveToTheClustersVpcForResolverRules() {
+            Cluster cluster = new Cluster();
+            cluster.setName("dns-cluster");
+            ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+            vpcConfig.setVpcId("vpc-12345678");
+            cluster.setResourcesVpcConfig(vpcConfig);
+
+            manager.registerClusterNodeInstance(cluster, "container-dns");
+
+            assertEquals(Optional.of(new ClientVpc("000000000000", "us-east-1", "vpc-12345678")),
+                    manager.vpcForClient("172.17.0.2"));
+            assertTrue(manager.vpcForClient("172.17.0.99").isEmpty());
+            assertTrue(manager.vpcForClient(null).isEmpty());
+
+            manager.unregisterMetadataEndpoint(cluster);
+            assertTrue(manager.vpcForClient("172.17.0.2").isEmpty());
+        }
+
+        @Test
+        void aClusterWithoutAVpcClaimsNoAddress() {
+            Cluster cluster = new Cluster();
+            cluster.setName("no-vpc-cluster");
+
+            manager.registerClusterNodeInstance(cluster, "container-no-vpc");
+
+            assertTrue(manager.vpcForClient("172.17.0.2").isEmpty());
+        }
+
+        @Test
+        void aClusterWhoseAddressesCannotBeDeterminedClaimsNoneAndSaysWhy() {
+            // Inspection failing leaves resolver rules quietly not applying rather than failing
+            // anything, so the warning is the only way a reader finds out. See #4538 review.
+            when(dockerClient.inspectContainerCmd(anyString()))
+                    .thenThrow(new RuntimeException("docker is unreachable"));
+            Cluster cluster = new Cluster();
+            cluster.setName("unreachable-cluster");
+            ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+            vpcConfig.setVpcId("vpc-12345678");
+            cluster.setResourcesVpcConfig(vpcConfig);
+
+            List<LogRecord> logs = LogCapture.capture(EksClusterManager.class,
+                    () -> manager.registerClusterNodeInstance(cluster, "container-unreachable"));
+
+            assertTrue(manager.vpcForClient("172.17.0.2").isEmpty());
+            // Compared by severity, not identity: JBoss LogManager has its own Level constants, so
+            // its WARN is not the same object as java.util.logging's WARNING.
+            assertTrue(logs.stream().anyMatch(
+                            record -> record.getLevel().intValue() >= Level.WARNING.intValue()
+                                    && String.valueOf(record.getMessage()).contains("Resolver rules will not apply")),
+                    "the cluster must say why its rules stopped applying, got: "
+                            + logs.stream().map(LogRecord::getMessage).toList());
+        }
+
+        @Test
         void clusterNodeInstanceProviderFindsAndListsRegisteredInstances() {
             Cluster cluster = new Cluster();
             cluster.setName("prov-cluster");
@@ -1396,6 +1676,8 @@ class EksClusterManagerTest {
 
             Container container = Mockito.mock(Container.class);
             when(container.getId()).thenReturn("surviving-container-id");
+            when(container.getLabels()).thenReturn(Map.of(
+                    "io.floci.eks.node-capacity", "m5.large:unbounded"));
             when(lifecycleManager.findByName("floci-eks-my-cluster")).thenReturn(Optional.of(container));
             when(lifecycleManager.adopt(anyString(), any())).thenReturn(
                     new ContainerInfo("surviving-container-id", Map.of(6443, new ContainerLifecycleManager.EndpointInfo("localhost", 6500)), Map.of(6443, 6500)));
@@ -1685,6 +1967,74 @@ class EksClusterManagerTest {
                     Mockito.mock(ContainerDetector.class), portAllocator,
                     Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
                     config, regionResolver, null, Mockito.mock(EksOidcService.class));
+        }
+
+        @Test
+        void nodeGroupTypeControlsContainerAndSynthesizedInstance() {
+            DockerClient dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
+            Info host = Mockito.mock(Info.class);
+            when(host.getMemTotal()).thenReturn(16L * 1024 * 1024 * 1024);
+            when(host.getNCPU()).thenReturn(8);
+            when(dockerClient.infoCmd().exec()).thenReturn(host);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("capacity-cluster");
+            cluster.setNodeInstanceType(manager.selectNodeInstanceType("t3.medium"));
+            manager.startCluster(cluster);
+
+            Ec2InstanceTypeCatalog catalog = new Ec2InstanceTypeCatalog();
+            EksNodeCapacity.Limits limits = EksNodeCapacity.calculate(
+                    catalog.find("t3.medium").orElseThrow(), host.getMemTotal(), host.getNCPU(), 0, 0);
+            verify(builder).withMemoryBytes(limits.memoryBytes());
+            verify(builder).withCpuUnits(limits.vcpus() * 1024);
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> expectedArgs = new ArrayList<>();
+            limits.addKubeletArgs(expectedArgs);
+            assertTrue(cmdCaptor.getValue().containsAll(expectedArgs));
+            assertEquals("t3.medium", manager.synthesizeClusterNodeInstance(
+                    cluster, "172.17.0.2", "us-east-1", "000000000000").getInstanceType());
+        }
+
+        @Test
+        void hostTooSmallLeavesClusterUnboundedAndStarting() {
+            DockerClient dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
+            Info host = Mockito.mock(Info.class);
+            when(host.getMemTotal()).thenReturn(1024L * 1024 * 1024);
+            when(host.getNCPU()).thenReturn(2);
+            when(dockerClient.infoCmd().exec()).thenReturn(host);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("small-host");
+            assertDoesNotThrow(() -> manager.startCluster(cluster));
+            verify(builder, never()).withMemoryBytes(Mockito.anyLong());
+            verify(builder, never()).withCpuUnits(Mockito.anyInt());
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            assertFalse(cmdCaptor.getValue().stream().anyMatch(arg -> arg.contains("reserved=")
+                    || arg.contains("eviction-hard=")));
+        }
+
+        @Test
+        void explicitCeilingSurvivesMissingDockerHostInformation() {
+            when(eks.maxMemoryMib()).thenReturn(512);
+            when(eks.maxVcpus()).thenReturn(1);
+            Cluster cluster = new Cluster();
+            cluster.setName("capped-cluster");
+
+            manager.startCluster(cluster);
+
+            verify(builder).withMemoryBytes(512L * 1024 * 1024);
+            verify(builder).withCpuUnits(1024);
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            assertFalse(cmdCaptor.getValue().stream().anyMatch(arg -> arg.contains("reserved=")
+                    || arg.contains("eviction-hard=")));
         }
 
         @Test
@@ -2150,6 +2500,8 @@ class EksClusterManagerTest {
         void restoreClusterAttachesLogsForAdoptedContainer() {
             Container container = Mockito.mock(Container.class);
             when(container.getId()).thenReturn("adopted-container-id-12345678901234567890");
+            when(container.getLabels()).thenReturn(Map.of(
+                    "io.floci.eks.node-capacity", "m5.large:unbounded"));
             when(lifecycleManager.findByName("floci-eks-prod-cluster")).thenReturn(Optional.of(container));
             when(lifecycleManager.adopt(anyString(), any())).thenReturn(
                     new ContainerInfo("adopted-container-id-12345678901234567890",
@@ -2303,6 +2655,10 @@ class EksClusterManagerTest {
 
             manager.startCluster(cluster);
             assertEquals(mockAuditHandle, manager.getLogHandle(cluster));
+            verify(logStreamer).execLogCallbackForAccount(
+                    "000000000000", "/aws/eks/audit-cluster/cluster",
+                    "kube-apiserver-audit-container-id-1234567890123456789",
+                    "us-east-1", "eks-audit:audit-cluster", false);
 
             manager.stopCluster(cluster);
             verify(lifecycleManager).stopAndRemove("container-id-123456789012345678901234567890", mockAuditHandle);

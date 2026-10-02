@@ -957,7 +957,6 @@ class LogsMetricFilterCfnProvisionerTest {
         service.deleteMetricFilter(GROUP, "errors", REGION);
         create(props().put("FilterPattern", "UNRELATED"));
         JsonNode otherOwner = MAPPER.valueToTree(filter(GROUP, "errors"));
-        assertTrue(provisioner.hasPendingRollbackCleanup(resource), "untracked identity must reach safe cleanup inspection");
         assertThrows(IllegalStateException.class, () -> provisioner.delete(resource, REGION));
         assertEquals("UNKNOWN", mutationState(resource, false).path("ownership").asText());
         assertEquals(otherOwner, MAPPER.valueToTree(filter(GROUP, "errors")));

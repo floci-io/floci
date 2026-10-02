@@ -18,4 +18,10 @@ public interface DnsRecordSource {
      * source does not own the name. The name arrives without a trailing dot and in the case the client sent.
      */
     Optional<DnsAnswer> resolveIpv4(String name);
+
+    /** A source that only implements IPv4 still preserves name ownership for other query types. */
+    default Optional<DnsAnswer> resolve(String name, int type) {
+        return resolveIpv4(name).map(answer -> type == 1 ? answer
+                : answer.nameExists() ? DnsAnswer.noData() : DnsAnswer.nxDomain());
+    }
 }

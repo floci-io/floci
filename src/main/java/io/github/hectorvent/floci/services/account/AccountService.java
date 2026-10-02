@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.account.model.AlternateContact;
@@ -19,7 +20,7 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class AccountService implements Resettable {
-    private static final String ACCOUNT_MANAGEMENT_SERVICE_PRINCIPAL = "account.amazonaws.com";
+    private static final String ACCOUNT_MANAGEMENT_SERVICE_PRINCIPAL = ServicePrincipals.of("account");
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
     private static final Pattern EMAIL = Pattern.compile("\\s*[\\w+=.#|!&-]+@[\\w.-]+\\.[\\w]+\\s*");
     private static final Pattern PHONE = Pattern.compile("[\\s0-9()+-]+");

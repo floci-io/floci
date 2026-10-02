@@ -1,8 +1,6 @@
 package io.github.hectorvent.floci.services.rds.container;
 
-import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -10,6 +8,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
@@ -28,8 +27,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
-import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -39,7 +38,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -860,8 +858,8 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         String lastOutput = "";
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
-                ContainerExecResult result = execInContainer(containerId, cmd, 5);
-                lastOutput = result.output() + (result.stderr().isEmpty() ? "" : "\n" + result.stderr());
+                ContainerExec.Result result = execInContainer(containerId, cmd, 5);
+                lastOutput = result.stdout() + (result.stderr().isEmpty() ? "" : "\n" + result.stderr());
                 if (result.exitCode() == 0) {
                     LOG.infov("Initialized {0} in RDS container {1}", description, containerName);
                     return;
@@ -886,11 +884,11 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
                 "-U", effectiveUser
         };
         try (Lease _ = holdContainer(containerId)) {
-            ContainerExecResult result = execInContainer(containerId, cmd, 120);
+            ContainerExec.Result result = execInContainer(containerId, cmd, 120);
             if (result.exitCode() != 0) {
                 throw new RuntimeException("pg_dumpall failed with exit code " + result.exitCode() + ": " + result.stderr());
             }
-            return result.output();
+            return result.stdout();
         } catch (Exception e) {
             throw new RuntimeException("Failed to create postgres snapshot", e);
         }
@@ -920,7 +918,7 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
 
             String[] cmd = { "sh", "/tmp/restore.sh", effectiveUser };
 
-            ContainerExecResult result = null;
+            ContainerExec.Result result = null;
             for (int i = 0; i < 60; i++) {
                 result = execInContainer(containerId, cmd, 120);
                 if (result.exitCode() == 0) {
@@ -938,7 +936,7 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
             }
 
             if (result == null || result.exitCode() != 0) {
-                String errMsg = result != null ? (result.stderr().isEmpty() ? result.output() : result.stderr()) : "";
+                String errMsg = result != null ? (result.stderr().isEmpty() ? result.stdout() : result.stderr()) : "";
                 throw new RuntimeException("psql restore failed with exit code "
                         + (result != null ? result.exitCode() : -1) + ": " + errMsg);
             }
@@ -993,60 +991,9 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         tar.closeArchiveEntry();
     }
 
-    private ContainerExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
-        String execId = lifecycleManager.getDockerClient().execCreateCmd(containerId)
-                .withCmd(cmd)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec()
-                .getId();
-
-        CountDownLatch latch = new CountDownLatch(1);
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
-        Closeable callback = lifecycleManager.getDockerClient().execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
-            @Override
-            public void onNext(Frame frame) {
-                if (frame.getPayload() != null) {
-                    try {
-                        if (frame.getStreamType() == com.github.dockerjava.api.model.StreamType.STDOUT) {
-                            output.write(frame.getPayload());
-                        } else if (frame.getStreamType() == com.github.dockerjava.api.model.StreamType.STDERR) {
-                            stderr.write(frame.getPayload());
-                        }
-                    } catch (IOException e) {
-                        LOG.warnv(e, "Failed to read output stream for container exec {0}", execId);
-                    }
-                }
-            }
-
-            @Override
-            public void onComplete() {
-                latch.countDown();
-            }
-
-            @Override
-            public void onError(Throwable t) {
-                LOG.warnv(t, "Container exec {0} failed", execId);
-                latch.countDown();
-            }
-        });
-        try {
-            boolean completed = latch.await(timeoutSeconds, TimeUnit.SECONDS);
-            if (!completed) {
-                return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s", "");
-            }
-            Long exitCode = lifecycleManager.getDockerClient().inspectExecCmd(execId).exec().getExitCodeLong();
-            return new ContainerExecResult(
-                    exitCode != null ? exitCode : -1,
-                    output.toString(StandardCharsets.UTF_8),
-                    stderr.toString(StandardCharsets.UTF_8));
-        } finally {
-            callback.close();
-        }
+    private ContainerExec.Result execInContainer(String containerId, String[] cmd, int timeoutSeconds) {
+        return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, timeoutSeconds);
     }
-
-    record ContainerExecResult(long exitCode, String output, String stderr) {}
 
     public void removeVolume(String instanceId, String volumeId) {
         removeVolume(instanceId, instanceId,

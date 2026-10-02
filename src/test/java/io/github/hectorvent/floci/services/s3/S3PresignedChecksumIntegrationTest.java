@@ -212,6 +212,135 @@ class S3PresignedChecksumIntegrationTest {
             .header("x-amz-checksum-sha256", equalTo(expectedSha256));
     }
 
+    @Test
+    void presignedPutWithUserMetadataInQueryStoresTheMetadata() throws Exception {
+        createBucket();
+        String path = "/" + BUCKET + "/query-metadata.txt";
+        String url = presign("PUT", path,
+                Map.of("x-amz-meta-source", "presigned-put", "x-amz-meta-Uploaded-By", "tester"), Map.of());
+
+        given()
+            .urlEncodingEnabled(false)
+            .body("x".getBytes(StandardCharsets.UTF_8))
+        .when()
+            .put(url)
+        .then()
+            .statusCode(200);
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .head(path)
+        .then()
+            .statusCode(200)
+            .header("x-amz-meta-source", equalTo("presigned-put"))
+            .header("x-amz-meta-uploaded-by", equalTo("tester"));
+    }
+
+    @Test
+    void presignedPutWithUnsignedMetadataHeaderIsRejectedAsHeadersNotSigned() throws Exception {
+        createBucket();
+        String path = "/" + BUCKET + "/unsigned-metadata-header.txt";
+        String url = presign("PUT", path, Map.of("x-amz-meta-source", "signed"), Map.of());
+
+        given()
+            .urlEncodingEnabled(false)
+            .header("x-amz-meta-source", "altered")
+            .body("x".getBytes(StandardCharsets.UTF_8))
+        .when()
+            .put(url)
+        .then()
+            .statusCode(403)
+            .body(containsString("<Code>AccessDenied</Code>"))
+            .body(containsString("<HeadersNotSigned>x-amz-meta-source</HeadersNotSigned>"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .head(path)
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    void presignedCreateMultipartUploadWithUserMetadataInQueryStoresTheMetadata() throws Exception {
+        createBucket();
+        String path = "/" + BUCKET + "/multipart-query-metadata.txt";
+        String initiateUrl = presign("POST", path,
+                Map.of("uploads", "", "x-amz-meta-source", "presigned-multipart"), Map.of());
+
+        String uploadId = given()
+            .urlEncodingEnabled(false)
+        .when()
+            .post(initiateUrl)
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        String etag = given()
+            .filter(LOCAL_SIGNER)
+            .body("part".getBytes(StandardCharsets.UTF_8))
+        .when()
+            .put(path + "?partNumber=1&uploadId=" + uploadId)
+        .then()
+            .statusCode(200)
+            .extract().header("ETag");
+
+        given()
+            .filter(LOCAL_SIGNER)
+            .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + etag
+                    + "</ETag></Part></CompleteMultipartUpload>")
+        .when()
+            .post(path + "?uploadId=" + uploadId)
+        .then()
+            .statusCode(200);
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .head(path)
+        .then()
+            .statusCode(200)
+            .header("x-amz-meta-source", equalTo("presigned-multipart"));
+    }
+
+    @Test
+    void presignedCopyObjectWithReplacedUserMetadataInQueryStoresTheMetadata() throws Exception {
+        createBucket();
+        String sourcePath = "/" + BUCKET + "/metadata-copy-source.txt";
+        given()
+            .filter(LOCAL_SIGNER)
+            .header("x-amz-meta-source", "original")
+            .body("copy me".getBytes(StandardCharsets.UTF_8))
+        .when()
+            .put(sourcePath)
+        .then()
+            .statusCode(200);
+
+        String destPath = "/" + BUCKET + "/metadata-copy-dest.txt";
+        String copyUrl = presign("PUT", destPath,
+                Map.of("x-amz-meta-source", "copied"),
+                Map.of("x-amz-copy-source", sourcePath, "x-amz-metadata-directive", "REPLACE"));
+
+        given()
+            .urlEncodingEnabled(false)
+            .header("x-amz-copy-source", sourcePath)
+            .header("x-amz-metadata-directive", "REPLACE")
+        .when()
+            .put(copyUrl)
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .head(destPath)
+        .then()
+            .statusCode(200)
+            .header("x-amz-meta-source", equalTo("copied"));
+    }
+
     private static void createBucket() {
         given()
             .filter(LOCAL_SIGNER)

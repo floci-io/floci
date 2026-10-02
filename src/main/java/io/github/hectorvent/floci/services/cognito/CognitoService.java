@@ -47,6 +47,8 @@ import org.jspecify.annotations.Nullable;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.KeyPair;
@@ -319,7 +321,6 @@ public class CognitoService implements ResourceProvider {
         pool.setClientIdOverride(getClientIdOverride(userPoolTags));
         pool.setClientSecretOverride(ReservedTags.extractOverrideCognitoClientSecret(userPoolTags));
         populateUserPool(pool, request);
-        normalizePasswordPolicy(pool);
 
         ensureJwtSigningKeys(pool);
         ensureRefreshTokenSecret(pool);
@@ -399,32 +400,25 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * Fills in AWS's per-field password policy defaults for a pool created with a
-     * {@code PasswordPolicy} that has some fields unset: TemporaryPasswordValidityDays 7 (the one
-     * default the API reference states explicitly) and MinimumLength 8 (AWS's documented
-     * complex-password recommendation; the field itself only documents a minimum of 6).
-     * "If you don't provide a value for an attribute, Amazon Cognito sets it to its default
-     * value" (CreateUserPool).
+     * Normalizes and validates a supplied {@code PasswordPolicy}.
+     *
+     * <p>On live Cognito, when {@code PasswordPolicy} is provided, {@code MinimumLength} must be
+     * between 6 and 99. If omitted, live Cognito evaluates it as 0 and rejects the request with
+     * {@code InvalidParameterException} ("Value '0' at 'policies.passwordPolicy.minimumLength'
+     * failed to satisfy constraint: Member must have value greater than or equal to 6").
+     *
+     * <p>{@code TemporaryPasswordValidityDays} defaults to 7 (the one default the API reference
+     * documents explicitly).
      *
      * <p>RequireUppercase, RequireLowercase, RequireNumbers and RequireSymbols are deliberately
-     * left alone. The API reference documents no default for any of them, and they are unboxed
-     * booleans in the Cognito model, so a client that wants one off cannot say so on the wire:
-     * aws-sdk-go-v2 emits each under {@code if v.RequireLowercase != false}. Absence therefore
-     * means "not required", which is what the live service reports back - the Terraform provider
-     * asserts require_numbers and require_uppercase read as false immediately after a create
-     * that set them to false. Defaulting them to enabled made every Terraform plan after a
-     * create show spurious drift, and over-enforced the policy on SignUp and
-     * AdminSetUserPassword. The all-enabled policy is the console's "Cognito defaults" mode,
-     * not an API default.
+     * left alone: absence means "not required", matching live Cognito and avoiding Terraform
+     * plan drift.
      *
      * <p>Deliberately does not fabricate a {@code PasswordPolicy} for a pool that supplies none
      * at all — every other test and fixture in this codebase creates pools that way, relying on
      * "no policy configured" meaning no password validation, and defaulting one into existence
      * here would enforce it retroactively on all of them. Whether an unconfigured pool should
      * get AWS's default policy is tracked separately (hectorvent's follow-up on #2066).
-     *
-     * <p>Scoped to creation only, not UpdateUserPool, whose partial-update semantics for a
-     * re-supplied PasswordPolicy are not verified here.
      */
     @SuppressWarnings("unchecked")
     private void normalizePasswordPolicy(UserPool pool) {
@@ -432,12 +426,81 @@ public class CognitoService implements ResourceProvider {
         if (policies == null || !(policies.get("PasswordPolicy") instanceof Map<?, ?> raw)) {
             return;
         }
-        Map<String, Object> normalized = new HashMap<>(policies);
         Map<String, Object> passwordPolicy = new HashMap<>((Map<String, Object>) raw);
-        passwordPolicy.putIfAbsent("MinimumLength", 8);
+        validatePasswordPolicy(passwordPolicy);
         passwordPolicy.putIfAbsent("TemporaryPasswordValidityDays", 7);
+        Map<String, Object> normalized = new HashMap<>(policies);
         normalized.put("PasswordPolicy", passwordPolicy);
         pool.setPolicies(normalized);
+    }
+
+    private void validatePasswordPolicy(Map<String, Object> passwordPolicy) {
+        Object minLengthVal = passwordPolicy.get("MinimumLength");
+        if (minLengthVal == null) {
+            throw new AwsException(
+                    "InvalidParameterException",
+                    "1 validation error detected: Value '0' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6",
+                    400
+            );
+        }
+        BigInteger minLength = policyInteger(passwordPolicy, "MinimumLength", "minimumLength");
+        if (minLength.compareTo(BigInteger.valueOf(6)) < 0) {
+            throw new AwsException(
+                    "InvalidParameterException",
+                    "1 validation error detected: Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value greater than or equal to 6",
+                    400
+            );
+        }
+        if (minLength.compareTo(BigInteger.valueOf(99)) > 0) {
+            throw new AwsException(
+                    "InvalidParameterException",
+                    "1 validation error detected: Value '" + minLengthVal + "' at 'policies.passwordPolicy.minimumLength' failed to satisfy constraint: Member must have value less than or equal to 99",
+                    400
+            );
+        }
+
+        if (passwordPolicy.containsKey("TemporaryPasswordValidityDays")) {
+            Object tempDaysVal = passwordPolicy.get("TemporaryPasswordValidityDays");
+            if (tempDaysVal != null) {
+                BigInteger tempDays = policyInteger(passwordPolicy, "TemporaryPasswordValidityDays",
+                        "temporaryPasswordValidityDays");
+                if (tempDays.compareTo(BigInteger.ZERO) < 0) {
+                    throw new AwsException(
+                            "InvalidParameterException",
+                            "1 validation error detected: Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value greater than or equal to 0",
+                            400
+                    );
+                }
+                if (tempDays.compareTo(BigInteger.valueOf(365)) > 0) {
+                    throw new AwsException(
+                            "InvalidParameterException",
+                            "1 validation error detected: Value '" + tempDaysVal + "' at 'policies.passwordPolicy.temporaryPasswordValidityDays' failed to satisfy constraint: Member must have value less than or equal to 365",
+                            400
+                    );
+                }
+            }
+        }
+
+        if (passwordPolicy.containsKey("PasswordHistorySize")) {
+            Object historySizeVal = passwordPolicy.get("PasswordHistorySize");
+            if (historySizeVal != null) {
+                BigInteger historySize = policyInteger(passwordPolicy, "PasswordHistorySize", "passwordHistorySize");
+                if (historySize.compareTo(BigInteger.ZERO) < 0) {
+                    throw new AwsException(
+                            "InvalidParameterException",
+                            "1 validation error detected: Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value greater than or equal to 0",
+                            400
+                    );
+                }
+                if (historySize.compareTo(BigInteger.valueOf(24)) > 0) {
+                    throw new AwsException(
+                            "InvalidParameterException",
+                            "1 validation error detected: Value '" + historySizeVal + "' at 'policies.passwordPolicy.passwordHistorySize' failed to satisfy constraint: Member must have value less than or equal to 24",
+                            400
+                    );
+                }
+            }
+        }
     }
 
     private static String prefixedAttributeName(String name, boolean developerOnly) {
@@ -467,7 +530,10 @@ public class CognitoService implements ResourceProvider {
 
     @SuppressWarnings("unchecked")
     private void populateUserPool(UserPool pool, Map<String, Object> request) {
-        if (request.containsKey("Policies")) pool.setPolicies((Map<String, Object>) request.get("Policies"));
+        if (request.containsKey("Policies")) {
+            pool.setPolicies((Map<String, Object>) request.get("Policies"));
+            normalizePasswordPolicy(pool);
+        }
         if (request.containsKey("DeletionProtection")) pool.setDeletionProtection((String) request.get("DeletionProtection"));
         if (request.containsKey("LambdaConfig")) pool.setLambdaConfig((Map<String, Object>) request.get("LambdaConfig"));
         if (request.containsKey("Schema")) pool.setSchemaAttributes(prefixCustomSchemaAttributes((List<Map<String, Object>>) request.get("Schema")));
@@ -487,12 +553,25 @@ public class CognitoService implements ResourceProvider {
         if (request.containsKey("AdminCreateUserConfig")) pool.setAdminCreateUserConfig((Map<String, Object>) request.get("AdminCreateUserConfig"));
         if (request.containsKey("UserPoolAddOns")) pool.setUserPoolAddOns((Map<String, Object>) request.get("UserPoolAddOns"));
         if (request.containsKey("UsernameConfiguration")) pool.setUsernameConfiguration((Map<String, Object>) request.get("UsernameConfiguration"));
-        if (request.containsKey("AccountRecoverySetting")) pool.setAccountRecoverySetting((Map<String, Object>) request.get("AccountRecoverySetting"));
+        if (request.containsKey("AccountRecoverySetting")) {
+            pool.setAccountRecoverySetting((Map<String, Object>) request.get("AccountRecoverySetting"));
+            validateAccountRecoverySetting(pool);
+        }
         if (request.containsKey("UserAttributeUpdateSettings")) {
             pool.setUserAttributeUpdateSettings(validateUserAttributeUpdateSettings(
                     (Map<String, Object>) request.get("UserAttributeUpdateSettings")));
         }
         if (request.containsKey("UserPoolTier")) pool.setUserPoolTier((String) request.get("UserPoolTier"));
+    }
+
+    private void validateAccountRecoverySetting(UserPool pool) {
+        List<String> mechanisms = accountRecoveryMechanisms(pool);
+        if (mechanisms.contains("admin_only") && mechanisms.stream().anyMatch(name -> !"admin_only".equals(name))) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid account recovery setting parameter. "
+                            + "Account Recovery Setting cannot use admin_only setting with any other recovery mechanisms.",
+                    400);
+        }
     }
 
     private Map<String, Object> validateUserAttributeUpdateSettings(Map<String, Object> settings) {
@@ -2079,6 +2158,12 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminResetUserPassword(String userPoolId, String username) {
+        UserPool pool = describeUserPool(userPoolId);
+        if (accountRecoveryMechanisms(pool).contains("admin_only")) {
+            throw new AwsException("NotAuthorizedException",
+                    "This userpool does not have password recovery mechanism, the administrator must set a new password.",
+                    400);
+        }
         CognitoUser resolvedUser = adminGetUser(userPoolId, username);
         synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
             adminResetUserPasswordUnderUserLock(userPoolId, resolvedUser.getUsername());
@@ -2877,6 +2962,54 @@ public class CognitoService implements ResourceProvider {
         return authFlowHandler.adminRespondToAuthChallenge(userPoolId, clientId, challengeName, session, responses, clientMetadata);
     }
 
+    public Map<String, Object> associateSoftwareToken(String accessToken, String session) {
+        return authFlowHandler.associateSoftwareToken(accessToken, session);
+    }
+
+    public Map<String, Object> verifySoftwareToken(String accessToken, String session, String userCode) {
+        return authFlowHandler.verifySoftwareToken(accessToken, session, userCode);
+    }
+
+    void beginSoftwareTokenMfa(String poolId, String username, String secret) {
+        synchronized (userLock(poolId, username)) {
+            CognitoUser user = adminGetUser(poolId, username);
+            user.setPendingSoftwareTokenMfaSecret(secret);
+            user.setPendingSoftwareTokenMfaAttemptsRemaining(CognitoTotp.MAX_FAILED_ATTEMPTS);
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(poolId, user.getUsername()), user);
+        }
+    }
+
+    boolean activateSoftwareTokenMfa(String poolId, String username, String expectedSecret,
+                                     String code, Instant now) {
+        synchronized (userLock(poolId, username)) {
+            CognitoUser user = adminGetUser(poolId, username);
+            String pending = user.getPendingSoftwareTokenMfaSecret();
+            if (pending == null) {
+                throw new AwsException("InvalidParameterException", "No software token is awaiting verification", 400);
+            }
+            if (expectedSecret != null && !expectedSecret.equals(pending)) {
+                throw new AwsException("NotAuthorizedException", "Software token association has changed", 400);
+            }
+            Integer storedAttempts = user.getPendingSoftwareTokenMfaAttemptsRemaining();
+            int attemptsRemaining = storedAttempts == null ? CognitoTotp.MAX_FAILED_ATTEMPTS : storedAttempts;
+            if (attemptsRemaining <= 0) {
+                return false;
+            }
+            if (!CognitoTotp.validCode(pending, code, now)) {
+                user.setPendingSoftwareTokenMfaAttemptsRemaining(attemptsRemaining - 1);
+                userStore.put(userKey(poolId, user.getUsername()), user);
+                return false;
+            }
+            user.setSoftwareTokenMfaSecret(pending);
+            user.setPendingSoftwareTokenMfaSecret(null);
+            user.setPendingSoftwareTokenMfaAttemptsRemaining(null);
+            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(poolId, user.getUsername()), user);
+            return true;
+        }
+    }
+
     public void changePassword(String accessToken, String previousPassword, String proposedPassword) {
         VerifiedAccessToken token = verifyAccessToken(accessToken);
         String username = token.username();
@@ -2904,8 +3037,11 @@ public class CognitoService implements ResourceProvider {
     public Map<String, Object> forgotPassword(String clientId, String username) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
-        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
         UserPool pool = describeUserPool(client.getUserPoolId());
+        if (accountRecoveryMechanisms(pool).contains("admin_only")) {
+            throw new AwsException("NotAuthorizedException", "Contact administrator to reset password.", 400);
+        }
+        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
         ensureVerificationWiring();
         DeliveryTarget deliveryTarget = resolveForgotPasswordDeliveryTarget(pool, user);
 
@@ -2952,6 +3088,41 @@ public class CognitoService implements ResourceProvider {
         List<Map<String, String>> attrs = new ArrayList<>();
         user.getAttributes().forEach((k, v) -> attrs.add(Map.of("Name", k, "Value", v)));
         result.put("UserAttributes", attrs);
+        return result;
+    }
+
+    /**
+     * GetUserAuthFactors. The MFA members come from the email MFA preference, the one per-user
+     * MFA setting Floci stores; SetUserMFAPreference accepts SMS and software-token settings
+     * without keeping them.
+     */
+    public Map<String, Object> getUserAuthFactors(String accessToken) {
+        VerifiedAccessToken token;
+        try {
+            token = verifyAccessToken(accessToken);
+        } catch (AwsException e) {
+            if ("NotAuthorizedException".equals(e.getErrorCode())
+                    && INVALID_ACCESS_TOKEN_MESSAGE.equals(e.getMessage())) {
+                throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
+            }
+            throw e;
+        }
+        requireScope(accessToken, "aws.cognito.signin.user.admin");
+
+        CognitoUser user = adminGetUser(token.poolId(), token.username());
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("Username", user.getUsername());
+        List<String> factors = authFlowHandler.configuredUserAuthFactors(user);
+        if (!factors.isEmpty()) {
+            result.put("ConfiguredUserAuthFactors", factors);
+        }
+        EmailMfaSettings emailMfa = user.getEmailMfaSettings();
+        if (emailMfa != null && emailMfa.isEnabled()) {
+            if (emailMfa.isPreferredMfa()) {
+                result.put("PreferredMfaSetting", "EMAIL_OTP");
+            }
+            result.put("UserMFASettingList", List.of("EMAIL_OTP"));
+        }
         return result;
     }
 
@@ -3556,7 +3727,11 @@ public class CognitoService implements ResourceProvider {
             if (override.scopesToAdd() != null) {
                 for (String s : override.scopesToAdd()) if (!current.contains(s)) current.add(s);
             }
-            if (!current.isEmpty()) claims.put("scope", String.join(" ", current));
+            if (current.isEmpty()) {
+                claims.remove("scope");
+            } else {
+                claims.put("scope", String.join(" ", current));
+            }
         }
     }
 
@@ -4094,6 +4269,38 @@ public class CognitoService implements ResourceProvider {
         return 0;
     }
 
+    /**
+     * Reads a password policy integer without narrowing it, so range checks see the real value.
+     * A value that is not a whole-number type or string is rejected: falling back to zero would
+     * let it pass the 0-based ranges of {@code TemporaryPasswordValidityDays} and
+     * {@code PasswordHistorySize} and be stored as-is.
+     */
+    private BigInteger policyInteger(Map<String, Object> policy, String key, String member) {
+        Object value = policy.get(key);
+        try {
+            if (value instanceof BigInteger integer) {
+                return integer;
+            }
+            if (value instanceof Number number) {
+                return new BigDecimal(number.toString()).toBigInteger();
+            }
+            if (value instanceof String stringValue) {
+                return new BigInteger(stringValue);
+            }
+        } catch (NumberFormatException e) {
+            throw notAnInteger(value, member);
+        }
+        throw notAnInteger(value, member);
+    }
+
+    private static AwsException notAnInteger(Object value, String member) {
+        return new AwsException(
+                "InvalidParameterException",
+                "1 validation error detected: Value '" + value + "' at 'policies.passwordPolicy." + member
+                        + "' failed to satisfy constraint: Member must be an integer",
+                400);
+    }
+
     private boolean policyBoolean(Map<String, Object> policy, String key) {
         Object value = policy.get(key);
         return value instanceof Boolean booleanValue
@@ -4407,39 +4614,40 @@ public class CognitoService implements ResourceProvider {
 
 
     /**
-     * Extracts the space-separated {@code scope} claim from an already-verified access token
-     * (call after {@link #verifyAccessToken}). {@code null} means no scope claim at all, which
-     * every token this simulator currently issues also is not the case for access tokens (see
-     * {@code generateSignedJwt}, which always sets a default scope) but a caller-suppressed
-     * scope list still needs to be tolerated as "no restriction modeled" rather than treated the
-     * same as an empty, restrictive list.
+     * The scopes in the space-separated {@code scope} claim of an already-verified access token
+     * (call after {@link #verifyAccessToken}), empty when the claim is absent or blank. Every access
+     * token Floci mints sets the claim (see {@code generateSignedJwt}); it is missing only when a
+     * PreTokenGeneration trigger removed it, and such a token grants no scope.
      */
     private Set<String> extractScopesFromToken(String token) {
         try {
             String[] parts = token.split("\\.", -1);
             JsonNode claims = MAPPER.readTree(Base64.getUrlDecoder().decode(parts[1]));
             String scope = textClaim(claims, "scope");
-            if (scope == null || scope.isBlank()) return null;
             Set<String> scopes = new HashSet<>();
+            if (scope == null) {
+                return scopes;
+            }
             for (String s : scope.split(" ")) {
                 if (!s.isBlank()) scopes.add(s);
             }
             return scopes;
         } catch (Exception e) {
-            return null;
+            LOG.debug("Could not read the scope claim of an access token", e);
+            return Set.of();
         }
     }
 
     /**
      * AWS requires an access token carrying the given scope for some operations (for example
-     * VerifyUserAttribute requires aws.cognito.signin.user.admin). Call after
-     * {@link #verifyAccessToken}, which already confirms the token is a valid, unexpired access
-     * token; this only adds the scope check on top.
+     * VerifyUserAttribute requires aws.cognito.signin.user.admin), and refuses a token with no
+     * scope claim. Call after {@link #verifyAccessToken}, which already confirms the token is a
+     * valid, unexpired access token; this only adds the scope check on top.
      */
-    private void requireScope(String accessToken, String requiredScope) {
+    void requireScope(String accessToken, String requiredScope) {
         Set<String> scopes = extractScopesFromToken(accessToken);
-        if (scopes != null && !scopes.contains(requiredScope)) {
-            throw new AwsException("NotAuthorizedException", "Access Token does not have the required scope", 400);
+        if (!scopes.contains(requiredScope)) {
+            throw new AwsException("NotAuthorizedException", "Access Token does not have required scopes", 400);
         }
     }
 
@@ -4858,7 +5066,7 @@ public class CognitoService implements ResourceProvider {
         }
         return recoveryMechanisms.stream().filter(Map.class::isInstance).map(Map.class::cast)
                 .sorted(Comparator.comparingInt(this::recoveryPriority))
-                .map(m -> String.valueOf(m.get("Name"))).filter(name -> !"admin_only".equals(name))
+                .map(m -> String.valueOf(m.get("Name")))
                 .toList();
     }
 

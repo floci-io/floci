@@ -481,14 +481,17 @@ final class S3PublicAccessEvaluator {
                     || "ArnLike".equalsIgnoreCase(operator.getKey());
             boolean exact = "StringEquals".equalsIgnoreCase(operator.getKey())
                     || "ArnEquals".equalsIgnoreCase(operator.getKey());
-            if ((!glob && !exact) || !operator.getValue().isObject()) {
+            boolean bool = "Bool".equalsIgnoreCase(operator.getKey());
+            if ((!glob && !exact && !bool) || !operator.getValue().isObject()) {
                 return false;
             }
             Iterator<Map.Entry<String, JsonNode>> entries = operator.getValue().fields();
             while (entries.hasNext()) {
                 Map.Entry<String, JsonNode> entry = entries.next();
                 String actual = contextValue(context, entry.getKey());
-                if (actual == null || !conditionValueMatches(entry.getValue(), actual, glob)) {
+                if (actual == null || !(bool
+                        ? booleanConditionMatches(entry.getValue(), actual)
+                        : conditionValueMatches(entry.getValue(), actual, glob))) {
                     return false;
                 }
             }
@@ -506,6 +509,25 @@ final class S3PublicAccessEvaluator {
             }
         }
         return null;
+    }
+
+    private static boolean booleanConditionMatches(JsonNode expected, String actual) {
+        if (!"true".equalsIgnoreCase(actual) && !"false".equalsIgnoreCase(actual)) {
+            return false;
+        }
+        if (expected.isBoolean() || expected.isTextual()) {
+            String value = expected.asText();
+            return ("true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value))
+                    && value.equalsIgnoreCase(actual);
+        }
+        if (expected.isArray()) {
+            for (JsonNode item : expected) {
+                if (booleanConditionMatches(item, actual)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean conditionValueMatches(JsonNode expected, String actual, boolean glob) {

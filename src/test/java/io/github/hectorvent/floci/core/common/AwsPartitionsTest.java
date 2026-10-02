@@ -144,6 +144,29 @@ class AwsPartitionsTest {
         assertFalse(AwsPartitions.commercial().offers(null));
     }
 
+    /** A credential scope carries the signing name, which for some services is not the endpoint key. */
+    @Test
+    void signingNamesJoinTheEndpointPrefixesTheyCover() {
+        assertEquals(Set.of("api.ecr"), AwsPartitions.endpointPrefixes("ecr"));
+        assertTrue(AwsPartitions.endpointPrefixes("bedrock").contains("bedrock-runtime"));
+        assertEquals(Set.of(), AwsPartitions.endpointPrefixes("sqs"));
+        assertEquals(Set.of(), AwsPartitions.endpointPrefixes(null));
+
+        assertTrue(AwsPartitions.commercial().offersSigningName("ecr"));
+        assertTrue(AwsPartitions.byId("aws-cn").offersSigningName("ecr"));
+        assertTrue(AwsPartitions.byId("aws-cn").offersSigningName("sqs"));
+        assertFalse(AwsPartitions.byId("aws-us-gov").offersSigningName("cloudfront"));
+        assertFalse(AwsPartitions.byId("aws-eusc").offersSigningName("iam"));
+        assertFalse(AwsPartitions.commercial().offersSigningName("no-such-service"));
+        assertFalse(AwsPartitions.commercial().offersSigningName(null));
+
+        assertTrue(AwsPartitions.publishesSomewhere("cloudfront"));
+        assertTrue(AwsPartitions.publishesSomewhere("ecr"), "a signing name whose endpoint prefix is published");
+        assertFalse(AwsPartitions.publishesSomewhere("fis"), "endpoints.json omits the ruleset-only services");
+        assertFalse(AwsPartitions.publishesSomewhere("no-such-service"));
+        assertFalse(AwsPartitions.publishesSomewhere(null));
+    }
+
     @Test
     void optInAndWebsiteFormFlagsComeFromTheCdkRules() {
         AwsPartition aws = AwsPartitions.commercial();

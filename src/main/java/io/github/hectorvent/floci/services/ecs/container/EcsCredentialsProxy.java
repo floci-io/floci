@@ -1,12 +1,11 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Container;
-import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
@@ -17,7 +16,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -26,10 +24,10 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Owns the small proxy container, one per Docker network, that holds the ECS container-credentials
  * address (169.254.170.2) and forwards to {@link EcsTaskRoleCredentialsServer}. A task container
- * needs its own address in 169.254.0.0/16 to reach this proxy at all (see the follow-up wiring
- * that gives it one): without a connected route for that range, the kernel routes toward the
- * default gateway instead of resolving the peer directly, and the connection is refused before it
- * reaches this proxy's socket.
+ * needs its own address in 169.254.0.0/16 to reach this proxy at all, which
+ * {@code EcsTaskLinkLocalAddresses} hands out: without a connected route for that range, the
+ * kernel routes toward the default gateway instead of resolving the peer directly, and the
+ * connection is refused before it reaches this proxy's socket.
  *
  * <p>Docker accepts a link-local address request even on a runtime that then does not honour it
  * (see the review discussion on #4063), so a bind is never trusted from the API call alone: after
@@ -45,6 +43,7 @@ public class EcsCredentialsProxy implements ContainerTeardown {
     private static final String OWNS_NETWORK_LABEL = "floci.ecs-task-role-credentials-proxy";
     private static final int VERIFY_ATTEMPTS = 30;
     private static final long VERIFY_INTERVAL_MILLIS = 200;
+    private static final int EXEC_TIMEOUT_SECONDS = 10;
 
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
@@ -75,14 +74,21 @@ public class EcsCredentialsProxy implements ContainerTeardown {
      * SecurityGroupFirewallManager} uses: several Floci processes can share one Docker daemon, and
      * a label match alone would let one instance's restart tear down another's still-running,
      * still-in-use proxy.
+     *
+     * <p>Skipped with {@code reconcile-containers-on-startup} off, like the task container sweep:
+     * that is the setting for instances sharing one owner identity, where a proxy carrying this
+     * owner label may still serve another instance's running tasks.
      */
     @PostConstruct
     void reapSurvivingProxies() {
+        if (!config.services().ecs().reconcileContainersOnStartup()) {
+            return;
+        }
         try {
             dockerClient.listContainersCmd().withShowAll(true)
                     .withLabelFilter(Map.of(OWNS_NETWORK_LABEL, "true"))
                     .exec().stream()
-                    .filter(container -> owner().equals(container.getLabels().get("floci_owner_port")))
+                    .filter(container -> owner().equals(container.getLabels().get(ContainerStorageHelper.OWNER_LABEL)))
                     .forEach(container -> lifecycleManager.removeIfExists(container.getId()));
         } catch (Exception e) {
             LOG.warnv("Could not reap surviving ECS credentials proxy containers: {0}", e.getMessage());
@@ -91,8 +97,7 @@ public class EcsCredentialsProxy implements ContainerTeardown {
 
     /** Identifies this Floci process among others that may share the same Docker daemon. */
     String owner() {
-        String namespace = config.docker().resourceNamespace().orElse("");
-        return namespace.isBlank() ? String.valueOf(config.port()) : namespace + "/" + config.port();
+        return ContainerStorageHelper.ownerIdentity(config);
     }
 
     /**
@@ -149,7 +154,7 @@ public class EcsCredentialsProxy implements ContainerTeardown {
                 .withCmd(List.of(
                         "TCP-LISTEN:80,bind=" + CREDENTIALS_ADDRESS + ",fork,reuseaddr",
                         "TCP:" + flociHost + ":" + port))
-                .withLabels(Map.of(OWNS_NETWORK_LABEL, "true", "floci_owner_port", owner()))
+                .withLabels(Map.of(OWNS_NETWORK_LABEL, "true", ContainerStorageHelper.OWNER_LABEL, owner()))
                 .build();
 
         String proxyId = null;
@@ -199,7 +204,7 @@ public class EcsCredentialsProxy implements ContainerTeardown {
                 }
                 Map<String, String> labels = candidate.getLabels();
                 boolean isOurProxy = labels != null && "true".equals(labels.get(OWNS_NETWORK_LABEL));
-                String candidateOwner = labels == null ? null : labels.get("floci_owner_port");
+                String candidateOwner = labels == null ? null : labels.get(ContainerStorageHelper.OWNER_LABEL);
                 if (isOurProxy && (candidateOwner == null || owner().equals(candidateOwner))) {
                     lifecycleManager.removeIfExists(candidate.getId());
                 }
@@ -250,19 +255,10 @@ public class EcsCredentialsProxy implements ContainerTeardown {
 
     private String execCapture(String containerId, String... cmd) {
         try {
-            String execId = dockerClient.execCreateCmd(containerId)
-                    .withAttachStdout(true).withAttachStderr(true).withCmd(cmd).exec().getId();
-            StringBuilder output = new StringBuilder();
-            try (ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
-                @Override
-                public void onNext(Frame frame) {
-                    output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
-                }
-            }) {
-                dockerClient.execStartCmd(execId).exec(callback).awaitCompletion();
-            }
-            return output.toString();
-        } catch (Exception e) {
+            ContainerExec.Result result = ContainerExec.runMerged(dockerClient, containerId, cmd, EXEC_TIMEOUT_SECONDS);
+            return result.timedOut() ? null : result.stdout();
+        } catch (RuntimeException e) {
+            LOG.debugv("Probe command in credentials proxy {0} failed: {1}", containerId, e.getMessage());
             return null;
         }
     }

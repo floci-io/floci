@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -49,6 +50,15 @@ class SesExportJobV2IntegrationTest {
         return given().contentType("application/json").header("Authorization", AUTH)
                 .body(body)
         .when().post("/v2/email/export-jobs");
+    }
+
+    private static String fetchExportCsv(String url) {
+        URI uri = URI.create(url);
+        // SigV4 signs Host as well as path and query. Keep the authority from the issued URL
+        // while routing the request to the random Quarkus test listener.
+        return given().urlEncodingEnabled(false).header("Host", uri.getRawAuthority())
+                .when().get(uri.getRawPath() + "?" + uri.getRawQuery())
+                .then().statusCode(200).extract().asString();
     }
 
     private static String insightsSource() {
@@ -218,8 +228,7 @@ class SesExportJobV2IntegrationTest {
 
         // The URL is Floci's own S3 emulation, so the object is fetched back through it.
         String url = job.path("ExportDestination.S3Url");
-        String path = url.substring(url.indexOf('/', url.indexOf("//") + 2));
-        String body = given().when().get(path).then().statusCode(200).extract().asString();
+        String body = fetchExportCsv(url);
         assertTrue(body.startsWith("\"messageid\",\"sendtimestamp\""), body.substring(0, 60));
         assertTrue(body.contains("reader@example.com"), "the send should be in the export");
     }
@@ -241,8 +250,7 @@ class SesExportJobV2IntegrationTest {
         String url = given().header("Authorization", AUTH)
         .when().get("/v2/email/export-jobs/" + jobId).then().statusCode(200)
                 .extract().path("ExportDestination.S3Url");
-        String path = url.substring(url.indexOf('/', url.indexOf("//") + 2));
-        String body = given().when().get(path).then().statusCode(200).extract().asString();
+        String body = fetchExportCsv(url);
 
         assertTrue(body.startsWith("ISP,SEND_VOLUME\n"), body);
         assertTrue(body.contains("UNKNOWN_ISP,1.0000"), body);
@@ -339,8 +347,7 @@ class SesExportJobV2IntegrationTest {
         String url = given().header("Authorization", AUTH)
         .when().get("/v2/email/export-jobs/" + jobId).then().statusCode(200)
                 .extract().path("ExportDestination.S3Url");
-        String path = url.substring(url.indexOf('/', url.indexOf("//") + 2));
-        return given().when().get(path).then().statusCode(200).extract().asString();
+        return fetchExportCsv(url);
     }
 
     @Test
@@ -384,8 +391,7 @@ class SesExportJobV2IntegrationTest {
         String url = given().header("Authorization", AUTH)
         .when().get("/v2/email/export-jobs/" + jobId).then().statusCode(200)
                 .extract().path("ExportDestination.S3Url");
-        String path = url.substring(url.indexOf('/', url.indexOf("//") + 2));
-        String body = given().when().get(path).then().statusCode(200).extract().asString();
+        String body = fetchExportCsv(url);
 
         assertTrue(body.startsWith("EMAIL_IDENTITY,SEND_VOLUME\n"), body);
         assertTrue(body.contains(SENDER), "a domain filter has to match the addresses inside it");

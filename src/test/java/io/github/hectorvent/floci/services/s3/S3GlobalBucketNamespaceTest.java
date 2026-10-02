@@ -5,12 +5,14 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
+import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -274,5 +276,37 @@ class S3GlobalBucketNamespaceTest {
                 "cross-account metadata writes must not create a caller shadow object");
         assertTrue(objects.getForAccount(ACCOUNT_B, versionKey).isEmpty(),
                 "cross-account version metadata writes must stay in the owner partition");
+    }
+
+    @Test
+    void completeMultipartUploadCrossAccountStoresTheVersionInTheOwnerPartitionOnly() {
+        Instance<RequestContext> ctx = mutableContext();
+        AccountAwareStorageBackend<Bucket> buckets =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), ctx, DEFAULT_ACCT);
+        AccountAwareStorageBackend<S3Object> objects =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), ctx, DEFAULT_ACCT);
+        S3Service globalNs = new S3Service(
+                buckets, objects, Path.of("s3-gns-multipart-test"), true, true);
+
+        caller.set(ACCOUNT_A);
+        globalNs.createBucket("shared-multipart-bucket", "us-east-1");
+        globalNs.putBucketVersioning("shared-multipart-bucket", "Enabled");
+
+        caller.set(ACCOUNT_B);
+        MultipartUpload upload = globalNs.initiateMultipartUpload(
+                "shared-multipart-bucket", "object.bin", "application/octet-stream");
+        globalNs.uploadPart("shared-multipart-bucket", "object.bin", upload.getUploadId(), 1,
+                "payload".getBytes(UTF_8));
+        String versionId = globalNs.completeMultipartUpload("shared-multipart-bucket", "object.bin",
+                upload.getUploadId(), List.of(1), null, null).getVersionId();
+
+        String currentKey = "shared-multipart-bucket/object.bin";
+        String versionKey = currentKey + "#v#" + versionId;
+        assertTrue(objects.getForAccount(ACCOUNT_A, currentKey).isPresent());
+        assertTrue(objects.getForAccount(ACCOUNT_A, versionKey).isPresent());
+        assertTrue(objects.getForAccount(ACCOUNT_B, currentKey).isEmpty(),
+                "a cross-account multipart completion must not create a caller shadow object");
+        assertTrue(objects.getForAccount(ACCOUNT_B, versionKey).isEmpty(),
+                "a cross-account multipart completion must not create a caller shadow version");
     }
 }

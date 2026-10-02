@@ -123,14 +123,12 @@ class ApiGatewayExecuteControllerTest {
         requestHeaders.add("X-Dup", "first");
         requestHeaders.add("X-Dup", "second");
         requestHeaders.add("X-Dup", "third");
-        HttpHeaders headers = mock(HttpHeaders.class);
-        when(headers.getRequestHeaders()).thenReturn(requestHeaders);
 
         ObjectMapper objectMapper = new ObjectMapper();
         ObjectNode event = objectMapper.createObjectNode();
         ApiGatewayExecuteController controller = controller(objectMapper);
-        controller.putSingleValueHeaders(event, headers);
-        controller.putMultiValueHeaders(event, headers);
+        controller.putSingleValueHeaders(event, requestHeaders);
+        controller.putMultiValueHeaders(event, requestHeaders);
 
         assertEquals("third", event.path("headers").path("X-Dup").asText());
         assertEquals(

@@ -35,6 +35,8 @@ public final class ContainerStorageHelper {
 
     /** {@link #NAME_PREFIX} with its separator, the literal prefix of every name produced here. */
     static final String CONTAINER_PREFIX = NAME_PREFIX + "-";
+    /** The label carrying {@link #ownerIdentity(EmulatorConfig)}. */
+    public static final String OWNER_LABEL = "floci_owner_port";
 
     /**
      * The prefix this emulator used before it took the shared {@code floci-<cloud>-} convention.
@@ -182,6 +184,18 @@ public final class ContainerStorageHelper {
         putIfNotBlank(labels, "io.floci.account", accountId);
         putIfNotBlank(labels, "io.floci.region", region);
         return labels;
+    }
+
+    /**
+     * Identity of the Floci deployment that owns a container, stamped as {@link #OWNER_LABEL} so a
+     * startup sweep collects only its own leftovers. The API port alone collides when two
+     * independently namespaced Flocis share a Docker daemon on the same internal port, so the
+     * resource namespace goes in front of it; an unnamespaced Floci keeps the bare port.
+     */
+    public static String ownerIdentity(EmulatorConfig config) {
+        String namespace = config.docker() == null || config.docker().resourceNamespace() == null
+                ? "" : config.docker().resourceNamespace().orElse("");
+        return namespace.isBlank() ? String.valueOf(config.port()) : namespace + "/" + config.port();
     }
 
     private static void putIfNotBlank(Map<String, String> labels, String key, String value) {

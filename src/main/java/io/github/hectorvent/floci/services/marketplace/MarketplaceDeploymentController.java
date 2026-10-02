@@ -55,7 +55,7 @@ public class MarketplaceDeploymentController {
     }
 
     private String region() {
-        return requestContext.getRegion() == null ? "us-east-1" : requestContext.getRegion();
+        return requestContext.getRegion() == null ? "us-east-1" : requestContext.getRegion(); // partition-literal: fallback to Marketplace's own region when the request carries none
     }
 
     private String accountId() {

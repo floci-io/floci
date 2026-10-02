@@ -8,19 +8,27 @@ import com.github.dockerjava.api.exception.DockerClientException;
 import com.github.dockerjava.api.exception.InternalServerErrorException;
 import com.github.dockerjava.api.model.AuthConfig;
 import com.github.dockerjava.api.model.Info;
+import com.github.dockerjava.api.model.PullResponseItem;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 
 /**
- * Ensures each Docker image is pulled only once per platform.
+ * Ensures each Docker image is pulled only once per platform, except for launches that ask
+ * for the ECS agent's pull behaviour through {@link #resolveForLaunch}.
  * Thread-safe using ConcurrentHashMap for double-checked locking per image.
  */
 @ApplicationScoped
@@ -30,10 +38,14 @@ public class ImageCacheService {
 
     static final int MAX_PULL_ATTEMPTS = 3;
     static final long INITIAL_BACKOFF_MS = 500L;
+    private static final List<String> DOCKER_HUB_PREFIXES = List.of("docker.io/", "index.docker.io/", "library/");
+    private static final Pattern IMAGE_ID = Pattern.compile("sha256:[0-9a-f]{64}");
+    private static final String DIGEST_STATUS = "Digest: ";
 
     private final DockerClient dockerClient;
     private final List<EmulatorConfig.DockerConfig.RegistryCredential> registryCredentials;
     private final Map<ImageKey, String> resolvedImages = new ConcurrentHashMap<>();
+    private final Set<ImageKey> pulledImages = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
     private volatile String daemonPlatform;
 
@@ -48,6 +60,9 @@ public class ImageCacheService {
     }
 
     public String ensureImageExists(String imageUri, String platform) {
+        if (isImageId(imageUri)) {
+            return existingImageId(imageUri);
+        }
         boolean explicitPlatform = platform != null && !platform.isBlank();
         String requestedPlatform = explicitPlatform ? platform.trim() : daemonPlatform();
         ImageKey imageKey = new ImageKey(imageUri, requestedPlatform);
@@ -68,26 +83,174 @@ public class ImageCacheService {
                 LOG.infov("Image already present locally, skipping pull: {0}", imageUri);
                 return resolvedImage;
             }
-            LOG.infov("Pulling image: {0}", imageUri);
-            try {
-                runWithRetry(imageUri, MAX_PULL_ATTEMPTS, INITIAL_BACKOFF_MS, () -> {
-                    PullImageCmd pullImage = dockerClient.pullImageCmd(imageUri)
-                            .withAuthConfig(resolveAuth(imageUri));
-                    if (explicitPlatform) {
-                        pullImage.withPlatform(requestedPlatform);
-                    }
-                    pullImage.exec(new PullImageResultCallback())
-                            .awaitCompletion(5, TimeUnit.MINUTES);
-                });
-                resolvedImage = resolvedImageReference(imageUri, inspectLocalImage(imageUri));
-                resolvedImages.put(imageKey, resolvedImage);
-                LOG.infov("Image pulled successfully: {0}", imageUri);
-                return resolvedImage;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Interrupted while pulling image: " + imageUri, e);
+            resolvedImage = resolvedImageReference(imageUri,
+                    pull(imageKey, explicitPlatform ? requestedPlatform : null).image());
+            resolvedImages.put(imageKey, resolvedImage);
+            return resolvedImage;
+        }
+    }
+
+    /**
+     * Resolves the image a container launch runs, pulling it as the ECS agent does under
+     * {@code ECS_IMAGE_PULL_BEHAVIOR}.
+     *
+     * <p>Unlike {@link #ensureImageExists}, this never reuses the id a reference named the first
+     * time it was seen: the local tag is read again on every call, so a tag moved by a pull (this
+     * one or anyone else's) is what the next launch runs. The launch creates its container from the
+     * returned image id rather than from the reference, so a pull by an overlapping launch that
+     * moves the tag again cannot change what this one runs.
+     */
+    public LaunchImage resolveForLaunch(String imageUri, ImagePullBehavior behavior) {
+        if (isImageId(imageUri)) {
+            return new LaunchImage(existingImageId(imageUri), null);
+        }
+        ImageKey imageKey = new ImageKey(imageUri, daemonPlatform());
+        Object lock = locks.computeIfAbsent(imageUri, k -> new Object());
+        synchronized (lock) {
+            LocalImage image = switch (behavior) {
+                case DEFAULT -> pullOrUseCached(imageKey);
+                case ALWAYS -> pull(imageKey, null);
+                case ONCE -> pulledImages.contains(imageKey) ? cachedOrPull(imageKey) : pull(imageKey, null);
+                case PREFER_CACHED -> cachedOrPull(imageKey);
+            };
+            String imageId = resolvedImageReference(imageUri, image.image());
+            resolvedImages.put(imageKey, imageId);
+            String digest = image.pulledDigest() != null && imageUri.indexOf('@') < 0
+                    ? image.pulledDigest()
+                    : manifestDigest(imageUri, image.image()).orElse(null);
+            return new LaunchImage(imageId, digest);
+        }
+    }
+
+    /**
+     * The image a launch resolved a reference to.
+     *
+     * @param imageId the immutable id of the image the launch runs
+     * @param manifestDigest the image's manifest digest in the repository it was named by, null when
+     *        the image was never pulled from or pushed to that repository (a locally built image)
+     */
+    public record LaunchImage(String imageId, String manifestDigest) {}
+
+    /** Whether a reference is an image id, which names one immutable image and never needs a pull. */
+    public static boolean isImageId(String reference) {
+        return reference != null && IMAGE_ID.matcher(reference).matches();
+    }
+
+    private String existingImageId(String imageId) {
+        InspectImageResponse image = inspectLocalImage(imageId);
+        if (image == null) {
+            throw new DockerClientException("Image no longer exists: " + imageId);
+        }
+        return resolvedImageReference(imageId, image);
+    }
+
+    private LocalImage pullOrUseCached(ImageKey imageKey) {
+        try {
+            return pull(imageKey, null);
+        } catch (RuntimeException e) {
+            InspectImageResponse cached = Thread.currentThread().isInterrupted() ? null : cachedImage(imageKey);
+            if (cached == null) {
+                throw e;
+            }
+            LOG.warnv("Could not pull image {0}, using the cached image {1}: {2}",
+                    imageKey.imageUri(), cached.getId(), e.getMessage());
+            return new LocalImage(cached, null);
+        }
+    }
+
+    private LocalImage cachedOrPull(ImageKey imageKey) {
+        InspectImageResponse cached = cachedImage(imageKey);
+        return cached != null ? new LocalImage(cached, null) : pull(imageKey, null);
+    }
+
+    private InspectImageResponse cachedImage(ImageKey imageKey) {
+        InspectImageResponse local = inspectLocalImage(imageKey.imageUri());
+        return matchesPlatform(local, imageKey.platform()) ? local : null;
+    }
+
+    /**
+     * Pulls the image and inspects what the reference names afterwards.
+     *
+     * @param platform the platform to ask the registry for, or null for the daemon's own
+     */
+    private LocalImage pull(ImageKey imageKey, String platform) {
+        String imageUri = imageKey.imageUri();
+        LOG.infov("Pulling image: {0}", imageUri);
+        AtomicReference<ManifestDigestCallback> lastAttempt = new AtomicReference<>();
+        try {
+            runWithRetry(imageUri, MAX_PULL_ATTEMPTS, INITIAL_BACKOFF_MS, () -> {
+                PullImageCmd pullImage = dockerClient.pullImageCmd(imageUri)
+                        .withAuthConfig(resolveAuth(imageUri));
+                if (platform != null) {
+                    pullImage.withPlatform(platform);
+                }
+                ManifestDigestCallback callback = new ManifestDigestCallback();
+                lastAttempt.set(callback);
+                pullImage.<PullImageResultCallback>exec(callback)
+                        .awaitCompletion(5, TimeUnit.MINUTES);
+            });
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while pulling image: " + imageUri, e);
+        }
+        InspectImageResponse pulled = inspectLocalImage(imageUri);
+        pulledImages.add(imageKey);
+        LOG.infov("Image pulled successfully: {0}", imageUri);
+        return new LocalImage(pulled, lastAttempt.get().digest);
+    }
+
+    /**
+     * The digest of the manifest the reference resolved to, from the repository it names. A
+     * reference pinned by digest is its own answer; otherwise it is the image's repo digest for
+     * that repository, which Docker records when it pulls or pushes the image. An image can hold
+     * several digests for one repository: on the classic image store, manifests that share one
+     * image config; on the containerd store, an index and its platform manifest. The containerd
+     * store's image id is the digest of the manifest the tag names, so a digest equal to the id
+     * is the answer there. Otherwise nothing local says which one the tag names, and a launch that
+     * did not pull reports none rather than a digest the tag may no longer name.
+     */
+    static Optional<String> manifestDigest(String imageUri, InspectImageResponse image) {
+        int at = imageUri.indexOf('@');
+        if (at >= 0) {
+            return Optional.of(imageUri.substring(at + 1));
+        }
+        List<String> repoDigests = image.getRepoDigests();
+        if (repoDigests == null) {
+            return Optional.empty();
+        }
+        String repository = normalizedRepository(imageUri);
+        Set<String> digests = new LinkedHashSet<>();
+        for (String repoDigest : repoDigests) {
+            int separator = repoDigest.indexOf('@');
+            if (separator > 0 && normalizedRepository(repoDigest.substring(0, separator)).equals(repository)) {
+                digests.add(repoDigest.substring(separator + 1));
             }
         }
+        if (digests.size() > 1) {
+            if (digests.contains(image.getId())) {
+                return Optional.of(image.getId());
+            }
+            LOG.debugv("Image {0} holds several digests for {1}, reporting none: {2}",
+                    image.getId(), imageUri, digests);
+            return Optional.empty();
+        }
+        return digests.stream().findFirst();
+    }
+
+    /** The repository a reference names, without its tag and with Docker Hub's implied prefixes. */
+    private static String normalizedRepository(String reference) {
+        String repository = reference;
+        int lastSlash = repository.lastIndexOf('/');
+        int tagSeparator = repository.lastIndexOf(':');
+        if (tagSeparator > lastSlash) {
+            repository = repository.substring(0, tagSeparator);
+        }
+        for (String prefix : DOCKER_HUB_PREFIXES) {
+            if (repository.startsWith(prefix)) {
+                repository = repository.substring(prefix.length());
+            }
+        }
+        return repository;
     }
 
     /**
@@ -219,6 +382,28 @@ public class ImageCacheService {
     }
 
     private record ImageKey(String imageUri, String platform) {}
+
+    /**
+     * The image a reference names locally.
+     *
+     * @param pulledDigest the manifest digest the registry reported when this launch pulled the
+     *        image, null when the image came from the cache
+     */
+    private record LocalImage(InspectImageResponse image, String pulledDigest) {}
+
+    /** Records the manifest digest the daemon reports once a pull has resolved the reference. */
+    private static final class ManifestDigestCallback extends PullImageResultCallback {
+        private volatile String digest;
+
+        @Override
+        public void onNext(PullResponseItem item) {
+            String status = item.getStatus();
+            if (status != null && status.startsWith(DIGEST_STATUS)) {
+                digest = status.substring(DIGEST_STATUS.length()).trim();
+            }
+            super.onNext(item);
+        }
+    }
 
     private AuthConfig resolveAuth(String imageUri) {
         String host = extractRegistryHost(imageUri);

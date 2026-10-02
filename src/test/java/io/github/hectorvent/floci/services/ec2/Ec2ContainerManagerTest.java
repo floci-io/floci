@@ -76,6 +76,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.atLeastOnce;
@@ -565,18 +566,15 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
-    void userDataShellScriptsBoundsAggregateConcurrentDecompression() throws Exception {
-        // Each launch decodes its UserData independently on Ec2ContainerManager's unbounded
-        // cached launch executor, so the per-payload 10 MB cap alone does not stop many
-        // concurrent launches from each decompressing near that limit at once (Greptile's
-        // follow-up on the gzip-bomb fix). Drive real concurrent decompressions through the
-        // public entry point and use the test hook to prove no more than
-        // MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS (4) ever run at the same instant, while still
-        // exercising genuine concurrency rather than serialized calls.
+    void ec2UserDataPathsShareAggregateConcurrentDecompressionBudget() throws Exception {
+        // API decoding and guest execution share the same budget. The hook must see every
+        // decompression, and no more than four may run at once across both entry points.
         int concurrentLaunches = 12;
+        AtomicInteger totalDecompressions = new AtomicInteger(0);
         AtomicInteger active = new AtomicInteger(0);
         AtomicInteger peakActive = new AtomicInteger(0);
         UserDataPipeline.userDataDecompressionTestHook = () -> {
+            totalDecompressions.incrementAndGet();
             int now = active.incrementAndGet();
             peakActive.accumulateAndGet(now, Math::max);
             try {
@@ -597,7 +595,11 @@ class Ec2ContainerManagerTest {
 
             List<Future<List<String>>> futures = new ArrayList<>();
             for (int i = 0; i < concurrentLaunches; i++) {
-                futures.add(pool.submit(() -> Ec2ContainerManager.userDataShellScripts(gzipped)));
+                if (i % 2 == 0) {
+                    futures.add(pool.submit(() -> Ec2ContainerManager.userDataShellScripts(gzipped)));
+                } else {
+                    futures.add(pool.submit(() -> List.of(Ec2UserDataDecoder.decode(gzipped))));
+                }
             }
             for (Future<List<String>> future : futures) {
                 results.add(future.get(30, TimeUnit.SECONDS));
@@ -608,6 +610,7 @@ class Ec2ContainerManagerTest {
         }
 
         assertEquals(concurrentLaunches, results.size());
+        assertEquals(concurrentLaunches, totalDecompressions.get());
         assertTrue(peakActive.get() <= 4,
                 "peak concurrent UserData decompressions was " + peakActive.get() + ", expected <= 4");
         assertTrue(peakActive.get() >= 2,
@@ -1329,6 +1332,68 @@ class Ec2ContainerManagerTest {
         assertTrue(mkdirIndex < sshdIndex,
                 "/run/sshd must be created before sshd starts, otherwise sshd exits with "
                         + "\"Missing privilege separation directory\"");
+    }
+
+    @Test
+    void anAttachStreamErrorOnOneSshdPathStillTriesTheNext() throws Exception {
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.21");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        doAnswer(invocation -> {
+            ExecStartCmd execStart = mock(ExecStartCmd.class);
+            when(execStart.exec(any())).thenAnswer(startInvocation -> {
+                ResultCallback<Frame> callback = startInvocation.getArgument(0);
+                String[] command = harness.executedCommands.get(harness.executedCommands.size() - 1);
+                if (Arrays.equals(command, new String[]{"/usr/sbin/sshd"})) {
+                    callback.onError(new IllegalStateException("attach stream broke"));
+                } else {
+                    callback.onComplete();
+                }
+                return callback;
+            });
+            return execStart;
+        }).when(harness.dockerClient).execStartCmd(anyString());
+
+        harness.manager.launch(instance("i-sshd-retry"), "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> commandIndex(harness.executedCommands, "/usr/local/sbin/sshd") >= 0, Duration.ofSeconds(2));
+        assertTrue(commandIndex(harness.executedCommands, "/usr/sbin/sshd")
+                < commandIndex(harness.executedCommands, "/usr/local/sbin/sshd"));
+    }
+
+    @Test
+    void anInterruptWhileStartingSshdStopsTryingFurtherSshdPaths() throws Exception {
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.22");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        doAnswer(invocation -> {
+            ExecStartCmd execStart = mock(ExecStartCmd.class);
+            when(execStart.exec(any())).thenAnswer(startInvocation -> {
+                ResultCallback<Frame> callback = startInvocation.getArgument(0);
+                String[] command = harness.executedCommands.get(harness.executedCommands.size() - 1);
+                if (Arrays.equals(command, new String[]{"/usr/sbin/sshd"})) {
+                    Thread.currentThread().interrupt();
+                } else {
+                    callback.onComplete();
+                }
+                return callback;
+            });
+            return execStart;
+        }).when(harness.dockerClient).execStartCmd(anyString());
+        Instance instance = instance("i-sshd-interrupted");
+        instance.setUserData("#!/bin/sh\necho ready\n");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        // UserData is the next step after sshd, so its exec marks sshd startup as finished.
+        awaitUntil(() -> commandIndex(harness.executedCommands, "/var/lib/user-data.sh") >= 0, Duration.ofSeconds(2));
+        assertEquals(-1, commandIndex(harness.executedCommands, "/usr/local/sbin/sshd"));
     }
 
     @Test

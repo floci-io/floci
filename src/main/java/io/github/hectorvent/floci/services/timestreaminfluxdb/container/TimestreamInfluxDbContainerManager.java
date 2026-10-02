@@ -1,14 +1,11 @@
 package io.github.hectorvent.floci.services.timestreaminfluxdb.container;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.model.Frame;
-import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -18,13 +15,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayOutputStream;
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -34,7 +28,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -358,7 +351,7 @@ public class TimestreamInfluxDbContainerManager implements ContainerTeardown {
     }
 
     private void execOrThrow(String containerId, String[] command, String description) {
-        ExecResult result = exec(containerId, command);
+        ContainerExec.Result result = exec(containerId, command);
         if (result.exitCode() != 0) {
             throw new IllegalStateException(description + " failed with exit code " + result.exitCode()
                     + ": " + result.stderr() + result.stdout());
@@ -373,64 +366,7 @@ public class TimestreamInfluxDbContainerManager implements ContainerTeardown {
         }
     }
 
-    private ExecResult exec(String containerId, String[] command) {
-        DockerClient dockerClient = lifecycleManager.getDockerClient();
-        String execId = dockerClient.execCreateCmd(containerId)
-                .withCmd(command)
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec()
-                .getId();
-        CountDownLatch latch = new CountDownLatch(1);
-        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-        ByteArrayOutputStream stderr = new ByteArrayOutputStream();
-        Closeable callback = dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
-            @Override
-            public void onNext(Frame frame) {
-                if (frame.getPayload() == null) {
-                    return;
-                }
-                try {
-                    if (frame.getStreamType() == StreamType.STDERR) {
-                        stderr.write(frame.getPayload());
-                    } else {
-                        stdout.write(frame.getPayload());
-                    }
-                } catch (IOException e) {
-                    LOG.warnv(e, "Failed to read output of container exec {0}", execId);
-                }
-            }
-
-            @Override
-            public void onComplete() {
-                latch.countDown();
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                LOG.warnv(throwable, "Container exec {0} failed", execId);
-                latch.countDown();
-            }
-        });
-        try {
-            if (!latch.await(EXEC_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                return new ExecResult(-1, stdout.toString(StandardCharsets.UTF_8), "timed out");
-            }
-            Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
-            return new ExecResult(exitCode != null ? exitCode : -1,
-                    stdout.toString(StandardCharsets.UTF_8), stderr.toString(StandardCharsets.UTF_8));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted running command in container " + containerId, e);
-        } finally {
-            try {
-                callback.close();
-            } catch (IOException e) {
-                LOG.debugv("Failed to close exec callback {0}: {1}", execId, e.getMessage());
-            }
-        }
-    }
-
-    private record ExecResult(long exitCode, String stdout, String stderr) {
+    private ContainerExec.Result exec(String containerId, String[] command) {
+        return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, command, EXEC_TIMEOUT_SECONDS);
     }
 }

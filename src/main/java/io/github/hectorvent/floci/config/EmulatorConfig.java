@@ -75,6 +75,15 @@ public interface EmulatorConfig {
         Optional<String> id();
 
         /**
+         * Refuse requests signed for a service AWS does not publish in the request's partition
+         * (CloudFront in GovCloud, IAM in {@code aws-eusc}). On AWS such a request never reaches
+         * an API because its endpoint does not resolve; Floci serves every enabled service in
+         * every partition unless this is set.
+         */
+        @WithDefault("false")
+        boolean strict();
+
+        /**
          * Accept a request whose SigV4 credential scope names a region that no partition
          * publishes or admits by its region pattern ({@code polygondwanaland-west-1}). Refused by
          * default, as moto ({@code MOTO_ALLOW_NONEXISTENT_REGION}) and LocalStack
@@ -209,6 +218,29 @@ public interface EmulatorConfig {
          */
         @WithDefault("8.8.8.8,8.8.4.4")
         List<String> containerFallbackServers();
+
+        /**
+         * When {@code true}, the embedded DNS server also answers A queries for every AWS
+         * partition's DNS and dual-stack suffix (amazonaws.com, api.aws, amazonaws.com.cn,
+         * api.amazonwebservices.com.cn, amazonaws.eu, api.amazonwebservices.eu, c2s.ic.gov,
+         * api.aws.ic.gov, sc2s.sgov.gov, api.aws.scloud, cloud.adc-e.uk,
+         * api.cloud-aws.adc-e.uk, csp.hci.ic.gov, api.aws.hci.ic.gov) and every subdomain
+         * (any depth: {@code sts.amazonaws.com},
+         * {@code organizations.us-east-1.amazonaws.com}, virtual-hosted S3 like
+         * {@code bucket.s3.us-east-1.amazonaws.com}) with Floci's container IP,
+         * LocalStack-style transparent endpoint injection. Tools that construct SDK
+         * clients with explicit real-AWS endpoints (overriding {@code AWS_ENDPOINT_URL})
+         * then land on Floci instead of escaping to real AWS.
+         *
+         * <p>Combine with {@code floci.tls.enabled=true} so hardcoded {@code https://}
+         * endpoints are served on port 443 with a certificate covering the AWS wildcards.
+         *
+         * <p>Off by default: it hijacks all real-AWS traffic from spawned containers, including
+         * live suffixes such as {@code api.aws} and {@code amazonaws.eu}.
+         * Env: {@code FLOCI_DNS_SPOOF_AWS_ENDPOINTS}
+         */
+        @WithDefault("false")
+        boolean spoofAwsEndpoints();
     }
 
     interface SecurityConfig {
@@ -1277,6 +1309,9 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean clearFifoDeduplicationCacheOnPurge();
+
+        @WithDefault("local-emulator-secret")
+        String receiptHandleSecret();
     }
 
     interface S3ServiceConfig {
@@ -1342,6 +1377,21 @@ public interface EmulatorConfig {
          */
         @WithDefault("10")
         int vectorIndexBackfillSeconds();
+
+        /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
+        @WithDefault("native")
+        String backend();
+
+        /** The DynamoDB Local base URL, required when backend is local. Env: FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT. */
+        Optional<String> localEndpoint();
+
+        /** Env: FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS. */
+        @WithDefault("2")
+        int localConnectTimeoutSeconds();
+
+        /** Env: FLOCI_SERVICES_DYNAMODB_LOCAL_REQUEST_TIMEOUT_SECONDS. */
+        @WithDefault("10")
+        int localRequestTimeoutSeconds();
     }
 
     interface SnsServiceConfig {
@@ -2060,15 +2110,50 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean allowUnsafeHostVolumes();
 
+        /**
+         * When true, Floci removes on startup, in Docker mode, every ECS container a previous run
+         * of <em>this same</em> Floci left on the daemon (matched by the {@code floci_owner_port}
+         * label), task-role credentials proxies included, before the service scheduler starts
+         * replacement tasks. Turn it off when two Floci instances share a daemon with the same
+         * port and no resource namespace, so one does not remove the other's containers.
+         *
+         * Env var: FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
+
+        /**
+         * How a task's container images are pulled when the task starts, with the values and
+         * semantics of the ECS agent's {@code ECS_IMAGE_PULL_BEHAVIOR}. The default pulls on every
+         * launch, so a tag moved in its registry (a rebuilt {@code :latest}) is what the next task
+         * runs.
+         */
+        @WithDefault("default")
+        ImagePullBehavior imagePullBehavior();
+
         EcsTaskRoleCredentialsConfig taskRoleCredentials();
+
+        enum ImagePullBehavior {
+            /** Pull on every launch; when the pull fails, run the cached image if there is one. */
+            DEFAULT,
+            /** Pull on every launch; when the pull fails, the task fails. */
+            ALWAYS,
+            /**
+             * Pull when Floci has not pulled the image since it started or the cached image is
+             * gone; otherwise run the cached image.
+             */
+            ONCE,
+            /** Pull only when there is no cached image. */
+            PREFER_CACHED
+        }
     }
 
     interface EcsTaskRoleCredentialsConfig {
         /**
          * Opt-in: vends real task-role credentials over the AWS container-credentials wire
-         * contract. Off by default: reaching it from a task container needs a Docker network the
-         * task and Floci both have real access to, which the follow-up wiring this feeds into
-         * establishes; this alone has no way to satisfy it.
+         * contract. Off by default: reaching it from a task container needs a user-defined Docker
+         * network that both the task and the credentials proxy join, so the default bridge is not
+         * enough. Set {@code floci.services.ecs.docker-network} alongside this.
          */
         @WithDefault("false")
         boolean enabled();
@@ -2084,10 +2169,10 @@ public interface EmulatorConfig {
         /**
          * Port on the Floci host serving the credentials endpoint itself. Not the address a task
          * container talks to: real ECS SDKs hardcode 169.254.170.2, which nothing in Floci's own
-         * process can bind without also owning that address on the task's Docker network. A
-         * follow-up piece launches a small proxy container that holds that address and forwards
-         * to this port, the same way Lambda and ECS containers already reach Floci's other
-         * endpoints over {@code host.docker.internal}.
+         * process can bind without also owning that address on the task's Docker network. A small
+         * proxy container holds that address on each task network and forwards to this port, the
+         * same way Lambda and ECS containers already reach Floci's other endpoints over
+         * {@code host.docker.internal}.
          */
         @WithDefault("51679")
         int port();
@@ -3071,6 +3156,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
+        /** Optional ceiling for the single k3s node container, in MiB. Zero uses its instance type. */
+        @WithDefault("0")
+        int maxMemoryMib();
+
+        /** Optional vCPU ceiling for the single k3s node container. Zero uses its instance type. */
+        @WithDefault("0")
+        int maxVcpus();
+
         @WithDefault("k3s")
         String provider();
 
@@ -3180,6 +3273,13 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean embeddedDns();
+
+        /**
+         * When true, programs static routes inside EKS cluster containers from emulated VPC route
+         * tables associated with the cluster's subnets or VPC.
+         */
+        @WithDefault("true")
+        boolean vpcRouteProgramming();
     }
 
     /**
@@ -3316,6 +3416,22 @@ public interface EmulatorConfig {
         /** Unix socket or TCP URL for the Docker daemon (e.g. unix:///var/run/docker.sock). */
         @WithDefault("unix:///var/run/docker.sock")
         String dockerHost();
+
+        /**
+         * Size of the connection pool behind the shared Docker client. Every Docker call leases a
+         * connection from it, and some hold one for as long as a container runs: a Lambda
+         * container holds two (its followed log stream and its exit watcher) plus one per
+         * extension, and other container-backed services hold one for their log stream. Once
+         * those fill the pool, create, start, stop and remove wait for a free connection,
+         * including the calls that would release one, so the emulator stalls.
+         *
+         * <p>1024 rather than the former hard-coded 100, which capped live Lambda containers at
+         * about 50: a tenth of the 500 that the runtime API port range
+         * ({@link LambdaServiceConfig#runtimeApiBasePort}) exists to allow. Connections are
+         * opened on demand, so a small stack never approaches the limit.
+         */
+        @WithDefault("1024")
+        int maxConnections();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

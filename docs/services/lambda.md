@@ -43,9 +43,9 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `GetFunctionUrlConfig` | Read function URL config |
 | `UpdateFunctionUrlConfig` | Update function URL config |
 | `DeleteFunctionUrlConfig` | Delete function URL config |
-| `ListTags` | List tags on a function |
-| `TagResource` | Tag a function |
-| `UntagResource` | Untag a function |
+| `ListTags` | List tags on a function or event source mapping |
+| `TagResource` | Tag a function or event source mapping |
+| `UntagResource` | Untag a function or event source mapping |
 | `PutFunctionConcurrency` | Set reserved concurrent executions |
 | `GetFunctionConcurrency` | Get reserved concurrent executions |
 | `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
@@ -56,9 +56,22 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `DeleteFunctionEventInvokeConfig` | Remove the asynchronous invocation settings |
 | `ListFunctionEventInvokeConfigs` | List the asynchronous invocation settings of every version and alias of a function |
 
+`UpdateFunctionConfiguration` validates `MemorySize` and `Timeout` as whole numbers in their
+supported ranges before changing any stored settings. A rejected value returns
+`InvalidParameterValueException` and leaves the function configuration unchanged.
+
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
 provisions it from a stack. Asynchronous invocations apply its retry, event age, destination settings,
 and dead-letter queue configurations (`DeadLetterConfig`).
+
+### Reserved Concurrency
+
+Unqualified `GetFunction` reads include `Concurrency.ReservedConcurrentExecutions` when a reservation
+is set, including an explicit zero. Qualified reads omit `Concurrency`, whether `$LATEST`, a published
+version, or an alias is supplied through `Qualifier` or embedded in the function name or ARN.
+Use `GetFunctionConcurrency` to read the function-wide reservation separately.
+Deleting the reservation with `DeleteFunctionConcurrency` removes the `Concurrency` member from
+subsequent unqualified `GetFunction` responses.
 
 ### Asynchronous Invocation Retries and Dead-Letter Queues
 
@@ -351,7 +364,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default function memory (MB) |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default function timeout (seconds) |
 | `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` | `12000` | First port in the Lambda Runtime API range |
-| `FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT` | `12499` | Last port in the Lambda Runtime API range. One port is held per running container, so the range width caps concurrent executions |
+| `FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT` | `12499` | Last port in the Lambda Runtime API range. One port is held per running container, so the range width caps concurrent executions. Each running container also holds two Docker connections, so a wider range needs a matching `FLOCI_DOCKER_MAX_CONNECTIONS` |
 | `FLOCI_SERVICES_LAMBDA_CODE_PATH` | `./data/lambda-code` | Directory where Lambda ZIP files are stored |
 | `FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS` | `1000` | Event-source mapping poll interval (milliseconds) |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` | `300` | Idle container shutdown timeout (seconds) |
@@ -850,6 +863,8 @@ aws lambda update-function-code \
 Connect Lambda to SQS, Kinesis, or DynamoDB Streams. Self-managed Apache Kafka event source mappings are accepted, validated, persisted, and returned on the wire, but Floci does not run an active Kafka consumer poller:
 
 For DynamoDB Streams mappings, Floci retries failed batches with exponential backoff, honors `MaximumRetryAttempts` and `MaximumRecordAgeInSeconds`, and sends discarded batches to configured SQS, SNS, or S3 `DestinationConfig.OnFailure` destinations. With `BisectBatchOnFunctionError`, a batch that fails with a function error is split in half and retried, narrowing it down to the failing record, which then follows the normal retry and record age rules. Splits do not count as retry attempts, and only function errors split: throttles do not, and a partial batch response retries from the reported record. If the OnFailure destination refuses a discarded batch, Floci logs the failure, drops the batch and advances past it.
+
+For Kinesis mappings, a function error or throttle leaves the shard checkpoint in place and the same batch is read again on the next poll; there is no retry limit, backoff, or OnFailure destination. With `FunctionResponseTypes: ["ReportBatchItemFailures"]`, a partial batch response moves the checkpoint up to the lowest reported record, and a malformed response retries the whole batch. `FunctionResponseTypes` can be set or cleared on an existing mapping with `UpdateEventSourceMapping`.
 
 A DynamoDB Streams mapping created with `StartingPosition: LATEST` delivers only records written after it is created, so a stream that is empty at creation delivers everything written later. After a restart it still resumes from the trim horizon, because native stream records are volatile. Deleting or disabling a mapping stops any poll that has not yet invoked the function. An invocation already running completes, but its checkpoint is not saved: a deleted mapping is never recreated and its result is dropped, and a disabled mapping re-reads that batch when it is enabled again.
 

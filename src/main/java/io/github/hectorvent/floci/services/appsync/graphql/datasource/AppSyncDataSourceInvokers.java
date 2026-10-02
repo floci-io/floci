@@ -15,9 +15,18 @@ import java.util.Map;
 public class AppSyncDataSourceInvokers {
 
     private final Map<DataSourceType, AppSyncDataSourceInvoker> byType = new EnumMap<>(DataSourceType.class);
+    private final AppSyncDataSourceAuthorizer authorizer;
 
     @Inject
-    public AppSyncDataSourceInvokers(Instance<AppSyncDataSourceInvoker> invokers) {
+    public AppSyncDataSourceInvokers(Instance<AppSyncDataSourceInvoker> invokers,
+                                    AppSyncDataSourceAuthorizer authorizer) {
+        this((Iterable<AppSyncDataSourceInvoker>) invokers, authorizer);
+    }
+
+    /** Test constructor: an explicit set, bypassing CDI. */
+    public AppSyncDataSourceInvokers(Iterable<AppSyncDataSourceInvoker> invokers,
+                                    AppSyncDataSourceAuthorizer authorizer) {
+        this.authorizer = authorizer;
         invokers.forEach(invoker -> {
             AppSyncDataSourceInvoker existing = byType.put(invoker.type(), invoker);
             if (existing != null) {
@@ -28,11 +37,6 @@ public class AppSyncDataSourceInvokers {
         });
     }
 
-    /** Test constructor: an explicit set, bypassing CDI. */
-    public AppSyncDataSourceInvokers(Iterable<AppSyncDataSourceInvoker> invokers) {
-        invokers.forEach(invoker -> byType.put(invoker.type(), invoker));
-    }
-
     /**
      * Runs the request against its data source.
      *
@@ -41,6 +45,18 @@ public class AppSyncDataSourceInvokers {
      * mode this whole layer exists to remove.
      */
     public Object invoke(DataSource dataSource, Object request, String region) {
+        AppSyncDataSourceInvoker invoker = invokerFor(dataSource);
+        authorizer.authorize(dataSource, request, region);
+        return invoker.invoke(dataSource, request, region);
+    }
+
+    public Object invokeVtl(DataSource dataSource, Object request, String region) {
+        AppSyncDataSourceInvoker invoker = invokerFor(dataSource);
+        authorizer.authorize(dataSource, request, region);
+        return invoker.invokeVtl(dataSource, request, region);
+    }
+
+    private AppSyncDataSourceInvoker invokerFor(DataSource dataSource) {
         DataSourceType type = dataSource.getType();
         AppSyncDataSourceInvoker invoker = byType.get(type);
         if (invoker == null) {
@@ -48,7 +64,7 @@ public class AppSyncDataSourceInvokers {
                     "Floci cannot invoke AppSync data sources of type " + type
                             + " (data source " + dataSource.getName() + ")", 500);
         }
-        return invoker.invoke(dataSource, request, region);
+        return invoker;
     }
 
     public boolean supports(DataSourceType type) {

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.rds.proxy;
 
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -10,10 +11,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.lang.reflect.Method;
 import java.text.MessageFormat;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.logging.Handler;
-import java.util.logging.Level;
 import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -78,6 +76,22 @@ class RdsSigV4ValidatorTest {
                 Instant.now().minusSeconds(60), 900);
 
         assertTrue(validator.validate(token, "jane_doe", exampleBinding()));
+    }
+
+    /** A China database's rds-db:connect resource is an arn:aws-cn: ARN, as a China IAM policy names it. */
+    @Test
+    void validateAcceptsAChinaConnectGrantForADatabaseInChina() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithUserPolicy(
+                "AKIDRDS", "secret-rds", "jane", connectPolicyFor(
+                        "arn:aws-cn:rds-db:cn-north-1:123456789012:dbuser:db-ABCDEFGHIJKL01234/jane_doe"));
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService, () -> true);
+        String token = SigV4TokenTestHelper.createRdsTokenWithScope(
+                "db.example.local", 3307, "jane_doe", "AKIDRDS", "secret-rds", "cn-north-1", "rds-db",
+                Instant.now().minusSeconds(60), 900);
+        RdsProxyBinding chinaBinding = new RdsProxyBinding(
+                "db.example.local", 3307, "cn-north-1", "123456789012", "db-ABCDEFGHIJKL01234", true);
+
+        assertTrue(validator.validate(token, "jane_doe", chinaBinding));
     }
 
     @Test
@@ -629,7 +643,7 @@ class RdsSigV4ValidatorTest {
                 "db.example.local", 3307, dbUser, "AKIDRDS", "secret-rds",
                 Instant.now().minusSeconds(60), 900);
 
-        List<LogRecord> records = captureLogs(
+        List<LogRecord> records = LogCapture.capture(RdsSigV4Validator.class,
                 () -> assertFalse(validator.validate(token, dbUser, exampleBinding())));
 
         List<String> refusals = records.stream()
@@ -646,35 +660,6 @@ class RdsSigV4ValidatorTest {
         return record.getParameters() == null
                 ? record.getMessage()
                 : MessageFormat.format(record.getMessage(), record.getParameters());
-    }
-
-    private static List<LogRecord> captureLogs(Runnable action) {
-        java.util.logging.Logger julLogger =
-                java.util.logging.Logger.getLogger(RdsSigV4Validator.class.getName());
-        julLogger.setLevel(Level.ALL);
-        List<LogRecord> records = new ArrayList<>();
-        Handler handler = new Handler() {
-            @Override
-            public void publish(LogRecord record) {
-                records.add(record);
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        handler.setLevel(Level.ALL);
-        julLogger.addHandler(handler);
-        try {
-            action.run();
-        } finally {
-            julLogger.removeHandler(handler);
-        }
-        return records;
     }
 
     @Test

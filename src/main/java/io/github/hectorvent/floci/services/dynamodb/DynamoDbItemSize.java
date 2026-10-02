@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Iterator;
@@ -25,6 +26,7 @@ final class DynamoDbItemSize {
     private static final int SET_OR_ADD_COST = 19;
     private static final int REMOVE_OR_DELETE_COST = 2;
     private static final int LIST_INDEX_COST = 1;
+    private static final int MAX_NUMBER_PAIRS = 20;
 
     private DynamoDbItemSize() {}
 
@@ -117,7 +119,9 @@ final class DynamoDbItemSize {
     static int attributeValueSize(JsonNode attr) {
         if (attr == null) return 0;
         if (attr.has("S")) return utf8Length(attr.get("S").asText());
-        if (attr.has("N")) return attr.get("N").asText().length();
+        if (attr.has("N")) {
+            return numberSize(attr.get("N").asText());
+        }
         if (attr.has("B")) return binarySize(attr.get("B").asText());
         if (attr.has("BOOL")) return 1;
         if (attr.has("NULL")) return 1;
@@ -128,7 +132,9 @@ final class DynamoDbItemSize {
         }
         if (attr.has("NS")) {
             int size = 0;
-            for (JsonNode e : attr.get("NS")) size += e.asText().length() + 1;
+            for (JsonNode e : attr.get("NS")) {
+                size += numberSize(e.asText());
+            }
             return size;
         }
         if (attr.has("BS")) {
@@ -151,6 +157,25 @@ final class DynamoDbItemSize {
             return size;
         }
         return 0;
+    }
+
+    // DynamoDB stores a number as base-100 digits paired from the decimal point, plus one byte,
+    // plus one more for a negative value below the 20-pair maximum.
+    static int numberSize(String number) {
+        BigDecimal value;
+        try {
+            value = new BigDecimal(number).stripTrailingZeros();
+        } catch (NumberFormatException | ArithmeticException ignored) {
+            // A number BigDecimal cannot hold is never stored, so its size never matters.
+            return number.length();
+        }
+        if (value.signum() == 0) {
+            return 1;
+        }
+        long lowestPower = -(long) value.scale();
+        long highestPower = value.precision() + lowestPower - 1;
+        long pairs = Math.floorDiv(highestPower, 2) - Math.floorDiv(lowestPower, 2) + 1;
+        return (int) (1 + pairs + (value.signum() < 0 && pairs < MAX_NUMBER_PAIRS ? 1 : 0));
     }
 
     static int utf8Length(String s) {

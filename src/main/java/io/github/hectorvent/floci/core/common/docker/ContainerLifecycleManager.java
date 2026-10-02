@@ -1,8 +1,5 @@
 package io.github.hectorvent.floci.core.common.docker;
 
-import io.github.hectorvent.floci.config.ContainerCaBundle;
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
@@ -22,6 +19,11 @@ import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Ports;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
+import io.github.hectorvent.floci.config.ContainerCaBundle;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -112,6 +114,15 @@ public class ContainerLifecycleManager {
             removeIfExists(containerId);
             throw e;
         }
+    }
+
+    /**
+     * Resolves the image a container launch is about to run, pulling it as the ECS agent does
+     * under {@code behavior}. A spec built from the returned image id runs exactly that image,
+     * whatever a later pull of the same reference moves its tag to.
+     */
+    public LaunchImage resolveImageForLaunch(String image, ImagePullBehavior behavior) {
+        return imageCacheService.resolveForLaunch(image, behavior);
     }
 
     /**
@@ -1059,8 +1070,10 @@ public class ContainerLifecycleManager {
         }
 
         // DNS servers — used to inject Floci's embedded DNS so spawned containers
-        // can resolve *.localhost.floci.io to Floci's Docker network IP.
-        if (spec.dnsServers() != null && !spec.dnsServers().isEmpty()) {
+        // can resolve *.localhost.floci.io to Floci's Docker network IP. Docker rejects them
+        // together with container:<id> network mode, where the resolver comes from that container.
+        if (spec.dnsServers() != null && !spec.dnsServers().isEmpty()
+                && !isContainerNetworkMode(spec.networkMode())) {
             hostConfig.withDns(spec.dnsServers().toArray(new String[0]));
         }
 

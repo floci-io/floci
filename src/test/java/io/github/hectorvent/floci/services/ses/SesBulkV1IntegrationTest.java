@@ -155,7 +155,7 @@ class SesBulkV1IntegrationTest {
     @Test
     @Order(6)
     void sendBulkTemplatedEmail_perEntryMissingDestination_mapsToInvalidParameterValue() {
-        // An entry with only ReplacementTemplateData (no recipient) reaches sendEmail,
+        // An entry with only ReplacementTemplateData (no recipient) reaches the per-entry send,
         // which throws AwsException("InvalidParameterValue", ...). Expected per-entry
         // Status string in v1 is "InvalidParameterValue", not "Failed" or "InvalidParameter".
         // DefaultTemplateData supplies team so rendering succeeds before the recipient check.

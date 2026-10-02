@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
@@ -254,5 +255,18 @@ class ElbClassicServiceTest {
         ClassicLoadBalancer lb = create("my-elb");
         service.createLoadBalancerListeners(REGION, "my-elb", List.of(httpListener()));
         assertEquals(1, lb.getListeners().size());
+    }
+
+    /** A balancer stored before the zone was looked up per region carries the old fixed zone. */
+    @Test
+    void aRestoredBalancerTakesTheHostedZoneOfItsRegion() {
+        create("stored-elb").setCanonicalHostedZoneNameId("Z35SXDOTRQ7X7K");
+        assertEquals("Z35SXDOTRQ7X7K",
+                service.describeLoadBalancers(REGION, List.of("stored-elb")).getFirst().getCanonicalHostedZoneNameId());
+
+        service.restorePersistedRuntime();
+
+        assertEquals(AwsRegionFacts.classicElbHostedZoneId(REGION).orElseThrow(),
+                service.describeLoadBalancers(REGION, List.of("stored-elb")).getFirst().getCanonicalHostedZoneNameId());
     }
 }

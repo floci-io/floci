@@ -307,8 +307,8 @@ public class MarketplaceDeploymentService implements Resettable {
     }
 
     private static void validateRegion(String region) {
-        if (region != null && !region.isBlank() && !"us-east-1".equals(region)) {
-            throw validation("AWS Marketplace Deployment Service is available only in us-east-1.");
+        if (region != null && !region.isBlank() && !"us-east-1".equals(region)) { // partition-literal: AWS Marketplace is commercial-only and AWS pins its APIs to these regions
+            throw validation("AWS Marketplace Deployment Service is available only in us-east-1."); // partition-literal: AWS's message text
         }
     }
 

@@ -74,7 +74,7 @@ public class MarketplaceDiscoveryController {
         } catch (AwsException e) { throw e; }
         catch (Exception e) { throw validation("Request body is not valid JSON."); }
     }
-    private String region() { return context.getRegion() == null ? "us-east-1" : context.getRegion(); }
+    private String region() { return context.getRegion() == null ? "us-east-1" : context.getRegion(); } // partition-literal: fallback to Marketplace's own region when the request carries none
     private Response ok(JsonNode node) { return Response.ok(node).build(); }
     private static AwsException validation(String message) { return new AwsException("ValidationException", message, 400); }
 }

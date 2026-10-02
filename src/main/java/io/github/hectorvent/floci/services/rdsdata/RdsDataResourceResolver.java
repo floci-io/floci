@@ -73,7 +73,9 @@ class RdsDataResourceResolver {
     }
 
     private DatabaseTarget fromCluster(DbCluster cluster, String region) {
+        // Healthy queries must not wait behind unrelated container starts or image pulls.
         DbCluster resolved = hasRuntime(cluster.getContainerHost(), cluster.getContainerPort())
+                && !rdsService.hasMissingClusterMemberBackends(cluster, region)
                 ? cluster
                 : rdsService.ensureClusterBackend(cluster.getDbClusterIdentifier(), region);
         return target(resolved.getDbClusterArn(), resolved.getEngine(), resolved.getContainerHost(),

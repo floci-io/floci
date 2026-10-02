@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.auth.SigV4AuthorizationHeader;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
 import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
 import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
@@ -167,6 +168,13 @@ public class ApiGatewayExecuteController {
 
     private static final String CONNECTIONS_PREFIX = "@connections/";
 
+    private boolean isWebSocketConnectionRequest(String apiId, String proxy) {
+        if (proxy == null || !proxy.startsWith(CONNECTIONS_PREFIX) || routeContext.isRestApiRoute()) {
+            return false;
+        }
+        return apiGatewayV2Service.hasWebSocketApi(apiId);
+    }
+
     private String decodeConnectionId(String rawConnectionId) {
         return URLDecoder.decode(rawConnectionId, StandardCharsets.UTF_8);
     }
@@ -229,7 +237,7 @@ public class ApiGatewayExecuteController {
                               @PathParam("apiId") String apiId,
                               @PathParam("stageName") String stageName,
                               @PathParam("proxy") String proxy) {
-        if (proxy != null && proxy.startsWith(CONNECTIONS_PREFIX)) {
+        if (isWebSocketConnectionRequest(apiId, proxy)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handleGetConnectionInfo(connectionId);
         }
@@ -244,7 +252,7 @@ public class ApiGatewayExecuteController {
                                @PathParam("stageName") String stageName,
                                @PathParam("proxy") String proxy,
                                byte[] body) {
-        if (proxy != null && proxy.startsWith(CONNECTIONS_PREFIX)) {
+        if (isWebSocketConnectionRequest(apiId, proxy)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handlePostToConnection(connectionId, body);
         }
@@ -269,7 +277,7 @@ public class ApiGatewayExecuteController {
                                  @PathParam("apiId") String apiId,
                                  @PathParam("stageName") String stageName,
                                  @PathParam("proxy") String proxy) {
-        if (proxy != null && proxy.startsWith(CONNECTIONS_PREFIX)) {
+        if (isWebSocketConnectionRequest(apiId, proxy)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handleDeleteConnection(connectionId);
         }
@@ -458,7 +466,7 @@ public class ApiGatewayExecuteController {
             case "AWS" -> invokeAwsIntegration(scope, region, httpMethod, path, stageName,
                     matched, integration, headers, uriInfo, body, authorizerResult);
             case "HTTP_PROXY" -> invokeHttpProxy(scope, apiId, httpMethod, path, proxy, stageName,
-                    matched, integration, headers, uriInfo, body);
+                    matched, integration, headers, uriInfo, body, iamIdentity);
             case "HTTP" -> invokeHttpIntegration(scope, region, apiId, httpMethod, path, proxy, stageName,
                     matched, integration, headers, uriInfo, body, authorizerResult);
             case "MOCK" -> invokeMock(scope, region, httpMethod, path, stageName,
@@ -534,7 +542,8 @@ public class ApiGatewayExecuteController {
     private Response invokeHttpProxy(GatewayResponseScope scope, String apiId, String httpMethod, String path,
                                      String proxy, String stageName, ApiGatewayResource resource,
                                      Integration integration, HttpHeaders headers,
-                                     UriInfo uriInfo, byte[] body) {
+                                     UriInfo uriInfo, byte[] body,
+                                     ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
         String uri = integration.getUri();
         if (uri == null || uri.isBlank()) {
             return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
@@ -545,11 +554,10 @@ public class ApiGatewayExecuteController {
         // proxy integration passes the request through, so "?tag=a&tag=b" has to arrive as two
         // tag parameters and not as "tag=a,b". The joined single-value maps are only the lookup
         // surface for method.request.* parameter mapping, which resolves to one value in AWS too.
-        Map<String, List<String>> multiValueHeaders = new LinkedHashMap<>();
+        Map<String, List<String>> multiValueHeaders = integrationRequestHeaders(headers, iamIdentity);
         Map<String, String> headerMap = new LinkedHashMap<>();
         for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
             if (e.getValue().isEmpty()) continue;
-            multiValueHeaders.put(e.getKey(), List.copyOf(e.getValue()));
             headerMap.put(e.getKey(), String.join(",", e.getValue()));
         }
         Map<String, List<String>> multiValueQuery = new LinkedHashMap<>();
@@ -968,7 +976,8 @@ public class ApiGatewayExecuteController {
                                               Stage stage,
                                               MethodConfig method,
                                               HttpHeaders headers, UriInfo uriInfo, ResolvedApiKey resolvedApiKey) {
-        if ("COGNITO_USER_POOLS".equalsIgnoreCase(method.getAuthorizationType())) {
+        String authorizationType = method.getAuthorizationType();
+        if ("COGNITO_USER_POOLS".equalsIgnoreCase(authorizationType)) {
             CognitoUserPoolAuthorizer.Result result = cognitoAuthorizer.authorize(region, apiId, method, headers);
             if (result.failure() == CognitoUserPoolAuthorizer.Failure.UNAUTHORIZED) {
                 return new AuthorizerResult(gatewayResponse(scope, GatewayResponseType.UNAUTHORIZED, 401,
@@ -980,16 +989,19 @@ public class ApiGatewayExecuteController {
             }
             return new AuthorizerResult(null, result.principalId(), result.context());
         }
-        if ("CUSTOM".equals(method.getAuthorizationType())) {
+        if ("CUSTOM".equals(authorizationType)) {
             String authorizerId = method.getAuthorizerId();
             if (authorizerId == null) {
                 return new AuthorizerResult(null, null, null);
             }
 
             io.github.hectorvent.floci.services.apigateway.model.Authorizer auth = apiGatewayService.getAuthorizer(region, apiId, authorizerId);
+            String authorizerType = auth.getType();
             String lambdaName = functionNameFromUri(auth.getAuthorizerUri());
-            if (lambdaName == null) {
-                return new AuthorizerResult(null, null, null);
+            if ((!"TOKEN".equals(authorizerType) && !"REQUEST".equals(authorizerType))
+                    || lambdaName == null || lambdaName.isBlank()) {
+                return new AuthorizerResult(gatewayResponseOr(Response.status(500).build(), scope,
+                        GatewayResponseType.AUTHORIZER_CONFIGURATION_ERROR, null), null, null);
             }
 
             String event = toAuthorizerEvent(auth, headers, region, apiId, stageName, httpMethod, requestPath, resourcePath, resourceId, stage, uriInfo, resolvedApiKey);
@@ -1137,8 +1149,8 @@ public class ApiGatewayExecuteController {
             node.put("resource", resourcePath);
             node.put("path", preservedPath);
             node.put("httpMethod", httpMethod);
-            putSingleValueHeaders(node, headers);
-            putMultiValueHeaders(node, headers);
+            putSingleValueHeaders(node, headers.getRequestHeaders());
+            putMultiValueHeaders(node, headers.getRequestHeaders());
             putQueryStringParameters(node, uriInfo);
             putMultiValueQueryStringParameters(node, uriInfo);
 
@@ -1262,8 +1274,9 @@ public class ApiGatewayExecuteController {
         event.put("path", requestPath);
         event.put("httpMethod", httpMethod);
 
-        putSingleValueHeaders(event, headers);
-        putMultiValueHeaders(event, headers);
+        Map<String, List<String>> integrationHeaders = integrationRequestHeaders(headers, iamIdentity);
+        putSingleValueHeaders(event, integrationHeaders);
+        putMultiValueHeaders(event, integrationHeaders);
         putQueryStringParameters(event, uriInfo);
         putMultiValueQueryStringParameters(event, uriInfo);
 
@@ -1376,10 +1389,42 @@ public class ApiGatewayExecuteController {
         }
     }
 
+    /**
+     * The inbound headers a REST integration receives. AWS drops {@code Authorization} on the way
+     * to a Lambda or HTTP integration when the method is AWS_IAM ({@code iamIdentity} is non-null
+     * only then) or the header carries a SigV4 signature, so a function behind a signed call never
+     * sees the caller's signature. Every other header, {@code X-Amz-Date} and
+     * {@code X-Amz-Security-Token} included, passes through.
+     */
+    static Map<String, List<String>> integrationRequestHeaders(HttpHeaders headers,
+                                                               ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
+        Map<String, List<String>> forwarded = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
+            if (e.getValue().isEmpty()) {
+                continue;
+            }
+            if (HttpHeaders.AUTHORIZATION.equalsIgnoreCase(e.getKey())
+                    && (iamIdentity != null || isSigV4Authorization(e.getValue()))) {
+                continue;
+            }
+            forwarded.put(e.getKey(), e.getValue());
+        }
+        return forwarded;
+    }
+
+    private static boolean isSigV4Authorization(List<String> values) {
+        for (String value : values) {
+            if (SigV4AuthorizationHeader.parse(value) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Package-private for unit testing (see ApiGatewayExecuteControllerTest).
-    void putSingleValueHeaders(ObjectNode event, HttpHeaders headers) {
+    void putSingleValueHeaders(ObjectNode event, Map<String, List<String>> headers) {
         ObjectNode headersNode = event.putObject("headers");
-        headers.getRequestHeaders().forEach((name, values) -> {
+        headers.forEach((name, values) -> {
             // AWS collapses duplicate request headers to the LAST value in the single-value `headers`
             // map (multiValueHeaders keeps every value). Taking the first value diverged from AWS.
             if (!values.isEmpty()) {
@@ -1388,9 +1433,9 @@ public class ApiGatewayExecuteController {
         });
     }
 
-    void putMultiValueHeaders(ObjectNode event, HttpHeaders headers) {
+    void putMultiValueHeaders(ObjectNode event, Map<String, List<String>> headers) {
         ObjectNode mvHeaders = event.putObject("multiValueHeaders");
-        headers.getRequestHeaders().forEach((name, values) -> {
+        headers.forEach((name, values) -> {
             ArrayNode arr = mvHeaders.putArray(name);
             values.forEach(arr::add);
         });
@@ -2906,8 +2951,8 @@ public class ApiGatewayExecuteController {
         event.put("path", preservedPath);
         event.put("httpMethod", httpMethod);
 
-        putSingleValueHeaders(event, headers);
-        putMultiValueHeaders(event, headers);
+        putSingleValueHeaders(event, headers.getRequestHeaders());
+        putMultiValueHeaders(event, headers.getRequestHeaders());
         putQueryStringParameters(event, uriInfo);
         putMultiValueQueryStringParameters(event, uriInfo);
 

@@ -1,5 +1,19 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
+import io.restassured.config.HttpClientConfig;
+import io.restassured.config.RestAssuredConfig;
+import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
+import org.awaitility.Awaitility;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -10,24 +24,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.awaitility.Awaitility;
-import io.restassured.RestAssured;
-import io.restassured.response.Response;
-import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.config.HttpClientConfig;
-import io.restassured.config.RestAssuredConfig;
-import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
-import io.restassured.specification.RequestSpecification;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Redshift zero-ETL integrations.
@@ -38,10 +42,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * integrations returns an empty list rather than an error.
  */
 @QuarkusTest
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class RedshiftIntegrationsIntegrationTest {
 
-    private static String source;
-    private static String otherSource;
+    @Inject
+    RedshiftService service;
+
+    private String source;
+    private String otherSource;
     private static final String TARGET = "arn:aws:redshift:us-east-1:000000000000:cluster:zero-etl-cluster";
 
     /**
@@ -79,6 +87,13 @@ class RedshiftIntegrationsIntegrationTest {
         otherSource = newOtherSource;
     }
 
+    @AfterAll
+    void deleteZeroEtlCluster() {
+        if (source != null) {
+            service.deleteCluster("zero-etl-cluster");
+        }
+    }
+
     private static String createDynamoTable(String tableName) {
         Response response = given()
                 .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
@@ -94,16 +109,17 @@ class RedshiftIntegrationsIntegrationTest {
                         """.formatted(tableName))
                 .when().post("/");
         if (response.statusCode() != 200) {
-            response = given()
+            return given()
                     .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
                     .contentType("application/x-amz-json-1.0")
                     .body("{\"TableName\":\"%s\"}".formatted(tableName))
-                    .when().post("/");
+                    .when().post("/")
+                    .then().statusCode(200).extract().path("Table.LatestStreamArn");
         }
         return response.then().statusCode(200).extract().path("TableDescription.LatestStreamArn");
     }
 
-    private static String createIntegration(String name) {
+    private String createIntegration(String name) {
         return query("Action", "CreateIntegration", "IntegrationName", name,
                 "SourceArn", source, "TargetArn", TARGET)
                 .then().statusCode(200)

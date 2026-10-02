@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,6 +18,7 @@ import java.util.function.Consumer;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
 
 class SecretsManagerJsonHandlerTest {
 
@@ -29,7 +31,7 @@ class SecretsManagerJsonHandlerTest {
     @BeforeEach
     void setUp() {
         service = new SecretsManagerService(new InMemoryStorage<>(), 30);
-        handler = new SecretsManagerJsonHandler(service, MAPPER);
+        handler = new SecretsManagerJsonHandler(service, MAPPER, mock(IamEnforcementFilter.class));
     }
 
     private String getRandomPassword(ObjectNode request) {

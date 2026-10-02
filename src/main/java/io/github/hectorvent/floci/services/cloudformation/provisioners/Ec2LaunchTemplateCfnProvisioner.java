@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.Ec2UserDataDecoder;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -59,7 +60,9 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
             data.setInstanceType(node.path("InstanceType").asText(null));
             data.setKeyName(node.path("KeyName").asText(null));
             // CFN carries UserData already base64-encoded.
-            data.setEncodedUserData(node.path("UserData").asText(null));
+            String encodedUserData = node.path("UserData").asText(null);
+            data.setEncodedUserData(encodedUserData);
+            data.setUserData(Ec2UserDataDecoder.decode(encodedUserData));
             data.setIamInstanceProfile(iamInstanceProfile(node.path("IamInstanceProfile")));
             if (node.has("SecurityGroupIds")) {
                 List<String> securityGroupIds = new ArrayList<>();

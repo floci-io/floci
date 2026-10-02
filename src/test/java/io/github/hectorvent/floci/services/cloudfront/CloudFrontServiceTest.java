@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -123,6 +124,10 @@ class CloudFrontServiceTest {
                     + "</GeoRestriction></Restrictions>";
 
     private CloudFrontService serviceWithDomainSuffix(String domainSuffix) {
+        return serviceWithDomainSuffix(domainSuffix, "us-east-1");
+    }
+
+    private CloudFrontService serviceWithDomainSuffix(String domainSuffix, String region) {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
                 .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
@@ -140,7 +145,7 @@ class CloudFrontServiceTest {
         when(servicesConfig.cloudfront()).thenReturn(cloudFrontConfig);
         when(cloudFrontConfig.domainSuffix()).thenReturn(domainSuffix);
 
-        return new CloudFrontService(storageFactory, config);
+        return new CloudFrontService(storageFactory, config, new RegionResolver(region, ACCOUNT));
     }
 
     @Test
@@ -225,6 +230,15 @@ class CloudFrontServiceTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.describeFunction(function.getName(), "LIVE"));
         assertEquals("NoSuchFunctionExists", error.getErrorCode());
+    }
+
+    @Test
+    void distributionArnTakesTheRequestsPartition() {
+        CloudFrontService china = serviceWithDomainSuffix("cloudfront.net", "cn-north-1");
+
+        Distribution dist = china.createDistribution(new Distribution(), Map.of());
+
+        assertEquals("arn:aws-cn:cloudfront::" + ACCOUNT + ":distribution/" + dist.getId(), dist.getArn());
     }
 
     @Test

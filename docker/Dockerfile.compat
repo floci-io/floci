@@ -9,7 +9,7 @@ FROM ${BASE_IMAGE} AS native
 
 # Everything that does not depend on the Floci version. CI builds this stage alone
 # (target: tools) to test the aws CLI shim and to warm the layer cache.
-FROM registry.access.redhat.com/ubi9-minimal:9.7 AS tools
+FROM registry.access.redhat.com/ubi9-minimal:9.8 AS tools
 
 LABEL org.opencontainers.image.title="Floci (compat)" \
       org.opencontainers.image.description="Floci compatibility image with AWS CLI and boto3 pre-installed" \

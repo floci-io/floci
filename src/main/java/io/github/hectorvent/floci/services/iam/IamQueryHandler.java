@@ -26,11 +26,12 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
-import java.util.TreeSet;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -43,6 +44,12 @@ import java.util.stream.Stream;
 public class IamQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(IamQueryHandler.class);
+
+    /** {@code MaxItems} on the last-accessed readers: "defaults to 100", valid range 1 to 1000. */
+    private static final int DEFAULT_MAX_ITEMS = 100;
+    private static final int MAX_MAX_ITEMS = 1000;
+    /** {@code serviceNamespaceListType}: minimum 1 item, maximum 200. */
+    private static final int MAX_SERVICE_NAMESPACES = 200;
     private static final int MAX_TAG_LIST_MEMBERS = 50;
     private static final int MAX_TAG_KEY_LENGTH = 128;
     private static final int MAX_TAG_VALUE_LENGTH = 256;
@@ -256,7 +263,7 @@ public class IamQueryHandler {
     private Response handleCreateUser(MultivaluedMap<String, String> params) {
         String userName = getParam(params, "UserName");
         String path = getParam(params, "Path");
-        Map<String, String> tags = extractTags(params);
+        Map<String, String> tags = extractTags(params, true);
         IamUser user = iamService.createUser(userName, path);
         if (!tags.isEmpty()) iamService.tagUser(userName, tags);
         user = iamService.getUser(userName);
@@ -317,7 +324,7 @@ public class IamQueryHandler {
 
     private Response handleTagUser(MultivaluedMap<String, String> params) {
         String userName = getParam(params, "UserName");
-        iamService.tagUser(userName, extractTags(params));
+        iamService.tagUser(userName, extractTags(params, true));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagUser", AwsNamespaces.IAM)).build();
     }
 
@@ -402,7 +409,7 @@ public class IamQueryHandler {
     private Response handleCreateSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
         SAMLProvider provider = samlProviderService.create(regionResolver.getPartition(),
                 accountResolver.resolve(authorization), getParam(params, "Name"),
-                getParam(params, "SAMLMetadataDocument"), extractTags(params));
+                getParam(params, "SAMLMetadataDocument"), extractTags(params, false));
         return Response.ok(AwsQueryResponse.envelope("CreateSAMLProvider", AwsNamespaces.IAM,
                 new XmlBuilder().elem("SAMLProviderArn", provider.getArn())
                         .raw(tagsElement(new TreeMap<>(provider.getTags()))).build())).build();
@@ -436,7 +443,7 @@ public class IamQueryHandler {
 
     private Response handleTagSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
         String accountId = accountResolver.resolve(authorization);
-        samlProviderService.tag(accountId, getParam(params, "SAMLProviderArn"), extractTags(params));
+        samlProviderService.tag(accountId, getParam(params, "SAMLProviderArn"), extractTags(params, false));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagSAMLProvider", AwsNamespaces.IAM)).build();
     }
 
@@ -471,7 +478,7 @@ public class IamQueryHandler {
                 getParam(params, "Url"),
                 getMemberList(params, "ClientIDList"),
                 getMemberList(params, "ThumbprintList"),
-                extractTags(params));
+                extractTags(params, false));
         var xml = new XmlBuilder().elem("OpenIDConnectProviderArn", provider.getArn());
         if (!provider.getTags().isEmpty()) {
             xml.start("Tags").raw(tagsXml(provider.getTags())).end("Tags");
@@ -528,7 +535,7 @@ public class IamQueryHandler {
     }
 
     private Response handleTagOpenIDConnectProvider(MultivaluedMap<String, String> params) {
-        iamService.tagOpenIDConnectProvider(getParam(params, "OpenIDConnectProviderArn"), extractTags(params));
+        iamService.tagOpenIDConnectProvider(getParam(params, "OpenIDConnectProviderArn"), extractTags(params, false));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagOpenIDConnectProvider", AwsNamespaces.IAM)).build();
     }
 
@@ -779,7 +786,7 @@ public class IamQueryHandler {
         String trustPolicy = getParam(params, "AssumeRolePolicyDocument");
         String description = getParam(params, "Description");
         int maxSession = getIntParam(params, "MaxSessionDuration", 3600);
-        Map<String, String> tags = extractTags(params);
+        Map<String, String> tags = extractTags(params, true);
         IamRole role = iamService.createRole(roleName, path, trustPolicy, description, maxSession, tags);
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("CreateRole", AwsNamespaces.IAM, result)).build();
@@ -841,7 +848,7 @@ public class IamQueryHandler {
     }
 
     private Response handleTagRole(MultivaluedMap<String, String> params) {
-        iamService.tagRole(getParam(params, "RoleName"), extractTags(params));
+        iamService.tagRole(getParam(params, "RoleName"), extractTags(params, true));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagRole", AwsNamespaces.IAM)).build();
     }
 
@@ -866,7 +873,7 @@ public class IamQueryHandler {
         String path = getParam(params, "Path");
         String description = getParam(params, "Description");
         String document = getParam(params, "PolicyDocument");
-        Map<String, String> tags = extractTags(params);
+        Map<String, String> tags = extractTags(params, false);
         IamPolicy policy = iamService.createPolicy(policyName, path, description, document, tags);
         String result = new XmlBuilder().start("Policy").raw(policyXml(policy, true)).end("Policy").build();
         return Response.ok(AwsQueryResponse.envelope("CreatePolicy", AwsNamespaces.IAM, result)).build();
@@ -1113,7 +1120,7 @@ public class IamQueryHandler {
     }
 
     private Response handleTagPolicy(MultivaluedMap<String, String> params) {
-        iamService.tagPolicy(getParam(params, "PolicyArn"), extractTags(params));
+        iamService.tagPolicy(getParam(params, "PolicyArn"), extractTags(params, false));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagPolicy", AwsNamespaces.IAM)).build();
     }
 
@@ -1381,7 +1388,7 @@ public class IamQueryHandler {
     // =========================================================================
 
     private Response handleCreateInstanceProfile(MultivaluedMap<String, String> params) {
-        Map<String, String> tags = extractTags(params);
+        Map<String, String> tags = extractTags(params, false);
         InstanceProfile profile = iamService.createInstanceProfile(
                 getParam(params, "InstanceProfileName"), getParam(params, "Path"));
         if (!tags.isEmpty()) {
@@ -1562,11 +1569,11 @@ public class IamQueryHandler {
         String accountId = accountResolver.resolve(authorization);
         String arn = requireParam(params, "Arn");
         AccessAdvisorTarget target = resolveAccessAdvisorTarget(accountId, arn);
-        IamPolicyEvaluator.GrantedServices granted =
-                policyEvaluator.servicesGrantedBy(target.policyDocuments());
+        // Already sorted and expanded, including the wildcard and NotAction grants that name no
+        // namespace of their own.
+        List<String> granted = policyEvaluator.servicesGrantedBy(target.policyDocuments());
         ServiceLastAccessedJob job = serviceLastAccessedService.generate(accountId, arn,
-                params.getFirst("Granularity"), new TreeSet<>(granted.namespaces()).stream().toList(),
-                target.entities());
+                params.getFirst("Granularity"), granted, target.entities());
         return Response.ok(AwsQueryResponse.envelope("GenerateServiceLastAccessedDetails", AwsNamespaces.IAM,
                 new XmlBuilder().elem("JobId", job.getJobId()).build())).build();
     }
@@ -1656,6 +1663,7 @@ public class IamQueryHandler {
             throw new AwsException("InvalidInput",
                     "The request must include at least one service namespace.", 400);
         }
+        checkListLength(namespaces.size(), "serviceNamespaces", MAX_SERVICE_NAMESPACES);
         List<GrantingPolicy> candidates = policiesForIdentity(accountId, arn);
         // The response list carries one entry per requested namespace, so that is what a Marker
         // walks through.
@@ -1712,9 +1720,10 @@ public class IamQueryHandler {
         // Every input is validated before the bounds check, so a malformed request is rejected
         // rather than answered emptily just because the marker happens to sit past the end.
         int from = markerIndex(params);
-        // Validated only when actually supplied: an absent MaxItems means "no limit", which is not
-        // the same as a limit of zero, and an empty report would otherwise fail its own check.
-        int limit = items.size();
+        // An omitted MaxItems is not "no limit": the API reference states the count "defaults to
+        // 100" on both readers, so a report wider than that is truncated with a Marker exactly as
+        // it would be against AWS. Operations that model no MaxItems at all pass through whole.
+        int limit = maxItemsModeled ? DEFAULT_MAX_ITEMS : items.size();
         if (maxItemsModeled) {
             String raw = params.getFirst("MaxItems");
             if (raw != null && !raw.isBlank()) {
@@ -1725,9 +1734,12 @@ public class IamQueryHandler {
                             "The value " + raw + " at 'maxItems' is not a number.", 400);
                 }
                 if (limit < 1) {
-                    throw new AwsException("ValidationError",
-                            "Value at 'maxItems' failed to satisfy constraint: "
-                                    + "Member must have value greater than or equal to 1", 400);
+                    throw validationError(raw, "maxItems",
+                            "Member must have value greater than or equal to 1");
+                }
+                if (limit > MAX_MAX_ITEMS) {
+                    throw validationError(raw, "maxItems",
+                            "Member must have value less than or equal to " + MAX_MAX_ITEMS);
                 }
             }
         }
@@ -2160,39 +2172,50 @@ public class IamQueryHandler {
     /**
      * Every IAM request that carries tags types them as {@code tagListType}, whose {@code max: 50}
      * binds the members as sent, so the count is taken here, before the map collapses repeated keys.
+     * Duplicate keys in the request are rejected with InvalidInput (case-insensitively for users and
+     * roles, and case-sensitively for other IAM resource types).
      */
-    private Map<String, String> extractTags(MultivaluedMap<String, String> params) {
+    private Map<String, String> extractTags(MultivaluedMap<String, String> params, boolean caseInsensitiveKeys) {
         List<Map.Entry<String, String>> members = new ArrayList<>();
         for (int i = 1; ; i++) {
             String key = params.getFirst("Tags.member." + i + ".Key");
             String value = params.getFirst("Tags.member." + i + ".Value");
-            if (key == null) break;
+            if (key == null) {
+                break;
+            }
             members.add(Map.entry(key, value != null ? value : ""));
         }
         checkListLength(members.size(), "tags");
-        Map<String, String> tags = new HashMap<>();
+        Set<String> seenKeys = new HashSet<>();
+        Map<String, String> tags = new LinkedHashMap<>();
         for (int i = 0; i < members.size(); i++) {
             String key = members.get(i).getKey();
             String value = members.get(i).getValue();
             String at = "tags." + (i + 1) + ".member";
-            if (key.isEmpty()) {
-                throw tagValidationError(key, at + ".key", "Member must have length greater than or equal to 1");
-            }
-            if (key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH) {
-                throw tagValidationError(key, at + ".key",
-                        "Member must have length less than or equal to " + MAX_TAG_KEY_LENGTH);
-            }
-            if (!TAG_KEY_PATTERN.matcher(key).matches()) {
-                throw tagValidationError(key, at + ".key",
-                        "Member must satisfy regular expression pattern: " + TAG_KEY_PATTERN.pattern());
+            String keyViolation = tagKeyViolation(key);
+            if (keyViolation != null) {
+                throw validationError(key, at + ".key", keyViolation);
             }
             if (value.codePointCount(0, value.length()) > MAX_TAG_VALUE_LENGTH) {
-                throw tagValidationError(value, at + ".value",
+                throw validationError(value, at + ".value",
                         "Member must have length less than or equal to " + MAX_TAG_VALUE_LENGTH);
             }
             if (!TAG_VALUE_PATTERN.matcher(value).matches()) {
-                throw tagValidationError(value, at + ".value",
+                throw validationError(value, at + ".value",
                         "Member must satisfy regular expression pattern: " + TAG_VALUE_PATTERN.pattern());
+            }
+            if (caseInsensitiveKeys) {
+                for (String seenKey : seenKeys) {
+                    if (seenKey.equalsIgnoreCase(key)) {
+                        throw new AwsException("InvalidInput",
+                                "Duplicate tag keys found. Please note that Tag keys are case insensitive.", 400);
+                    }
+                }
+                seenKeys.add(key);
+            } else {
+                if (!seenKeys.add(key)) {
+                    throw new AwsException("InvalidInput", "Duplicate tag keys found.", 400);
+                }
             }
             tags.put(key, value);
         }
@@ -2200,14 +2223,44 @@ public class IamQueryHandler {
     }
 
     private static void checkListLength(int members, String param) {
-        if (members > MAX_TAG_LIST_MEMBERS) {
+        checkListLength(members, param, MAX_TAG_LIST_MEMBERS);
+    }
+
+    /**
+     * The constraint-violation shape used for a list member. Unlike the scalar form it leaves the
+     * value out, which is Floci's choice rather than a rule AWS follows: captured violations
+     * elsewhere in AWS do quote the list, such as Lambda's {@code Value '[x86_64, arm64]' at
+     * 'architectures'}, while IAM's own are inconsistent about it. Omitting it keeps a request that
+     * breaks the limit from echoing every member back in the error message.
+     */
+    private static void checkListLength(int members, String param, int limit) {
+        if (members > limit) {
             throw new AwsException("ValidationError",
                     "1 validation error detected: Value at '" + param + "' failed to satisfy constraint: "
-                            + "Member must have length less than or equal to " + MAX_TAG_LIST_MEMBERS, 400);
+                            + "Member must have length less than or equal to " + limit, 400);
         }
     }
 
-    private static AwsException tagValidationError(String value, String at, String constraint) {
+    /** Returns the {@code tagKeyType} constraint the key breaks, or null when it is valid. */
+    private static String tagKeyViolation(String key) {
+        if (key.isEmpty()) {
+            return "Member must have length greater than or equal to 1";
+        }
+        if (key.codePointCount(0, key.length()) > MAX_TAG_KEY_LENGTH) {
+            return "Member must have length less than or equal to " + MAX_TAG_KEY_LENGTH;
+        }
+        if (!TAG_KEY_PATTERN.matcher(key).matches()) {
+            return "Member must satisfy regular expression pattern: " + TAG_KEY_PATTERN.pattern();
+        }
+        return null;
+    }
+
+    /**
+     * IAM's constraint-violation shape for a scalar member, which leads with the error count and
+     * quotes the offending value. Only the bound actually broken is named, as AWS does: a value
+     * outside a range reports the side it fell outside, not the whole range.
+     */
+    private static AwsException validationError(String value, String at, String constraint) {
         return new AwsException("ValidationError",
                 "1 validation error detected: Value '" + value + "' at '" + at + "' failed to satisfy constraint: "
                         + constraint, 400);
@@ -2231,6 +2284,13 @@ public class IamQueryHandler {
             keys.add(key);
         }
         checkListLength(keys.size(), "tagKeys");
+        for (String key : keys) {
+            String violation = tagKeyViolation(key);
+            if (violation != null) {
+                throw validationError(keys.toString(), "tagKeys",
+                        "Member must satisfy constraint: [" + violation + "]");
+            }
+        }
         return keys;
     }
 
@@ -2303,7 +2363,7 @@ public class IamQueryHandler {
     }
 
     private Response handleTagInstanceProfile(MultivaluedMap<String, String> params) {
-        iamService.tagInstanceProfile(getParam(params, "InstanceProfileName"), extractTags(params));
+        iamService.tagInstanceProfile(getParam(params, "InstanceProfileName"), extractTags(params, false));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagInstanceProfile", AwsNamespaces.IAM)).build();
     }
 

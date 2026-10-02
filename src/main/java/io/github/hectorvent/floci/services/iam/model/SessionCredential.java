@@ -29,6 +29,9 @@ public class SessionCredential {
     private String ec2RoleId;
     /** Exact ECS task ARN this session was minted for, when this is a task-role session. */
     private String ecsTaskArn;
+    /** Exact object action and ARN for an internally generated S3 presigned URL. */
+    private String presignedAction;
+    private String presignedResourceArn;
 
     public SessionCredential() {}
 
@@ -111,6 +114,12 @@ public class SessionCredential {
 
     public String getEcsTaskArn() { return ecsTaskArn; }
     public void setEcsTaskArn(String ecsTaskArn) { this.ecsTaskArn = ecsTaskArn; }
+
+    public String getPresignedAction() { return presignedAction; }
+    public void setPresignedAction(String presignedAction) { this.presignedAction = presignedAction; }
+
+    public String getPresignedResourceArn() { return presignedResourceArn; }
+    public void setPresignedResourceArn(String presignedResourceArn) { this.presignedResourceArn = presignedResourceArn; }
 
     public boolean isLambdaExecutionRole() { return lambdaExecutionRole; }
     public void setLambdaExecutionRole(boolean lambdaExecutionRole) { this.lambdaExecutionRole = lambdaExecutionRole; }

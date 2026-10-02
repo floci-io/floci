@@ -1466,4 +1466,383 @@ class EsmIntegrationTest {
         given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuidWith).then().statusCode(202);
         given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuidWithout).then().statusCode(202);
     }
+
+    // ──────────────────────────── ARN and tags ────────────────────────────
+
+    private static String esmArn(String region, String uuid) {
+        return "arn:aws:lambda:" + region + ":" + ACCOUNT_ID + ":event-source-mapping:" + uuid;
+    }
+
+    @Test
+    @Order(82)
+    void eventSourceMappingArnIsReturnedByCreateGetListAndDelete() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s" }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("EventSourceMappingArn", startsWith("arn:aws:lambda:" + REGION + ":" + ACCOUNT_ID
+                    + ":event-source-mapping:"))
+        .extract().path("UUID");
+        String arn = esmArn(REGION, uuid);
+
+        given().get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(200)
+            .body("EventSourceMappingArn", equalTo(arn));
+
+        given().queryParam("FunctionName", FUNCTION_ARN).get(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(200)
+            .body("EventSourceMappings.find { it.UUID == '" + uuid + "' }.EventSourceMappingArn", equalTo(arn));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(202)
+            .body("EventSourceMappingArn", equalTo(arn));
+    }
+
+    @Test
+    @Order(83)
+    void createEventSourceMappingStoresTagsReadableThroughListTags() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "Tags": { "Environment": "uat", "ManagedBy": "terraform" }
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("$", not(hasKey("Tags")))
+        .extract().path("UUID");
+
+        given().get("/2017-03-31/tags/" + esmArn(REGION, uuid))
+        .then()
+            .statusCode(200)
+            .body("Tags.Environment", equalTo("uat"))
+            .body("Tags.ManagedBy", equalTo("terraform"))
+            .body("Tags.size()", equalTo(2));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    @Order(84)
+    void tagAndUntagResourceOnEventSourceMappingArn() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s" }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(202).extract().path("UUID");
+        String arn = esmArn(REGION, uuid);
+
+        given().get("/2017-03-31/tags/" + arn)
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(0));
+
+        given()
+            .contentType("application/json")
+            .body("{\"Tags\": {\"Layer\": \"backend\", \"Target\": \"email\"}}")
+        .when().post("/2017-03-31/tags/" + arn)
+        .then().statusCode(204);
+
+        given().queryParam("tagKeys", "Target").delete("/2017-03-31/tags/" + arn)
+        .then().statusCode(204);
+
+        given().get("/2017-03-31/tags/" + arn)
+        .then()
+            .statusCode(200)
+            .body("Tags.Layer", equalTo("backend"))
+            .body("Tags.size()", equalTo(1));
+
+        given().get("/2017-03-31/tags/" + FUNCTION_ARN)
+        .then()
+            .statusCode(200)
+            .body("Tags", not(hasKey("Layer")));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+
+        given().get("/2017-03-31/tags/" + arn)
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(85)
+    void tagApisReportUnknownOrForeignEventSourceMappingArnAsNotFound() {
+        given().get("/2017-03-31/tags/" + esmArn(REGION, UUID.randomUUID().toString()))
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s" }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(202).extract().path("UUID");
+
+        given()
+            .contentType("application/json")
+            .body("{\"Tags\": {\"k\": \"v\"}}")
+        .when().post("/2017-03-31/tags/" + esmArn("eu-west-1", uuid))
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+
+        given().get("/2017-03-31/tags/" + esmArn(REGION, uuid).replaceFirst("^arn:aws:", "arn:aws-cn:"))
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    @Order(86)
+    void createEventSourceMappingRejectsNonObjectTags() {
+        given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s", "Tags": ["Environment"] }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+
+        given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s", "Tags": { "Environment": 1 } }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    @Order(87)
+    void tagResourceRejectsNonStringTagValuesOnEventSourceMapping() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s" }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(202).extract().path("UUID");
+        String arn = esmArn(REGION, uuid);
+
+        given()
+            .contentType("application/json")
+            .body("{\"Tags\": {\"k\": 1}}")
+        .when().post("/2017-03-31/tags/" + arn)
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+
+        given().get("/2017-03-31/tags/" + arn)
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(0));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    @Order(88)
+    void updateEventSourceMappingSetsAndClearsFunctionResponseTypes() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s", "BatchSize": 2 }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(202)
+            .body("FunctionResponseTypes", empty())
+        .extract().path("UUID");
+
+        given().contentType("application/json")
+            .body("{ \"FunctionResponseTypes\": [\"ReportBatchItemFailures\"] }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
+
+        given()
+        .when().get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(200)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
+
+        // An update that omits the member leaves it unchanged
+        given().contentType("application/json").body("{ \"BatchSize\": 3 }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
+
+        given().contentType("application/json").body("{ \"FunctionResponseTypes\": [\"Bogus\"] }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+
+        given()
+        .when().get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(200)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
+
+        // A null member is absent, and a scalar is a serialization error that changes nothing
+        given().contentType("application/json").body("{ \"FunctionResponseTypes\": null }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
+
+        given().contentType("application/json").body("{ \"FunctionResponseTypes\": \"ReportBatchItemFailures\" }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+
+        // A request that fails on a later member applies none of its members
+        given().contentType("application/json")
+            .body("{ \"FunctionResponseTypes\": [], \"BatchSize\": 5, \"Topics\": [] }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(400);
+
+        given()
+        .when().get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(200)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"))
+            .body("BatchSize", equalTo(3));
+
+        given().contentType("application/json").body("{ \"FunctionResponseTypes\": [] }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(202)
+            .body("FunctionResponseTypes", empty());
+
+        given()
+        .when().get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(200)
+            .body("FunctionResponseTypes", empty());
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    // ── Request-shape validation ────────────────────────────────────────────────
+
+    @Test
+    @Order(90)
+    void createEventSourceMapping_rejectsUnknownFunctionResponseType() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "FunctionResponseTypes": ["Bogus"]
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    @Order(91)
+    void updateEventSourceMapping_appliesAndRejectsFunctionResponseTypes() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s"
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .extract().path("UUID");
+
+        try {
+            given()
+                .contentType("application/json")
+                .body("{ \"FunctionResponseTypes\": [\"Bogus\"] }")
+            .when()
+                .put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
+
+            given()
+                .contentType("application/json")
+                .body("{ \"FunctionResponseTypes\": [\"ReportBatchItemFailures\"] }")
+            .when()
+                .put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+            .then()
+                .statusCode(202)
+                .body("FunctionResponseTypes", hasItem("ReportBatchItemFailures"));
+        } finally {
+            given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid);
+        }
+    }
+
+    @Test
+    @Order(92)
+    void listEventSourceMappings_rejectsMalformedEventSourceArn() {
+        given()
+        .when()
+            .get(LAMBDA_BASE + "/event-source-mappings?EventSourceArn=not-an-arn")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(93)
+    void listEventSourceMappings_filtersByEventSourceArn() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s"
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .extract().path("UUID");
+
+        try {
+            given()
+            .when()
+                .get(LAMBDA_BASE + "/event-source-mappings?EventSourceArn=" + QUEUE_ARN)
+            .then()
+                .statusCode(200)
+                .body("EventSourceMappings.UUID", hasItem(uuid));
+
+            given()
+            .when()
+                .get(LAMBDA_BASE + "/event-source-mappings?EventSourceArn=" + STREAM_ARN)
+            .then()
+                .statusCode(200)
+                .body("EventSourceMappings.UUID", not(hasItem(uuid)));
+        } finally {
+            given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid);
+        }
+    }
 }

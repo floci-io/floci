@@ -1,14 +1,12 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
@@ -19,15 +17,17 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
@@ -108,7 +108,7 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
         int effectiveSize = sizeGib > 0 ? sizeGib : 8;
         String rawFile = "/volumes/" + volumeId + ".raw";
         String cmd = "truncate -s " + effectiveSize + "G " + rawFile;
-        ContainerExecResult result = execInContainer(helperId, new String[]{"sh", "-c", cmd}, DEFAULT_TIMEOUT_SECONDS);
+        ContainerExec.Result result = execInContainer(helperId, new String[]{"sh", "-c", cmd}, DEFAULT_TIMEOUT_SECONDS);
         if (result.exitCode() != 0) {
             LOG.warnv("Failed to create backing file for volume {0}: {1}", volumeId, result.summary());
         }
@@ -138,28 +138,126 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
      * Deletes the volume's backing file and releases any associated loop device.
      */
     public boolean deleteVolume(String volumeId) {
-        if (!isAvailable()) {
+        if (!isAvailable() || volumeId == null) {
             return false;
         }
-        String helperId = ensureHelperContainer();
-        if (helperId == null) {
-            LOG.warnv("EC2 volume helper container unavailable; backing file for volume {0} could not be deleted",
-                    volumeId);
+        return withVolumeLock(volumeId, () -> {
+            String helperId = ensureHelperContainer();
+            if (helperId == null) {
+                LOG.warnv("EC2 volume helper container unavailable; backing file for volume {0} could not be deleted",
+                        volumeId);
+                return false;
+            }
+            String rawFile = "/volumes/" + volumeId + ".raw";
+            String script = SHELL_LOOP_FINDER
+                    + "raw=\"$1\"\n"
+                    + "while true; do\n"
+                    + "  loop=$(find_loops \"$raw\" | head -n1)\n"
+                    + "  [ -n \"$loop\" ] || break\n"
+                    + "  losetup -d \"$loop\" 2>/dev/null || break\n"
+                    + "done\n"
+                    + "rm -f \"$raw\"";
+            ContainerExec.Result result = execInContainer(helperId,
+                    new String[]{"sh", "-c", script, "delete", rawFile}, DEFAULT_TIMEOUT_SECONDS);
+            activeLoopDevices.remove(volumeId);
+            return result.exitCode() == 0;
+        });
+    }
+
+    private static final class RefCountedLock {
+        private final ReentrantLock lock = new ReentrantLock();
+        private final AtomicInteger refCount = new AtomicInteger(1);
+    }
+
+    private final ConcurrentHashMap<String, RefCountedLock> volumeLocks = new ConcurrentHashMap<>();
+
+    private <T> T withVolumeLock(String volumeId, Supplier<T> action) {
+        if (volumeId == null) {
+            return action.get();
+        }
+        RefCountedLock refLock = volumeLocks.compute(volumeId, (k, v) -> {
+            if (v == null) {
+                return new RefCountedLock();
+            }
+            v.refCount.incrementAndGet();
+            return v;
+        });
+        refLock.lock.lock();
+        try {
+            return action.get();
+        } finally {
+            refLock.lock.unlock();
+            volumeLocks.computeIfPresent(volumeId, (k, v) -> {
+                if (v.refCount.decrementAndGet() <= 0) {
+                    return null;
+                }
+                return v;
+            });
+        }
+    }
+
+    /**
+     * Resizes the volume's raw backing file and refreshes any associated loop device.
+     */
+    public boolean resizeVolume(String volumeId, int sizeGib) {
+        if (!isAvailable() || volumeId == null) {
             return false;
         }
-        String rawFile = "/volumes/" + volumeId + ".raw";
-        String script = SHELL_LOOP_FINDER
-                + "raw=\"$1\"\n"
-                + "while true; do\n"
-                + "  loop=$(find_loops \"$raw\" | head -n1)\n"
-                + "  [ -n \"$loop\" ] || break\n"
-                + "  losetup -d \"$loop\" 2>/dev/null || break\n"
-                + "done\n"
-                + "rm -f \"$raw\"";
-        ContainerExecResult result = execInContainer(helperId,
-                new String[]{"sh", "-c", script, "delete", rawFile}, DEFAULT_TIMEOUT_SECONDS);
-        activeLoopDevices.remove(volumeId);
-        return result.exitCode() == 0;
+        return withVolumeLock(volumeId, () -> {
+            String helperId = ensureHelperContainer();
+            if (helperId == null) {
+                LOG.warnv("EC2 volume helper container unavailable; backing file for volume {0} could not be resized",
+                        volumeId);
+                return false;
+            }
+            int effectiveSize = sizeGib > 0 ? sizeGib : 8;
+            String rawFile = "/volumes/" + volumeId + ".raw";
+            String script = SHELL_LOOP_FINDER
+                    + "raw=\"$1\"\n"
+                    + "size=\"$2\"\n"
+                    + "cur_bytes=$(stat -c %s \"$raw\" 2>/dev/null || echo 0)\n"
+                    + "target_bytes=$((size * 1024 * 1024 * 1024))\n"
+                    + "truncated=0\n"
+                    + "if [ \"$cur_bytes\" -lt \"$target_bytes\" ]; then\n"
+                    + "  truncate -s \"${size}G\" \"$raw\" || exit 1\n"
+                    + "  truncated=1\n"
+                    + "fi\n"
+                    + "for loop in $(find_loops \"$raw\"); do\n"
+                    + "  minor=$(echo \"$loop\" | sed 's/[^0-9]*//g')\n"
+                    + "  if [ -n \"$minor\" ] && [ ! -b \"$loop\" ]; then\n"
+                    + "    mknod \"$loop\" b 7 \"$minor\" 2>/dev/null || true\n"
+                    + "  fi\n"
+                    + "  if ! losetup -c \"$loop\"; then\n"
+                    + "    if [ \"$truncated\" -eq 1 ]; then\n"
+                    + "      if [ \"$cur_bytes\" -gt 0 ]; then\n"
+                    + "        truncate -s \"$cur_bytes\" \"$raw\" 2>/dev/null || true\n"
+                    + "      else\n"
+                    + "        rm -f \"$raw\" 2>/dev/null || true\n"
+                    + "      fi\n"
+                    + "      for rloop in $(find_loops \"$raw\"); do\n"
+                    + "        losetup -c \"$rloop\" 2>/dev/null || true\n"
+                    + "      done\n"
+                    + "    fi\n"
+                    + "    exit 2\n"
+                    + "  fi\n"
+                    + "done";
+            ContainerExec.Result result = execInContainer(helperId,
+                    new String[]{"sh", "-c", script, "resize", rawFile, String.valueOf(effectiveSize)},
+                    DEFAULT_TIMEOUT_SECONDS);
+            if (result.exitCode() == 1) {
+                LOG.warnv("Failed to resize backing file for volume {0}: {1}", volumeId, result.summary());
+                return false;
+            }
+            if (result.exitCode() == 2) {
+                LOG.warnv("Failed to refresh loop device for volume {0}: {1}", volumeId, result.summary());
+                return false;
+            }
+            if (result.exitCode() != 0) {
+                LOG.warnv("Failed to resize volume {0}: {1}", volumeId, result.summary());
+                return false;
+            }
+            return true;
+        });
     }
 
     /**
@@ -222,7 +320,7 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
                 + "fi\n"
                 + "echo \"$loop\"";
 
-        ContainerExecResult helperResult;
+        ContainerExec.Result helperResult;
         synchronized (loopAllocationLock) {
             helperResult = execInContainer(helperId,
                     new String[]{"sh", "-c", helperScript, "helper", rawFile, String.valueOf(effectiveSize)},
@@ -258,7 +356,7 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
                 + "fi\n"
                 + "[ -b \"$dev\" ] || [ -L \"$dev\" ]";
 
-        ContainerExecResult targetResult = execInContainer(targetContainerId,
+        ContainerExec.Result targetResult = execInContainer(targetContainerId,
                 new String[]{"sh", "-c", targetScript, "target", normalizedDevice, loopDev, minorStr},
                 DEFAULT_TIMEOUT_SECONDS);
         if (targetResult.exitCode() != 0) {
@@ -364,34 +462,11 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
         }
     }
 
-    private ContainerExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds) {
+    private ContainerExec.Result execInContainer(String containerId, String[] cmd, int timeoutSeconds) {
         try {
-            ExecCreateCmdResponse exec = dockerClient
-                    .execCreateCmd(containerId)
-                    .withCmd(cmd)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .exec();
-
-            StringBuilder output = new StringBuilder();
-            boolean completed = dockerClient.execStartCmd(exec.getId())
-                    .exec(new ResultCallback.Adapter<Frame>() {
-                        @Override
-                        public void onNext(Frame frame) {
-                            if (frame != null && frame.getPayload() != null) {
-                                output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
-                            }
-                        }
-                    })
-                    .awaitCompletion(timeoutSeconds, TimeUnit.SECONDS);
-
-            if (!completed) {
-                return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s");
-            }
-            Long exitCode = dockerClient.inspectExecCmd(exec.getId()).exec().getExitCodeLong();
-            return new ContainerExecResult(exitCode != null ? exitCode : -1, output.toString());
-        } catch (Exception e) {
-            return new ContainerExecResult(-1, e.getMessage());
+            return ContainerExec.runMerged(dockerClient, containerId, cmd, timeoutSeconds);
+        } catch (RuntimeException e) {
+            return new ContainerExec.Result(-1, "", Objects.requireNonNullElse(e.getMessage(), e.toString()), false);
         }
     }
 
@@ -416,11 +491,5 @@ public class Ec2VolumeBlockDeviceManager implements Resettable {
             execInContainer(helperId, new String[]{"sh", "-c", script}, DEFAULT_TIMEOUT_SECONDS);
         }
         activeLoopDevices.clear();
-    }
-
-    public record ContainerExecResult(long exitCode, String output) {
-        public String summary() {
-            return output == null || output.isBlank() ? "(no output)" : output.trim();
-        }
     }
 }

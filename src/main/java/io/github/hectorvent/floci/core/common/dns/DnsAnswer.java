@@ -3,14 +3,14 @@ package io.github.hectorvent.floci.core.common.dns;
 import java.util.List;
 
 /**
- * What a {@link DnsRecordSource} answers for a name inside a zone it owns: the A records with the
- * TTL the zone publishes for them, an existing name without A records, or an absent name. A name
+ * What a {@link DnsRecordSource} answers for a name inside a zone it owns: typed records with the
+ * TTL the zone publishes for them, an existing name without those records, or an absent name. A name
  * the source does not own is an empty optional, not an answer.
  *
  * <p>The TTL is per answer rather than per record: every address behind one Cloud Map service
  * shares that service's TTL, which is how Route 53 publishes a record set.
  */
-public record DnsAnswer(List<String> addresses, int ttlSeconds, boolean nameExists) {
+public record DnsAnswer(List<DnsRecord> records, int ttlSeconds, boolean nameExists) {
 
     /** What the DNS server publishes for a name whose zone declares no TTL of its own. */
     public static final int DEFAULT_TTL_SECONDS = 60;
@@ -24,15 +24,26 @@ public record DnsAnswer(List<String> addresses, int ttlSeconds, boolean nameExis
         if (ttlSeconds < 0) {
             throw new IllegalArgumentException("DNS TTL must not be negative: " + ttlSeconds);
         }
-        addresses = List.copyOf(addresses);
+        records = List.copyOf(records);
     }
 
     /** A records for an existing name, all published with the same TTL. */
     public static DnsAnswer records(List<String> addresses, int ttlSeconds) {
-        return new DnsAnswer(addresses, ttlSeconds, true);
+        return typedRecords(addresses.stream().map(address -> (DnsRecord) new DnsRecord.Address(1, address)).toList(),
+                ttlSeconds);
     }
 
-    /** An existing name without A records: NOERROR with no answers. */
+    public static DnsAnswer typedRecords(List<DnsRecord> records, int ttlSeconds) {
+        return new DnsAnswer(records, ttlSeconds, true);
+    }
+
+    /** IPv4 projection retained for callers that explicitly resolve A records. */
+    public List<String> addresses() {
+        return records.stream().filter(record -> record instanceof DnsRecord.Address && record.type() == 1)
+                .map(record -> ((DnsRecord.Address) record).value()).toList();
+    }
+
+    /** An existing name without records of the requested type: NOERROR with no answers. */
     public static DnsAnswer noData() {
         return NO_DATA;
     }
@@ -43,6 +54,6 @@ public record DnsAnswer(List<String> addresses, int ttlSeconds, boolean nameExis
     }
 
     public boolean isEmpty() {
-        return addresses.isEmpty();
+        return records.isEmpty();
     }
 }

@@ -28,10 +28,14 @@ class Ec2InstanceTypeCatalogTest {
                 .collect(Collectors.toSet());
 
         assertEquals(Set.of(
+                "t2.nano",
                 "t2.micro",
+                "t2.small",
+                "t3.nano",
                 "t3.micro",
                 "t3.small",
                 "t3.medium",
+                "t3a.nano",
                 "m5.large",
                 "t4g.micro",
                 "t4g.small",

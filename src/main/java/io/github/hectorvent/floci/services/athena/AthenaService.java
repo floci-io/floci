@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.athena.model.WorkGroupEngineVersionRe
 import io.github.hectorvent.floci.services.athena.model.WorkGroupTag;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.glue.GlueService;
+import io.github.hectorvent.floci.services.glue.PartitionProjection;
 import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.Table;

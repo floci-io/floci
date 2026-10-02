@@ -315,6 +315,15 @@ class ContainerBuilderTest {
         assertEquals("ghcr.io/floci-io/mirror/floci/ami-ubuntu:24.04-arm64", spec.image());
     }
 
+    @Test
+    void imageRegistryBaseLeavesAnImageIdAlone() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.docker.imageRegistryBase()).thenReturn(Optional.of("ghcr.io/floci-io/mirror"));
+        String imageId = "sha256:" + "a".repeat(64);
+
+        assertEquals(imageId, fixture.builder.newContainer(imageId).build().image());
+    }
+
     private static class TestFixture {
         final EmulatorConfig config = mock(EmulatorConfig.class);
         final EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);

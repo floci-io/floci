@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ssoportal;
 
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.ssoadmin.SsoAdminService;
@@ -39,7 +40,8 @@ class SsoPortalServiceTest {
         ssoAdminService = mock(SsoAdminService.class);
         organizationsService = mock(OrganizationsService.class);
         iamService = mock(IamService.class);
-        service = new SsoPortalService(oidcService, ssoAdminService, organizationsService, iamService);
+        service = new SsoPortalService(oidcService, ssoAdminService, organizationsService, iamService,
+                new RegionResolver("cn-north-1", "000000000000"));
     }
 
     @Test
@@ -69,7 +71,8 @@ class SsoPortalServiceTest {
 
         ArgumentCaptor<String> roleArn = ArgumentCaptor.forClass(String.class);
         verify(iamService).registerSessionForAccount(eq(accountId), any(), any(), any(), roleArn.capture(), any(), eq(null));
-        assertTrue(roleArn.getValue().contains(":iam::" + accountId + ":role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_PlatformAdmins_floci"));
+        assertEquals("arn:aws-cn:iam::" + accountId
+                + ":role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_PlatformAdmins_floci", roleArn.getValue());
     }
 
     @Test

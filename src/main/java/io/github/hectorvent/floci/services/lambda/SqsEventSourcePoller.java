@@ -26,9 +26,11 @@ import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 
@@ -152,15 +154,18 @@ public class SqsEventSourcePoller implements Resettable {
         }
     }
 
-    /** Package-private (not private) only so unit tests can drive a single poll directly. */
-    void pollAndInvoke(EventSourceMapping esm) {
+    /**
+     * Package-private (not private) only so unit tests can drive a single poll directly and wait
+     * for it to finish through the returned future.
+     */
+    Future<?> pollAndInvoke(EventSourceMapping esm) {
         // Skip this tick if a previous poll for this ESM is still in progress.
         // This prevents concurrent deliveries of the same message when the Lambda
         // cold-start / execution time exceeds the SQS visibility timeout.
         if (activePolls.putIfAbsent(esm.getUuid(), Boolean.TRUE) != null) {
-            return;
+            return CompletableFuture.completedFuture(null);
         }
-        pollExecutor.submit(() -> {
+        return pollExecutor.submit(() -> {
             try {
                 // Look up the function first so we can set an appropriate visibility
                 // timeout: fn.timeout + 30s keeps messages hidden while Lambda runs.

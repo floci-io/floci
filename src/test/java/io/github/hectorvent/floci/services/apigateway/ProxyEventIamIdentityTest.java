@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,6 +22,10 @@ import static org.mockito.Mockito.when;
  * REST renders it under {@code requestContext.identity}, HTTP APIs under
  * {@code requestContext.authorizer.iam}. Both were unreachable before AWS_IAM was enforced at
  * all: REST's identity fields were hardcoded to null with a comment saying so.
+ *
+ * <p>The caller's signature itself must not: AWS drops the {@code Authorization} header before a
+ * REST Lambda proxy integration when the method is AWS_IAM or the header carries a SigV4 signature
+ * ("Amazon API Gateway important notes for REST APIs", header table footnote).
  */
 class ProxyEventIamIdentityTest {
 
@@ -29,8 +34,12 @@ class ProxyEventIamIdentityTest {
             new ExecuteApiSigV4Authorizer.CallerIdentity(
                     "AKIAIOSFODNN7EXAMPLE", "000000000000",
                     "arn:aws:iam::000000000000:user/alice", "AIDAEXAMPLEUSERID");
+    private static final String SIGV4 = "AWS4-HMAC-SHA256 "
+            + "Credential=AKIAIOSFODNN7EXAMPLE/20260928/us-east-1/execute-api/aws4_request, "
+            + "SignedHeaders=host;x-amz-date, Signature=abc123";
 
     private ApiGatewayExecuteController controller;
+    private MultivaluedMap<String, String> requestHeaders;
     private HttpHeaders headers;
     private UriInfo uriInfo;
 
@@ -40,8 +49,9 @@ class ProxyEventIamIdentityTest {
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
 
+        requestHeaders = new MultivaluedHashMap<>();
         headers = mock(HttpHeaders.class);
-        when(headers.getRequestHeaders()).thenReturn(new MultivaluedHashMap<>());
+        when(headers.getRequestHeaders()).thenReturn(requestHeaders);
 
         uriInfo = mock(UriInfo.class);
         when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
@@ -106,5 +116,70 @@ class ProxyEventIamIdentityTest {
 
         assertTrue(requestContext.path("authorizer").isMissingNode(),
                 "a route with no authorizer must not grow an authorizer node");
+    }
+
+    @Test
+    void awsIamMethodDropsTheSignatureButKeepsTheOtherSigningHeaders() throws Exception {
+        requestHeaders.add("Authorization", SIGV4);
+        requestHeaders.add("X-Amz-Date", "20260928T120000Z");
+        requestHeaders.add("X-Amz-Security-Token", "session-token");
+
+        JsonNode event = restEvent(CALLER);
+
+        assertAuthorizationAbsent(event);
+        assertEquals("20260928T120000Z", event.path("headers").path("X-Amz-Date").asText());
+        assertEquals("session-token", event.path("headers").path("X-Amz-Security-Token").asText());
+        assertEquals("session-token",
+                event.path("multiValueHeaders").path("X-Amz-Security-Token").path(0).asText());
+    }
+
+    @Test
+    void awsIamMethodDropsAnAuthorizationHeaderThatIsNotSigV4() throws Exception {
+        // A presigned-URL caller is authenticated by the query string, so its Authorization header
+        // can be anything. AWS still drops it: the method is AWS_IAM.
+        requestHeaders.add("Authorization", "Bearer user-token");
+
+        assertAuthorizationAbsent(restEvent(CALLER));
+    }
+
+    @Test
+    void noneMethodDropsASigV4AuthorizationHeader() throws Exception {
+        requestHeaders.add("Authorization", SIGV4);
+
+        assertAuthorizationAbsent(restEvent(null));
+    }
+
+    @Test
+    void noneMethodPassesABearerAuthorizationHeaderThrough() throws Exception {
+        requestHeaders.add("Authorization", "Bearer user-token");
+
+        JsonNode event = restEvent(null);
+
+        assertEquals("Bearer user-token", event.path("headers").path("Authorization").asText());
+        assertEquals("Bearer user-token",
+                event.path("multiValueHeaders").path("Authorization").path(0).asText());
+    }
+
+    @Test
+    void authorizationHeaderNameIsMatchedCaseInsensitively() throws Exception {
+        requestHeaders.add("authorization", SIGV4);
+
+        JsonNode event = restEvent(null);
+
+        assertTrue(event.path("headers").path("authorization").isMissingNode());
+        assertTrue(event.path("multiValueHeaders").path("authorization").isMissingNode());
+    }
+
+    private JsonNode restEvent(ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) throws Exception {
+        return MAPPER.readTree(controller.buildProxyEvent(
+                "us-east-1", "api1", "GET", "/iam", "/iam", "res1", "test", null,
+                headers, uriInfo, null, "req-1", null, null, null, iamIdentity));
+    }
+
+    private static void assertAuthorizationAbsent(JsonNode event) {
+        assertTrue(event.path("headers").path("Authorization").isMissingNode(),
+                "headers must not carry Authorization");
+        assertTrue(event.path("multiValueHeaders").path("Authorization").isMissingNode(),
+                "multiValueHeaders must not carry Authorization");
     }
 }

@@ -123,7 +123,7 @@ class Ec2InstanceCfnProvisionerTest {
         data.setImageId("ami-from-template");
         data.setInstanceType("m5.large");
         data.setKeyName("template-key");
-        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, "1")).thenReturn(data);
+        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, "1", false)).thenReturn(data);
         Instance instance = new Instance();
         instance.setInstanceId("i-2");
         stubLaunch(instance);
@@ -138,7 +138,7 @@ class Ec2InstanceCfnProvisionerTest {
 
     @Test
     void aLaunchTemplateThatDoesNotResolveFailsTheInstance() throws Exception {
-        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-missing", null, null))
+        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-missing", null, null, false))
                 .thenThrow(new AwsException("InvalidLaunchTemplateId.NotFound",
                         "The specified launch template does not exist.", 400));
 

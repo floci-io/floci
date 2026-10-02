@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.CustomVerificationEmailTemplate;
@@ -72,6 +73,13 @@ public class SesCvetService {
         return cvetStore.get(cvetKey(region, templateName)).orElseThrow(() -> cvetNotFound(templateName));
     }
 
+    public PaginatedResult<CustomVerificationEmailTemplate> listCustomVerificationEmailTemplates(
+            String region, SesListPaging paging, Integer pageSize, String nextToken) {
+        return paging.page(region, listCustomVerificationEmailTemplates(region),
+                CustomVerificationEmailTemplate::getTemplateName, pageSize, nextToken);
+    }
+
+    /** By name; SES's own order could not be observed, since creating one needs a verified sender. */
     public List<CustomVerificationEmailTemplate> listCustomVerificationEmailTemplates(String region) {
         String prefix = "cvet::" + region + "::";
         return cvetStore.scan(k -> k.startsWith(prefix)).stream()

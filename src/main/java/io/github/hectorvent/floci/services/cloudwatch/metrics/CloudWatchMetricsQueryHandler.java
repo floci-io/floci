@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.cloudwatch.metricstreams.CloudWatchMe
 import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStream;
 import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStreamFilter;
 import io.github.hectorvent.floci.services.cloudwatch.metricstreams.model.MetricStreamStatisticsConfiguration;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.AlarmMetricDataQuery;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
@@ -660,7 +661,8 @@ public class CloudWatchMetricsQueryHandler {
         a.setMetricName(params.getFirst("MetricName"));
         a.setNamespace(params.getFirst("Namespace"));
         a.setStatistic(params.getFirst("Statistic"));
-        a.setPeriod(parseIntParam(params, "Period", 60));
+        a.setMetrics(parseAlarmMetricQueries(params));
+        a.setPeriod(a.getMetrics().isEmpty() ? parseIntParam(params, "Period", 60) : null);
         a.setUnit(params.getFirst("Unit"));
         a.setEvaluationPeriods(parseIntParam(params, "EvaluationPeriods", 1));
         String datapointsToAlarm = params.getFirst("DatapointsToAlarm");
@@ -709,6 +711,50 @@ public class CloudWatchMetricsQueryHandler {
         return a;
     }
 
+    private List<AlarmMetricDataQuery> parseAlarmMetricQueries(MultivaluedMap<String, String> params) {
+        List<AlarmMetricDataQuery> queries = new ArrayList<>();
+        for (int index = 1; ; index++) {
+            String prefix = "Metrics.member." + index;
+            String id = params.getFirst(prefix + ".Id");
+            if (id == null) {
+                break;
+            }
+            AlarmMetricDataQuery.MetricStat metricStat = null;
+            String metricPrefix = prefix + ".MetricStat.Metric";
+            if (params.getFirst(metricPrefix + ".Namespace") != null) {
+                List<AlarmMetricDataQuery.MetricDimension> dimensions = null;
+                for (int dimensionIndex = 1; ; dimensionIndex++) {
+                    String dimensionPrefix = metricPrefix + ".Dimensions.member." + dimensionIndex;
+                    String name = params.getFirst(dimensionPrefix + ".Name");
+                    if (name == null) {
+                        break;
+                    }
+                    if (dimensions == null) {
+                        dimensions = new ArrayList<>();
+                    }
+                    dimensions.add(new AlarmMetricDataQuery.MetricDimension(
+                            name, params.getFirst(dimensionPrefix + ".Value")));
+                }
+                AlarmMetricDataQuery.Metric metric = new AlarmMetricDataQuery.Metric(
+                        params.getFirst(metricPrefix + ".Namespace"),
+                        params.getFirst(metricPrefix + ".MetricName"), dimensions);
+                metricStat = new AlarmMetricDataQuery.MetricStat(metric,
+                        optionalInteger(params.getFirst(prefix + ".MetricStat.Period")),
+                        params.getFirst(prefix + ".MetricStat.Stat"), params.getFirst(prefix + ".MetricStat.Unit"));
+            }
+            String returnData = params.getFirst(prefix + ".ReturnData");
+            queries.add(new AlarmMetricDataQuery(id, params.getFirst(prefix + ".Expression"),
+                    params.getFirst(prefix + ".Label"), returnData == null ? null : Boolean.valueOf(returnData),
+                    optionalInteger(params.getFirst(prefix + ".Period")),
+                    params.getFirst(prefix + ".AccountId"), metricStat));
+        }
+        return queries;
+    }
+
+    private static Integer optionalInteger(String value) {
+        return value == null ? null : Integer.valueOf(value);
+    }
+
     private void toAlarmXml(XmlBuilder xml, MetricAlarm a) {
         xml.start("member")
                 .elem("AlarmName", a.getAlarmName())
@@ -726,21 +772,25 @@ public class CloudWatchMetricsQueryHandler {
         xml.start("InsufficientDataActions");
         a.getInsufficientDataActions().forEach(act -> xml.elem("member", act));
         xml.end("InsufficientDataActions");
-        xml.start("Dimensions");
-        for (Dimension d : a.getDimensions()) {
-            xml.start("member").elem("Name", d.name()).elem("Value", d.value()).end("member");
+        if (!a.getMetrics().isEmpty()) {
+            toAlarmMetricsXml(xml, a.getMetrics());
+        } else {
+            xml.start("Dimensions");
+            for (Dimension d : a.getDimensions()) {
+                xml.start("member").elem("Name", d.name()).elem("Value", d.value()).end("member");
+            }
+            xml.end("Dimensions")
+                    .elem("MetricName", a.getMetricName())
+                    .elem("Namespace", a.getNamespace())
+                    .elem("Statistic", a.getStatistic())
+                    .elem("Period", a.getPeriod() == null ? null : a.getPeriod().toString())
+                    .elem("Unit", a.getUnit());
         }
-        xml.end("Dimensions");
 
         xml.elem("StateValue", a.getStateValue())
                 .elem("StateReason", a.getStateReason())
                 .elem("StateReasonData", a.getStateReasonData())
                 .elem("StateUpdatedTimestamp", Instant.ofEpochSecond(a.getStateUpdatedTimestamp()).toString())
-                .elem("MetricName", a.getMetricName())
-                .elem("Namespace", a.getNamespace())
-                .elem("Statistic", a.getStatistic())
-                .elem("Period", String.valueOf(a.getPeriod()))
-                .elem("Unit", a.getUnit())
                 .elem("EvaluationPeriods", String.valueOf(a.getEvaluationPeriods()))
                 .elem("Threshold", String.valueOf(a.getThreshold()))
                 .elem("ComparisonOperator", a.getComparisonOperator())
@@ -751,6 +801,37 @@ public class CloudWatchMetricsQueryHandler {
         }
 
         xml.end("member");
+    }
+
+    private void toAlarmMetricsXml(XmlBuilder xml, List<AlarmMetricDataQuery> metrics) {
+        xml.start("Metrics");
+        for (AlarmMetricDataQuery query : metrics) {
+            xml.start("member").elem("Id", query.id()).elem("Expression", query.expression())
+                    .elem("Label", query.label()).elem("AccountId", query.accountId())
+                    .elem("Period", query.period() == null ? null : query.period().toString())
+                    .elem("ReturnData", query.returnData() == null ? null : query.returnData().toString());
+            AlarmMetricDataQuery.MetricStat stat = query.metricStat();
+            if (stat != null) {
+                xml.start("MetricStat");
+                AlarmMetricDataQuery.Metric metric = stat.metric();
+                if (metric != null) {
+                    xml.start("Metric").elem("Namespace", metric.namespace()).elem("MetricName", metric.metricName());
+                    if (metric.dimensions() != null) {
+                        xml.start("Dimensions");
+                        for (AlarmMetricDataQuery.MetricDimension dimension : metric.dimensions()) {
+                            xml.start("member").elem("Name", dimension.name()).elem("Value", dimension.value())
+                                    .end("member");
+                        }
+                        xml.end("Dimensions");
+                    }
+                    xml.end("Metric");
+                }
+                xml.elem("Period", stat.period() == null ? null : stat.period().toString())
+                        .elem("Stat", stat.stat()).elem("Unit", stat.unit()).end("MetricStat");
+            }
+            xml.end("member");
+        }
+        xml.end("Metrics");
     }
 
     private Instant parseInstant(String value) {

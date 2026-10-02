@@ -44,6 +44,9 @@ class NativeImageResourceIncludesTest {
 
     private static final String JAVA_SUFFIX = ".java";
 
+    /** A Dockerfile path literal. LocallyBuiltHelperImage reads it through a method parameter. */
+    private static final Pattern DOCKERFILE_LITERAL = Pattern.compile("\"(/?[\\w.\\-]+(?:/[\\w.\\-]+)*\\.Dockerfile)\"");
+
     /** A {@code static final String NAME = "some/path.ext";} declaration holding a resource path. */
     private static final Pattern RESOURCE_CONSTANT = Pattern.compile(
             "static\\s+final\\s+String\\s+(\\w+)\\s*=\\s*\"(/?[\\w.\\-]+(?:/[\\w.\\-]+)+\\.[A-Za-z0-9]+)\"");
@@ -89,6 +92,41 @@ class NativeImageResourceIncludesTest {
                         + offenders.entrySet().stream()
                         .map(e -> e.getKey() + "  (read by " + e.getValue() + ")")
                         .reduce((a, b) -> a + "\n  " + b).orElse(""));
+    }
+
+    @Test
+    void everyHelperDockerfileIsIncludedInTheNativeImage() throws IOException {
+        List<PathMatcher> includes = parseIncludes();
+        Map<String, String> offenders = new LinkedHashMap<>();
+
+        try (Stream<Path> sources = Files.walk(MAIN_SOURCE_ROOT)) {
+            sources.filter(p -> p.toString().endsWith(JAVA_SUFFIX)).forEach(source -> {
+                Matcher literals = DOCKERFILE_LITERAL.matcher(readSource(source));
+                while (literals.find()) {
+                    String resource = literals.group(1).startsWith("/")
+                            ? literals.group(1).substring(1) : literals.group(1);
+                    if (Files.exists(MAIN_RESOURCE_ROOT.resolve(resource))
+                            && includes.stream().noneMatch(m -> m.matches(Path.of(resource)))) {
+                        offenders.put(resource, source.toString());
+                    }
+                }
+            });
+        }
+
+        assertTrue(offenders.isEmpty(),
+                "These Dockerfiles are built from the classpath at runtime, but no glob in " + APPLICATION_YML
+                        + " under quarkus.native.resources.includes matches them:\n  "
+                        + offenders.entrySet().stream()
+                        .map(e -> e.getKey() + "  (named in " + e.getValue() + ")")
+                        .reduce((a, b) -> a + "\n  " + b).orElse(""));
+    }
+
+    private static String readSource(Path javaFile) {
+        try {
+            return Files.readString(javaFile);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Unable to read source file " + javaFile, e);
+        }
     }
 
     /** Resource paths declared as a constant in {@code javaFile} and passed to getResourceAsStream there. */

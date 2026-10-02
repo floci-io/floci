@@ -13,11 +13,13 @@ import java.time.Instant;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class FinishedCrawl {
     private long sequence;
+    private String crawlerName;
     private Instant startedAt;
     private Instant finishedAt;
     private String status;
     private String crawlId;
     private String originRunId;
+    private String workflowRunId;
 
     @JsonProperty(value = "triggeredRuns", access = JsonProperty.Access.WRITE_ONLY)
     private int legacyTriggeredRuns;
@@ -26,6 +28,9 @@ public class FinishedCrawl {
 
     public int getLegacyTriggeredRuns() { return legacyTriggeredRuns; }
     public void setLegacyTriggeredRuns(int legacyTriggeredRuns) { this.legacyTriggeredRuns = legacyTriggeredRuns; }
+
+    public String getCrawlerName() { return crawlerName; }
+    public void setCrawlerName(String crawlerName) { this.crawlerName = crawlerName; }
 
     public long getSequence() { return sequence; }
     public void setSequence(long sequence) { this.sequence = sequence; }
@@ -45,4 +50,6 @@ public class FinishedCrawl {
     public String getOriginRunId() { return originRunId; }
     public void setOriginRunId(String originRunId) { this.originRunId = originRunId; }
 
+    public String getWorkflowRunId() { return workflowRunId; }
+    public void setWorkflowRunId(String workflowRunId) { this.workflowRunId = workflowRunId; }
 }

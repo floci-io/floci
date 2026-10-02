@@ -28,6 +28,7 @@ import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
+import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheAuthProxy;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
@@ -41,6 +42,7 @@ import java.net.UnknownHostException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -298,7 +300,7 @@ public class ElastiCacheService implements ResourceProvider {
                 if (handle != null) {
                     proxyManager.startProxy(groupId, authMode, proxyPort,
                             handle.getHost(), handle.getPort(),
-                            (username, password) -> validatePassword(groupId, username, password));
+                            groupAuthenticator(groupId));
                 } else {
                     LOG.warnv("Replication group {0} created without a backing cache container: no "
                             + "Docker daemon is reachable. Metadata operations work; connections to "
@@ -376,7 +378,7 @@ public class ElastiCacheService implements ResourceProvider {
                 ElastiCacheContainerHandle handle = handles.get(i);
                 proxyManager.startProxy(node.getMemberClusterId(), authMode, node.getProxyPort(),
                         handle.getHost(), handle.getPort(),
-                        (username, password) -> validatePassword(groupId, username, password));
+                        groupAuthenticator(groupId));
                 startedProxyKeys.add(node.getMemberClusterId());
             }
 
@@ -837,7 +839,7 @@ public class ElastiCacheService implements ResourceProvider {
                     group.setContainerPort(handle.getPort());
                     proxyManager.startProxy(groupId, group.getAuthMode(), group.getProxyPort(),
                             handle.getHost(), handle.getPort(),
-                            (username, password) -> validatePassword(groupId, username, password));
+                            groupAuthenticator(groupId));
                 } else {
                     // Cleared rather than left alone: whatever the record carried describes a
                     // container from the previous process, and nothing must read it as live.
@@ -989,7 +991,7 @@ public class ElastiCacheService implements ResourceProvider {
                     ElastiCacheContainerHandle handle = handles.get(i);
                     proxyManager.startProxy(node.getMemberClusterId(), group.getAuthMode(), node.getProxyPort(),
                             handle.getHost(), handle.getPort(),
-                            (username, password) -> validatePassword(groupId, username, password));
+                            groupAuthenticator(groupId));
                     startedProxyKeys.add(node.getMemberClusterId());
                 }
 
@@ -1459,11 +1461,26 @@ public class ElastiCacheService implements ResourceProvider {
             ReplicationGroup group = getReplicationGroup(groupId);
             // every check before any change: the store hands out its own object, so a mutation
             // made before a later refusal would stay visible
+            Set<String> nextUserIds = new HashSet<>(group.getAssociatedUserIds());
+            if (userIdsToRemove != null) {
+                nextUserIds.removeAll(userIdsToRemove);
+            }
             if (userIdsToAdd != null) {
                 for (String userId : userIdsToAdd) {
                     getUser(userId);
                 }
+                nextUserIds.addAll(userIdsToAdd);
             }
+
+            Set<String> seenUserNames = new HashSet<>();
+            for (String userId : nextUserIds) {
+                ElastiCacheUser u = users.get(userId).orElse(null);
+                if (u != null && !seenUserNames.add(u.getUserName())) {
+                    throw new AwsException("DuplicateUserNameFault",
+                            "Duplicate user name " + u.getUserName() + " in user group.", 400);
+                }
+            }
+
             settings.applyTo(group);
             if (userIdsToAdd != null) {
                 group.getAssociatedUserIds().addAll(userIdsToAdd);
@@ -1548,13 +1565,28 @@ public class ElastiCacheService implements ResourceProvider {
         return users.scan(k -> true);
     }
 
-    public ElastiCacheUser modifyUser(String userId, List<String> passwords, String engine) {
+    /**
+     * Applies a ModifyUser request. A non-null {@code authMode} switches the user's
+     * authentication and replaces its passwords with {@code passwords}; {@code accessString}
+     * replaces the access string and {@code appendAccessString} adds to it.
+     */
+    public ElastiCacheUser modifyUser(String userId, AuthMode authMode, List<String> passwords,
+                                      String accessString, String appendAccessString, String engine) {
         ElastiCacheUser user = getUser(userId);
         // Storage backends hand back the live stored object, so validate everything
         // before the first setter — a rejected request must not leave changes behind.
         String normalizedEngine = (engine == null || engine.isBlank()) ? null : normalizeEngine(engine);
-        if (passwords != null) {
-            user.setPasswords(passwords);
+        if (authMode != null) {
+            user.setAuthMode(authMode);
+            user.setPasswords(passwords != null ? passwords : List.of());
+        }
+        if (accessString != null) {
+            user.setAccessString(accessString);
+        } else if (appendAccessString != null) {
+            String current = user.getAccessString();
+            user.setAccessString(current == null || current.isBlank()
+                    ? appendAccessString
+                    : current + " " + appendAccessString);
         }
         if (normalizedEngine != null) {
             user.setEngine(normalizedEngine);
@@ -1568,6 +1600,13 @@ public class ElastiCacheService implements ResourceProvider {
             throw new AwsException("UserNotFoundFault", "User " + userId + " not found.", 404);
         }
         users.delete(userId);
+        for (ReplicationGroup group : groups.scan(k -> true)) {
+            synchronized (lockFor("rg:" + group.getReplicationGroupId())) {
+                if (group.getAssociatedUserIds().remove(userId)) {
+                    groups.put(group.getReplicationGroupId(), group);
+                }
+            }
+        }
         LOG.infov("ElastiCache user {0} deleted", userId);
     }
 
@@ -1589,21 +1628,82 @@ public class ElastiCacheService implements ResourceProvider {
             if (group.getAuthToken() != null && password.equals(group.getAuthToken())) {
                 return true;
             }
-            // Fall back to the "default" PASSWORD user associated with this group
+            // Fall back to the "default" user associated with this group
             Set<String> groupUserIds = group.getAssociatedUserIds();
-            return groupUserIds.stream()
+            ElastiCacheUser defaultUser = groupUserIds.stream()
                     .map(id -> users.get(id).orElse(null))
-                    .filter(u -> u != null
-                            && "default".equals(u.getUserName())
-                            && u.getAuthMode() == AuthMode.PASSWORD)
-                    .anyMatch(u -> u.getPasswords() != null && u.getPasswords().contains(password));
+                    .filter(u -> u != null && "default".equals(u.getUserName()))
+                    .findFirst()
+                    .orElse(null);
+            if (defaultUser == null || !defaultUser.isEnabled()) {
+                return false;
+            }
+            if (defaultUser.getAuthMode() == AuthMode.NO_AUTH) {
+                return true;
+            }
+            if (defaultUser.getAuthMode() == AuthMode.PASSWORD) {
+                return defaultUser.getPasswords() != null && defaultUser.getPasswords().contains(password);
+            }
+            return false;
         }
         // AUTH username password form: find user by userName, scoped to group
         Set<String> groupUserIds = group.getAssociatedUserIds();
-        return groupUserIds.stream()
+        ElastiCacheUser targetUser = groupUserIds.stream()
                 .map(id -> users.get(id).orElse(null))
-                .filter(u -> u != null && username.equals(u.getUserName()) && u.getAuthMode() == AuthMode.PASSWORD)
-                .anyMatch(u -> u.getPasswords() != null && u.getPasswords().contains(password));
+                .filter(u -> u != null && username.equals(u.getUserName()))
+                .findFirst()
+                .orElse(null);
+        if (targetUser == null || !targetUser.isEnabled()) {
+            return false;
+        }
+        if (targetUser.getAuthMode() == AuthMode.NO_AUTH) {
+            return true;
+        }
+        if (targetUser.getAuthMode() == AuthMode.PASSWORD) {
+            return targetUser.getPasswords() != null && targetUser.getPasswords().contains(password);
+        }
+        return false;
+    }
+
+    public boolean hasMembers(String groupId) {
+        ReplicationGroup group = groups.get(groupId).orElse(null);
+        if (group == null) {
+            return false;
+        }
+        return group.getAssociatedUserIds().stream().anyMatch(id -> users.get(id).isPresent());
+    }
+
+    public AuthMode memberAuthMode(String groupId, String username) {
+        ReplicationGroup group = groups.get(groupId).orElse(null);
+        if (group == null) {
+            return null;
+        }
+        String target = (username == null || username.isEmpty()) ? "default" : username;
+        return group.getAssociatedUserIds().stream()
+                .map(id -> users.get(id).orElse(null))
+                .filter(u -> u != null && target.equals(u.getUserName()) && u.isEnabled())
+                .map(ElastiCacheUser::getAuthMode)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private ElastiCacheAuthProxy.PasswordValidator groupAuthenticator(String groupId) {
+        return new ElastiCacheAuthProxy.PasswordValidator() {
+            @Override
+            public boolean validatePassword(String username, String password) {
+                return ElastiCacheService.this.validatePassword(groupId, username, password);
+            }
+
+            @Override
+            public boolean hasMembers() {
+                return ElastiCacheService.this.hasMembers(groupId);
+            }
+
+            @Override
+            public AuthMode memberAuthMode(String username) {
+                return ElastiCacheService.this.memberAuthMode(groupId, username);
+            }
+        };
     }
 
     // AWS allows only redis and valkey.
@@ -1637,41 +1737,64 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /**
-     * Honors the request's {@code Port} when it is free and inside the proxy range. AWS models
-     * Port as an optional input on CreateReplicationGroup ("the port number on which each member
-     * of the replication group accepts connections"), so a caller that pins one and reads back a
-     * different value sees permanent drift: Terraform treats the port as replacement-forcing.
+     * Honors the request's {@code Port} when it is free and inside the proxy range, and otherwise
+     * serves the cache on a port from that range instead of refusing it.
      *
-     * <p>An explicit port is therefore either honored or refused, never quietly changed.
-     * Substituting one reproduces the very drift honoring it was meant to remove, and the
-     * substitution could only ever hit a caller who did ask for a port: one who does not care
-     * passes null and never reaches that branch. Floci multiplexes every group's proxy onto one
-     * host, so two groups genuinely cannot share a port, and a caller who pinned an unavailable
-     * one needs to know rather than discover it as drift later.
+     * <p>On AWS, Port belongs to a cache's own endpoint. 6379 is the Redis default, so nearly
+     * every ElastiCache cluster in the world uses it and they coexist: AWS gives each cache a DNS
+     * name of its own, and the port never has to distinguish them. Floci multiplexes every
+     * cache's proxy onto one host, where a TCP port is exclusive and the port is the only thing
+     * that does distinguish them. Refusing the second cache on 6379, which is what this method
+     * used to do, diverges from AWS on an entirely ordinary request: any module standing up two
+     * Redis clusters, and any suite running one per test in parallel, failed at the second
+     * create.
      *
-     * <p>Only an unpinned create falls back through the range below.
-     * {@code NeptuneService.allocateProxyPort} still substitutes on this path and carries the
-     * same flaw.
+     * <p>Which leaves a choice about the port a caller pinned but cannot have, and only two of
+     * the three obvious answers are safe. Refusing is the divergence above. Reporting the pinned
+     * port anyway, while listening on another, is worse than it sounds: the endpoint then names
+     * a listener belonging to a <em>different</em> cache, so a client that dials it reads someone
+     * else's data and is told nothing. That is the failure #4094 removed on the restore path,
+     * where "the old endpoint then reached an unrelated cache instead of failing cleanly".
+     *
+     * <p>So the port a cache reports is always the port it is actually on. A caller that pinned
+     * an unavailable port sees drift, which terraform surfaces as a replacement-forcing diff on
+     * the next plan. That is a visible, reversible failure, where the alternative is a silent
+     * wrong answer, and the create still succeeds. The WARN below names the port that was served
+     * and why the pinned one could not be.
+     *
+     * <p>A port outside the proxy range is substituted for the same reason rather than refused:
+     * the range bounds what this emulator may listen on, and never bounded what AWS accepts. The
+     * only rejection left is a range check, 1150 to 65535, which is the bound
+     * {@code RdsService.reserveProxyPort} applies to the same argument. Nothing here establishes
+     * that it is ElastiCache's real lower bound on AWS, so do not read it as one; it is strictly
+     * more permissive than the proxy-range check it replaced, which bounds the risk to accepting
+     * a port AWS would refuse rather than refusing one AWS accepts.
      */
     private int allocateProxyPort(Integer requested) {
         int base = config.services().elasticache().proxyBasePort();
         int max = config.services().elasticache().proxyMaxPort();
         if (requested != null) {
-            if (requested < base || requested > max) {
-                LOG.infov("Rejecting ElastiCache port {0}: outside the proxy range {1}-{2}",
-                        String.valueOf(requested), String.valueOf(base), String.valueOf(max));
+            if (requested < 1150 || requested > 65535) {
                 throw new AwsException("InvalidParameterValue",
-                        "Port " + requested + " is outside the port range this emulator serves ("
-                                + base + "-" + max + ").", 400);
+                        "Port must be between 1150 and 65535.", 400);
             }
-            if (!usedPorts.add(requested)) {
-                LOG.infov("Rejecting ElastiCache port {0}: already used by another replication group",
-                        String.valueOf(requested));
-                throw new AwsException("InvalidParameterValue",
-                        "Port " + requested + " is already in use by another replication group.", 400);
+            if (requested >= base && requested <= max && usedPorts.add(requested)) {
+                return requested;
             }
-            return requested;
+            int substitute = scanForFreePort(base, max);
+            LOG.warnv("ElastiCache port {0} could not be served: it is {1}. This cache is on {2} "
+                            + "instead, and that is the port its endpoint reports.",
+                    String.valueOf(requested),
+                    requested < base || requested > max
+                            ? "outside the proxy range " + base + "-" + max
+                            : "already in use by another cache here",
+                    String.valueOf(substitute));
+            return substitute;
         }
+        return scanForFreePort(base, max);
+    }
+
+    private int scanForFreePort(int base, int max) {
         for (int port = base; port <= max; port++) {
             if (usedPorts.add(port)) {
                 return port;

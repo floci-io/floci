@@ -4,11 +4,14 @@ import com.fasterxml.jackson.core.JacksonException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.MissingNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
+import io.github.hectorvent.floci.core.common.dns.DnsRecord;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -16,6 +19,7 @@ import io.github.hectorvent.floci.services.cloudmap.model.Instance;
 import io.github.hectorvent.floci.services.cloudmap.model.Namespace;
 import io.github.hectorvent.floci.services.cloudmap.model.Operation;
 import io.github.hectorvent.floci.services.cloudmap.model.Service;
+import io.netty.util.NetUtil;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -34,6 +38,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -161,6 +166,12 @@ public class CloudMapService {
         return result;
     }
 
+    public void updateNamespace(String id, String description) {
+        Namespace ns = requireNamespace(id);
+        ns.setDescription(description);
+        namespaceStore.put(id, ns);
+    }
+
     public Operation deleteNamespace(String id, String region) {
         Namespace ns = requireNamespace(id);
         boolean hasServices = scan(serviceStore).stream()
@@ -245,6 +256,26 @@ public class CloudMapService {
         return result;
     }
 
+    /**
+     * Only the TTLs of the existing DNS records can change, as on AWS: any other DnsConfig change
+     * (record types or count, RoutingPolicy), or a DnsConfig for a service without one, is rejected.
+     * A null {@code dnsConfig} keeps the stored one, since AWS cannot remove it; a null description
+     * or health check config clears it, as AWS UpdateService does.
+     */
+    public void updateService(String id, String description, String dnsConfig, String healthCheckConfig) {
+        Service service = requireService(id);
+        if (dnsConfig != null) {
+            if (!withoutTtls(parseDnsConfig(dnsConfig)).equals(withoutTtls(dnsConfigNode(service)))) {
+                throw new AwsException("InvalidInput",
+                        "Only the TTLs of a service's DNS records can be updated.", 400);
+            }
+            service.setDnsConfig(dnsConfig);
+        }
+        service.setDescription(description);
+        service.setHealthCheckConfig(healthCheckConfig);
+        serviceStore.put(id, service);
+    }
+
     public void deleteService(String id) {
         Service service = requireService(id);
         boolean hasInstances = !scanInstances(service.getId()).isEmpty();
@@ -271,6 +302,17 @@ public class CloudMapService {
         }
         if (attributes == null || attributes.isEmpty()) {
             throw new AwsException("InvalidInput", "Attributes are required.", 400);
+        }
+        if (dnsRecordTtl(service, "SRV") >= 0 && service.getNamespaceId() != null) {
+            Namespace namespace = requireNamespace(service.getNamespaceId());
+            if ("DNS_PRIVATE".equals(namespace.getType()) || "DNS_PUBLIC".equals(namespace.getType())) {
+                try {
+                    DnsRecord.encodeName(instanceId + "." + service.getName() + "." + namespace.getName());
+                } catch (IllegalArgumentException e) {
+                    throw new AwsException("InvalidInput",
+                            "The SRV target must have ASCII labels of 1 to 63 bytes and at most 253 characters.", 400);
+                }
+            }
         }
         Instance instance = new Instance();
         instance.setInstanceId(instanceId);
@@ -393,6 +435,10 @@ public class CloudMapService {
 
     /** Keeps zone ownership distinct from the A records and their TTL. */
     public Optional<DnsAnswer> resolveDnsNameIfOwned(String queryName) {
+        return resolveDnsNameIfOwned(queryName, 1);
+    }
+
+    public Optional<DnsAnswer> resolveDnsNameIfOwned(String queryName, int type) {
         if (queryName == null || queryName.isBlank()) {
             return Optional.empty();
         }
@@ -422,11 +468,11 @@ public class CloudMapService {
             List<Service> services = scan(serviceStore).stream()
                     .filter(service -> namespace.getId().equals(service.getNamespaceId()))
                     .toList();
-            Optional<DnsAnswer> byService = resolveServiceName(services, label);
+            Optional<DnsAnswer> byService = resolveServiceName(services, label, namespace.getName(), type);
             if (byService.filter(answer -> !answer.isEmpty()).isPresent()) {
                 return byService;
             }
-            Optional<DnsAnswer> byInstance = resolveInstanceHostname(services, label);
+            Optional<DnsAnswer> byInstance = resolveInstanceHostname(services, label, type);
             if (byInstance.filter(answer -> !answer.isEmpty()).isPresent()) {
                 return byInstance;
             }
@@ -437,40 +483,56 @@ public class CloudMapService {
     }
 
     /**
-     * The A records at {@code <service>.<namespace>}. A service without an A record still owns its
-     * name while it has instances, since its SRV record lives there, so it answers no-data.
+     * Requested records at {@code <service>.<namespace>}, preserving ownership for other types.
      */
-    private Optional<DnsAnswer> resolveServiceName(List<Service> services, String label) {
+    private Optional<DnsAnswer> resolveServiceName(List<Service> services, String label, String namespace, int type) {
         boolean exists = false;
         for (Service service : services) {
             if (!label.equalsIgnoreCase(service.getName())) {
                 continue;
             }
-            int ttl = dnsRecordTtl(service, "A");
+            List<Instance> instances = scanInstances(service.getId());
+            exists |= !instances.isEmpty();
+            int recordType = type;
+            String recordName = switch (type) {
+                case 1 -> "A";
+                case 5 -> "CNAME";
+                case 28 -> "AAAA";
+                case 33 -> "SRV";
+                default -> "";
+            };
+            int ttl = dnsRecordTtl(service, recordName);
+            if (ttl < 0 && dnsRecordTtl(service, "CNAME") >= 0) {
+                recordType = 5;
+                ttl = dnsRecordTtl(service, "CNAME");
+            }
             if (ttl < 0) {
-                exists |= !scanInstances(service.getId()).isEmpty();
                 continue;
             }
-            List<String> addresses = new ArrayList<>();
-            for (Instance instance : applyHealthFilter(scanInstances(service.getId()), "HEALTHY_OR_ELSE_ALL")) {
-                String ipv4 = instance.getAttributes().get("AWS_INSTANCE_IPV4");
-                if (isIpv4(ipv4)) {
-                    addresses.add(ipv4);
+            List<DnsRecord> records = new ArrayList<>();
+            for (Instance instance : applyHealthFilter(instances, "HEALTHY_OR_ELSE_ALL")) {
+                DnsRecord record = instanceDnsRecord(instance, service, namespace, recordType);
+                if (record != null) {
+                    records.add(record);
                 }
             }
-            if (!addresses.isEmpty()) {
-                return Optional.of(DnsAnswer.records(addresses.size() > MAX_DNS_ANSWERS
-                        ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses, ttl));
+            if (!records.isEmpty()) {
+                if (recordType == 5 || "WEIGHTED".equals(dnsConfigNode(service).path("RoutingPolicy").asText())) {
+                    return Optional.of(DnsAnswer.typedRecords(
+                            List.of(records.get(ThreadLocalRandom.current().nextInt(records.size()))), ttl));
+                }
+                return Optional.of(DnsAnswer.typedRecords(records.size() > MAX_DNS_ANSWERS
+                        ? records.subList(0, MAX_DNS_ANSWERS) : records, ttl));
             }
         }
         return exists ? Optional.of(DnsAnswer.noData()) : Optional.empty();
     }
 
     /**
-     * The A record Cloud Map creates at an SRV record's target, {@code <InstanceId>.<service>.<namespace>},
+     * The address records at an SRV record's target, {@code <InstanceId>.<service>.<namespace>},
      * published with the service's SRV TTL.
      */
-    private Optional<DnsAnswer> resolveInstanceHostname(List<Service> services, String label) {
+    private Optional<DnsAnswer> resolveInstanceHostname(List<Service> services, String label, int type) {
         boolean exists = false;
         for (Service service : services) {
             String serviceSuffix = "." + service.getName().toLowerCase(Locale.ROOT);
@@ -487,13 +549,40 @@ public class CloudMapService {
                     continue;
                 }
                 exists = true;
-                String ipv4 = instance.getAttributes().get("AWS_INSTANCE_IPV4");
-                if (isIpv4(ipv4)) {
-                    return Optional.of(DnsAnswer.records(List.of(ipv4), ttl));
+                DnsRecord record = instanceDnsRecord(instance, service, "", type);
+                if ((type == 1 || type == 28) && record != null) {
+                    return Optional.of(DnsAnswer.typedRecords(List.of(record), ttl));
                 }
             }
         }
         return exists ? Optional.of(DnsAnswer.noData()) : Optional.empty();
+    }
+
+    private DnsRecord instanceDnsRecord(Instance instance, Service service, String namespace, int type) {
+        Map<String, String> attributes = instance.getAttributes();
+        String ipv4 = attributes.get("AWS_INSTANCE_IPV4");
+        String ipv6 = attributes.get("AWS_INSTANCE_IPV6");
+        try {
+            DnsRecord record = switch (type) {
+                case 1 -> isIpv4(ipv4) ? new DnsRecord.Address(1, ipv4) : null;
+                case 28 -> ipv6 != null && !ipv6.contains("%") && !ipv6.startsWith("[")
+                        && NetUtil.isValidIpV6Address(ipv6) ? new DnsRecord.Address(28, ipv6) : null;
+                case 5 -> attributes.get("AWS_INSTANCE_CNAME") != null
+                        ? new DnsRecord.Cname(attributes.get("AWS_INSTANCE_CNAME")) : null;
+                case 33 -> attributes.get("AWS_INSTANCE_PORT") != null
+                        ? new DnsRecord.Srv(Integer.parseInt(attributes.get("AWS_INSTANCE_PORT")),
+                                instance.getInstanceId() + "." + service.getName() + "." + namespace) : null;
+                default -> null;
+            };
+            if (record != null) {
+                record.data();
+            }
+            return record;
+        } catch (IllegalArgumentException e) {
+            LOG.debugv("Invalid DNS attributes for Cloud Map instance {0}: {1}",
+                    instance.getInstanceId(), e.getMessage());
+            return null;
+        }
     }
 
     private JsonNode parseDnsConfig(String dnsConfig) {
@@ -514,6 +603,21 @@ public class CloudMapService {
             }
         }
         return config;
+    }
+
+    /** The DnsConfig as an update must keep it: record types in any order, TTLs free to change. */
+    private static JsonNode withoutTtls(JsonNode dnsConfig) {
+        JsonNode copy = dnsConfig.deepCopy();
+        if (copy instanceof ObjectNode object) {
+            List<String> types = new ArrayList<>();
+            for (JsonNode record : object.path("DnsRecords")) {
+                types.add(record.path("Type").asText());
+            }
+            types.sort(Comparator.naturalOrder());
+            ArrayNode records = object.putArray("DnsRecords");
+            types.forEach(records::add);
+        }
+        return copy;
     }
 
     /** Returns -1 when the service has no record of the requested type. */

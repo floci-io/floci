@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
@@ -26,6 +27,7 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -143,14 +145,18 @@ public class SesConfigurationSetController {
 
     @GET
     @Path("/configuration-sets")
-    public Response listConfigurationSets(@Context HttpHeaders headers) {
+    public Response listConfigurationSets(@Context HttpHeaders headers,
+                                          @QueryParam("PageSize") String pageSize,
+                                          @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        List<ConfigurationSet> all = configSetService.list(region);
+        PaginatedResult<ConfigurationSet> page = configSetService.list(region,
+                SesListPaging.V2_LIST_CONFIGURATION_SETS, SesListPaging.parseQueryPageSize(pageSize), nextToken);
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode arr = result.putArray("ConfigurationSets");
-        for (ConfigurationSet cs : all) {
+        for (ConfigurationSet cs : page.items()) {
             arr.add(cs.getName());
         }
+        result.put("NextToken", page.nextToken());
         return Response.ok(result).build();
     }
 
@@ -455,7 +461,8 @@ public class SesConfigurationSetController {
                 throw new AwsException("BadRequestException", "EventDestination is required.", 400);
             }
             EventDestination dest = objectMapper.treeToValue(edNode, EventDestination.class);
-            configSetService.createEventDestination(configurationSetName, edName, dest, region);
+            configSetService.createEventDestination(configurationSetName, edName, dest,
+                    regionResolver.getAccountId(), region);
             LOG.infov("SES V2 CreateConfigurationSetEventDestination: {0} on {1}", edName, configurationSetName);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
@@ -499,7 +506,7 @@ public class SesConfigurationSetController {
             }
             EventDestination dest = objectMapper.treeToValue(edNode, EventDestination.class);
             configSetService.updateEventDestination(configurationSetName, eventDestinationName,
-                    dest, region);
+                    dest, regionResolver.getAccountId(), region);
             LOG.infov("SES V2 UpdateConfigurationSetEventDestination: {0} on {1}",
                     eventDestinationName, configurationSetName);
             return Response.ok(objectMapper.createObjectNode()).build();

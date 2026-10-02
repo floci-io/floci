@@ -221,3 +221,22 @@ setup() {
     count=$(json_get "$output" '.Subnets | length')
     [ "$count" -eq 2 ]
 }
+
+# --- Cloud Map namespace + service (regression: issue #4596) ---
+#
+# CloudFormation must create the CDK-generated AWS::ServiceDiscovery::PrivateDnsNamespace
+# and AWS::ServiceDiscovery::Service in Cloud Map instead of stubbing them.
+# https://github.com/floci-io/floci/issues/4596
+
+@test "CDK: Cloud Map namespace and service exist" {
+    run aws_cmd servicediscovery list-namespaces
+    assert_success
+    ns_id=$(json_get "$output" '.Namespaces[] | select(.Name == "floci-cdk.internal") | .Id')
+    [[ "$ns_id" == ns-* ]]
+
+    run aws_cmd servicediscovery list-services \
+        --filters "Name=NAMESPACE_ID,Values=$ns_id,Condition=EQ"
+    assert_success
+    svc_name=$(json_get "$output" '.Services[] | select(.Name == "floci-cdk-svc") | .Name')
+    [ "$svc_name" = "floci-cdk-svc" ]
+}

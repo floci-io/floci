@@ -52,6 +52,29 @@ duplicate override IDs.
 **Protocol:** REST JSON
 **Endpoint:** `http://localhost:4566/restapis/...`
 
+`ImportRestApi` and `PutRestApi` return parser warnings in the REST API's `warnings` array.
+Set the lowercase query parameter `failonwarnings=true` (SDK: `failOnWarnings`) to reject
+a warning-bearing definition with `BadRequestException` before creating or changing
+the API. The default is `false`. A successful import with no warnings clears any prior
+warnings; malformed definitions and fatal import errors remain errors in either mode.
+
+`PutRestApi` defaults to `mode=merge`. Merge keeps paths, methods, models, authorizers,
+request validators, and gateway responses omitted from the incoming definition. An incoming
+method replaces the complete existing method at the same path and HTTP verb, including its
+integration and responses. Use `mode=overwrite` to clear those API definitions before import.
+During merge, a method can reference a retained Lambda or Cognito authorizer even when the
+incoming security schemes omit it. A same-name Lambda authorizer keeps its existing URI when
+the incoming definition provides no new URI. If a same-name authorizer changes between Lambda
+and Cognito, retained methods that reference it use the new authorization type. An explicit
+operation-level `security: []` leaves that method without authorization.
+For a same-name Cognito authorizer, merge also keeps its existing pool ARNs when the incoming
+definition provides no new `providerARNs`; an explicit list replaces them, including `[]`.
+
+REST OpenAPI imports resolve `${AWS::Region}`, `${AWS::AccountId}`, and `${AWS::Partition}`
+throughout the definition before parsing it. Values come from the request region and
+account, so the same definition can be imported across regions and partitions. This
+includes mapping templates and applies to both `ImportRestApi` and `PutRestApi`.
+
 ### Supported Operations
 
 | Category | Operations |
@@ -76,6 +99,14 @@ duplicate override IDs.
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
 
+`TagResource`, `UntagResource` and `GetTags` also accept API key and usage plan ARNs,
+`arn:aws:apigateway:<region>::/apikeys/<id>` and `arn:aws:apigateway:<region>::/usageplans/<id>`.
+An ARN nested under `/restapis/<id>/` other than a stage, such as a deployment or resource, is rejected with `BadRequestException`.
+An ARN with an account segment is rejected with `BadRequestException` and an ARN from another region with `NotFoundException`, as on AWS.
+Tagged REST APIs, stages, API keys, usage plans and custom domain names are discoverable through the
+[Resource Groups Tagging API](resource-groups-tagging.md), whose `TagResources` and `UntagResources`
+write REST API, stage, API key, usage plan and custom domain name tags through to API Gateway.
+
 ### API Key Behaviour Notes
 
 #### `CreateApiKey` and `ImportApiKeys` share one route
@@ -89,6 +120,14 @@ The CSV header row is addressed by name, not position. AWS's own column set is
 `Name,Key,Description,Enabled,UsagePlanIds`; a `Key` column is required, and a missing `Enabled`
 column defaults to `true`. Duplicate key values are reported in the `warnings` array, and
 `failonwarnings=true` turns those warnings into a `BadRequestException`.
+
+#### `enabled` defaults to `false`
+
+`CreateApiKey` creates the key disabled when the request body has no `enabled` field, matching
+AWS. AWS SDKs that model `enabled` as a plain boolean, such as the AWS SDK for Go v2, leave the field
+out of the request when it is `false`, so a client that wants a usable key must send
+`enabled: true`. An `AWS::ApiGateway::ApiKey` CloudFormation resource that omits `Enabled` is
+likewise created, or updated, as disabled.
 
 #### `generateDistinctId`
 
@@ -167,6 +206,12 @@ A verified caller reaches the integration as `requestContext.identity.{accessKey
 user, userArn}` on a REST proxy event, and as `requestContext.authorizer.iam` on an HTTP API 2.0
 event.
 
+As on AWS, a REST (v1) `AWS_PROXY` or `HTTP_PROXY` integration never receives the caller's
+`Authorization` header when the method is `AWS_IAM`, and on any method the header is dropped if it
+carries a SigV4 signature. `X-Amz-Date`, `X-Amz-Security-Token` and every other header still pass
+through, and a `Bearer` token on a method without `AWS_IAM` reaches the integration unchanged.
+HTTP API (v2) integrations receive `Authorization` as the caller sent it.
+
 Sign with any access key the emulator has issued (`CreateAccessKey`, or the temporary credentials
 from `AssumeRole`), or with the well-known local-dev `test`/`test` pair that Floci accepts across
 S3, RDS, and ElastiCache. No other unregistered key is accepted: an unknown key cannot sign for
@@ -238,7 +283,11 @@ These management-plane operations have no handler in v1. Calls will return `404`
 - Client Certificates (5 operations)
 - `GetExport` / `ImportDocumentationParts`
 
-The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`) is implemented separately and is not counted as management-plane operations. It supports these integration types; others return an error:
+The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`)
+is implemented separately and is not counted as management-plane operations. A deployed REST
+API is also available at `http://{apiId}.execute-api.localhost.floci.io:4566/{stage}/{path}`
+and `/execute-api/{apiId}/{stage}/{path}`. All three forms use the same method authorization
+and mappings. It supports these integration types; others return an error:
 
 | Type | Support |
 | --- | --- |

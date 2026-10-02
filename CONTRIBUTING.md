@@ -126,7 +126,7 @@ wip: still working on this          # "wip" is not a recognised type
 
 Do not include `Co-Authored-By` trailers for AI tools in commit messages. Attribution should be limited to human contributors.
 
-CI enforces this: the **Commits omit AI attribution trailers** check fails a pull request whose commits carry a `Co-Authored-By` for an identity that is not a person (one whose GitHub address belongs to a bot account, or that uses a `noreply@` mailbox), along with the session and generator lines such tools add on their own. It never judges a co-author by name, so co-authoring a person is always fine; that trailer is how GitHub credits reviewers on a squash merge. `dependabot[bot]` is allowlisted. If the check fires, drop the offending lines with `git commit --amend` (or a rebase for several commits) and force-push.
+CI enforces this: the **Commits omit AI attribution trailers** step of the **PR hygiene** check fails a pull request whose commits carry a `Co-Authored-By` for an identity that is not a person (one whose GitHub address belongs to a bot account, or that uses a `noreply@` mailbox), along with the session and generator lines such tools add on their own. It never judges a co-author by name, so co-authoring a person is always fine; that trailer is how GitHub credits reviewers on a squash merge. `dependabot[bot]` is allowlisted. If the check fires, drop the offending lines with `git commit --amend` (or a rebase for several commits) and force-push.
 
 ## Architecture
 
@@ -145,6 +145,8 @@ ln -s AGENTS.md COPILOT.md
 [AGENTS.md](AGENTS.md#code-style) carries the full list. The rules worth knowing
 before your first PR:
 
+- **Pass Checkstyle.** Run `./mvnw checkstyle:check`. The rules live in
+  `tools/checkstyle/checkstyle.xml`.
 - **Write explicit types. Do not use `var`.** Floci reproduces AWS wire contracts,
   so the concrete type at a call site is usually what a reviewer needs to see:
   whether a value is a `LinkedHashMap` or a `Map`, an AWS model type or a JDK one.

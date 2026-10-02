@@ -6,7 +6,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
  * Floci's own bookkeeping for one job run, never sent on the wire, and deleted with the run: the order
- * in which Floci saw it finish, and the run that set off its trigger chain.
+ * in which Floci saw it finish, the run that set off its trigger chain, and the workflow run it belongs
+ * to.
  */
 @RegisterForReflection
 // Earlier versions stored the chain's run count here as triggeredRuns: it is still read, so a chain in
@@ -15,6 +16,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 public class JobRunBookkeeping {
     private long completionOrder;
     private String originRunId;
+    private String workflowRunId;
 
     @JsonProperty(value = "triggeredRuns", access = JsonProperty.Access.WRITE_ONLY)
     private int legacyTriggeredRuns;
@@ -30,4 +32,6 @@ public class JobRunBookkeeping {
     public String getOriginRunId() { return originRunId; }
     public void setOriginRunId(String originRunId) { this.originRunId = originRunId; }
 
+    public String getWorkflowRunId() { return workflowRunId; }
+    public void setWorkflowRunId(String workflowRunId) { this.workflowRunId = workflowRunId; }
 }

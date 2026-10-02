@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
@@ -50,8 +51,6 @@ public class ElbV2Service implements ResourceProvider {
 
     @Inject
     EmulatorConfig config;
-
-    private static final String CANONICAL_HOSTED_ZONE_ID = "Z35SXDOTRQ7X7K";
 
     // region → ARN → resource
     private Map<String, Map<String, LoadBalancer>> loadBalancers = new ConcurrentHashMap<>();
@@ -163,6 +162,7 @@ public class ElbV2Service implements ResourceProvider {
      */
     public void restorePersistedRuntime()
     {
+        refreshCanonicalHostedZones();
         if (healthChecker != null) {
             for (Map<String, TargetGroup> regionTargetGroups : targetGroups.values()) {
                 for (TargetGroup targetGroup : regionTargetGroups.values()) {
@@ -210,7 +210,7 @@ public class ElbV2Service implements ResourceProvider {
         LoadBalancer lb = new LoadBalancer();
         lb.setLoadBalancerArn(arn);
         lb.setDnsName(dnsName);
-        lb.setCanonicalHostedZoneId(CANONICAL_HOSTED_ZONE_ID);
+        lb.setCanonicalHostedZoneId(canonicalHostedZoneId(lbType, region));
         lb.setCreatedTime(Instant.now());
         lb.setLoadBalancerName(name);
         lb.setScheme(lbScheme);
@@ -752,18 +752,28 @@ public class ElbV2Service implements ResourceProvider {
             }
         }
 
-        // check for collisions with rules NOT in the update set
-        Set<String> updatingArns = arnToPriority.keySet();
-        Set<Integer> newPriorities = new HashSet<>(arnToPriority.values());
+        // priorities are unique per listener, so collisions are only checked among rules of the same listener
+        Map<String, Set<Integer>> newPrioritiesByListener = new HashMap<>();
+        for (Map.Entry<String, Integer> e : arnToPriority.entrySet()) {
+            String listenerArn = regionRules.get(e.getKey()).getListenerArn();
+            if (!newPrioritiesByListener.computeIfAbsent(listenerArn, k -> new HashSet<>()).add(e.getValue())) {
+                throw new AwsException("PriorityInUse",
+                        "Priority " + e.getValue() + " is already in use.", 400);
+            }
+        }
+        // iterate the concurrent region map, not the listener index lists, which CreateRule/DeleteRule mutate
         for (Rule existing : regionRules.values()) {
-            if (!updatingArns.contains(existing.getRuleArn()) && !existing.isDefault()) {
-                try {
-                    int existingPriority = Integer.parseInt(existing.getPriority());
-                    if (newPriorities.contains(existingPriority)) {
-                        throw new AwsException("PriorityInUse",
-                                "Priority " + existingPriority + " is already in use.", 400);
-                    }
-                } catch (NumberFormatException ignored) { /* default rule */ }
+            if (existing.isDefault() || arnToPriority.containsKey(existing.getRuleArn())) {
+                continue;
+            }
+            Set<Integer> newPriorities = newPrioritiesByListener.get(existing.getListenerArn());
+            if (newPriorities == null) {
+                continue;
+            }
+            int existingPriority = Integer.parseInt(existing.getPriority());
+            if (newPriorities.contains(existingPriority)) {
+                throw new AwsException("PriorityInUse",
+                        "Priority " + existingPriority + " is already in use.", 400);
             }
         }
 
@@ -1089,6 +1099,37 @@ public class ElbV2Service implements ResourceProvider {
 
     private static String randomHex16() {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+    }
+
+    /**
+     * A load balancer stored before the hosted zones were looked up per region and type still
+     * carries the one fixed zone every balancer used to report, so restored balancers take the
+     * zone of their region and type again, written back so the stored copy agrees.
+     */
+    private void refreshCanonicalHostedZones() {
+        for (String region : List.copyOf(loadBalancers.keySet())) {
+            Map<String, LoadBalancer> regionLoadBalancers = loadBalancers.get(region);
+            if (regionLoadBalancers == null) {
+                continue;
+            }
+            for (LoadBalancer lb : regionLoadBalancers.values()) {
+                String lbType = lb.getType() != null ? lb.getType() : "application";
+                lb.setCanonicalHostedZoneId(canonicalHostedZoneId(lbType, region));
+            }
+            loadBalancers.put(region, regionLoadBalancers);
+        }
+    }
+
+    /**
+     * Network load balancers have their own hosted zone per region, distinct from the one
+     * Application (and Classic) load balancers share; a gateway load balancer has none.
+     */
+    private static String canonicalHostedZoneId(String type, String region) {
+        return switch (type) {
+            case "network" -> AwsRegionFacts.nlbHostedZoneId(region).orElse(null);
+            case "gateway" -> null;
+            default -> AwsRegionFacts.albHostedZoneId(region).orElse(null);
+        };
     }
 
     private static String lbTypePrefix(String type) {

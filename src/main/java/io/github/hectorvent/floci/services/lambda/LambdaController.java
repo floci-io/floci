@@ -123,6 +123,12 @@ public class LambdaController {
             tags.forEach(tagsNode::put);
         }
 
+        Integer reservedConcurrency = fn.getReservedConcurrentExecutions();
+        String effectiveQualifier = LambdaArnUtils.resolveWithQualifier(functionName, qualifier).qualifier();
+        if (effectiveQualifier == null && reservedConcurrency != null) {
+            root.putObject("Concurrency").put("ReservedConcurrentExecutions", reservedConcurrency);
+        }
+
         return Response.ok(root).build();
     }
 
@@ -309,8 +315,9 @@ public class LambdaController {
 
     @GET
     @Path("/event-source-mappings")
-    public Response listEventSourceMappings(@QueryParam("FunctionName") String functionArn) {
-        List<EventSourceMapping> esms = lambdaService.listEventSourceMappings(functionArn);
+    public Response listEventSourceMappings(@QueryParam("FunctionName") String functionArn,
+                                            @QueryParam("EventSourceArn") String eventSourceArn) {
+        List<EventSourceMapping> esms = lambdaService.listEventSourceMappings(functionArn, eventSourceArn);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("EventSourceMappings");
         for (EventSourceMapping esm : esms) {
@@ -345,6 +352,8 @@ public class LambdaController {
     Map<String, Object> buildEsmResponse(EventSourceMapping esm) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("UUID", esm.getUuid());
+        node.put("EventSourceMappingArn",
+                LambdaArnUtils.eventSourceMappingArn(esm.getRegion(), esm.getAccountId(), esm.getUuid()));
         node.put("FunctionArn", esm.getFunctionArn());
         if (esm.getEventSourceArn() != null) {
             node.put("EventSourceArn", esm.getEventSourceArn());

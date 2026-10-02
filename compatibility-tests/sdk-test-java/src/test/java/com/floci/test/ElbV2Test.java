@@ -501,6 +501,91 @@ class ElbV2Test {
                 .isInstanceOf(OperationNotPermittedException.class);
     }
 
+    @Test
+    @Order(36)
+    @DisplayName("SetRulePriorities - priority held on another listener is not a conflict")
+    void setRulePrioritiesIgnoresOtherListeners() {
+        String otherLbArn = elb.createLoadBalancer(CreateLoadBalancerRequest.builder()
+                .name(TestFixtures.uniqueName("sdk-lb2"))
+                .type(LoadBalancerTypeEnum.APPLICATION)
+                .scheme(LoadBalancerSchemeEnum.INTERNAL)
+                .ipAddressType(IpAddressType.IPV4)
+                .build()).loadBalancers().get(0).loadBalancerArn();
+        String otherListenerArn = null;
+        String otherRuleArn = null;
+        try {
+            otherListenerArn = elb.createListener(CreateListenerRequest.builder()
+                    .loadBalancerArn(otherLbArn)
+                    .protocol(ProtocolEnum.HTTP)
+                    .port(81)
+                    .defaultActions(Action.builder()
+                            .type(ActionTypeEnum.FORWARD)
+                            .targetGroupArn(tgArn)
+                            .build())
+                    .build()).listeners().get(0).listenerArn();
+            otherRuleArn = elb.createRule(CreateRuleRequest.builder()
+                    .listenerArn(otherListenerArn)
+                    .priority(100)
+                    .conditions(RuleCondition.builder()
+                            .field("path-pattern")
+                            .values("/signup/*")
+                            .build())
+                    .actions(Action.builder()
+                            .type(ActionTypeEnum.FORWARD)
+                            .targetGroupArn(tgArn)
+                            .build())
+                    .build()).rules().get(0).ruleArn();
+
+            elb.setRulePriorities(SetRulePrioritiesRequest.builder()
+                    .rulePriorities(RulePriorityPair.builder()
+                            .ruleArn(ruleArn)
+                            .priority(100)
+                            .build())
+                    .build());
+
+            DescribeRulesResponse resp = elb.describeRules(
+                    DescribeRulesRequest.builder().ruleArns(ruleArn, otherRuleArn).build());
+            assertThat(resp.rules()).extracting(Rule::priority).containsOnly("100");
+        } finally {
+            if (otherRuleArn != null) {
+                elb.deleteRule(DeleteRuleRequest.builder().ruleArn(otherRuleArn).build());
+            }
+            if (otherListenerArn != null) {
+                elb.deleteListener(DeleteListenerRequest.builder().listenerArn(otherListenerArn).build());
+            }
+            elb.deleteLoadBalancer(DeleteLoadBalancerRequest.builder().loadBalancerArn(otherLbArn).build());
+        }
+    }
+
+    @Test
+    @Order(37)
+    @DisplayName("SetRulePriorities - priority held on the same listener throws PriorityInUseException")
+    void setRulePrioritiesSameListenerConflict() {
+        String conflictingRuleArn = elb.createRule(CreateRuleRequest.builder()
+                .listenerArn(listenerArn)
+                .priority(30)
+                .conditions(RuleCondition.builder()
+                        .field("path-pattern")
+                        .values("/conflict/*")
+                        .build())
+                .actions(Action.builder()
+                        .type(ActionTypeEnum.FORWARD)
+                        .targetGroupArn(tgArn)
+                        .build())
+                .build()).rules().get(0).ruleArn();
+        try {
+            assertThatThrownBy(() -> elb.setRulePriorities(SetRulePrioritiesRequest.builder()
+                    .rulePriorities(RulePriorityPair.builder()
+                            .ruleArn(ruleArn)
+                            .priority(30)
+                            .build())
+                    .build()))
+                    .isInstanceOf(PriorityInUseException.class);
+        } finally {
+            elb.deleteRule(DeleteRuleRequest.builder().ruleArn(conflictingRuleArn).build());
+        }
+    }
+
     // ─── Tags ────────────────────────────────────────────────────────────────
 
     @Test

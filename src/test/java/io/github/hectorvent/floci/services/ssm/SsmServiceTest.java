@@ -4,6 +4,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
 import io.github.hectorvent.floci.services.ssm.model.ParameterStringFilter;
@@ -13,6 +16,8 @@ import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -26,6 +31,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class SsmServiceTest {
 
@@ -131,13 +138,96 @@ class SsmServiceTest {
     }
 
     @Test
+    void addTagsToResource_keyOutsideTheAwsPattern_isRejectedBeforeTheLookup() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.addTagsToResource("/no/such/param", Map.of("a,b", "x"), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: ^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$",
+                ex.getMessage());
+    }
+
+    @Test
+    void addTagsToResource_namesTheOffendingKeyByItsPosition() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/tags/position", "v", "String", null, false, region);
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put("ok", "1");
+        tags.put("a,b", "x");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.addTagsToResource("/tags/position", tags, region));
+        assertTrue(ex.getMessage().contains("'tags.2.member.key'"), ex.getMessage());
+        assertTrue(ssmService.listTagsForResource("/tags/position", region).isEmpty());
+    }
+
+    @Test
+    void addTagsToResource_validKeyIsApplied() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/tags/valid", "v", "String", null, false, region);
+
+        ssmService.addTagsToResource("/tags/valid", Map.of("team:name/x=y+z-@_. 1", "v"), region);
+
+        assertEquals(Map.of("team:name/x=y+z-@_. 1", "v"), ssmService.listTagsForResource("/tags/valid", region));
+    }
+
+    @Test
+    void addTagsToResource_emptyKeyIsRejected() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.addTagsToResource("/no/such/param", Map.of("", "x"), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
+    void addTagsToResource_keyLongerThan128IsRejected() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.addTagsToResource("/no/such/param", Map.of("k".repeat(129), "x"), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 128", ex.getMessage());
+    }
+
+    @Test
+    void addTagsToResource_keyLengthCountsCodePoints() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/tags/code-points", "v", "String", null, false, region);
+        String letter = new String(Character.toChars(0x20000));
+
+        ssmService.addTagsToResource("/tags/code-points", Map.of(letter.repeat(128), "x"), region);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.addTagsToResource("/tags/code-points", Map.of(letter.repeat(129), "x"), region));
+
+        assertEquals(Map.of(letter.repeat(128), "x"), ssmService.listTagsForResource("/tags/code-points", region));
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 128", ex.getMessage());
+    }
+
+    @Test
+    void putParameter_invalidTagKeyIsRejectedAndTheParameterIsNotCreated() {
+        String region = "eu-west-1";
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.putParameter("/tags/rejected", "v", "String", null, false,
+                        Map.of("a,b", "x"), region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'tags.1.member.key' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: ^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$",
+                ex.getMessage());
+        AwsException missing = assertThrows(AwsException.class, () ->
+                ssmService.getParameter("/tags/rejected", region));
+        assertEquals("ParameterNotFound", missing.getErrorCode());
+    }
+
+    @Test
     void getParameters() {
         String region = "eu-west-1";
         ssmService.putParameter("/a", "1", "String", null, false, region);
         ssmService.putParameter("/b", "2", "String", null, false, region);
         ssmService.putParameter("/c", "3", "String", null, false, region);
 
-        List<Parameter> params = ssmService.getParameters(List.of("/a", "/c", "/missing"), region);
+        List<Parameter> params = ssmService.getParameters(List.of("/a", "/c", "/missing"), false, region);
         assertEquals(2, params.size());
     }
 
@@ -199,6 +289,244 @@ class SsmServiceTest {
         assertEquals(3, history.size());
         assertEquals("v1", history.get(0).getValue());
         assertEquals("v3", history.get(2).getValue());
+    }
+
+    @Test
+    void getParameterByVersionSelectorReturnsThatVersion() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "SecureString", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "SecureString", null, true, region);
+
+        Parameter first = ssmService.getParameter("/app/key:1", region);
+        assertEquals("/app/key", first.getName());
+        assertEquals("v1", first.getValue());
+        assertEquals(1, first.getVersion());
+        assertEquals(":1", first.getSelector());
+        assertEquals("v2", ssmService.getParameter("/app/key:2", region).getValue());
+        assertEquals("v2", ssmService.getParameter("/app/key", region).getValue());
+    }
+
+    @Test
+    void getParameterByLabelSelectorReturnsLabeledVersion() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "String", null, true, region);
+        ssmService.labelParameterVersion("/app/key", 1, List.of("previous"), region);
+
+        Parameter labeled = ssmService.getParameter("/app/key:previous", region);
+        assertEquals("v1", labeled.getValue());
+        assertEquals(":previous", labeled.getSelector());
+    }
+
+    @Test
+    void labelParameterVersionRejectsNumericAndReservedLabels() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        SsmService.LabelParameterVersionResult result = ssmService.labelParameterVersion(
+                "/app/key", 1L, List.of("2", "aws:label", "ssm.label", "valid-label", "valid.label_1"), region);
+
+        assertEquals(1, result.parameterVersion());
+        assertEquals(List.of("2", "aws:label", "ssm.label"), result.invalidLabels());
+
+        Parameter labeled = ssmService.getParameter("/app/key:valid-label", region);
+        assertEquals("v1", labeled.getValue());
+        assertEquals(":valid-label", labeled.getSelector());
+
+        // Numeric label was rejected, so :2 asks for version 2 which does not exist
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.getParameter("/app/key:2", region));
+        assertEquals("ParameterVersionNotFound", ex.getErrorCode());
+    }
+
+    @Test
+    void labelParameterVersionEmptyLabelsThrowsValidationException() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.labelParameterVersion("/app/key", 1L, List.of(), region));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void labelParameterVersionMoreThan10LabelsThrowsValidationException() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        List<String> elevenLabels = List.of(
+                "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10", "l11");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.labelParameterVersion("/app/key", 1L, elevenLabels, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void labelParameterVersionEmptyLabelStringThrowsValidationException() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.labelParameterVersion("/app/key", 1L, List.of(""), region));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void labelParameterVersionLabelOver100CharsThrowsValidationException() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        String tooLong = "a".repeat(101);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.labelParameterVersion("/app/key", 1L, List.of(tooLong), region));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void labelParameterVersionMovesLabelBetweenVersions() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "String", null, true, region);
+
+        ssmService.labelParameterVersion("/app/key", 1L, List.of("prod"), region);
+        assertEquals("v1", ssmService.getParameter("/app/key:prod", region).getValue());
+
+        ssmService.labelParameterVersion("/app/key", 2L, List.of("prod"), region);
+        assertEquals("v2", ssmService.getParameter("/app/key:prod", region).getValue());
+    }
+
+    @Test
+    void labelParameterVersionEnforcesMaxLabelsPerVersion() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        List<String> tenLabels = List.of("l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10");
+        SsmService.LabelParameterVersionResult result = ssmService.labelParameterVersion(
+                "/app/key", 1L, tenLabels, region);
+        assertEquals(0, result.invalidLabels().size());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.labelParameterVersion("/app/key", 1L, List.of("l11"), region));
+        assertEquals("ParameterVersionLabelLimitExceeded", ex.getErrorCode());
+    }
+
+    @Test
+    void labelParameterVersionDefaultsToLatestVersionWhenVersionOmitted() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "String", null, true, region);
+
+        SsmService.LabelParameterVersionResult result = ssmService.labelParameterVersion(
+                "/app/key", null, List.of("latest-label"), region);
+        assertEquals(2, result.parameterVersion());
+        assertEquals("v2", ssmService.getParameter("/app/key:latest-label", region).getValue());
+    }
+
+    @Test
+    void labelParameterVersionWithExplicitZeroVersionThrowsParameterVersionNotFound() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        AwsException zero = assertThrows(AwsException.class,
+                () -> ssmService.labelParameterVersion("/app/key", 0L, List.of("prod"), region));
+        assertEquals("ParameterVersionNotFound", zero.getErrorCode());
+
+        AwsException negative = assertThrows(AwsException.class,
+                () -> ssmService.labelParameterVersion("/app/key", -1L, List.of("prod"), region));
+        assertEquals("ParameterVersionNotFound", negative.getErrorCode());
+    }
+
+    @Test
+    void labelParameterVersionDoesNotMutateStoredHistoryObjectsInPlace() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "String", null, true, region);
+        ssmService.labelParameterVersion("/app/key", 1L, List.of("prod"), region);
+
+        List<ParameterHistory> before = ssmService.getParameterHistory("/app/key", region);
+        ParameterHistory v1Before = before.stream().filter(h -> h.getVersion() == 1).findFirst().orElseThrow();
+        assertTrue(v1Before.getLabels().contains("prod"));
+
+        // Move to version 2
+        ssmService.labelParameterVersion("/app/key", 2L, List.of("prod"), region);
+
+        // Previous history instance should not be mutated in-place
+        assertTrue(v1Before.getLabels().contains("prod"));
+
+        List<ParameterHistory> after = ssmService.getParameterHistory("/app/key", region);
+        ParameterHistory v1After = after.stream().filter(h -> h.getVersion() == 1).findFirst().orElseThrow();
+        ParameterHistory v2After = after.stream().filter(h -> h.getVersion() == 2).findFirst().orElseThrow();
+        assertFalse(v1After.getLabels().contains("prod"));
+        assertTrue(v2After.getLabels().contains("prod"));
+    }
+
+    @Test
+    void concurrentLabelUpdatesDoNotLoseLabels() throws Exception {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/concurrent", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/concurrent", "v2", "String", null, true, region);
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch latch = new CountDownLatch(1);
+
+        Future<?> f1 = executor.submit(() -> {
+            try {
+                latch.await();
+                ssmService.labelParameterVersion("/app/concurrent", 1L, List.of("label-v1"), region);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+
+        Future<?> f2 = executor.submit(() -> {
+            try {
+                latch.await();
+                ssmService.labelParameterVersion("/app/concurrent", 2L, List.of("label-v2"), region);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+
+        latch.countDown();
+        f1.get();
+        f2.get();
+        executor.shutdown();
+
+        Parameter p1 = ssmService.getParameter("/app/concurrent:label-v1", region);
+        Parameter p2 = ssmService.getParameter("/app/concurrent:label-v2", region);
+        assertEquals("v1", p1.getValue());
+        assertEquals("v2", p2.getValue());
+    }
+
+    @Test
+    void getParameterWithUnknownVersionThrowsParameterVersionNotFound() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+
+        AwsException version = assertThrows(AwsException.class,
+                () -> ssmService.getParameter("/app/key:9", region));
+        assertEquals("ParameterVersionNotFound", version.getErrorCode());
+        AwsException label = assertThrows(AwsException.class,
+                () -> ssmService.getParameter("/app/key:nolabel", region));
+        assertEquals("ParameterVersionNotFound", label.getErrorCode());
+    }
+
+    @Test
+    void getParameterWithSelectorOnMissingParameterThrowsParameterNotFound() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ssmService.getParameter("/missing:1", "eu-west-1"));
+        assertEquals("ParameterNotFound", ex.getErrorCode());
+    }
+
+    @Test
+    void getParametersSkipsUnknownVersionSelector() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "String", null, true, region);
+
+        List<Parameter> found = ssmService.getParameters(List.of("/app/key:1", "/app/key:9"), false, region);
+        assertEquals(1, found.size());
+        assertEquals("v1", found.getFirst().getValue());
     }
 
     @Test
@@ -972,6 +1300,51 @@ class SsmServiceTest {
         assertFilterError("InvalidFilterOption", filter("Path", "Equals", "/app"));
         assertFilterError("InvalidFilterValue", filter("Path", null, "app"));
         assertFilterError("InvalidFilterValue", new ParameterStringFilter("Type", null, List.of()));
+    }
+
+    @Test
+    void secretReferenceCarriesTheGetSecretValueResultAsAwsFormatsIt() {
+        String arn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app-AbCdEf";
+        Secret described = new Secret();
+        described.setArn(arn);
+        described.setName("app");
+        SecretVersion current = new SecretVersion();
+        current.setVersionId("4aa4a0d4-4321-4661-9288-c9e2aeffd37a");
+        current.setSecretString("{\"k\":\"v\"}");
+        current.setVersionStages(List.of("AWSCURRENT"));
+        current.setCreatedDate(Instant.parse("2026-09-28T16:47:31.824Z"));
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        when(secrets.describeSecret("app", "us-east-1")).thenReturn(described);
+        when(secrets.getSecretValue(arn, null, null, "us-east-1")).thenReturn(current);
+        SsmService service = new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), 5, new RegionResolver("us-east-1", "000000000000"), null, secrets);
+
+        assertEquals("{\"ARN\":\"" + arn + "\",\"name\":\"app\",\"versionId\":\"4aa4a0d4-4321-4661-9288-c9e2aeffd37a\","
+                        + "\"secretString\":\"{\\\"k\\\":\\\"v\\\"}\",\"versionStages\":[\"AWSCURRENT\"],"
+                        + "\"createdDate\":\"Sep 28, 2026, 4:47:31 PM\"}",
+                service.getParameter("/aws/reference/secretsmanager/app", true, "us-east-1").getSourceResult());
+    }
+
+    @Test
+    void secretReplacedWhileReferenceIsReadIsNotReturnedUnderTheOldArn() {
+        String oldArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app-AAAAAA";
+        Secret described = new Secret();
+        described.setArn(oldArn);
+        SecretVersion replacement = new SecretVersion();
+        replacement.setSecretString("replacement");
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        when(secrets.describeSecret("app", "us-east-1")).thenReturn(described);
+        when(secrets.getSecretValue("app", null, null, "us-east-1")).thenReturn(replacement);
+        when(secrets.getSecretValue(oldArn, null, null, "us-east-1")).thenThrow(new AwsException(
+                "ResourceNotFoundException", "Secrets Manager can't find the specified secret.", 400));
+        SsmService service = new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), 5, new RegionResolver("us-east-1", "000000000000"), null, secrets);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.getParameter("/aws/reference/secretsmanager/app", true, "us-east-1"));
+        assertEquals("ParameterNotFound", ex.getErrorCode());
     }
 
     private List<String> describedNames(List<ParameterStringFilter> filters, String region) {

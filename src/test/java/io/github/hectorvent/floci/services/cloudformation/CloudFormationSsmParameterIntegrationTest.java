@@ -136,4 +136,55 @@ class CloudFormationSsmParameterIntegrationTest {
             .body(containsString(
                     "Unable to fetch parameters [/cfn/test/does-not-exist] from parameter store for this account"));
     }
+
+    @Test
+    void createStack_secretsManagerReferenceIsNotAPlaintextParameter() {
+        given()
+            .header("X-Amz-Target", "secretsmanager.CreateSecret")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{\"Name\": \"cfn-ssm-ref-secret\", \"SecretString\": \"s3cr3t\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        String template = """
+            {
+              "Parameters": {
+                "Secret": {
+                  "Type": "AWS::SSM::Parameter::Value<String>",
+                  "Default": "/aws/reference/secretsmanager/cfn-ssm-ref-secret"
+                }
+              },
+              "Resources": {
+                "Q": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": { "Fn::Sub": "cfn-ssm-ref-${Secret}" }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "ssm-secret-ref-param-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "ssm-secret-ref-param-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_FAILED</StackStatus>"))
+            .body(containsString("Unable to fetch parameters [/aws/reference/secretsmanager/cfn-ssm-ref-secret]"));
+    }
 }

@@ -67,8 +67,8 @@ class GlueTriggerServiceTest {
                 regionResolver, new ResourceGroupsTaggingService(storageFactory),
                 new KmsService(storageFactory, regionResolver));
         jobRuns = new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
-        crawls = new GlueCrawlerRunService(new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
-        triggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, jobRuns, crawls);
+        crawls = new GlueCrawlerRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
+        triggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, jobRuns, crawls);
         for (String job : List.of("extract", "load", "report")) {
             createJob(job);
         }
@@ -326,10 +326,9 @@ class GlueTriggerServiceTest {
     /** A run that could not start gives its claim back, so a failing action does not shorten the chain. */
     @Test
     void actionsThatFailToStartDoNotUseUpTheBudget() {
-        GlueCrawlerRunService slowCrawls = new GlueCrawlerRunService(new InMemoryStorage<>(), glueService, 600,
+        GlueCrawlerRunService slowCrawls = new GlueCrawlerRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 600,
                 new MutableClock());
-        GlueTriggerService loopTriggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                glueService, jobRuns, slowCrawls);
+        GlueTriggerService loopTriggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, jobRuns, slowCrawls);
         slowCrawls.startCrawler("raw");
         Trigger loop = conditional("loop", null, List.of(jobIs("extract", "SUCCEEDED")), "extract");
         TriggerAction crawl = new TriggerAction();
@@ -351,8 +350,7 @@ class GlueTriggerServiceTest {
         MutableClock clock = new MutableClock();
         GlueJobRunService slowRuns = new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(),
                 glueService, 60, clock);
-        GlueTriggerService chain = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                glueService, slowRuns, crawls);
+        GlueTriggerService chain = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, slowRuns, crawls);
         chain.createTrigger(conditional("after-crawl", "ANY", List.of(crawlIs("raw", "SUCCEEDED")), "extract"),
                 true, null, REGION);
         chain.createTrigger(conditional("after-extract", null, List.of(jobIs("extract", "SUCCEEDED")), "load"),
@@ -376,9 +374,8 @@ class GlueTriggerServiceTest {
         InMemoryStorage<String, JobRunBookkeeping> bookkeeping = new InMemoryStorage<>();
         GlueJobRunService slowRuns = new GlueJobRunService(new InMemoryStorage<>(), bookkeeping, glueService, 60, clock);
         InMemoryStorage<String, CrawlerRunRecord> crawlRecords = new InMemoryStorage<>();
-        GlueCrawlerRunService slowCrawls = new GlueCrawlerRunService(crawlRecords, glueService, 60, clock);
-        GlueTriggerService legacy = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                glueService, slowRuns, slowCrawls);
+        GlueCrawlerRunService slowCrawls = new GlueCrawlerRunService(crawlRecords, new InMemoryStorage<>(), glueService, 60, clock);
+        GlueTriggerService legacy = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, slowRuns, slowCrawls);
         legacy.createTrigger(conditional("after-extract", null, List.of(jobIs("extract", "SUCCEEDED")), "load"),
                 true, null, REGION);
         legacy.createTrigger(conditional("after-crawl", "ANY", List.of(crawlIs("raw", "SUCCEEDED")), "report"),
@@ -419,8 +416,7 @@ class GlueTriggerServiceTest {
         MutableClock clock = new MutableClock();
         InMemoryStorage<String, JobRunBookkeeping> bookkeeping = new InMemoryStorage<>();
         GlueJobRunService slowRuns = new GlueJobRunService(new InMemoryStorage<>(), bookkeeping, glueService, 60, clock);
-        GlueTriggerService upgraded = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                glueService, slowRuns, crawls);
+        GlueTriggerService upgraded = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, slowRuns, crawls);
         upgraded.createTrigger(conditional("loop", null, List.of(jobIs("extract", "SUCCEEDED")), "extract"),
                 true, null, REGION);
         String origin = slowRuns.startJobRun("extract", null, new JobRun()).getId();
@@ -440,8 +436,8 @@ class GlueTriggerServiceTest {
     void theBudgetStoreKeepsAtMostTheTrackedChains() {
         int cap = 20;
         InMemoryStorage<String, TriggerChainBudget> budgets = new InMemoryStorage<>();
-        GlueTriggerService bounded = new GlueTriggerService(new InMemoryStorage<>(), budgets, glueService, jobRuns,
-                crawls, cap);
+        GlueTriggerService bounded = new GlueTriggerService(new InMemoryStorage<>(), budgets, new InMemoryStorage<>(), glueService, jobRuns,
+                crawls, cap, Clock.systemUTC());
         bounded.createTrigger(conditional("after", null, List.of(jobIs("extract", "SUCCEEDED")), "load"),
                 true, null, REGION);
 
@@ -633,7 +629,7 @@ class GlueTriggerServiceTest {
     void aSuccessIsNotLostWhenALaterRunOfTheSameJobIsStoppedFirst() {
         MutableClock clock = new MutableClock();
         GlueJobRunService slowRuns = new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 60, clock);
-        GlueTriggerService slowTriggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, slowRuns, crawls);
+        GlueTriggerService slowTriggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, slowRuns, crawls);
         slowTriggers.createTrigger(conditional("after", null, List.of(jobIs("extract", "SUCCEEDED")), "load"),
                 true, null, REGION);
         slowRuns.startJobRun("extract", null, new JobRun());
@@ -652,7 +648,7 @@ class GlueTriggerServiceTest {
         Clock frozen = Clock.fixed(Instant.parse("2026-09-25T12:00:00Z"), ZoneOffset.UTC);
         GlueJobRunService frozenRuns =
                 new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, frozen);
-        GlueTriggerService frozenTriggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, frozenRuns, crawls);
+        GlueTriggerService frozenTriggers = new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, frozenRuns, crawls);
         frozenTriggers.createTrigger(conditional("each", "ANY", List.of(jobIs("extract", "SUCCEEDED")), "load"),
                 true, null, REGION);
 
@@ -667,9 +663,9 @@ class GlueTriggerServiceTest {
     @Test
     void crawlsFinishingInTheSameClockTickEachCount() {
         Clock frozen = Clock.fixed(Instant.parse("2026-09-25T12:00:00Z"), ZoneOffset.UTC);
-        GlueCrawlerRunService frozenCrawls = new GlueCrawlerRunService(new InMemoryStorage<>(), glueService, 0, frozen);
+        GlueCrawlerRunService frozenCrawls = new GlueCrawlerRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, frozen);
         GlueTriggerService frozenTriggers =
-                new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, jobRuns, frozenCrawls);
+                new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, jobRuns, frozenCrawls);
         frozenTriggers.createTrigger(conditional("each", "ANY", List.of(crawlIs("raw", "SUCCEEDED")), "load"),
                 true, null, REGION);
 

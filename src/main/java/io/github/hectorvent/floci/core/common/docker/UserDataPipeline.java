@@ -122,12 +122,25 @@ public final class UserDataPipeline {
             return null;
         }
         try {
-            USER_DATA_DECOMPRESSION_BUDGET.acquire();
+            byte[] decompressed = decompressGzipWithLimit(payload);
+            if (decompressed == null) {
+                LOG.warnv("UserData decompressed past {0} bytes; discarding as oversized",
+                        MAX_DECOMPRESSED_USER_DATA_BYTES);
+            }
+            return decompressed;
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             LOG.warnv("Interrupted while waiting for UserData decompression budget; discarding payload");
             return null;
+        } catch (IOException e) {
+            LOG.warnv("UserData starts with the gzip magic bytes but could not be decompressed: {0}", e.getMessage());
+            return null;
         }
+    }
+
+    /** Returns null for oversized content; both API decoding and guest execution share this budget. */
+    public static byte[] decompressGzipWithLimit(byte[] payload) throws IOException, InterruptedException {
+        USER_DATA_DECOMPRESSION_BUDGET.acquire();
         try {
             Runnable hook = userDataDecompressionTestHook;
             if (hook != null) {
@@ -145,16 +158,11 @@ public final class UserDataPipeline {
                 while ((read = gzip.read(buffer)) != -1) {
                     totalRead += read;
                     if (totalRead > MAX_DECOMPRESSED_USER_DATA_BYTES) {
-                        LOG.warnv("UserData decompressed past {0} bytes; discarding as oversized",
-                                MAX_DECOMPRESSED_USER_DATA_BYTES);
                         return null;
                     }
                     decompressed.write(buffer, 0, read);
                 }
                 return decompressed.toByteArray();
-            } catch (IOException e) {
-                LOG.warnv("UserData starts with the gzip magic bytes but could not be decompressed: {0}", e.getMessage());
-                return null;
             }
         } finally {
             USER_DATA_DECOMPRESSION_BUDGET.release();

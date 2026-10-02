@@ -91,7 +91,7 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 - Target health starts in `initial` state with reason `Elb.RegistrationInProgress` and is updated by Floci's health checker when monitoring is active.
 - Health checks probe the target group's `HealthCheckPort` when it is a port number, and each target's own port when it is `traffic-port` (the default).
 - Each `CreateListener` automatically creates an immutable default rule (`priority=default`, `isDefault=true`). This rule cannot be deleted; use `ModifyListener` to change its action.
-- Rule priorities are validated for uniqueness. `SetRulePriorities` is atomic: all priority assignments are validated before any change is committed.
+- Rule priorities are unique per listener: `CreateRule` and `SetRulePriorities` only reject a priority held by another rule on the same listener. `SetRulePriorities` is atomic: all priority assignments are validated before any change is committed.
 - `DeleteTargetGroup` is rejected with `ResourceInUse` while the target group is referenced by any listener or rule.
 - `DeleteRule` is rejected with `OperationNotPermitted` for the default rule.
 - `DescribeSSLPolicies` returns a pre-seeded list of standard AWS SSL policies (`ELBSecurityPolicy-*`).

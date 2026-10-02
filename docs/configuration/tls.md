@@ -65,7 +65,7 @@ When `FLOCI_TLS_ENABLED=true` and no custom certificate is provided, Floci keeps
 - Automatically includes custom hostnames from `FLOCI_HOSTNAME`, `FLOCI_BASE_URL` and `FLOCI_SERVICES_IOT_ENDPOINT_ADDRESS` in the SANs
 - Is regenerated when hostname configuration changes between restarts, or when it was not issued by the current CA
 
-The CA is created once and never rotates on its own. If its files are missing, corrupt or do not match each other, Floci generates a new CA, logs a warning, and reissues the server certificate; clients then need the new `ca.pem`.
+The CA key is created once and never rotates on its own. On the first start after upgrading from a version whose CA lacks X.509 key identifiers, Floci reissues the CA certificate with the same key and validity period, then reissues the server certificate. The CA certificate's fingerprint changes, so clients using a previously downloaded CA file must import the current `ca.pem` again. ACM and IoT certificates issued before the upgrade are not rewritten; reissue them if a strict client must verify them. If the CA files are missing, corrupt or do not match each other, Floci generates a new CA and key, logs a warning, and reissues the server certificate; clients then need the new `ca.pem`.
 
 ### Custom Hostname Support
 

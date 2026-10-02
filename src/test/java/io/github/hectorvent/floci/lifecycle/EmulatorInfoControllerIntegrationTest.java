@@ -92,7 +92,8 @@ class EmulatorInfoControllerIntegrationTest {
                 .statusCode(200)
                 .contentType("application/json")
                 .body("edition", equalTo("community"))
-                .body("version", notNullValue());
+                .body("version", notNullValue())
+                .body("dynamodb_backend", equalTo("native"));
     }
 
     @ParameterizedTest

@@ -229,7 +229,7 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Backfill**: Existing persisted clusters created before this feature was introduced are automatically backfilled on startup with default disabled logging.
 - **CloudWatch Logs delivery**:
   - When the `api` log type is enabled on a cluster, Floci creates the CloudWatch Logs log group `/aws/eks/<cluster-name>/cluster` and streams control plane container output to a log stream named `kube-apiserver-<hash>`, where `<hash>` is the first 32 characters of the container ID.
-  - When the `audit` log type is enabled on a cluster, Floci configures k3s with the Amazon EKS control plane audit policy, writes audit logs to `/var/log/audit.log` inside the container, and streams audit records to a log stream named `kube-apiserver-audit-<hash>`.
+  - When the `audit` log type is enabled on a cluster, Floci configures k3s with the Amazon EKS control plane audit policy, writes audit logs to `/var/log/audit.log` inside the container, and streams audit records to a log stream named `kube-apiserver-audit-<hash>`. Audit records are available in CloudWatch Logs and are not echoed to the Floci console.
   - When both `api` and `audit` are enabled, both streams are created and populated under `/aws/eks/<cluster-name>/cluster`. When neither is enabled, no log group or streams are created.
 - **Component streams deviation**: AWS EKS provisions separate log streams for each component (`kube-apiserver-*`, `kube-apiserver-audit-*`, `kube-controller-manager-*`, `kube-scheduler-*`, `authenticator-*`). Because Floci runs clusters on k3s, which embeds the Kubernetes API server, controller manager, and scheduler within a single process, control plane container logs are delivered to the single `kube-apiserver-<hash>` stream when `api` is enabled, and API server audit logs are delivered to `kube-apiserver-audit-<hash>` when `audit` is enabled. Other control plane log types (`authenticator`, `controllerManager`, `scheduler`) do not provision separate streams.
 - **Authenticator logs**: Authenticator webhook authentication events are logged directly by Floci.
@@ -369,6 +369,64 @@ A restored cluster reports `CREATING` until its API server answers again, then r
 back (for example Docker is unavailable), the cluster is marked `FAILED` instead of appearing
 `ACTIVE` while unreachable.
 
+#### Cluster node capacity
+
+Floci runs one k3s container per cluster. Before a node group exists, its node uses the
+`m5.large` entry in the EC2 instance type catalog. Creating the first node group selects the
+group's first `instanceTypes` entry. If that changes the type, Floci recreates the container,
+keeps its named k3s data volume, and reuses its published API port so existing kubeconfigs stay
+valid. Later node groups share this node and cannot change its type. An unknown type falls back to
+`m5.large` with a warning. The synthesized EC2 instance reports the selected type.
+First-group selection is serialized per cluster. If the replacement fails, Floci recreates the
+previous node, marks that node group `CREATE_FAILED`, and keeps its data volume. If recovery also
+fails, the cluster becomes `FAILED` instead of waiting indefinitely for readiness.
+Groups remain `CREATING` while launch-template user data runs. Later groups wait for the first
+group's result before accepting its node type as the shared capacity.
+
+The container receives a hard CPU quota equal to the selected type's vCPUs and a memory limit
+equal to its catalog memory plus 10% headroom (at least 128 MiB). Both are capped by Docker's host
+capacity. Memory is capped at 80% of the Docker host's memory so other processes can continue to
+run. `floci.services.eks.max-memory-mib` and `floci.services.eks.max-vcpus` provide optional lower
+ceilings; zero means no extra ceiling. Their environment variables are `FLOCI_SERVICES_EKS_MAX_MEMORY_MIB`
+and `FLOCI_SERVICES_EKS_MAX_VCPUS`.
+
+The same calculation sets kubelet's `kube-reserved`, `system-reserved`, and `eviction-hard` flags.
+The EKS AMI reserves `255 + 11 * maxPods` MiB and a tiered CPU fraction for kubelet and the
+container runtime. Floci derives `maxPods` from the catalog's primary network card and IPv4
+addresses per interface. Its `system-reserved` memory holds the container headroom, and its CPU
+reservation excludes the Docker host CPUs outside the container quota. Its absolute
+`memory.available` threshold includes the difference between Docker host memory and the container
+limit, plus a 100 MiB eviction buffer. This is necessary because kubelet in the nested container
+can report host memory while the kernel enforces the smaller cgroup limit.
+The EKS node filesystem eviction defaults remain at 10% available space and 5% free inodes.
+The pod-density calculation uses EKS managed node group caps of 110 pods up to 30 vCPUs and
+250 pods above 30 vCPUs; it does not change k3s `maxPods`.
+
+If Docker cannot report host capacity, or the host is too small to leave 256 MiB for pods after
+reservations, Floci warns and launches the cluster without the derived limits or kubelet arguments.
+This preserves startup on small hosts. An explicit memory or CPU ceiling remains a hard bound even
+when Docker host information is unavailable; in that case Floci cannot calculate kubelet arguments.
+When an explicit memory ceiling is smaller than the default reservation budget, Floci reduces the
+memory reservations to leave some room for pods and warns that they no longer match the EKS AMI
+amount.
+
+The reservation formulas follow the [EKS AMI nodeadm source](https://github.com/awslabs/amazon-eks-ami/blob/main/nodeadm/internal/kubelet/config.go) and [AWS's node memory calculation](https://docs.aws.amazon.com/batch/latest/userguide/memory-cpu-batch-eks.html).
+On restore, a surviving container whose capacity label differs from the current calculation is
+recreated against the retained data volume, reusing its published API port. Floci keeps the old
+container until the replacement starts and restarts it if replacement fails. This also upgrades
+containers started before resource limits were available. If Docker cannot remove the stopped
+backup after a successful replacement, the new node keeps running and cluster deletion retries
+the backup cleanup after stopping the live node. If cleanup still fails, deletion reports the
+error and can be retried before the data volume is removed. Backup container names put the
+`capacity-backup.` marker before the account-qualified cluster name, for example
+`floci-aws-eks-capacity-backup.demo` for the default account and
+`floci-aws-eks-capacity-backup.999999999999.demo` for another account. The configured Docker resource
+namespace applies to backups too. This keeps backup names outside both accounts' live-container
+namespaces without changing existing cluster container names or data volumes.
+Cleanup only targets this backup namespace; it does not look up old suffix-form names, which can
+identify another account's live cluster. Verify ownership before manually removing leftover stopped
+backups after upgrading.
+
 #### Cluster node provider ID and topology labels
 
 In real mode, cluster nodes carry a Kubernetes `spec.providerID` matching the AWS format:
@@ -394,6 +452,8 @@ The derived availability zone and instance ID match the synthetic EC2 node insta
 |---|---|---|
 | `FLOCI_SERVICES_EKS_ENABLED` | `true` | Enable the EKS service |
 | `FLOCI_SERVICES_EKS_MOCK` | `false` | Metadata-only mode (no Docker) |
+| `FLOCI_SERVICES_EKS_MAX_MEMORY_MIB` | `0` | Optional k3s container memory ceiling in MiB |
+| `FLOCI_SERVICES_EKS_MAX_VCPUS` | `0` | Optional k3s container vCPU ceiling |
 | `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` | k3s Docker image fallback |
 | `FLOCI_SERVICES_EKS_IMAGE_TEMPLATE` | *(unset)* | Format string for custom k3s images (e.g. `myregistry.io/k3s:v%s`), taking cluster version |
 | `FLOCI_SERVICES_EKS_API_SERVER_BASE_PORT` | `6500` | First port in the k3s API server range |
@@ -408,6 +468,7 @@ The derived availability zone and instance ID match the synthetic EC2 node insta
 | `FLOCI_SERVICES_EKS_POD_IDENTITY_WEBHOOK` | `true` | Register a mutating admission webhook that injects pod identity credentials. Needs `FLOCI_TLS_ENABLED=true` |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
 | `FLOCI_SERVICES_EKS_EMBEDDED_DNS` | `true` | Inject Floci's embedded DNS server into cluster containers for Route 53 private hosted zones and internal name resolution |
+| `FLOCI_SERVICES_EKS_VPC_ROUTE_PROGRAMMING` | `true` | Program emulated VPC route table entries into k3s cluster containers |
 
 ### Kubernetes versions and network configuration
 
@@ -437,6 +498,27 @@ aws --endpoint-url http://localhost:4566 eks create-cluster \
 ```
 
 Floci validates that `serviceIpv4Cidr` falls within RFC 1918 private address ranges (`10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`), has a prefix length between `/12` and `/24`, and does not overlap with the VPC CIDR. When omitted, Floci defaults `serviceIpv4Cidr` to `10.100.0.0/16` (or `172.20.0.0/16` if `10.100.0.0/16` overlaps with the VPC). Internal pod CIDR (`--cluster-cidr`) defaults to `10.42.0.0/16` to avoid collisions with Docker bridge networks.
+
+### VPC route table programming
+
+When a cluster is created in a VPC (`resourcesVpcConfig.vpcId` is specified) and `floci.services.eks.vpc-route-programming` is enabled (`true` by default), Floci inspects the VPC route tables and programs matching routes into the k3s cluster container via `ip route replace <dest> via <gw>`.
+
+- **Association rules**:
+  - If the cluster specifies `subnetIds`, Floci resolves the route table explicitly associated with each subnet. Subnets without an explicit association fall back to the VPC main route table. Route tables associated only with other subnets in the VPC are ignored.
+  - If the cluster specifies no subnets, the VPC main route table is used.
+- **Programmable route targets**:
+  - **Instance targets** (`InstanceId`): Resolved to the EC2 container bridge IP or private IP address on the shared Docker network.
+  - **Network interface targets** (`NetworkInterfaceId`): Resolved to the ENI private IP address.
+- **Ignored and out-of-scope targets**:
+  - The default route (`0.0.0.0/0`) is never overridden, preserving the container's external network reachability and Docker bridge routing.
+  - Internet gateways (`igw-*`) and NAT gateways (`nat-*`) are out of scope because Docker networking already handles outbound traffic.
+  - VPC peering connections (`pcx-*`) and prefix lists are recorded in route table metadata but not programmed into the container kernel routing table.
+- **Lifecycle and dynamic updates**:
+  - Routes are programmed when a cluster starts or is restored after a restart.
+  - An event-driven listener updates active clusters dynamically whenever routes or associations change via `CreateRoute`, `ReplaceRoute`, `DeleteRoute`, `AssociateRouteTable`, or `DisassociateRouteTable`.
+- **Fault tolerance**:
+  - Route programming is idempotent.
+  - If routing commands fail inside the container (for example, if the `ip` tool is missing or returns a non-zero exit code), Floci logs a warning and the cluster proceeds to `ACTIVE` without failing creation.
 
 ### Pulling images from Floci ECR
 
@@ -499,7 +581,7 @@ services:
 ```
 
 ## Instance Metadata Service (IMDS)
-The cluster container is registered as a synthesized EC2 instance node (type `m5.large`, image `ami-eks-k3s`) regardless of whether IMDS is enabled, making it visible to the EC2 service (`DescribeInstances`, `DescribeInstanceStatus`, volume attachments, tagging).
+The cluster container is registered as a synthesized EC2 instance node (image `ami-eks-k3s`) regardless of whether IMDS is enabled, making it visible to the EC2 service (`DescribeInstances`, `DescribeInstanceStatus`, volume attachments, tagging). Its instance type is the same type used for the container limits.
 
 When IMDS is enabled (`FLOCI_SERVICES_EKS_IMDS=true`), each k3s cluster container exposes the AWS Instance Metadata Service on the link-local address `169.254.169.254:80`. Inside the container, Floci adds `169.254.169.254/32` to the loopback interface (`lo`) and runs a lightweight `socat` TCP relay forwarding metadata requests to Floci's IMDS server.
 

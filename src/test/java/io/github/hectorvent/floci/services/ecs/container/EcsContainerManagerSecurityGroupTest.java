@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
@@ -66,8 +67,11 @@ class EcsContainerManagerSecurityGroupTest {
         builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.resolveImageForLaunch(any(), any()))
+                .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
         dockerClient = mock(DockerClient.class, RETURNS_DEEP_STUBS);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
@@ -98,7 +102,7 @@ class EcsContainerManagerSecurityGroupTest {
     void awsvpcTaskWithFirewallJoinsHelperNamespaceAndSkipsHostPorts() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(firewallManager.enabled()).thenReturn(true);
-        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any()))
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any()))
                 .thenReturn(new SecurityGroupFirewallManager.Namespace("helper-id", "10.0.0.5"));
 
         NetworkInterface eni = new NetworkInterface();
@@ -149,7 +153,7 @@ class EcsContainerManagerSecurityGroupTest {
     void stopTaskUnregistersEniAndReleasingTheTaskNetworkDeletesIt() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(firewallManager.enabled()).thenReturn(true);
-        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any()))
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any()))
                 .thenReturn(new SecurityGroupFirewallManager.Namespace("helper-id", "10.0.0.5"));
 
         NetworkInterface eni = new NetworkInterface();
@@ -185,7 +189,7 @@ class EcsContainerManagerSecurityGroupTest {
     void firelensRouterAndAppBothJoinTheHelperNamespace() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(firewallManager.enabled()).thenReturn(true);
-        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any()))
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any()))
                 .thenReturn(new SecurityGroupFirewallManager.Namespace("helper-id", "10.0.0.5"));
 
         NetworkInterface eni = new NetworkInterface();
@@ -233,7 +237,7 @@ class EcsContainerManagerSecurityGroupTest {
         verify(builder, times(2)).withNetworkMode("container:helper-id");
         verify(builder, times(2)).withLabels(Map.of("floci.security-group-workload", "true"));
 
-        verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any());
+        verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any());
         verify(lifecycleManager).create(any());
         verify(lifecycleManager).startCreated(eq("router-id"), any());
         verify(lifecycleManager).createAndStart(any());

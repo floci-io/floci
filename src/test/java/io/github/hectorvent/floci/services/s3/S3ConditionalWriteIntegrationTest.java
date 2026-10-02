@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 
@@ -25,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class S3ConditionalWriteIntegrationTest {
     private static final String PRECONDITION_FAILED_MESSAGE =
             "At least one of the pre-conditions you specified did not hold";
+    private static final String STALE_ETAG = "\"00000000000000000000000000000000\"";
 
     @Test
     void putObject_ifNoneMatchStar_succeedsWhenKeyMissing() {
@@ -263,6 +265,192 @@ class S3ConditionalWriteIntegrationTest {
         assertObjectBody(bucket, "object.txt", "first");
     }
 
+    @Test
+    void deleteObject_ifMatch_deletesOnMatch() {
+        String bucket = createBucket("delete-if-match");
+        String eTag = putObject(bucket, "object.txt", "first");
+
+        given()
+            .header("If-Match", eTag)
+        .when()
+            .delete("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(204);
+
+        assertObjectMissing(bucket, "object.txt");
+    }
+
+    @Test
+    void deleteObject_ifMatch_412OnMismatchAndDoesNotDelete() {
+        String bucket = createBucket("delete-if-match-stale");
+        putObject(bucket, "object.txt", "first");
+
+        ValidatableResponse response = given()
+            .header("If-Match", STALE_ETAG)
+        .when()
+            .delete("/" + bucket + "/object.txt")
+        .then();
+
+        assertPreconditionFailed(response, "If-Match");
+        assertObjectBody(bucket, "object.txt", "first");
+    }
+
+    @Test
+    void deleteObject_ifMatch_404WhenKeyMissing() {
+        String bucket = createBucket("delete-if-match-missing");
+
+        for (String ifMatch : List.of(STALE_ETAG, "*")) {
+            given()
+                .header("If-Match", ifMatch)
+            .when()
+                .delete("/" + bucket + "/missing.txt")
+            .then()
+                .statusCode(404)
+                .body("Error.Code", equalTo("NoSuchKey"));
+        }
+    }
+
+    @Test
+    void deleteObject_ifMatchStar_deletesWhenKeyExists() {
+        String bucket = createBucket("delete-if-match-star");
+        putObject(bucket, "object.txt", "first");
+
+        given()
+            .header("If-Match", "*")
+        .when()
+            .delete("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(204);
+
+        assertObjectMissing(bucket, "object.txt");
+    }
+
+    @Test
+    void deleteObject_versioned_ifMatchMismatchCreatesNoDeleteMarker() {
+        String bucket = createVersionedBucket("delete-if-match-versioned");
+        String eTag = putObject(bucket, "object.txt", "first");
+
+        assertPreconditionFailed(given()
+            .header("If-Match", STALE_ETAG)
+        .when()
+            .delete("/" + bucket + "/object.txt")
+        .then(), "If-Match");
+        assertObjectBody(bucket, "object.txt", "first");
+
+        given()
+            .header("If-Match", eTag)
+        .when()
+            .delete("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(204)
+            .header("x-amz-delete-marker", "true");
+        assertObjectMissing(bucket, "object.txt");
+    }
+
+    @Test
+    void deleteObject_versioned_ifMatch404WhenCurrentVersionIsDeleteMarker() {
+        String bucket = createVersionedBucket("delete-if-match-marker");
+        putObject(bucket, "object.txt", "first");
+        given().when().delete("/" + bucket + "/object.txt").then().statusCode(204);
+
+        given()
+            .header("If-Match", "*")
+        .when()
+            .delete("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(404)
+            .body("Error.Code", equalTo("NoSuchKey"));
+    }
+
+    @Test
+    void deleteObject_versioned_ifMatchIsEvaluatedAgainstTheCurrentVersion() {
+        String bucket = createVersionedBucket("delete-if-match-version-id");
+        String olderETag = putObject(bucket, "object.txt", "older");
+        String olderVersionId = versionIdOf(bucket, "object.txt", 1);
+        String currentETag = putObject(bucket, "object.txt", "current");
+
+        // The addressed version's own ETag is not what the precondition checks.
+        assertPreconditionFailed(given()
+            .header("If-Match", olderETag)
+        .when()
+            .delete("/" + bucket + "/object.txt?versionId=" + olderVersionId)
+        .then(), "If-Match");
+        given().when().get("/" + bucket + "/object.txt?versionId=" + olderVersionId).then().statusCode(200);
+
+        given()
+            .header("If-Match", currentETag)
+        .when()
+            .delete("/" + bucket + "/object.txt?versionId=" + olderVersionId)
+        .then()
+            .statusCode(204);
+        given().when().get("/" + bucket + "/object.txt?versionId=" + olderVersionId).then().statusCode(404);
+        assertObjectBody(bucket, "object.txt", "current");
+    }
+
+    @Test
+    void deleteObjects_perObjectETag_isAPreconditionPerEntry() {
+        String bucket = createBucket("delete-objects-etag");
+        String matchingETag = putObject(bucket, "matching.txt", "matching");
+        putObject(bucket, "stale.txt", "stale");
+        putObject(bucket, "unconditional.txt", "unconditional");
+
+        String response = given()
+            .contentType("application/xml")
+            .body("""
+                    <Delete>
+                        <Object><Key>matching.txt</Key><ETag>%s</ETag></Object>
+                        <Object><Key>stale.txt</Key><ETag>%s</ETag></Object>
+                        <Object><Key>missing.txt</Key><ETag>*</ETag></Object>
+                        <Object><Key>unconditional.txt</Key></Object>
+                    </Delete>""".formatted(stripQuotes(matchingETag), stripQuotes(STALE_ETAG)))
+        .when()
+            .post("/" + bucket + "?delete")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        XmlPath xml = XmlPath.from(response);
+        assertEquals(List.of("matching.txt", "unconditional.txt"), xml.getList("DeleteResult.Deleted.Key"));
+        assertEquals(List.of("stale.txt", "missing.txt"), xml.getList("DeleteResult.Error.Key"));
+        assertEquals(List.of("PreconditionFailed", "NoSuchKey"), xml.getList("DeleteResult.Error.Code"));
+        assertObjectBody(bucket, "stale.txt", "stale");
+        assertObjectMissing(bucket, "matching.txt");
+        assertObjectMissing(bucket, "unconditional.txt");
+    }
+
+    @Test
+    void concurrentDeleteObject_ifMatch_neverDeletesAnOverwrite() throws Exception {
+        String bucket = createBucket("delete-if-match-concurrent");
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        try {
+            for (int round = 0; round < 25; round++) {
+                String key = "object-" + round + ".txt";
+                String original = putObject(bucket, key, "original");
+                CyclicBarrier barrier = new CyclicBarrier(2);
+                Future<Integer> delete = executor.submit(() -> {
+                    barrier.await();
+                    return given().header("If-Match", original)
+                        .when().delete("/" + bucket + "/" + key)
+                        .then().extract().statusCode();
+                });
+                Future<Integer> overwrite = executor.submit(() -> {
+                    barrier.await();
+                    return given().body("overwrite")
+                        .when().put("/" + bucket + "/" + key)
+                        .then().extract().statusCode();
+                });
+                assertEquals(200, overwrite.get(10, SECONDS));
+                int deleteStatus = delete.get(10, SECONDS);
+                // Delete-then-overwrite and overwrite-then-412 both leave the overwrite in place.
+                // Only a check that is not atomic with the delete can remove it.
+                assertEquals(true, deleteStatus == 204 || deleteStatus == 412, "delete status " + deleteStatus);
+                assertObjectBody(bucket, key, "overwrite");
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     private static String createBucket(String label) {
         String bucket = "cond-" + label + "-" + UUID.randomUUID().toString().substring(0, 8);
         given()
@@ -271,6 +459,36 @@ class S3ConditionalWriteIntegrationTest {
         .then()
             .statusCode(200);
         return bucket;
+    }
+
+    private static String createVersionedBucket(String label) {
+        String bucket = createBucket(label);
+        given()
+            .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+            .put("/" + bucket + "?versioning")
+        .then()
+            .statusCode(200);
+        return bucket;
+    }
+
+    /** Version id of the {@code n}-th version written to {@code key} (1-based, oldest first). */
+    private static String versionIdOf(String bucket, String key, int n) {
+        List<String> ids = given()
+        .when()
+            .get("/" + bucket + "?versions&prefix=" + key)
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getList("ListVersionsResult.Version.VersionId");
+        return ids.get(ids.size() - n);
+    }
+
+    private static void assertObjectMissing(String bucket, String key) {
+        given()
+        .when()
+            .get("/" + bucket + "/" + key)
+        .then()
+            .statusCode(404);
     }
 
     private static String putObject(String bucket, String key, String body) {

@@ -630,8 +630,12 @@ public class OrganizationsJsonHandler {
         node.put("MasterAccountArn", organization.getMasterAccountArn());
         node.put("MasterAccountId", organization.getMasterAccountId());
         node.put("MasterAccountEmail", organization.getMasterAccountEmail());
+        // Deprecated in AWS and distinct from the root's enabled types (ListRoots): it reports SCPs as
+        // available for an all-features organization and never includes any other policy type.
         ArrayNode policyTypes = node.putArray("AvailablePolicyTypes");
-        organization.getRoot().getPolicyTypes().forEach(summary -> policyTypes.add(policyTypeNode(summary)));
+        if ("ALL".equals(organization.getFeatureSet())) {
+            policyTypes.add(policyTypeNode(new PolicyTypeSummary("SERVICE_CONTROL_POLICY", "ENABLED")));
+        }
         return node;
     }
 
