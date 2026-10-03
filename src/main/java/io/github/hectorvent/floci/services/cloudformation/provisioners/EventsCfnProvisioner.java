@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
 import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
@@ -68,7 +69,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of("AWS::Events::Rule", "AWS::Events::EventBus", "AWS::Events::EventBusPolicy");
+        return Set.of("AWS::Events::Rule", "AWS::Events::EventBus", "AWS::Events::EventBusPolicy",
+                "AWS::Events::ApiDestination");
     }
 
     @Override
@@ -77,6 +79,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             case "AWS::Events::Rule" -> provisionRule(r, props, ctx);
             case "AWS::Events::EventBus" -> provisionEventBus(r, props, ctx);
             case "AWS::Events::EventBusPolicy" -> provisionEventBusPolicy(r, props, ctx);
+            case "AWS::Events::ApiDestination" -> provisionApiDestination(r, props, ctx);
             default -> throw new IllegalStateException(
                     "EventsCfnProvisioner cannot handle " + r.getResourceType());
         }
@@ -107,6 +110,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, null, region);
             case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
             case "AWS::Events::EventBusPolicy" -> removeEventBusPolicySafe(physicalId, region);
+            case "AWS::Events::ApiDestination" -> deleteApiDestinationSafe(physicalId, region);
             default -> {
                 // no other type reaches this provisioner
             }
@@ -728,6 +732,51 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         // catch-all did: the statement stayed on the bus and the stack still reported deleted.
         CfnDeletes.safeDelete("Event bus policy statement", physicalId,
                 () -> eventBridgeService.removePermission(busName, statementId, false, region),
+                "ResourceNotFoundException");
+    }
+
+    private void provisionApiDestination(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String name = ctx.stablePhysicalName(
+                ctx.resolveOptional(props, "Name"), r.getLogicalId(), 64, false);
+        if (ctx.isUpdate() && ctx.priorPhysicalId() != null && !ctx.priorPhysicalId().equals(name)) {
+            throw new AwsException("ValidationError",
+                    "Updating ApiDestination Name requires resource replacement, which is not supported.", 400);
+        }
+
+        String connectionArn = ctx.resolveOptional(props, "ConnectionArn");
+        String invocationEndpoint = ctx.resolveOptional(props, "InvocationEndpoint");
+        String httpMethod = ctx.resolveOptional(props, "HttpMethod");
+        String description = ctx.resolveOptional(props, "Description");
+        Integer rateLimit = null;
+        if (props != null && props.has("InvocationRateLimitPerSecond") && !props.get("InvocationRateLimitPerSecond").isNull()) {
+            rateLimit = props.get("InvocationRateLimitPerSecond").asInt();
+        }
+
+        ApiDestination destination;
+        if (ctx.reusesPriorEntity(name)) {
+            destination = eventBridgeService.updateApiDestination(
+                    name, description, connectionArn, invocationEndpoint, httpMethod, rateLimit, ctx.region());
+        } else {
+            destination = eventBridgeService.createApiDestination(
+                    name, description, connectionArn, invocationEndpoint, httpMethod, rateLimit, ctx.region());
+        }
+
+        r.setPhysicalId(name);
+        String arn = destination.getArn();
+        r.getAttributes().put("Arn", arn);
+        String arnForPolicy = arn;
+        int lastSlash = arn.lastIndexOf('/');
+        int secondLastSlash = arn.lastIndexOf('/', lastSlash - 1);
+        if (secondLastSlash >= 0 && lastSlash > secondLastSlash) {
+            arnForPolicy = arn.substring(0, lastSlash);
+        }
+        r.getAttributes().put("ArnForPolicy", arnForPolicy);
+        r.getAttributes().put("Name", name);
+    }
+
+    private void deleteApiDestinationSafe(String name, String region) {
+        CfnDeletes.safeDelete("EventBridge API destination", name,
+                () -> eventBridgeService.deleteApiDestination(name, region),
                 "ResourceNotFoundException");
     }
 

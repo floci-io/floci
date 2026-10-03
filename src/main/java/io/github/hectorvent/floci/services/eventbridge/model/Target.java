@@ -19,6 +19,7 @@ public class Target {
     private EcsParameters ecsParameters;
     private RetryPolicy retryPolicy;
     private DeadLetterConfig deadLetterConfig;
+    private HttpParameters httpParameters;
 
     public Target() {}
 
@@ -58,6 +59,9 @@ public class Target {
 
     public DeadLetterConfig getDeadLetterConfig() { return deadLetterConfig; }
     public void setDeadLetterConfig(DeadLetterConfig deadLetterConfig) { this.deadLetterConfig = deadLetterConfig; }
+
+    public HttpParameters getHttpParameters() { return httpParameters; }
+    public void setHttpParameters(HttpParameters httpParameters) { this.httpParameters = httpParameters; }
 
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)
