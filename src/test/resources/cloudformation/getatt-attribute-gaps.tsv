@@ -46,6 +46,7 @@ AWS::RDS::DBInstance	StatusInfos	read-replica status detail is not emulated
 AWS::RDS::DBInstance	StorageOperationPercentProgress	storage operations (scaling, type changes) are not emulated; storage changes apply synchronously
 AWS::RDS::DBInstance	StorageOperationStatus	storage operations (scaling, type changes) are not emulated; storage changes apply synchronously
 AWS::Redshift::Cluster	DeferMaintenanceIdentifier	Floci does not emulate deferred maintenance windows
+AWS::RedshiftServerless::Namespace	Namespace	the whole Namespace object has no scalar GetAtt form; its members are set under the dotted Namespace.* attributes instead, the form AWS's GetAtt exposes
 AWS::SQS::QueuePolicy	Id	schema gives no description; the policy has no backing entity to take an id from
 AWS::Transfer::Server	As2ServiceManagedEgressIpAddresses	AS2 managed egress IP allocation is not emulated by the Transfer management-plane service
 AWS::SecretsManager::Secret	Id	Fn::GetAtt Id on a secret is its ARN, which the provisioner already sets as the physical id and as Arn; closable, deferred to a follow-up PR to keep this one a pure move

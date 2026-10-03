@@ -1574,10 +1574,29 @@ public class RedshiftService {
         }
     }
 
-    private void releaseProxyPort(int port) {
+    public void releaseProxyPort(int port) {
         if (port > 0) {
             usedPorts.remove(port);
         }
+    }
+
+    /**
+     * Hands out a proxy port from the shared pool. Redshift Serverless workgroups draw from the same
+     * range as provisioned clusters, so both must reserve through this service or they could be given
+     * the same port.
+     */
+    public int reserveProxyPort() {
+        return allocateProxyPort();
+    }
+
+    /** Reserves a specific port, e.g. one persisted before a restart. Returns false if it is taken. */
+    public boolean reserveProxyPort(int port) {
+        return port > 0 && usedPorts.add(port);
+    }
+
+    /** The address and port clients use to reach a proxy bound to {@code proxyPort}. */
+    public Endpoint advertisedEndpoint(int proxyPort) {
+        return proxyEndpoint(proxyPort);
     }
 
     private Endpoint proxyEndpoint(int proxyPort) {

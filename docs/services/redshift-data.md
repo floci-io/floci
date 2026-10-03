@@ -34,12 +34,14 @@ For the upstream API shape, see the AWS documentation:
 
 ## Authentication modes
 
-A request identifies its target cluster one of two ways:
+A request identifies its target cluster or serverless workgroup one of three ways:
 
 - **`ClusterIdentifier` + `DbUser` + `Database`.** The `DbUser` is the cluster master, or the prefixed name returned by `GetClusterCredentials` / `GetClusterCredentialsWithIAM` (for example `IAM:analyst`) while that credential is unexpired. Floci connects to the container as the cluster master in both cases. Any other `DbUser` returns `ValidationException`.
 - **`SecretArn` + `ClusterIdentifier` + `Database`.** The secret must be a local Secrets Manager secret holding JSON credentials (`username` or `user`, plus `password`). A cross-region `SecretArn` is rejected.
 
-`WorkgroupName` (Amazon Redshift Serverless) is rejected with `ValidationException`. Redshift Serverless is not emulated.
+- **`WorkgroupName` + `Database`, with or without `SecretArn`.** `WorkgroupName` is a workgroup name or workgroup ARN created through [Redshift Serverless](redshift-serverless.md). `Database` must be the namespace `dbName`. Without a `SecretArn`, Floci connects as the namespace admin; AWS derives the database user from the signing identity (`IAM:<name>`), and `DbUser` is not used. With a `SecretArn`, the secret must hold credentials the workgroup backend accepts. Sending `ClusterIdentifier` as well returns `ValidationException`, and so does a workgroup whose runtime is not running.
+
+A statement run against a workgroup reports `WorkgroupName` and omits `ClusterIdentifier`, and the reverse holds for a cluster statement. `ListDatabases`, `ListSchemas`, `ListTables` and `DescribeTable` accept `WorkgroupName` the same way.
 
 ## Compatibility Notes
 
