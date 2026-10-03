@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -315,6 +316,35 @@ class CodeArtifactPypiDockerIntegrationTest {
         given().header("Authorization", "Bearer " + token)
                 .get("/codeartifact/pypi/" + domain + "/" + REPO + "/simple/" + PACKAGE_NAME + "/")
                 .then().statusCode(200);
+    }
+
+    /**
+     * The real-world gap this closes: {@code GetPackageVersionAsset} used to 404 for every
+     * pypi-published file since Floci's generic-format package-version store never had a record
+     * for it (pypi publishing goes straight to pypiserver, bypassing it entirely). Proves the JSON
+     * API now bridges to the same file {@link #uploadThenDownloadRoundTripsTheExactBytesThroughTheSimpleIndex}
+     * already confirmed is really there, through the real sidecar, not a mock. No namespace: pypi
+     * packages don't have one.
+     */
+    @Test
+    @Order(12)
+    void getPackageVersionAssetBridgesToTheRealPypiserverSidecar() {
+        byte[] fetched = given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0&asset=" + FILENAME)
+                .then().statusCode(200)
+                .header("X-AssetName", equalTo(FILENAME))
+                .extract().asByteArray();
+        assertEquals("real-sdist-bytes", new String(fetched, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    @Order(12)
+    void getPackageVersionAssetReturns404ForAPypiAssetThatWasNeverUploaded() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0&asset=does-not-exist.tar.gz")
+                .then().statusCode(404);
     }
 
     /**
