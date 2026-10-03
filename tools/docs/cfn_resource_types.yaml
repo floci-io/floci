@@ -25,6 +25,7 @@ order:
   - AWS::EKS
   - AWS::RDS
   - AWS::Redshift
+  - AWS::RedshiftServerless
   - AWS::EC2
   - AWS::ElasticLoadBalancingV2
   - AWS::AutoScaling
@@ -85,6 +86,8 @@ type_order:
     [DBInstance, DBCluster, DBSubnetGroup, DBParameterGroup, DBClusterParameterGroup]
   AWS::Redshift:
     [Cluster, ClusterParameterGroup, ClusterSubnetGroup, ClusterSecurityGroup]
+  AWS::RedshiftServerless:
+    [Namespace, Workgroup]
   AWS::EC2:
     [VPC, Subnet, SecurityGroup, SecurityGroupIngress, SecurityGroupEgress, InternetGateway,
      RouteTable, SubnetRouteTableAssociation, Route, NatGateway, EIP, Instance, LaunchTemplate,
@@ -138,6 +141,7 @@ service_labels:
   AWS::Pipes: Pipes
   AWS::RDS: RDS
   AWS::Redshift: Redshift
+  AWS::RedshiftServerless: Redshift Serverless
   AWS::Route53: Route 53
   AWS::S3: S3
   AWS::SNS: SNS
@@ -163,6 +167,8 @@ notes:
   AWS::RDS::DBCluster: starts a real container
   AWS::Redshift::ClusterSecurityGroup: accepted; no EC2-Classic security group model
   AWS::Redshift::Cluster: single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported
+  AWS::RedshiftServerless::Namespace: 'ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form'
+  AWS::RedshiftServerless::Workgroup: 'starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form'
   AWS::CDK::Metadata: accepted; no-op
   AWS::Transfer::Server: 'management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported'
   AWS::IAM::User: 'template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete'
