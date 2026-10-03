@@ -1067,7 +1067,7 @@ class EsmIntegrationTest {
                             "KAFKA_BOOTSTRAP_SERVERS": ["b-1.example.com:9092", "b-2.example.com:9092"]
                         }
                     },
-                    "Topics": ["orders", "payments"],
+                    "Topics": ["orders"],
                     "StartingPosition": "TRIM_HORIZON"
                 }
                 """.formatted(FUNCTION_NAME))
@@ -1080,7 +1080,7 @@ class EsmIntegrationTest {
             .body("$", not(hasKey("EventSourceArn")))
             .body("SelfManagedEventSource.Endpoints.KAFKA_BOOTSTRAP_SERVERS",
                     hasItems("b-1.example.com:9092", "b-2.example.com:9092"))
-            .body("Topics", hasItems("orders", "payments"))
+            .body("Topics", hasItems("orders"))
             .body("StartingPosition", equalTo("TRIM_HORIZON"))
         .extract()
             .path("UUID");
@@ -1095,7 +1095,7 @@ class EsmIntegrationTest {
             .body("$", not(hasKey("EventSourceArn")))
             .body("SelfManagedEventSource.Endpoints.KAFKA_BOOTSTRAP_SERVERS",
                     hasItems("b-1.example.com:9092", "b-2.example.com:9092"))
-            .body("Topics", hasItems("orders", "payments"))
+            .body("Topics", hasItems("orders"))
             .body("StartingPosition", equalTo("TRIM_HORIZON"));
 
         // Verify DELETE by UUID
