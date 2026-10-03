@@ -3,6 +3,10 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.route53.Route53Service;
+import io.github.hectorvent.floci.services.route53.model.HostedZone;
+import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
+import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -15,6 +19,10 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * The ListEmailIdentities {@code Filter}. Every message and precedence below is what SES v2 answered
@@ -124,9 +132,62 @@ class SesIdentityListFilterServiceTest {
     }
 
     @Test
+    void token_isNotTakenByAFilterWhoseNameSpellsAnAbsentValue() {
+        String typeOnly = list(Map.of("IDENTITY_TYPE", "DOMAIN"), 1, null).nextToken();
+        assertRefused("Invalid NextToken.",
+                () -> list(Map.of("IDENTITY_NAME_CONTAINS", "null", "IDENTITY_TYPE", "DOMAIN"), 1, typeOnly));
+    }
+
+    @Test
+    void statusFilter_seesAStatusTheDkimRecordsHaveChanged() {
+        Route53Service route53 = mock(Route53Service.class);
+        SesIdentityService withDns = new SesIdentityService(new InMemoryStorage<>(), route53, Clock.systemUTC());
+        Identity domain = new Identity("dns.filter.test", "Domain");
+        domain.setVerificationStatus("Pending");
+        domain.setDkimVerificationStatus("Pending");
+        domain.setDkimTokens(List.of("token-a", "token-b", "token-c"));
+        withDns.save(domain, REGION);
+        when(route53.listHostedZones(null, Integer.MAX_VALUE))
+                .thenReturn(List.of(new HostedZone("zone-1", "dns.filter.test.", "ref", null, false)));
+        when(route53.listResourceRecordSets("zone-1", null, null, Integer.MAX_VALUE))
+                .thenReturn(dkimRecords("dns.filter.test", domain.getDkimTokens()));
+
+        List<Identity> verified = withDns.listV2Identities(REGION, Map.of("VERIFICATION_STATUS", "SUCCESS"),
+                null, null).items();
+        assertEquals(List.of("dns.filter.test"), verified.stream().map(Identity::getIdentity).toList());
+        assertEquals("Success", verified.get(0).getVerificationStatus());
+        assertEquals(List.of(), withDns.listV2Identities(REGION, Map.of("VERIFICATION_STATUS", "PENDING"),
+                null, null).items());
+    }
+
+    @Test
+    void statusFilter_leavesDomainsTheNameExcludesUnchecked() {
+        Route53Service route53 = mock(Route53Service.class);
+        SesIdentityService withDns = new SesIdentityService(new InMemoryStorage<>(), route53, Clock.systemUTC());
+        Identity domain = new Identity("dns.filter.test", "Domain");
+        domain.setVerificationStatus("Pending");
+        domain.setDkimTokens(List.of("token-a", "token-b", "token-c"));
+        withDns.save(domain, REGION);
+
+        assertEquals(List.of(), withDns.listV2Identities(REGION,
+                Map.of("IDENTITY_NAME_CONTAINS", "other", "VERIFICATION_STATUS", "PENDING"), null, null).items());
+        verify(route53, never()).listHostedZones(null, Integer.MAX_VALUE);
+    }
+
+    @Test
     void emptyFilter_sharesItsTokensWithTheV1List() {
         String v1 = service.listIdentities(null, REGION, SesListPaging.V1_LIST_IDENTITIES, 1, null).nextToken();
         assertEquals(List.of("alpha.filter.test"), names(list(Map.of(), 1, v1)));
+    }
+
+    private static List<ResourceRecordSet> dkimRecords(String domain, List<String> tokens) {
+        return tokens.stream().map(token -> {
+            ResourceRecordSet recordSet = new ResourceRecordSet();
+            recordSet.setName(token + "._domainkey." + domain + ".");
+            recordSet.setType("CNAME");
+            recordSet.setRecords(List.of(new ResourceRecord(token + ".dkim.amazonses.com.")));
+            return recordSet;
+        }).toList();
     }
 
     private void identity(String name, String type, String status) {

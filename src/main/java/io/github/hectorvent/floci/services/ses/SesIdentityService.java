@@ -24,6 +24,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -224,11 +225,14 @@ public class SesIdentityService {
         String type = v2FilterType(filter.get("IDENTITY_TYPE"));
         String status = v2FilterStatus(filter.get("VERIFICATION_STATUS"));
         List<Identity> matching = listIdentities(type, region).stream()
-                .map(i -> status == null ? i : withCurrentStatus(i, region))
                 .filter(i -> name == null || i.getIdentity().toLowerCase(Locale.ROOT).contains(name))
+                .map(i -> status == null ? i : withCurrentStatus(i, region))
                 .filter(i -> status == null || status.equals(i.getVerificationStatus()))
                 .toList();
-        String scope = filter.isEmpty() ? "" : name + "/" + type + "/" + status;
+        // The name goes last: the type and status values never hold the separator, so no name can
+        // pass for another filter.
+        String scope = filter.isEmpty() ? ""
+                : Objects.toString(type, "") + "/" + Objects.toString(status, "") + "/" + Objects.toString(name, "");
         return paging.page(region, scope, matching, Identity::getIdentity, pageSize, nextToken);
     }
 
