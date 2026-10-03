@@ -54,6 +54,33 @@ Useful for integration testing: applications that call Bedrock directly don't ne
 
 ## Examples
 
+### Inline images through the proxy
+
+Both `Converse` and `ConverseStream` forward inline `image` blocks as OpenAI
+`image_url` data URLs, preserving the order of text and images in each message.
+The supported image formats are `png`, `jpeg`, `gif`, and `webp`. The configured
+backend and model must support image input. Text-only messages keep their
+existing string representation.
+
+```python
+with open("image.png", "rb") as image:
+    response = client.converse(
+        modelId="your-mapped-model-id",
+        messages=[{"role": "user", "content": [
+            {"text": "Describe this image."},
+            {"image": {"format": "png", "source": {"bytes": image.read()}}},
+        ]}],
+    )
+```
+
+Supply raw bytes to the AWS SDK; it performs the wire-level Base64 encoding.
+The proxy rejects unsupported formats, malformed Base64, empty byte sources,
+and S3 image sources with `400 ValidationException` before contacting the backend.
+It does not decode image files or enforce model-specific image dimensions and
+size limits; those remain the responsibility of the configured backend.
+
+### Text requests
+
 ```bash
 export AWS_ENDPOINT_URL=http://localhost:4566
 export AWS_DEFAULT_REGION=us-east-1

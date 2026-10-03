@@ -1,15 +1,16 @@
 package io.github.hectorvent.floci.services.bedrockruntime.backend;
 
-import io.github.hectorvent.floci.core.common.AwsEventStreamWriter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsEventStreamWriter;
 import io.github.hectorvent.floci.core.common.AwsException;
 import org.jboss.logging.Logger;
 
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -116,16 +117,16 @@ final class BedrockOpenAiTranslator {
     }
 
     /**
-     * A Bedrock message's content[] blocks map to OpenAI in three different ways:
-     * plain text accumulates into the message's content string, toolUse blocks become
-     * entries in that same message's tool_calls[], and toolResult blocks become their
-     * own standalone OpenAI message with role=tool — so one Bedrock message can expand
-     * into zero, one, or several OpenAI messages.
+     * Text-only messages retain string content; messages with images use ordered
+     * content parts. Tool uses stay on the message, while tool results become
+     * standalone OpenAI messages with role=tool.
      */
     private static void translateMessage(ObjectMapper mapper, ArrayNode openAiMessages, JsonNode message) {
         String role = message.path("role").asText("user");
         JsonNode content = message.path("content");
         StringBuilder text = new StringBuilder();
+        ArrayNode parts = mapper.createArrayNode();
+        boolean hasImages = false;
         ArrayNode toolCalls = null;
 
         if (content.isArray()) {
@@ -151,8 +152,15 @@ final class BedrockOpenAiTranslator {
                     function.put("arguments", toJsonString(mapper, toolUse.path("input")));
                     continue;
                 }
+                if (block.has("image")) {
+                    parts.addObject().put("type", "image_url").putObject("image_url")
+                            .put("url", imageDataUrl(block.path("image")));
+                    hasImages = true;
+                    continue;
+                }
                 String blockText = block.path("text").asText(null);
                 if (blockText != null) {
+                    parts.addObject().put("type", "text").put("text", blockText);
                     if (text.length() > 0) {
                         text.append('\n');
                     }
@@ -161,10 +169,12 @@ final class BedrockOpenAiTranslator {
             }
         }
 
-        if (text.length() > 0 || toolCalls != null) {
+        if (text.length() > 0 || hasImages || toolCalls != null) {
             ObjectNode msg = openAiMessages.addObject();
             msg.put("role", role);
-            if (text.length() > 0) {
+            if (hasImages) {
+                msg.set("content", parts);
+            } else if (text.length() > 0) {
                 msg.put("content", text.toString());
             } else {
                 // OpenAI's spec treats content as optional when tool_calls is present; some
@@ -175,6 +185,35 @@ final class BedrockOpenAiTranslator {
                 msg.set("tool_calls", toolCalls);
             }
         }
+    }
+
+    private static String imageDataUrl(JsonNode image) {
+        String format = image.path("format").asText("");
+        if (!List.of("png", "jpeg", "gif", "webp").contains(format)) {
+            throw new AwsException("ValidationException", "Image format must be png, jpeg, gif, or webp.", 400);
+        }
+        JsonNode source = image.path("source");
+        JsonNode bytes = source.path("bytes");
+        if (!source.isObject() || source.size() != 1 || !bytes.isTextual() || bytes.asText().isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "The proxy supports only inline image source.bytes; provide non-empty Base64 bytes, not S3 sources.",
+                    400);
+        }
+        String encoded = bytes.asText();
+        try {
+            // Validate aligned quartets in bounded chunks instead of allocating the whole decoded image.
+            for (int offset = 0; offset < encoded.length();) {
+                int end = offset + Math.min(8192, encoded.length() - offset);
+                int decodedLength = Base64.getDecoder().decode(encoded.substring(offset, end)).length;
+                if (end < encoded.length() && decodedLength != (end - offset) / 4 * 3) {
+                    throw new IllegalArgumentException("Image padding must occur only at the end.");
+                }
+                offset = end;
+            }
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException", "Image source.bytes must contain valid Base64.", 400);
+        }
+        return "data:image/" + format + ";base64," + encoded;
     }
 
     private static String extractToolResultText(JsonNode toolResultContent) {
