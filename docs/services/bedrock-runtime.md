@@ -54,6 +54,50 @@ Useful for integration testing: applications that call Bedrock directly don't ne
 
 ## Examples
 
+### Structured outputs through the proxy
+
+Both `Converse` and `ConverseStream` translate
+`outputConfig.textFormat` with `type: "json_schema"` into OpenAI
+`response_format.json_schema`. The Bedrock
+`structure.jsonSchema.schema` value is a JSON string; the proxy parses it into
+the schema object expected by the backend, without rewriting its properties.
+Optional `name` and `description` are preserved. If the name is omitted, the
+proxy uses `response`, since the OpenAI wire shape requires a name.
+
+```python
+import json
+
+response = client.converse(
+    modelId="your-mapped-model-id",
+    messages=[{"role": "user", "content": [{"text": "Return a readiness label."}]}],
+    outputConfig={"textFormat": {
+        "type": "json_schema",
+        "structure": {"jsonSchema": {
+            "name": "readiness",
+            "schema": json.dumps({
+                "type": "object",
+                "properties": {"ready": {"type": "boolean"}},
+                "required": ["ready"],
+                "additionalProperties": False,
+            }),
+        }},
+    }},
+)
+```
+
+The backend and model must support this response format and the supplied schema.
+The proxy does not inject OpenAI's `strict` flag: that mode imposes extra schema
+restrictions, such as requiring every property, that valid Bedrock schemas need
+not satisfy. Schema enforcement therefore follows the backend's behavior; Floci
+does not emulate Bedrock's guaranteed schema adherence. Callers should validate
+returned data when testing through the proxy.
+The proxy rejects malformed configuration or a schema that is not a JSON object
+with `400 ValidationException`; it does not implement a JSON Schema validator or
+validate generated responses. Requests without a text format keep their existing
+behavior. The `stub` backend still ignores output constraints.
+
+### Text requests
+
 ```bash
 export AWS_ENDPOINT_URL=http://localhost:4566
 export AWS_DEFAULT_REGION=us-east-1

@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.bedrockruntime;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
 import io.quarkus.test.junit.QuarkusTest;
@@ -11,6 +13,8 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -25,6 +29,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -100,6 +105,156 @@ class BedrockProxyIntegrationTest {
             .body("usage.inputTokens", equalTo(7))
             .body("usage.outputTokens", equalTo(9))
             .body("usage.totalTokens", equalTo(16));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"converse", "converse-stream"})
+    void structuredOutputSchemaReachesProxy(String operation) throws IOException {
+        nextResponseBody.set(operation.equals("converse")
+                ? """
+                    {"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}
+                    """
+                : """
+                    data: {"choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}
+
+                    data: [DONE]
+                    """);
+        ObjectNode request = (ObjectNode) objectMapper.readTree("""
+            {"messages":[{"role":"user","content":[{"text":"Extract a label"}]}]}
+            """);
+        JsonNode schema = objectMapper.readTree("""
+            {"type":"object","properties":{"label":{"$ref":"#/$defs/label"}},
+             "additionalProperties":false,
+             "$defs":{"label":{"type":"string","enum":["ready","pending"]}}}
+            """);
+        ObjectNode definition = request.putObject("outputConfig").putObject("textFormat")
+                .put("type", "json_schema").putObject("structure").putObject("jsonSchema");
+        definition.put("name", "label_response");
+        definition.put("description", "A readiness label");
+        definition.put("schema", schema.toString());
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(request.toString())
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+        .then()
+            .statusCode(200);
+
+        JsonNode responseFormat = objectMapper.readTree(received.get().body()).path("response_format");
+        assertEquals("json_schema", responseFormat.path("type").asText());
+        JsonNode forwarded = responseFormat.path("json_schema");
+        assertEquals("label_response", forwarded.path("name").asText());
+        assertEquals("A readiness label", forwarded.path("description").asText());
+        assertFalse(forwarded.has("strict"), "Bedrock schemas must not acquire OpenAI-only strict restrictions");
+        assertEquals(schema, forwarded.path("schema"));
+    }
+
+    @Test
+    void structuredOutputPreservesDecimalConstraints() throws IOException {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}
+            """);
+        ObjectNode request = (ObjectNode) objectMapper.readTree("""
+            {"messages":[{"role":"user","content":[{"text":"Return a number"}]}]}
+            """);
+        String schema = """
+            {"type":"object","properties":{"value":{"const":0.1234567890123456789}}}
+            """;
+        request.putObject("outputConfig").putObject("textFormat").put("type", "json_schema")
+                .putObject("structure").putObject("jsonSchema").put("schema", schema);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(request.toString())
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+        .then()
+            .statusCode(200);
+        JsonNode sent = objectMapper.reader().with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+                .readTree(received.get().body());
+        assertEquals("0.1234567890123456789", sent.path("response_format").path("json_schema")
+                .path("schema").path("properties").path("value").path("const").asText());
+    }
+
+    @Test
+    void structuredOutputMetadataIsOptional() throws IOException {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}
+            """);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages":[{"role":"user","content":[{"text":"hi"}]}],
+                 "outputConfig":{"textFormat":{"type":"json_schema","structure":{
+                    "jsonSchema":{"schema":"{\\"type\\":\\"object\\"}"}}}}}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+        .then()
+            .statusCode(200);
+        JsonNode format = objectMapper.readTree(received.get().body()).path("response_format").path("json_schema");
+        assertEquals("response", format.path("name").asText());
+        assertFalse(format.has("description"));
+        assertEquals("object", format.path("schema").path("type").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"outputConfig\":{}}"})
+    void absentTextFormatDoesNotConstrainResponse(String extras) throws IOException {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"hi"}}]}
+            """);
+        ObjectNode request = (ObjectNode) objectMapper.readTree(extras);
+        request.set("messages", objectMapper.readTree("""
+            [{"role":"user","content":[{"text":"hi"}]}]
+            """));
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(request.toString())
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+        .then()
+            .statusCode(200);
+        assertFalse(objectMapper.readTree(received.get().body()).has("response_format"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "null", "[]", "{\"textFormat\":null}", "{\"textFormat\":{}}",
+        "{\"textFormat\":{\"type\":\"json_object\",\"structure\":{\"jsonSchema\":{\"schema\":\"{}\"}}}}",
+        "{\"textFormat\":{\"type\":\"json_schema\",\"structure\":{}}}",
+        "{\"textFormat\":{\"type\":\"json_schema\",\"structure\":{\"jsonSchema\":{}}}}",
+        "{\"textFormat\":{\"type\":\"json_schema\",\"structure\":{\"jsonSchema\":{\"schema\":{}}}}}",
+        "{\"textFormat\":{\"type\":\"json_schema\",\"structure\":{\"jsonSchema\":{\"schema\":\"\"}}}}",
+        "{\"textFormat\":{\"type\":\"json_schema\",\"structure\":{\"jsonSchema\":{\"schema\":\"not json\"}}}}",
+        "{\"textFormat\":{\"type\":\"json_schema\",\"structure\":{\"jsonSchema\":{\"schema\":\"[]\"}}}}",
+        "{\"textFormat\":{\"type\":\"json_schema\",\"structure\":{\"jsonSchema\":{\"schema\":\"true\"}}}}",
+        "{\"textFormat\":{\"type\":\"json_schema\",\"structure\":{\"jsonSchema\":{\"schema\":\"{} {}\"}}}}",
+        "{\"textFormat\":{\"type\":\"json_schema\",\"structure\":{\"jsonSchema\":{\"schema\":\"{}\",\"name\":42}}}}",
+        "{\"textFormat\":{\"type\":\"json_schema\",\"structure\":{\"jsonSchema\":{\"schema\":\"{}\",\"description\":false}}}}"
+    })
+    void invalidOutputConfigFailsBeforeCallingProxy(String outputConfig) {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"unexpected"}}]}
+            """);
+        for (String operation : new String[]{"converse", "converse-stream"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {"messages":[{"role":"user","content":[{"text":"hi"}]}],"outputConfig":%s}
+                    """.formatted(outputConfig))
+            .when()
+                .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+            assertNull(received.get());
+        }
     }
 
     @Test

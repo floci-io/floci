@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.bedrockruntime.backend;
 
-import io.github.hectorvent.floci.core.common.AwsEventStreamWriter;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsEventStreamWriter;
 import io.github.hectorvent.floci.core.common.AwsException;
 import org.jboss.logging.Logger;
 
@@ -106,7 +108,52 @@ final class BedrockOpenAiTranslator {
             openAi.set("stop", stopSequences.deepCopy());
         }
 
+        translateOutputConfig(mapper, bedrockRequest.path("outputConfig"), openAi);
+
         return openAi;
+    }
+
+    private static void translateOutputConfig(ObjectMapper mapper, JsonNode outputConfig, ObjectNode openAi) {
+        if (outputConfig.isMissingNode()) {
+            return;
+        }
+        if (!outputConfig.isObject()) {
+            throw new AwsException("ValidationException", "outputConfig must be an object.", 400);
+        }
+        JsonNode textFormat = outputConfig.path("textFormat");
+        if (textFormat.isMissingNode()) {
+            return;
+        }
+        JsonNode structure = textFormat.path("structure");
+        JsonNode definition = structure.path("jsonSchema");
+        JsonNode schemaString = definition.path("schema");
+        if (!"json_schema".equals(textFormat.path("type").asText())
+                || !structure.isObject() || structure.size() != 1 || !definition.isObject()
+                || !schemaString.isTextual()
+                || (definition.has("name") && !definition.path("name").isTextual())
+                || (definition.has("description") && !definition.path("description").isTextual())) {
+            throw new AwsException("ValidationException",
+                    "outputConfig.textFormat requires type json_schema and structure.jsonSchema with a schema string"
+                            + " and optional string name/description.", 400);
+        }
+        JsonNode schema;
+        try {
+            schema = mapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+                    .readTree(schemaString.asText());
+        } catch (JsonProcessingException e) {
+            throw new AwsException("ValidationException", "Structured output schema must be a JSON object.", 400);
+        }
+        if (schema == null || !schema.isObject()) {
+            throw new AwsException("ValidationException", "Structured output schema must be a JSON object.", 400);
+        }
+        ObjectNode responseFormat = openAi.putObject("response_format").put("type", "json_schema");
+        ObjectNode jsonSchema = responseFormat.putObject("json_schema");
+        jsonSchema.put("name", definition.path("name").asText("response"));
+        jsonSchema.set("schema", schema);
+        if (definition.has("description")) {
+            jsonSchema.set("description", definition.path("description").deepCopy());
+        }
     }
 
     /** Builds the OpenAI {@code {type: "function", function: {name}}} shape shared by tools[] entries and tool_choice. */
