@@ -675,9 +675,9 @@ No extra configuration or `cap_add` is needed because Docker containers have
 `CAP_NET_BIND_SERVICE` in their default capability set, so Floci (running as a
 non-root user) can bind UDP/53 without any changes to your Compose file.
 
-### VpcConfig, SnapStart and LoggingConfig
+### VpcConfig, SnapStart, LoggingConfig and DurableConfig
 
-All three round-trip through `CreateFunction`, `UpdateFunctionConfiguration`,
+All four round-trip through `CreateFunction`, `UpdateFunctionConfiguration`,
 `GetFunctionConfiguration`, `GetFunction`, `ListFunctions` and `PublishVersion`.
 
 The response shapes are **not** the request shapes, and Floci follows the AWS model
@@ -688,6 +688,7 @@ rather than echoing the request back:
 | `VpcConfig` | `VpcConfig` | `VpcConfigResponse` | `VpcId`, resolved from the first subnet via EC2 |
 | `SnapStart` | `SnapStart` | `SnapStartResponse` | `OptimizationStatus` — `On` only for a published version with `ApplyOn=PublishedVersions`, `Off` for `$LATEST` |
 | `LoggingConfig` | `LoggingConfig` | `LoggingConfig` | — |
+| `DurableConfig` | `DurableConfig` | `DurableConfig` | `RetentionPeriodInDays` defaults to 14; omitted for a function created without it |
 
 `SnapStart` and `LoggingConfig` are always present in a response, as on AWS: an
 unset function reads back `SnapStart={ApplyOn: None, OptimizationStatus: Off}` and
@@ -698,6 +699,12 @@ is a permanent diff rather than a cosmetic omission.
 
 `LoggingConfig` is replaced wholesale on update, not merged — an update naming only
 `LogFormat` resets `LogGroup` to the default.
+
+`DurableConfig` requires `ExecutionTimeout` on create. A durable function created without
+a `Timeout` gets `min(ExecutionTimeout, 900)`. It always logs in JSON format, and
+`LogFormat: Text` is rejected. On update the members are merged, and a function created
+without `DurableConfig` cannot gain one. The durable execution itself (checkpoints, waits,
+callbacks) is not emulated yet; the configuration only round-trips.
 
 `LogGroup` is validated against AWS's documented constraint: 1-512 characters matching
 `[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` are accepted with any
