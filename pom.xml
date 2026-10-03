@@ -452,6 +452,16 @@
                     <systemPropertyVariables>
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                     </systemPropertyVariables>
+                    <!-- Abort a hung test with a thread dump instead of letting CI's job timeout kill
+                         the shard silently. Set here rather than in junit-platform.properties, which
+                         would shadow the one quarkus-junit ships (its profile-aware class orderer). -->
+                    <properties>
+                        <configurationParameters>
+                            junit.jupiter.execution.timeout.testable.method.default = 2m
+                            junit.jupiter.execution.timeout.lifecycle.method.default = 2m
+                            junit.jupiter.execution.timeout.threaddump.enabled = true
+                        </configurationParameters>
+                    </properties>
                 </configuration>
             </plugin>
             <plugin>

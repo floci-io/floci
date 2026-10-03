@@ -36,10 +36,10 @@ jobs:
   test:
     name: Build and Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # Shards run 10m49s to 13m47s, so 15 left the slowest about a minute of margin and a slow
-    # runner spent it. This is a runaway-job kill switch, not a budget: Actions bills the minutes a
-    # job actually uses, so a higher ceiling costs nothing until something hangs.
-    timeout-minutes: 20
+    # Shards now run up to 16m50s (about 15 min of it in "Run tests"), so 20 left little margin.
+    # This is a runaway-job kill switch, not a budget: Actions bills the minutes a job actually
+    # uses, so a higher ceiling costs nothing until something hangs.
+    timeout-minutes: 25
     # Drafts skip the suite to spare runners; it runs once the PR is ready for review.
     # Written on the job rather than as a gate job so it costs no runner. Pushes to main
     # always run; `closed` and `edited` are excluded so widening the trigger types cannot
@@ -115,11 +115,15 @@ jobs:
           cmp -s all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" \
             || { echo "::error::test class list from src/test/java differs from target/test-classes:"; diff all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" | head -50; exit 1; }
 
+      # surefire.timeout kills a fork whose test ignores JUnit's interrupt (deadlock, blocking
+      # I/O). It caps the whole shard (one fork runs all its tests), so 20 min leaves room above
+      # the slowest shard's ~15 min and still lets surefire report before the 25-minute job limit.
       - name: Run tests
         run: >
           ./mvnw surefire:test -B
           -Dsurefire.includesFile="$GITHUB_WORKSPACE/shard.txt"
           -Dsurefire.failIfNoTests=true
+          -Dsurefire.timeout=1200
 
       # The prefetch runs in the background past its own step, so its per-image
       # results are only complete once the tests are done. A pull still running

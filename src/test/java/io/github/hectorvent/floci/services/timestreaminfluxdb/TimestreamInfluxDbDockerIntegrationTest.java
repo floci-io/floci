@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -20,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,6 +31,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 @Tag("docker")
 @QuarkusTest
 @TestProfile(TimestreamInfluxDbDockerIntegrationTest.RealContainerProfile.class)
+// Three 180 s status waits on real containers, plus the requests and cleanup around them.
+@Timeout(value = 15, unit = TimeUnit.MINUTES)
 class TimestreamInfluxDbDockerIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
