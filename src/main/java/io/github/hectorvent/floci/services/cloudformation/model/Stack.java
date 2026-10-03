@@ -64,6 +64,13 @@ public class Stack {
     private Map<String, ChangeSet> changeSets = orderedMap();
     private Map<String, String> tags = orderedMap();
     private boolean enableTerminationProtection = false;
+    /**
+     * Set only while the stack is in UPDATE_ROLLBACK_FAILED: the state from before the failed
+     * update, and the logical ids whose rollback has not succeeded yet. ContinueUpdateRollback
+     * runs the rollback again from them. Absent on a stack stored before they were kept.
+     */
+    private StackUpdateSnapshot updateRollbackSnapshot;
+    private List<String> updateRollbackResourceIds;
 
     public String getStackId() { return stackId; }
     public void setStackId(String stackId) { this.stackId = stackId; }
@@ -186,4 +193,8 @@ public class Stack {
     }
     public boolean isEnableTerminationProtection() { return enableTerminationProtection; }
     public void setEnableTerminationProtection(boolean enableTerminationProtection) { this.enableTerminationProtection = enableTerminationProtection; }
+    public StackUpdateSnapshot getUpdateRollbackSnapshot() { return updateRollbackSnapshot; }
+    public void setUpdateRollbackSnapshot(StackUpdateSnapshot updateRollbackSnapshot) { this.updateRollbackSnapshot = updateRollbackSnapshot; }
+    public List<String> getUpdateRollbackResourceIds() { return updateRollbackResourceIds; }
+    public void setUpdateRollbackResourceIds(List<String> updateRollbackResourceIds) { this.updateRollbackResourceIds = updateRollbackResourceIds; }
 }
