@@ -21,7 +21,7 @@ class AwsRegionsTest {
      */
     @Test
     void everyAdvertisedRegionIsAKnownRegionId() {
-        for (String region : AwsRegions.ALL) {
+        for (String region : AwsRegions.advertised("aws")) {
             assertTrue(AwsRegions.KNOWN_IDS.contains(region),
                     region + " is advertised by DescribeRegions but is not a known region id");
         }
@@ -111,8 +111,7 @@ class AwsRegionsTest {
 
     @Test
     void advertisedListsArePerPartition() {
-        assertEquals(AwsRegions.ALL, AwsRegions.advertised("aws"));
-        assertEquals(34, AwsRegions.ALL.size());
+        assertEquals(34, AwsRegions.advertised("aws").size());
         assertEquals(List.of("cn-north-1", "cn-northwest-1"), AwsRegions.advertised("aws-cn"));
         assertTrue(AwsRegions.KNOWN_IDS.contains("eusc-de-east-1"));
         assertTrue(AwsRegions.KNOWN_IDS.contains("us-isof-south-1"));

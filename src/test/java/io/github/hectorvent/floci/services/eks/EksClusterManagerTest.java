@@ -169,17 +169,17 @@ class EksClusterManagerTest {
     @Test
     void registriesYamlMirrorsEveryRegionHostnameAndThePathStyleForm() {
         String yaml = EksClusterManager.buildRegistriesYaml(
-                "000000000000", AwsRegions.ALL, 4566, "http://floci:4566");
+                "000000000000", AwsRegions.advertised("aws"), 4566, "http://floci:4566");
 
         assertTrue(yaml.startsWith("mirrors:\n"));
-        for (String region : AwsRegions.ALL) {
+        for (String region : AwsRegions.advertised("aws")) {
             assertTrue(yaml.contains("\"000000000000.dkr.ecr." + region + ".localhost:4566\":"),
                     "should mirror the " + region + " hostname");
         }
         assertTrue(yaml.contains("\"localhost:4566\":"), "should mirror the path-style form");
         assertFalse(yaml.contains("\"*\""), "must not catch-all public registries");
         long endpoints = yaml.lines().filter(l -> l.contains("- \"http://floci:4566\"")).count();
-        assertEquals(AwsRegions.ALL.size() + 1, endpoints,
+        assertEquals(AwsRegions.advertised("aws").size() + 1, endpoints,
                 "every mirror should point at Floci's in-network data plane");
     }
 
@@ -197,9 +197,9 @@ class EksClusterManagerTest {
     void registriesYamlTlsAliasesPreserveLoopbackMirrorsAndInternalHttpEndpoint() {
         String endpoint = "http://host.docker.internal:4577";
         String yaml = EksClusterManager.buildRegistriesYaml(
-                "111122223333", AwsRegions.ALL, 4577, endpoint, true);
+                "111122223333", AwsRegions.advertised("aws"), 4577, endpoint, true);
 
-        for (String region : AwsRegions.ALL) {
+        for (String region : AwsRegions.advertised("aws")) {
             assertTrue(yaml.contains("\"111122223333.dkr.ecr." + region + ".localhost:4577\":"));
             assertTrue(yaml.contains("\"111122223333.dkr.ecr." + region + ".localhost.floci.io:4577\":"));
         }
@@ -211,7 +211,7 @@ class EksClusterManagerTest {
         assertFalse(yaml.contains("ghcr.io"));
         assertFalse(yaml.contains("https://"), "internal pulls still use the HTTP data plane");
         long endpoints = yaml.lines().filter(line -> line.contains("- \"" + endpoint + "\"")).count();
-        assertEquals(2L * (AwsRegions.ALL.size() + 1), endpoints);
+        assertEquals(2L * (AwsRegions.advertised("aws").size() + 1), endpoints);
     }
 
     @Test

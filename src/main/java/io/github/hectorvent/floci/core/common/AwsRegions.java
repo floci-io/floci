@@ -12,20 +12,14 @@ import java.util.Set;
 public final class AwsRegions {
 
     /**
-     * The commercial partition's published regions, in botocore order. Callers that serve one
-     * request should prefer {@link #advertised(String)} with the request's partition; this list
-     * is what static, deployment-wide consumers (certificate SANs) enumerate.
-     */
-    public static final List<String> ALL = advertised(AwsPartitions.COMMERCIAL_ID);
-
-    /**
      * Every published AWS region id, across all partitions.
      *
-     * <p>Distinct from {@link #ALL}, and deliberately a superset of it. {@code ALL} is what
-     * this emulator <em>advertises</em> in the commercial partition. {@code KNOWN_IDS} is for
-     * <em>recognising</em> a region id that a client wrote, most importantly inside a hostname,
-     * where the alternative is a shape like {@code [a-z]{2}-[a-z-]+-\d+} that also matches
-     * perfectly ordinary strings ({@code my-cd-1}, {@code eu-team-2}).
+     * <p>Distinct from {@link #advertised(String)}, and deliberately a superset of every advertised
+     * list: {@code advertised} is what this emulator <em>advertises</em> in one partition, while
+     * {@code KNOWN_IDS} is for <em>recognising</em> a region id that a client wrote, most
+     * importantly inside a hostname, where the alternative is a shape like
+     * {@code [a-z]{2}-[a-z-]+-\d+} that also matches perfectly ordinary strings ({@code my-cd-1},
+     * {@code eu-team-2}).
      *
      * <p>It follows botocore's published lists ({@code make aws-data-sync}); the cost of a
      * region newer than the vendored data is documented at each call site, because it differs
