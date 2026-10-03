@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
+import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -46,6 +47,7 @@ class CodePipelineV2ConditionsTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private LambdaService lambdaService;
     private CodePipelineService service;
+    private InMemoryStorageFactory storageFactory;
 
     @BeforeEach
     void setUp() {
@@ -62,7 +64,8 @@ class CodePipelineV2ConditionsTest {
         when(s3Service.headObject(anyString(), anyString())).thenReturn(object);
         lambdaReturns(null);
 
-        service = new CodePipelineService(new InMemoryStorageFactory(), mapper, mock(CodeBuildService.class),
+        storageFactory = new InMemoryStorageFactory();
+        service = new CodePipelineService(storageFactory, mapper, mock(CodeBuildService.class),
                 mock(CodeDeployService.class), lambdaService, s3Service);
     }
 
@@ -373,15 +376,60 @@ class CodePipelineV2ConditionsTest {
         assertFalse(execution.has("conditionOverrides"));
     }
 
+    @Test
+    void overrideWaiterTimingOutDoesNotEraseAnOverrideAnotherRequestAccepted() {
+        // Catches: a timed-out override waiter removing the flag of a concurrent override that already
+        // resumed the run.
+        ObjectNode deploy = lambdaStage("Deploy");
+        addRule(deploy, "onSuccess", "FAIL", "VariableCheck")
+                .put("Variable", "#{variables.env}").put("Value", "prod").put("Operator", "EQ");
+        createPipeline("override-race", sourceStage(), deploy);
+        String executionId = startExecution("override-race");
+        awaitStatus("override-race", executionId, "Failed");
+
+        ObjectNode override = mapper.createObjectNode().put("pipelineName", "override-race")
+                .put("pipelineExecutionId", executionId).put("stageName", "Deploy")
+                .put("conditionType", "ON_SUCCESS");
+        // The run looks like it is still finishing, so the first override waits and then times out.
+        String runKey = ACCOUNT + ":" + executionId;
+        service.activeRuns.add(runKey);
+        service.runFinishWaitNanos = TimeUnit.MILLISECONDS.toNanos(200);
+        // Just before that waiter cleans up, the run finishes and a second override resumes it.
+        service.beforeOverrideTimeoutCleanup = () -> {
+            service.beforeOverrideTimeoutCleanup = () -> { };
+            service.activeRuns.remove(runKey);
+            service.handle("OverrideStageCondition", override, REGION, ACCOUNT);
+        };
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.handle("OverrideStageCondition", override, REGION, ACCOUNT));
+        assertEquals("ConflictException", thrown.getErrorCode());
+
+        CodePipelineExecution stored = storageFactory.executionBackend().scanAllAccounts().get(0);
+        assertEquals(Boolean.TRUE, stored.getConditionOverrides().get("Deploy/ON_SUCCESS"));
+    }
+
     private static final class InMemoryStorageFactory extends StorageFactory {
+        private final List<AccountAwareStorageBackend<?>> created = new java.util.ArrayList<>();
+
         private InMemoryStorageFactory() {
             super(null, null);
+        }
+
+        @SuppressWarnings("unchecked")
+        AccountAwareStorageBackend<CodePipelineExecution> executionBackend() {
+            return (AccountAwareStorageBackend<CodePipelineExecution>) created.stream()
+                    .filter(backend -> backend.scanAllAccounts().stream()
+                            .anyMatch(CodePipelineExecution.class::isInstance))
+                    .findFirst().orElseThrow();
         }
 
         @Override
         public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                                                         TypeReference<Map<String, V>> typeReference) {
-            return AccountAwareStorageBackend.inMemory(ACCOUNT);
+            AccountAwareStorageBackend<V> backend = AccountAwareStorageBackend.inMemory(ACCOUNT);
+            created.add(backend);
+            return backend;
         }
     }
 }

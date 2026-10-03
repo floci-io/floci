@@ -122,7 +122,7 @@ public class CodePipelineService {
     private final Map<String, byte[]> runtimeArtifacts = new ConcurrentHashMap<>();
     // An execution's status turns Failed as soon as one action fails, while its runner is still waiting
     // on sibling actions. Retries check this set so they never overlap a runner that has not finished.
-    private final Set<String> activeRuns = ConcurrentHashMap.newKeySet();
+    final Set<String> activeRuns = ConcurrentHashMap.newKeySet();
     private final long sourcePollIntervalMs;
 
     /** Matches the {@code source-poll-interval-ms} default in application.yml. */
@@ -959,7 +959,9 @@ public class CodePipelineService {
         return started;
     }
 
-    private static final long RUN_FINISH_WAIT_NANOS = TimeUnit.SECONDS.toNanos(5);
+    // Package-private so tests can shorten the wait and probe the gap before the timeout cleanup.
+    volatile long runFinishWaitNanos = TimeUnit.SECONDS.toNanos(5);
+    volatile Runnable beforeOverrideTimeoutCleanup = () -> { };
 
     private ObjectNode overrideStageCondition(JsonNode request, String region, String account) {
         String pipelineName = text(request, "pipelineName");
@@ -985,7 +987,7 @@ public class CodePipelineService {
         String conditionFailedSummary = "Condition " + conditionType + " failed in stage " + stageName + ".";
         boolean[] runStillFinishing = new boolean[1];
         Map<String, String> resumed = null;
-        long finishDeadline = System.nanoTime() + RUN_FINISH_WAIT_NANOS;
+        long finishDeadline = System.nanoTime() + runFinishWaitNanos;
         do {
             runStillFinishing[0] = false;
             resumed = startLocks.withLock(lockKey(execution), () -> {
@@ -1022,10 +1024,19 @@ public class CodePipelineService {
             }
         } while (runStillFinishing[0] && System.nanoTime() - finishDeadline < 0);
         if (runStillFinishing[0]) {
-            synchronized (execution) {
-                execution.getConditionOverrides().remove(stageName + "/" + conditionType);
-                putExecution(execution);
-            }
+            beforeOverrideTimeoutCleanup.run();
+            // Another override may have resumed the run since this waiter's last check; clear the flag
+            // only under the resume lock and only while the run is still failed on this condition.
+            startLocks.withLock(lockKey(execution), () -> {
+                synchronized (execution) {
+                    if ("Failed".equals(execution.getStatus())
+                            && conditionFailedSummary.equals(execution.getStatusSummary())) {
+                        execution.getConditionOverrides().remove(stageName + "/" + conditionType);
+                        putExecution(execution);
+                    }
+                }
+                return null;
+            });
             throw new AwsException("ConflictException",
                     "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
                             + "Try again later.", 400);
