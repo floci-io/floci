@@ -215,7 +215,7 @@ def count_generated_actions(md_source: str) -> int | None:
     return count
 
 
-def count_shared_tagging_actions(repo_root: Path) -> int:
+def count_shared_tagging_routes(repo_root: Path) -> int:
     """Count the shared /tags/{resourceArn} REST operations."""
     source_path = (
         repo_root
@@ -227,10 +227,12 @@ def count_shared_tagging_actions(repo_root: Path) -> int:
 
 def extract_action_counts(repo_root: Path) -> dict[str, int]:
     """Extract mechanically verifiable action counts.
-
     Generated service documents are counted from their generated action-table
     markers. IAM is a deferred non-tabular document, so its Query switch is
     parsed directly using the same action parser as regen_action_docs.py.
+    Other services without generated action-table markers are intentionally
+    skipped here because their handlers use non-tabular or mixed dispatch
+    patterns that cannot be counted safely by the generic registry parser.
     """
     md_source = (repo_root / MATRIX_DOC).read_text(encoding="utf-8")
     matrix_counts = extract_matrix_action_counts(md_source)
@@ -407,11 +409,11 @@ def main(argv: list[str] | None = None) -> int:
     matrix_extra_counts = extract_matrix_extra_counts(md_source)
     documented_tagging_count = matrix_extra_counts.get("bedrock-agentcore")
     if documented_tagging_count is not None:
-        source_tagging_count = count_shared_tagging_actions(repo_root)
+        source_tagging_count = count_shared_tagging_routes(repo_root)
         if documented_tagging_count != source_tagging_count:
             warnings.append(
                 f"service 'bedrock-agentcore' documents {documented_tagging_count} "
-                f"shared tagging operations in {MATRIX_DOC}, but the shared tags "
+                f"shared tagging routes in {MATRIX_DOC}, but the shared tags "
                 f"controller contains {source_tagging_count}; update the matrix count"
             )
     for d in expired_deferred:
