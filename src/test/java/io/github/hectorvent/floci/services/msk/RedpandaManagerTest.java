@@ -36,6 +36,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -229,8 +230,9 @@ class RedpandaManagerTest {
     }
 
     @Test
-    void containerModeAdvertisesContainerNameAddress() {
+    void containerModeAdvertisesContainerNameOnInternalListenerAndHostPortOnHostListener() {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9301);
 
         ContainerInfo info = new ContainerInfo("container-456",
                 Map.of(KAFKA_PORT, new EndpointInfo("172.18.0.5", KAFKA_PORT)));
@@ -238,22 +240,80 @@ class RedpandaManagerTest {
 
         ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
 
-        manager.startContainer(newCluster());
+        MskCluster cluster = newCluster();
+        manager.startContainer(cluster);
 
         verify(lifecycleManager).createAndStart(specCaptor.capture());
         ContainerSpec spec = specCaptor.getValue();
 
+        int listenIndex = spec.cmd().indexOf("--kafka-addr");
+        assertTrue(listenIndex >= 0, "cmd should contain --kafka-addr");
+        assertEquals("internal://0.0.0.0:9092,host://0.0.0.0:9093", spec.cmd().get(listenIndex + 1));
         int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
         assertTrue(flagIndex >= 0, "cmd should contain --advertise-kafka-addr");
-        assertEquals("floci-aws-msk-abc123:9092", spec.cmd().get(flagIndex + 1));
+        assertEquals("internal://floci-aws-msk-abc123:9092,host://localhost:9301",
+                spec.cmd().get(flagIndex + 1));
 
-        assertFalse(spec.portBindings().containsKey(KAFKA_PORT), "container mode should not publish ports to host");
+        assertFalse(spec.portBindings().containsKey(KAFKA_PORT),
+                "the internal listener stays on the Docker network");
+        assertEquals(Integer.valueOf(9301), spec.portBindings().get(RedpandaManager.KAFKA_HOST_LISTENER_PORT),
+                "the host listener is published so clients on the Docker host can reach the broker");
         assertTrue(spec.exposedPorts().contains(KAFKA_PORT));
         assertTrue(spec.exposedPorts().contains(RedpandaManager.ADMIN_PORT));
         assertFalse(Files.exists(tempDir.resolve("msk").resolve("test-cluster")),
                 "container mode must not create host directories from inside the emulator container");
 
-        verifyNoInteractions(portAllocator);
+        assertEquals("172.18.0.5:9092", cluster.getBootstrapBrokers(),
+                "without a bootstrap hostname, GetBootstrapBrokers keeps the Docker-network address");
+    }
+
+    @Test
+    void containerModeReportsHostListenerWhenBootstrapHostnameIsSet() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(config.services().msk().bootstrapHostname()).thenReturn(Optional.of("kafka.local"));
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9302);
+
+        ContainerInfo info = new ContainerInfo("container-457",
+                Map.of(KAFKA_PORT, new EndpointInfo("172.18.0.6", KAFKA_PORT)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+
+        MskCluster cluster = newCluster();
+        manager.startContainer(cluster);
+
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        ContainerSpec spec = specCaptor.getValue();
+        int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
+        assertEquals("internal://floci-aws-msk-abc123:9092,host://kafka.local:9302",
+                spec.cmd().get(flagIndex + 1));
+        assertEquals("kafka.local:9302", cluster.getBootstrapBrokers());
+    }
+
+    @Test
+    void containerModeReleasesHostListenerPortWhenStartFails() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9303);
+        when(lifecycleManager.createAndStart(any())).thenThrow(new RuntimeException("boom"));
+
+        assertThrows(RuntimeException.class, () -> manager.startContainer(newCluster()));
+
+        verify(portAllocator).release(9303);
+    }
+
+    @Test
+    void stopContainerInContainerModeReleasesHostListenerPort() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(9304);
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("container-458",
+                Map.of(KAFKA_PORT, new EndpointInfo("172.18.0.7", KAFKA_PORT))));
+
+        MskCluster cluster = newCluster();
+        manager.startContainer(cluster);
+        manager.stopContainer(cluster);
+
+        verify(lifecycleManager).stopAndRemove("container-458", null);
+        verify(portAllocator).release(9304);
     }
 
     @Test
