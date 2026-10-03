@@ -145,6 +145,11 @@ public class CloudFormationQueryHandler {
         String stackName = params.getFirst("StackName");
         String templateBody = params.getFirst("TemplateBody");
         String templateUrl = params.getFirst("TemplateURL");
+        String previousTemplate = cfnService.previousTemplateFor(stackName, region, templateBody,
+                templateUrl, Boolean.parseBoolean(params.getFirst("UsePreviousTemplate")));
+        if (previousTemplate != null) {
+            templateBody = previousTemplate;
+        }
         Map<String, String> parameters =
                 extractParameters(params, cfnService.currentParameters(stackName, region));
         List<String> capabilities = extractList(params, "Capabilities.member.");
@@ -211,6 +216,19 @@ public class CloudFormationQueryHandler {
         String changeSetType = params.getFirst("ChangeSetType");
         String templateBody = params.getFirst("TemplateBody");
         String templateUrl = params.getFirst("TemplateURL");
+        boolean usePreviousTemplate = Boolean.parseBoolean(params.getFirst("UsePreviousTemplate"));
+        if (usePreviousTemplate && "CREATE".equalsIgnoreCase(changeSetType)) {
+            throw new AwsException("ValidationError",
+                    "UsePreviousTemplate cannot be specified for a CREATE change set", 400);
+        }
+        if (usePreviousTemplate && changeSetType == null) {
+            changeSetType = "UPDATE";
+        }
+        String previousTemplate = cfnService.previousTemplateFor(stackName, region, templateBody,
+                templateUrl, usePreviousTemplate);
+        if (previousTemplate != null) {
+            templateBody = previousTemplate;
+        }
         Map<String, String> parameters =
                 extractParameters(params, cfnService.currentParameters(stackName, region));
         List<String> capabilities = extractList(params, "Capabilities.member.");

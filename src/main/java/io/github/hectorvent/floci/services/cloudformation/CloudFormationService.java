@@ -242,6 +242,34 @@ public class CloudFormationService implements ResourceProvider {
                 && (status.endsWith("_IN_PROGRESS") || "ROLLBACK_COMPLETE".equals(status));
     }
 
+    /**
+     * Validates the template source of an {@code UpdateStack} or {@code CreateChangeSet} request
+     * and, when {@code UsePreviousTemplate} is set, returns the template the stack currently holds.
+     * Returns {@code null} when the request carries its own template.
+     */
+    public String previousTemplateFor(String stackName, String region, String templateBody,
+                                      String templateUrl, boolean usePreviousTemplate) {
+        boolean hasTemplate = (templateBody != null && !templateBody.isBlank())
+                || (templateUrl != null && !templateUrl.isBlank());
+        if (usePreviousTemplate && hasTemplate) {
+            throw new AwsException("ValidationError",
+                    "UsePreviousTemplate cannot be specified together with TemplateBody or TemplateURL", 400);
+        }
+        if (!usePreviousTemplate) {
+            if (!hasTemplate) {
+                throw new AwsException("ValidationError",
+                        "Either Template URL or Template Body must be specified.", 400);
+            }
+            return null;
+        }
+        Stack stack = resolveStack(stackName, region);
+        if (stack == null) {
+            throw new AwsException("ValidationError",
+                    "Stack with id " + stackName + " does not exist", 400);
+        }
+        return stack.getTemplateBody();
+    }
+
     // ── CreateChangeSet ───────────────────────────────────────────────────────
 
     public ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,
