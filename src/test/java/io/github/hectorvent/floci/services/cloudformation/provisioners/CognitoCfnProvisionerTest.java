@@ -10,9 +10,9 @@ import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
+import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
-import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.List;
@@ -873,6 +873,22 @@ class CognitoCfnProvisionerTest {
         assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
 
         assertTrue(r.getAttributes().containsKey(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void anInPlaceUpdateDropsItsSnapshotWhenTheUpdateCommits() {
+        // The engine's post-commit cleanup calls completeUpdate for every resource, but clearUpdate
+        // only after a replacement, so an in-place update relies on completeUpdate.
+        when(cognito.userPoolSettings(POOL_ID)).thenReturn(pool(POOL_ID, "my-pool"));
+        when(cognito.updateUserPool(any(), eq(REGION))).thenReturn(pool(POOL_ID, "renamed-pool"));
+        StackResource r = resource(USER_POOL, "Pool");
+        r.setPhysicalId(POOL_ID);
+        provisioner.provision(r, mapper.createObjectNode().put("UserPoolName", "renamed-pool"), ctx(POOL_ID));
+        assertTrue(r.getAttributes().containsKey(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR));
+
+        assertFalse(provisioner.completeUpdate(r).applicable(), "an in-place update owes no replacement cleanup");
+
+        assertFalse(r.getAttributes().containsKey(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR));
     }
 
     @Test

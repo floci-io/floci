@@ -149,8 +149,14 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         return ReplacementCleanup.cleanupPhysicalId(resource);
     }
 
+    /**
+     * The engine calls this for every resource once a stack update commits, but {@link #clearUpdate}
+     * only after a replacement's cleanup, so an in-place update's snapshot is dropped here: the update
+     * committed and nothing will roll it back.
+     */
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.COGNITO_UPDATE_SNAPSHOT_ATTR);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
