@@ -154,7 +154,7 @@ cross-resource references.
 | Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup` |
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
-| EventBridge Scheduler | `ScheduleGroup` |
+| EventBridge Scheduler | `Schedule`, `ScheduleGroup` |
 | Transfer Family | `Server` (management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported) |
 | Backup | `BackupVault` |
 | Pipes | `Pipe` |
@@ -185,6 +185,27 @@ Set `floci.services.cloudformation.allow-stub-unsupported-resource-types` to `fa
 (`FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_UNSUPPORTED_RESOURCE_TYPES=false`) to fail such a
 resource instead: it reaches `CREATE_FAILED` and the stack rolls back. Use it in a pipeline that
 must not pass over a resource it never got.
+
+## EventBridge Scheduler Schedules
+
+`AWS::Scheduler::Schedule` creates a real schedule. `Ref` returns its name and `Fn::GetAtt Arn`
+returns its ARN. A group move preserves the name, removes the old group address, and restores the
+original configuration if the stack update rolls back.
+
+`Fn::If` values that select `AWS::NoValue` omit optional schedule properties and nested target
+or time-window fields. `ScheduleExpression`, `Target`, `FlexibleTimeWindow`, and their required
+fields still must be present and valid.
+
+If `DeleteStack` cannot remove a failed update's schedule orphan, it leaves the stack in
+`DELETE_FAILED` and keeps the orphan's address for a later deletion retry. This is separate from
+committed update cleanup, which abandons an old schedule after three failed attempts.
+`UpdateReplacePolicy: Retain` keeps a name replacement's old schedule, but does not keep a group
+move's old address or an orphan created by a failed update.
+
+Schedules are addressed by group and name, as in the Scheduler API. If another client removes a
+managed schedule and recreates the same address, an in-place stack update applies the template to
+the current schedule there. Stack deletion and replacement cleanup delete the current schedule
+at a tracked address, and rollback restores its saved configuration at that address.
 
 ## EventBridge Event Buses
 
