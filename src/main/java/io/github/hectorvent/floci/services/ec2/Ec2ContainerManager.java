@@ -47,7 +47,6 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -666,7 +665,7 @@ public class Ec2ContainerManager {
                     }
                     lifecycleManager.removeIfExists(namespace.helperId());
                 }
-                if (isHostPortCollision(e)) {
+                if (PortAllocator.isHostPortCollision(e)) {
                     // Docker Desktop can own a published port without exposing it to a host-side
                     // ServerSocket probe. Keep it unavailable for this process and try the next port.
                     portAllocator.markReserved(sshHostPort);
@@ -865,17 +864,6 @@ public class Ec2ContainerManager {
     private static boolean isLaunchCancelledState(Instance instance) {
         String state = instance.getState() != null ? instance.getState().getName() : null;
         return "shutting-down".equals(state) || "terminated".equals(state);
-    }
-
-    private static boolean isHostPortCollision(Exception exception) {
-        for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
-            String message = cause.getMessage();
-            if (message != null && (message.toLowerCase(Locale.ROOT).contains("port is already allocated")
-                    || message.toLowerCase(Locale.ROOT).contains("address already in use"))) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private record StartedContainer(String containerId, int sshHostPort, String vpcAddress,
