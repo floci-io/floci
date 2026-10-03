@@ -1847,7 +1847,8 @@ public class EksClusterManager
         }
         String endpoint = "http://" + dockerHostResolver.resolve() + ":" + config.port();
         boolean tlsUri = config.services().ecr().tlsUri() && config.tls().enabled();
-        String content = buildRegistriesYaml(config.defaultAccountId(), regions, config.port(), endpoint, tlsUri);
+        String content = buildRegistriesYaml(config.defaultAccountId(), regions,
+                ecrRegistryManager.advertisedPort(), endpoint, tlsUri);
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
                 "registries.yaml"), content, clusterName);
         try {
@@ -2033,27 +2034,28 @@ public class EksClusterManager
     /**
      * Builds the k3s registries.yaml content. One mirror entry per hostname-style repository URI
      * ({@code <account>.dkr.ecr.<region>.localhost:<port>}) plus one for the path-style form
-     * ({@code localhost:<port>}), all pointing at Floci's in-network data plane. The TLS URI
-     * mode adds the corresponding {@code localhost.floci.io} aliases. k3s supports
-     * no partial wildcards and a {@code "*"} catch-all would also intercept public registries,
-     * so the hostnames are enumerated explicitly.
+     * ({@code localhost:<port>}), all pointing at Floci's in-network data plane. The port is the
+     * one the repository URIs advertise, which differs from the endpoint's port when Floci's
+     * container publishes its port on another host port. The TLS URI mode adds the corresponding
+     * {@code localhost.floci.io} aliases. k3s supports no partial wildcards and a {@code "*"}
+     * catch-all would also intercept public registries, so the hostnames are enumerated explicitly.
      */
-    static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort, String endpoint) {
-        return buildRegistriesYaml(accountId, regions, dataPlanePort, endpoint, false);
+    static String buildRegistriesYaml(String accountId, List<String> regions, int advertisedPort, String endpoint) {
+        return buildRegistriesYaml(accountId, regions, advertisedPort, endpoint, false);
     }
 
-    static String buildRegistriesYaml(String accountId, List<String> regions, int dataPlanePort,
+    static String buildRegistriesYaml(String accountId, List<String> regions, int advertisedPort,
                                      String endpoint, boolean tlsUri) {
         StringBuilder yaml = new StringBuilder("mirrors:\n");
         for (String region : regions) {
-            appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost:" + dataPlanePort, endpoint);
+            appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost:" + advertisedPort, endpoint);
             if (tlsUri) {
-                appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost.floci.io:" + dataPlanePort, endpoint);
+                appendMirror(yaml, accountId + ".dkr.ecr." + region + ".localhost.floci.io:" + advertisedPort, endpoint);
             }
         }
-        appendMirror(yaml, "localhost:" + dataPlanePort, endpoint);
+        appendMirror(yaml, "localhost:" + advertisedPort, endpoint);
         if (tlsUri) {
-            appendMirror(yaml, "localhost.floci.io:" + dataPlanePort, endpoint);
+            appendMirror(yaml, "localhost.floci.io:" + advertisedPort, endpoint);
         }
         return yaml.toString();
     }

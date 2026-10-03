@@ -32,7 +32,7 @@ public class CurrentContainerNetworkResolver {
 
     private final DockerClient dockerClient;
     private final ContainerDetector containerDetector;
-    private final Map<Integer, Integer> cachedPublishedPorts = new ConcurrentHashMap<>();
+    private final Map<Integer, OptionalInt> cachedPublishedPorts = new ConcurrentHashMap<>();
 
     private volatile Optional<CurrentContainerNetwork> cachedNetwork;
 
@@ -59,15 +59,17 @@ public class CurrentContainerNetworkResolver {
     }
 
     public OptionalInt resolvePublishedPort(int containerPort) {
-        Integer cachedPublishedPort = cachedPublishedPorts.get(containerPort);
+        OptionalInt cachedPublishedPort = cachedPublishedPorts.get(containerPort);
         if (cachedPublishedPort != null) {
-            return OptionalInt.of(cachedPublishedPort);
+            return cachedPublishedPort;
         }
 
         OptionalInt resolvedPublishedPort = detectPublishedPort(containerPort);
-        resolvedPublishedPort.ifPresent(port -> cachedPublishedPorts.putIfAbsent(containerPort, port));
-        Integer publishedPort = cachedPublishedPorts.get(containerPort);
-        return publishedPort == null ? OptionalInt.empty() : OptionalInt.of(publishedPort);
+        if (resolvedPublishedPort == null) {
+            return OptionalInt.empty();
+        }
+        OptionalInt publishedPort = cachedPublishedPorts.putIfAbsent(containerPort, resolvedPublishedPort);
+        return publishedPort == null ? resolvedPublishedPort : publishedPort;
     }
 
     Optional<CurrentContainerNetwork> resolve() {
@@ -79,6 +81,12 @@ public class CurrentContainerNetworkResolver {
         return cachedNetwork;
     }
 
+    /**
+     * The host port Floci's own container publishes for {@code containerPort}, empty when it is
+     * not published or Floci is not in a container, or null when the container could not be
+     * inspected so the next call retries. A running container's port bindings never change, so
+     * every non-null result is final.
+     */
     private OptionalInt detectPublishedPort(int containerPort) {
         if (!containerDetector.isRunningInContainer()) {
             return OptionalInt.empty();
@@ -87,7 +95,7 @@ public class CurrentContainerNetworkResolver {
         String containerId = currentContainerId();
         if (containerId.isBlank()) {
             LOG.debug("Could not determine current Docker container id");
-            return OptionalInt.empty();
+            return null;
         }
 
         try {
@@ -115,7 +123,7 @@ public class CurrentContainerNetworkResolver {
         } catch (Exception e) {
             LOG.debugv("Could not resolve published port {0} for current Docker container {1}: {2}",
                     String.valueOf(containerPort), containerId, e.getMessage());
-            return OptionalInt.empty();
+            return null;
         }
     }
 

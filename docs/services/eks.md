@@ -618,6 +618,8 @@ Requirements and limits:
   EKS service network variable.
 - Only Floci-mintable hostnames are mirrored; public registries (docker.io, ghcr.io, …)
   are never touched.
+- Mirrored hostnames carry the port the repository URIs advertise, which is the host port
+  when Floci's container publishes `4566` on another one (see [ECR](ecr.md#docker-compose-port-mapping)).
 - Repository URIs using a non-default `registryId` (account) are not covered.
 - The mirror set is snapshotted when the cluster is created. Clusters created before this
   feature can be fixed manually because the k3s container filesystem survives a restart:

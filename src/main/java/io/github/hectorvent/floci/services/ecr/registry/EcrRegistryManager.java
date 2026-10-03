@@ -45,8 +45,10 @@ import java.util.regex.Pattern;
  * lazily on first use and reused across restarts.
  *
  * <p>Methods that compute URIs ({@link #getRepositoryUri}, {@link #getProxyEndpoint})
- * do not require Docker — they read the configured port and account/region from
- * {@link EmulatorConfig}. Only {@link #ensureStarted()} talks to the daemon.
+ * never start the registry. They read the account and region from {@link EmulatorConfig}
+ * and the port from {@link #advertisedPort()}, which inspects Floci's own container only
+ * when Floci runs in one and falls back to the configured port. Only
+ * {@link #ensureStarted()} manages the registry container.
  */
 @ApplicationScoped
 public class EcrRegistryManager {
@@ -161,7 +163,7 @@ public class EcrRegistryManager {
     }
 
     private String repositoryUri(String accountId, String region, String repoName, String domain) {
-        int port = config.port();
+        int port = advertisedPort();
         String style = config.services().ecr().uriStyle();
         if ("path".equalsIgnoreCase(style)) {
             return domain + ":" + port + "/" + accountId + "/" + region + "/" + repoName;
@@ -187,11 +189,22 @@ public class EcrRegistryManager {
                     ? "localhost.floci.io"
                     : regionResolver.getAccountId() + ".dkr.ecr."
                             + regionResolver.getRegion() + ".localhost.floci.io";
-            return "https://" + host + ":" + config.port();
+            return "https://" + host + ":" + advertisedPort();
         }
         String scheme = config.services().ecr().tlsEnabled() ? "https" : "http";
         return scheme + "://" + regionResolver.getAccountId() + ".dkr.ecr."
-                + regionResolver.getRegion() + ".localhost:" + config.port();
+                + regionResolver.getRegion() + ".localhost:" + advertisedPort();
+    }
+
+    /**
+     * The port in every registry address Floci hands out. The Docker daemon performs login, push
+     * and pull, and reaches Floci through the host port Floci's own container publishes for
+     * {@code floci.port}. Outside a container, or when that port is not published, it is
+     * {@code floci.port} itself.
+     */
+    public int advertisedPort() {
+        int port = config.port();
+        return currentContainerNetworkResolver.resolvePublishedPort(port).orElse(port);
     }
 
     /** Returns the effective registry port. Stable across calls once {@link #ensureStarted} runs. */
