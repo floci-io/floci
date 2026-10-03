@@ -9,15 +9,16 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.TempCredential;
-import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import jakarta.interceptor.Interceptor;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
@@ -111,10 +112,12 @@ public class RedshiftServerlessService implements Resettable {
 
     /**
      * A persisted workgroup keeps its endpoint across restarts. The port is claimed again in the
-     * shared pool before anything else can be handed it; if a provisioned cluster already took it,
-     * the workgroup gets a new endpoint and the change is stored.
+     * shared pool; if a provisioned cluster already took it, the workgroup gets a new endpoint and the
+     * change is stored. The priority places this after the default-priority observers, which includes
+     * {@code RedshiftService}, so every persisted cluster has reserved its own port by then and the
+     * two services cannot be handed the same one.
      */
-    void onStart(@Observes StartupEvent event) {
+    void onStart(@Observes @Priority(Interceptor.Priority.APPLICATION + 600) StartupEvent event) {
         for (AccountAwareStorageBackend.AccountEntry<Workgroup> entry : workgroups.scanAllAccountEntries(key -> true)) {
             Workgroup workgroup = new Workgroup(entry.value());
             workgroup.setEndpoint(endpoints.restore(workgroup.getEndpoint()));

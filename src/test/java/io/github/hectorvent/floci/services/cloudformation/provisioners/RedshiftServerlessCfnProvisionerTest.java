@@ -251,6 +251,31 @@ class RedshiftServerlessCfnProvisionerTest {
     }
 
     @Test
+    void anUpdateThatOmitsAPropertyResetsItToTheDefaultInsteadOfKeepingTheStoredValue() {
+        when(service.getWorkgroup("my-wg", REGION)).thenReturn(workgroup("my-wg", "my-ns"));
+        when(service.updateWorkgroup(eq("my-wg"), any(WorkgroupSettings.class), eq(REGION)))
+                .thenReturn(workgroup("my-wg", "my-ns"));
+        when(service.listTagsForResource(WORKGROUP_ARN, REGION)).thenReturn(Map.of());
+        ObjectNode props = mapper.createObjectNode();
+        props.put("WorkgroupName", "my-wg");
+        props.put("NamespaceName", "my-ns");
+
+        provisioner.provision(resource(WORKGROUP_TYPE, "my-wg"), props, ctx("my-wg"));
+
+        ArgumentCaptor<WorkgroupSettings> settings = ArgumentCaptor.forClass(WorkgroupSettings.class);
+        verify(service).updateWorkgroup(eq("my-wg"), settings.capture(), eq(REGION));
+        WorkgroupSettings sent = settings.getValue();
+        assertEquals(RedshiftServerlessService.DEFAULT_BASE_CAPACITY, sent.baseCapacity());
+        assertEquals(Boolean.FALSE, sent.enhancedVpcRouting());
+        assertEquals(Boolean.FALSE, sent.publiclyAccessible());
+        assertEquals(RedshiftServerlessService.DEFAULT_PORT, sent.port());
+        assertEquals(RedshiftServerlessService.DEFAULT_TRACK_NAME, sent.trackName());
+        assertEquals("DISABLED", sent.pricePerformanceTarget().getStatus());
+        assertTrue(sent.configParameters().isEmpty());
+        assertTrue(sent.subnetIds().isEmpty());
+    }
+
+    @Test
     void aNonNumericCapacityIsAValidationError() {
         ObjectNode props = mapper.createObjectNode();
         props.put("WorkgroupName", "my-wg");
