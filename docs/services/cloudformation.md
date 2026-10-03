@@ -153,7 +153,7 @@ cross-resource references.
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
 | Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup` |
 | ACM | `Certificate` |
-| EventBridge | `Rule`, `EventBus`, `EventBusPolicy` |
+| EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `ApiDestination` |
 | EventBridge Scheduler | `ScheduleGroup` |
 | Transfer Family | `Server` (management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported) |
 | Backup | `BackupVault` |

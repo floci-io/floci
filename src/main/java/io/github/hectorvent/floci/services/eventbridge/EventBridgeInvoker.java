@@ -9,11 +9,14 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
+import io.github.hectorvent.floci.services.eventbridge.model.Connection;
 import io.github.hectorvent.floci.services.eventbridge.model.EcsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
@@ -28,8 +31,18 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.InetAddress;
+import java.net.URI;
+import java.net.UnknownHostException;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -56,6 +69,7 @@ public class EventBridgeInvoker {
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
+    private final HttpClient httpClient;
 
     @Inject
     public EventBridgeInvoker(LambdaService lambdaService,
@@ -70,6 +84,24 @@ public class EventBridgeInvoker {
                               RegionResolver regionResolver,
                               ObjectMapper objectMapper,
                               EmulatorConfig config) {
+        this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
+                ecsService, ecsJsonHandler, stepFunctionsService, regionResolver, objectMapper, config,
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+    }
+
+    EventBridgeInvoker(LambdaService lambdaService,
+                       SqsService sqsService,
+                       SnsService snsService,
+                       BatchService batchService,
+                       FirehoseService firehoseService,
+                       EventBridgeService eventBridgeService,
+                       EcsService ecsService,
+                       EcsJsonHandler ecsJsonHandler,
+                       StepFunctionsService stepFunctionsService,
+                       RegionResolver regionResolver,
+                       ObjectMapper objectMapper,
+                       EmulatorConfig config,
+                       HttpClient httpClient) {
         this.lambdaService = lambdaService;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -82,6 +114,7 @@ public class EventBridgeInvoker {
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
+        this.httpClient = httpClient;
     }
 
     EventBridgeInvoker(LambdaService lambdaService,
@@ -247,6 +280,8 @@ public class EventBridgeInvoker {
                         BUS_TO_BUS_DEPTH.set(depth);
                     }
                 }
+            } else if (arn.contains(":events:") && arn.contains(":api-destination/")) {
+                deliverToApiDestination(target, payload, region);
             } else {
                 LOG.warnv("EventBridge: unsupported target ARN type: {0}", arn);
             }
@@ -447,5 +482,208 @@ public class EventBridgeInvoker {
         String resource = AwsArnUtils.parse(arn).resource();
         String prefix = "stateMachine:";
         return resource.startsWith(prefix) && resource.indexOf(':', prefix.length()) < 0;
+    }
+
+    private void deliverToApiDestination(Target target, String payload, String region) {
+        if (eventBridgeService == null) {
+            LOG.warnv("EventBridge API Destination target missing EventBridge service: {0}", target.getArn());
+            return;
+        }
+        String arn = target.getArn();
+        ApiDestination destination = eventBridgeService.findApiDestinationByArn(arn, region);
+        if (destination == null) {
+            LOG.warnv("EventBridge API Destination not found for ARN: {0}", arn);
+            return;
+        }
+
+        Connection connection = null;
+        if (destination.getConnectionArn() != null) {
+            try {
+                connection = eventBridgeService.findConnectionByArn(destination.getConnectionArn(), region);
+            } catch (Exception e) {
+                LOG.warnv("Failed to find Connection {0} for API Destination {1}: {2}",
+                        destination.getConnectionArn(), destination.getName(), e.getMessage());
+            }
+        }
+
+        String rawUrl = destination.getInvocationEndpoint();
+        if (rawUrl == null || rawUrl.isBlank()) {
+            LOG.warnv("API Destination {0} has no InvocationEndpoint", destination.getName());
+            return;
+        }
+
+        String resolvedUrl = rawUrl;
+        if (target.getHttpParameters() != null && target.getHttpParameters().getPathParameterValues() != null) {
+            List<String> pathValues = target.getHttpParameters().getPathParameterValues();
+            for (String val : pathValues) {
+                int starIdx = resolvedUrl.indexOf('*');
+                if (starIdx >= 0) {
+                    resolvedUrl = resolvedUrl.substring(0, starIdx) + val + resolvedUrl.substring(starIdx + 1);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Map<String, String> queryParams = new LinkedHashMap<>();
+        if (connection != null && connection.getAuthParameters() != null) {
+            try {
+                JsonNode authNode = objectMapper.readTree(connection.getAuthParameters());
+                JsonNode invocationHttp = authNode.path("InvocationHttpParameters");
+                if (invocationHttp.has("QueryStringParameters")) {
+                    for (JsonNode param : invocationHttp.path("QueryStringParameters")) {
+                        String key = param.path("Key").asText(null);
+                        String value = param.path("Value").asText(null);
+                        if (key != null && value != null) {
+                            queryParams.put(key, value);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                LOG.warnv("Failed to parse connection authParameters for query string: {0}", e.getMessage());
+            }
+        }
+        if (target.getHttpParameters() != null && target.getHttpParameters().getQueryStringParameters() != null) {
+            queryParams.putAll(target.getHttpParameters().getQueryStringParameters());
+        }
+
+        if (!queryParams.isEmpty()) {
+            StringBuilder sb = new StringBuilder(resolvedUrl);
+            if (!resolvedUrl.contains("?")) {
+                sb.append("?");
+            } else if (!resolvedUrl.endsWith("?") && !resolvedUrl.endsWith("&")) {
+                sb.append("&");
+            }
+            boolean first = true;
+            for (Map.Entry<String, String> entry : queryParams.entrySet()) {
+                if (!first) {
+                    sb.append("&");
+                }
+                first = false;
+                sb.append(URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8))
+                        .append("=")
+                        .append(URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8));
+            }
+            resolvedUrl = sb.toString();
+        }
+
+        URI uri;
+        try {
+            uri = URI.create(resolvedUrl);
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Invalid API Destination URI: {0}", resolvedUrl);
+            return;
+        }
+
+        String host = uri.getHost();
+        if (host != null) {
+            try {
+                SsrfProtection.rejectMetadataAddresses(InetAddress.getAllByName(host), host);
+            } catch (UnknownHostException ignored) {
+                // Host resolution will be attempted by httpClient.send
+            } catch (IOException e) {
+                LOG.warnv("Refusing to deliver to API Destination {0}: {1}", resolvedUrl, e.getMessage());
+                return;
+            }
+        }
+
+        Map<String, String> headers = new LinkedHashMap<>();
+        if (connection != null) {
+            applyConnectionAuth(connection, headers);
+            if (connection.getAuthParameters() != null) {
+                try {
+                    JsonNode authNode = objectMapper.readTree(connection.getAuthParameters());
+                    JsonNode invocationHttp = authNode.path("InvocationHttpParameters");
+                    if (invocationHttp.has("HeaderParameters")) {
+                        for (JsonNode param : invocationHttp.path("HeaderParameters")) {
+                            String key = param.path("Key").asText(null);
+                            String value = param.path("Value").asText(null);
+                            if (key != null && value != null) {
+                                headers.put(key, value);
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    LOG.warnv("Failed to parse connection authParameters for headers: {0}", e.getMessage());
+                }
+            }
+        }
+
+        if (target.getHttpParameters() != null && target.getHttpParameters().getHeaderParameters() != null) {
+            headers.putAll(target.getHttpParameters().getHeaderParameters());
+        }
+
+        String method = destination.getHttpMethod() != null ? destination.getHttpMethod().toUpperCase() : "POST";
+        boolean hasBody = "POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method);
+
+        if (hasBody && !headers.containsKey("Content-Type") && !headers.containsKey("content-type")) {
+            headers.put("Content-Type", "application/json; charset=utf-8");
+        }
+
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(uri)
+                .timeout(Duration.ofSeconds(5));
+
+        headers.forEach(requestBuilder::header);
+
+        HttpRequest.BodyPublisher bodyPublisher = hasBody
+                ? HttpRequest.BodyPublishers.ofString(payload != null ? payload : "", StandardCharsets.UTF_8)
+                : HttpRequest.BodyPublishers.noBody();
+
+        requestBuilder.method(method, bodyPublisher);
+
+        try {
+            HttpResponse<String> response = httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
+            LOG.debugv("API Destination {0} response status: {1}", destination.getName(), response.statusCode());
+        } catch (Exception e) {
+            LOG.warnv("Failed to deliver to API Destination {0} ({1}): {2}",
+                    destination.getName(), resolvedUrl, e.getMessage());
+        }
+    }
+
+    private void applyConnectionAuth(Connection connection, Map<String, String> headers) {
+        String authType = connection.getAuthorizationType();
+        if (authType == null || connection.getAuthParameters() == null) {
+            return;
+        }
+        try {
+            JsonNode authNode = objectMapper.readTree(connection.getAuthParameters());
+            switch (authType) {
+                case "BASIC" -> {
+                    JsonNode basic = authNode.path("BasicAuthParameters");
+                    String user = basic.path("Username").asText("");
+                    String pass = basic.path("Password").asText("");
+                    String token = Base64.getEncoder().encodeToString(
+                            (user + ":" + pass).getBytes(StandardCharsets.UTF_8));
+                    headers.put("Authorization", "Basic " + token);
+                }
+                case "API_KEY" -> {
+                    JsonNode apiKey = authNode.path("ApiKeyAuthParameters");
+                    String name = apiKey.path("ApiKeyName").asText(null);
+                    String value = apiKey.path("ApiKeyValue").asText(null);
+                    if (name != null && value != null) {
+                        headers.put(name, value);
+                    }
+                }
+                case "OAUTH_CLIENT_CREDENTIALS" -> {
+                    JsonNode oauth = authNode.path("OAuthParameters");
+                    if (oauth.has("OAuthHttpParameters")) {
+                        JsonNode oauthHttp = oauth.path("OAuthHttpParameters");
+                        if (oauthHttp.has("HeaderParameters")) {
+                            for (JsonNode param : oauthHttp.path("HeaderParameters")) {
+                                String key = param.path("Key").asText(null);
+                                String value = param.path("Value").asText(null);
+                                if (key != null && value != null) {
+                                    headers.put(key, value);
+                                }
+                            }
+                        }
+                    }
+                }
+                default -> { }
+            }
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse connection auth: {0}", e.getMessage());
+        }
     }
 }

@@ -7,6 +7,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
+import io.github.hectorvent.floci.services.eventbridge.model.ApiDestinationState;
+import io.github.hectorvent.floci.services.eventbridge.model.Connection;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
 import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
@@ -936,5 +939,92 @@ class EventBridgeServiceTest {
         JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
         assertEquals(REGION, envelope.path("region").asText());
         assertEquals("000000000000", envelope.path("account").asText());
+    }
+
+    @Test
+    void createAndDescribeApiDestination() {
+        Connection conn = service.createConnection("my-conn", "test conn", "API_KEY",
+                "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"x-api-key\",\"ApiKeyValue\":\"secret\"}}",
+                null, null, REGION);
+
+        ApiDestination dest = service.createApiDestination(
+                "my-dest", "description", conn.getConnectionArn(),
+                "https://api.example.com/events", "POST", 10, REGION);
+
+        assertNotNull(dest.getArn());
+        assertEquals("my-dest", dest.getName());
+        assertEquals("description", dest.getDescription());
+        assertEquals(conn.getConnectionArn(), dest.getConnectionArn());
+        assertEquals("https://api.example.com/events", dest.getInvocationEndpoint());
+        assertEquals("POST", dest.getHttpMethod());
+        assertEquals(10, dest.getInvocationRateLimitPerSecond());
+        assertEquals(ApiDestinationState.ACTIVE, dest.getApiDestinationState());
+
+        ApiDestination described = service.describeApiDestination("my-dest", REGION);
+        assertEquals(dest.getArn(), described.getArn());
+        assertEquals("my-dest", described.getName());
+    }
+
+    @Test
+    void createApiDestination_validations() {
+        Connection conn = service.createConnection("conn-val", null, "API_KEY",
+                "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"x-key\",\"ApiKeyValue\":\"val\"}}",
+                null, null, REGION);
+
+        // Name missing
+        assertThrows(AwsException.class, () -> service.createApiDestination(
+                null, "desc", conn.getConnectionArn(), "https://api.com", "POST", 5, REGION));
+
+        // Invalid method
+        assertThrows(AwsException.class, () -> service.createApiDestination(
+                "dest-1", "desc", conn.getConnectionArn(), "https://api.com", "INVALID_METHOD", 5, REGION));
+
+        // Non-existent connection
+        assertThrows(AwsException.class, () -> service.createApiDestination(
+                "dest-2", "desc", "arn:aws:events:us-east-1:000000000000:connection/unknown/123",
+                "https://api.com", "POST", 5, REGION));
+
+        // Duplicate name
+        service.createApiDestination("dup-dest", "desc", conn.getConnectionArn(), "https://api.com", "POST", 5, REGION);
+        assertThrows(AwsException.class, () -> service.createApiDestination(
+                "dup-dest", "desc2", conn.getConnectionArn(), "https://api.com", "GET", 5, REGION));
+    }
+
+    @Test
+    void updateAndDeleteApiDestination() {
+        Connection conn1 = service.createConnection("conn-upd1", null, "API_KEY",
+                "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"k\",\"ApiKeyValue\":\"v\"}}", null, null, REGION);
+        Connection conn2 = service.createConnection("conn-upd2", null, "API_KEY",
+                "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"k\",\"ApiKeyValue\":\"v\"}}", null, null, REGION);
+
+        service.createApiDestination("upd-dest", "initial", conn1.getConnectionArn(), "https://api.com/v1", "POST", 5, REGION);
+
+        ApiDestination updated = service.updateApiDestination("upd-dest", "updated desc", conn2.getConnectionArn(),
+                "https://api.com/v2", "PUT", 20, REGION);
+
+        assertEquals("updated desc", updated.getDescription());
+        assertEquals(conn2.getConnectionArn(), updated.getConnectionArn());
+        assertEquals("https://api.com/v2", updated.getInvocationEndpoint());
+        assertEquals("PUT", updated.getHttpMethod());
+        assertEquals(20, updated.getInvocationRateLimitPerSecond());
+
+        service.deleteApiDestination("upd-dest", REGION);
+        assertThrows(AwsException.class, () -> service.describeApiDestination("upd-dest", REGION));
+    }
+
+    @Test
+    void listApiDestinations() {
+        Connection conn = service.createConnection("conn-list", null, "API_KEY",
+                "{\"ApiKeyAuthParameters\":{\"ApiKeyName\":\"k\",\"ApiKeyValue\":\"v\"}}", null, null, REGION);
+
+        service.createApiDestination("prefix-dest-1", null, conn.getConnectionArn(), "https://api.com", "GET", null, REGION);
+        service.createApiDestination("prefix-dest-2", null, conn.getConnectionArn(), "https://api.com", "GET", null, REGION);
+        service.createApiDestination("other-dest", null, conn.getConnectionArn(), "https://api.com", "GET", null, REGION);
+
+        List<ApiDestination> all = service.listApiDestinations(null, null, REGION);
+        assertTrue(all.size() >= 3);
+
+        List<ApiDestination> prefixed = service.listApiDestinations("prefix-", null, REGION);
+        assertEquals(2, prefixed.size());
     }
 }
