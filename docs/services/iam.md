@@ -679,6 +679,7 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries regi
 - An explicit **Deny** in a resource policy overrides any allows.
 - In cross-account scenarios or resource-controlled access, an explicit **Allow** in a resource policy grants access to the principal.
 - For detailed S3 bucket policy behavior and configuration, see [S3 Bucket Policy Enforcement](s3.md#bucket-policy-enforcement).
+- S3 bucket policies are the only resource policies evaluated today; [Resource policy enforcement](../design/resource-policy-enforcement.md) records the measured AWS behaviour for SQS, Lambda, API Gateway and IoT and the follow-up units that would evaluate them.
 
 ### Service control policies (SCPs)
 
@@ -856,8 +857,9 @@ being bounded by SCPs (below): both forms of root enforcement now agree. A negat
 absent key cannot equal what the policy names, so the condition holds, and a `Deny` written
 that way applies when the key is missing.
 
-**Not yet supported**: `NotPrincipal`, resource-based policies (S3 bucket policy, Lambda resource
-policy), and `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems` and the
+**Not yet supported**: resource-based policies other than S3 bucket policies (the others, for example
+SQS queue, SNS topic, Lambda function and API Gateway REST API policies, are stored but not
+evaluated), and `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems` and the
 PartiQL operations.
 
 ### Assumed roles
