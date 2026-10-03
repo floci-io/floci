@@ -300,7 +300,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
 
-        assertEquals(Set.of("maven", "npm"), created.getSidecarContainerIds().keySet());
+        assertEquals(Set.of("maven", "npm", "pypi"), created.getSidecarContainerIds().keySet());
         created.getSidecarContainerIds().values()
                 .forEach(id -> assertTrue(id != null && !id.isBlank()));
     }
@@ -313,7 +313,7 @@ class CodeArtifactServiceTest {
         service.deleteRepository(REGION, "dom", null, "repo");
         CodeArtifactRepository recreated = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
 
-        for (String format : Set.of("maven", "npm")) {
+        for (String format : Set.of("maven", "npm", "pypi")) {
             assertTrue(
                     !first.getSidecarContainerIds().get(format).equals(recreated.getSidecarContainerIds().get(format)),
                     "a recreated repository must never reuse the previous one's container id for a format, "
@@ -505,6 +505,9 @@ class CodeArtifactServiceTest {
 
         String endpoint = service.getRepositoryEndpoint(REGION, "dom", null, "repo", "npm", null);
         assertEquals("http://localhost:4566/codeartifact/npm/dom/repo/", endpoint);
+
+        String pypiEndpoint = service.getRepositoryEndpoint(REGION, "dom", null, "repo", "pypi", null);
+        assertEquals("http://localhost:4566/codeartifact/pypi/dom/repo/", pypiEndpoint);
 
         AwsException e = assertThrows(AwsException.class,
                 () -> service.getRepositoryEndpoint(REGION, "dom", null, "repo", "not-a-format", null));
