@@ -529,6 +529,20 @@ Routes carrying `authorizationType: AWS_IAM`: including those an OpenAPI import 
 `awsSigv4` security scheme: require a signed caller; see
 [IAM Authorization](#iam-authorization).
 
+Lambda REQUEST authorizer policies for HTTP APIs (payload formats 1.0 and 2.0) and
+WebSocket `$connect` routes are evaluated against the request's execute-api ARN. An
+invocation requires a matching `execute-api:Invoke` Allow; a matching Deny takes
+precedence regardless of statement order. Statements may be an object or an array,
+and actions and resources may be strings or arrays with wildcards. No matching Allow
+returns 403; a malformed policy returns 500. HTTP API simple responses continue to
+use `isAuthorized` instead of an IAM policy.
+
+`aws:SourceIp` conditions support IPv4 and IPv6 CIDR ranges. They use the request's
+transport address for HTTP APIs and the connection source IP for WebSocket handshakes.
+Caller-supplied `X-Forwarded-For` headers do not override this value. An empty
+`Condition` object or an unavailable
+request source IP returns 500 instead of evaluating without that context.
+
 ### Supported Operations
 
 | Category | Operations |
