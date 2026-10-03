@@ -57,6 +57,8 @@ public class CognitoOAuthController {
     private static final Pattern CODE_CHALLENGE_PATTERN = Pattern.compile("[A-Za-z0-9_-]{43}");
     /** RFC 7636 section 4.1: 43 to 128 characters of the unreserved set. */
     private static final Pattern CODE_VERIFIER_PATTERN = Pattern.compile("[A-Za-z0-9._~-]{43,128}");
+    /** AWS's description of a revocation without a token. */
+    private static final String INVALID_PARAMETER = "Invalid parameter in request";
 
     private final CognitoService cognitoService;
     private final ObjectMapper objectMapper;
@@ -395,6 +397,95 @@ public class CognitoOAuthController {
                           MultivaluedMap<String, String> formParams) {
         String domainPoolId = (String) requestContext.getProperty(CognitoCustomDomainFilter.POOL_PROPERTY);
         return issueToken(authorization, formParams, domainPoolId);
+    }
+
+    /**
+     * Revokes a refresh token and every access and ID token minted from it. A public client names
+     * itself with {@code client_id}; a client with a secret presents it in a Basic header, the only
+     * place AWS takes it from here. Success, and a token that is not valid or already revoked, are 200
+     * with an empty body, as on AWS. Errors are JSON whatever the {@code Accept} header asks for.
+     */
+    @POST
+    @Path("/cognito-idp/oauth2/revoke")
+    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
+    @Produces(MediaType.WILDCARD)
+    public Response revoke(@HeaderParam("Authorization") String authorization,
+                           @Context ContainerRequestContext requestContext,
+                           MultivaluedMap<String, String> formParams) {
+        String token = trimToNull(formParams.getFirst("token"));
+        if (token == null) {
+            return oauthError("invalid_request", INVALID_PARAMETER);
+        }
+        Optional<BasicCredentials> client = revokingClient(authorization,
+                trimToNull(formParams.getFirst("client_id")));
+        String domainPoolId = (String) requestContext.getProperty(CognitoCustomDomainFilter.POOL_PROPERTY);
+        if (client.isEmpty() || (domainPoolId != null && !isClientOfPool(client.get().clientId(), domainPoolId))) {
+            return invalidClient();
+        }
+        try {
+            cognitoService.revokeToken(client.get().clientId(), token, client.get().clientSecret());
+        } catch (AwsException e) {
+            return revocationError(e, token);
+        }
+        return Response.ok().build();
+    }
+
+    /**
+     * The client a revocation authenticates as, or empty when its credentials are refused. Unlike the
+     * token endpoint, AWS takes a secret only from a Basic header, and refuses one that is empty.
+     */
+    private Optional<BasicCredentials> revokingClient(String authorization, String bodyClientId) {
+        BasicCredentials basicCredentials;
+        try {
+            basicCredentials = parseBasicCredentials(authorization);
+        } catch (IllegalArgumentException expected) {
+            // A malformed Basic header authenticates no client, like a wrong secret.
+            return Optional.empty();
+        }
+        if (basicCredentials == null) {
+            return Optional.ofNullable(bodyClientId).map(clientId -> new BasicCredentials(clientId, null));
+        }
+        if (basicCredentials.clientId() == null || basicCredentials.clientSecret() == null
+                || (bodyClientId != null && !bodyClientId.equals(basicCredentials.clientId()))) {
+            return Optional.empty();
+        }
+        return Optional.of(basicCredentials);
+    }
+
+    /**
+     * AWS's answer to a revocation that {@code RevokeToken} refuses. A token that is not a refresh
+     * token is refused only when it is a JWT, an access or ID token; any other token is not valid,
+     * which AWS answers with 200.
+     */
+    private Response revocationError(AwsException e, String token) {
+        return switch (e.getErrorCode()) {
+            case "InvalidParameterException" -> oauthError("invalid_request", INVALID_PARAMETER);
+            case "UnsupportedOperationException" -> oauthError("invalid_request", "Unsupported operation");
+            case "ResourceNotFoundException", "UnauthorizedException" -> invalidClient();
+            case "UnsupportedTokenTypeException" -> token.split("\\.", -1).length == 3
+                    ? oauthError("unsupported_token_type", null)
+                    : Response.ok().build();
+            default -> {
+                LOG.errorv(e, "Failed to revoke a Cognito token");
+                yield oauthError("invalid_request", INVALID_PARAMETER);
+            }
+        };
+    }
+
+    /** AWS's answer to every client the revocation endpoint cannot authenticate. */
+    private Response invalidClient() {
+        return Response.fromResponse(oauthError(Response.Status.UNAUTHORIZED, "invalid_client",
+                        "Invalid client credentials in request"))
+                .header(HttpHeaders.WWW_AUTHENTICATE, "Basic")
+                .build();
+    }
+
+    private boolean isClientOfPool(String clientId, String poolId) {
+        try {
+            return poolId.equals(cognitoService.findClientById(clientId).getUserPoolId());
+        } catch (AwsException e) {
+            return false;
+        }
     }
 
     private Response issueToken(String authorization, MultivaluedMap<String, String> formParams,
@@ -889,10 +980,16 @@ public class CognitoOAuthController {
     }
 
     private Response oauthError(String error, String description) {
+        return oauthError(Response.Status.BAD_REQUEST, error, description);
+    }
+
+    private Response oauthError(Response.Status status, String error, String description) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("error", error);
-        body.put("error_description", description);
-        return Response.status(400)
+        if (description != null) {
+            body.put("error_description", description);
+        }
+        return Response.status(status)
                 .type(MediaType.APPLICATION_JSON)
                 .header("Cache-Control", "no-store")
                 .header("Pragma", "no-cache")
