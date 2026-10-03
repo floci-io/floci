@@ -51,6 +51,7 @@ class VirtualMfaAccountScopeTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), devices,
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", ACCOUNT_A), false, null);
 
         VirtualMfaDevice device = service.createVirtualMfaDevice("shared-name", "/", Map.of());
@@ -88,6 +89,7 @@ class VirtualMfaAccountScopeTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), devices,
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", ACCOUNT_A), false, null);
 
