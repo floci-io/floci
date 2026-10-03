@@ -238,6 +238,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_LAMBDA_ENABLED` | `true` | Enable the Lambda service |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove Lambda containers immediately after each invocation |
 | `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI` | `public.ecr.aws` | Registry (optionally with a path prefix) the Lambda runtime images are pulled from, e.g. `public.ecr.aws/lambda/python:3.12`. Legacy name `FLOCI_ECR_BASE_URI` still works |
+| `FLOCI_SERVICES_LAMBDA_RUNTIME_IMAGES__PYTHON3_12__` | *(unset)* | Override the `python3.12` runtime image, for example with `registry.example/lambda-python:3.12`. The double underscores quote the runtime key; the unquoted form `FLOCI_SERVICES_LAMBDA_RUNTIME_IMAGES_PYTHON3_12` does not bind. Use the same form for other dotted runtime keys. |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default memory allocation for functions that don't specify one |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default invocation timeout in seconds |
 | `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` | `12000` | First port in the Lambda Runtime API port range |

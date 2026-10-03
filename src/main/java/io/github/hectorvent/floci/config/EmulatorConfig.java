@@ -4,6 +4,7 @@ import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
 import java.net.URI;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 
@@ -2698,6 +2699,9 @@ public interface EmulatorConfig {
          */
         @WithDefault("public.ecr.aws") // partition-literal: configurable; ECR Public exists only in the commercial partition
         String ecrBaseUri();
+
+        /** Full image references for individual runtimes, keyed by Lambda runtime identifier. */
+        Map<String, String> runtimeImages();
 
         @WithDefault("128")
         int defaultMemoryMb();

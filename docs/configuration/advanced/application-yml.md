@@ -155,6 +155,8 @@ floci:
       ephemeral: false                        # true = remove container after each invocation
       docker-flags: ""                        # Extra Docker create flags for Lambda containers
       ecr-base-uri: public.ecr.aws            # Registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
+      runtime-images:                         # Optional per-runtime image references
+        "python3.12": "registry.example/lambda-python:3.12"
       honour-architectures: false             # true = select the declared Lambda Docker architecture
       default-memory-mb: 128
       default-timeout-seconds: 3
@@ -328,6 +330,7 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_DEFAULT_AVAILABILITY_ZONE`                  | `us-east-1a`     | Default AZ reported by EC2, RDS, and other AZ-aware services  |
 | `FLOCI_DEFAULT_ACCOUNT_ID`                         | `000000000000`   | Default AWS account ID used in ARNs                           |
 | `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI`               | `public.ecr.aws` | Registry used when pulling Lambda runtime images (legacy: `FLOCI_ECR_BASE_URI`) |
+| `FLOCI_SERVICES_LAMBDA_RUNTIME_IMAGES__PYTHON3_12__` | *(unset)* | Image reference for `python3.12`; double underscores quote the dotted runtime key |
 | `FLOCI_DNS_EXTRA_SUFFIXES`                         | *(unset)*        | Comma-separated extra hostname suffixes the embedded DNS server resolves to Floci's container IP. E.g. `localhost.localstack.cloud,localhost.example.internal` |
 | `FLOCI_SERVICES_SSM_MAX_PARAMETER_HISTORY`         | `5`              | Max parameter versions kept                                   |
 | `FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT`    | `30`             | Default visibility timeout (seconds)                          |
