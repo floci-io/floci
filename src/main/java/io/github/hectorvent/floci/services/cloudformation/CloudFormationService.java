@@ -1502,7 +1502,10 @@ public class CloudFormationService implements ResourceProvider {
                         stack.getResources().put(logicalId, resource);
                     }
 
-                    String inProgressStatus = isCreate
+                    // A logical id the stack did not hold is created, even on an update, as AWS
+                    // reports it; that includes a resource whose condition just turned true.
+                    boolean creating = isCreate || previousResource == null;
+                    String inProgressStatus = creating
                             ? "CREATE_IN_PROGRESS"
                             : "UPDATE_IN_PROGRESS";
                     addEvent(
@@ -1526,7 +1529,7 @@ public class CloudFormationService implements ResourceProvider {
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));
-                    if (!isCreate) {
+                    if (!creating) {
                         if ("CREATE_COMPLETE".equals(resource.getStatus())) {
                             resource.setStatus("UPDATE_COMPLETE");
                         } else if ("CREATE_FAILED".equals(resource.getStatus())) {
