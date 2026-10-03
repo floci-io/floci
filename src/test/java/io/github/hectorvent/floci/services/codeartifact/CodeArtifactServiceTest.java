@@ -36,6 +36,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -51,6 +53,7 @@ class CodeArtifactServiceTest {
     private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
     private VerdaccioSidecarManager verdaccioManager;
     private ReposiliteSidecarClient reposiliteClient;
+    private PypiserverSidecarManager pypiserverManager;
 
     @BeforeEach
     void setUp() {
@@ -72,8 +75,11 @@ class CodeArtifactServiceTest {
         when(verdaccioManager.format()).thenReturn("npm");
         reposiliteClient = mock(ReposiliteSidecarClient.class);
         when(reposiliteClient.format()).thenReturn("maven");
+        pypiserverManager = mock(PypiserverSidecarManager.class);
+        when(pypiserverManager.format()).thenReturn("pypi");
         service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, regionResolver, config,
-                true, null, new CodeArtifactSidecarRegistry(List.of(verdaccioManager, reposiliteClient)));
+                true, null, new CodeArtifactSidecarRegistry(
+                        List.of(verdaccioManager, reposiliteClient, pypiserverManager)));
     }
 
     // -------------------------------------------------------------- domains
@@ -300,7 +306,7 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
 
-        assertEquals(Set.of("maven", "npm"), created.getSidecarContainerIds().keySet());
+        assertEquals(Set.of("maven", "npm", "pypi"), created.getSidecarContainerIds().keySet());
         created.getSidecarContainerIds().values()
                 .forEach(id -> assertTrue(id != null && !id.isBlank()));
     }
@@ -313,7 +319,7 @@ class CodeArtifactServiceTest {
         service.deleteRepository(REGION, "dom", null, "repo");
         CodeArtifactRepository recreated = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
 
-        for (String format : Set.of("maven", "npm")) {
+        for (String format : Set.of("maven", "npm", "pypi")) {
             assertTrue(
                     !first.getSidecarContainerIds().get(format).equals(recreated.getSidecarContainerIds().get(format)),
                     "a recreated repository must never reuse the previous one's container id for a format, "
@@ -505,6 +511,9 @@ class CodeArtifactServiceTest {
 
         String endpoint = service.getRepositoryEndpoint(REGION, "dom", null, "repo", "npm", null);
         assertEquals("http://localhost:4566/codeartifact/npm/dom/repo/", endpoint);
+
+        String pypiEndpoint = service.getRepositoryEndpoint(REGION, "dom", null, "repo", "pypi", null);
+        assertEquals("http://localhost:4566/codeartifact/pypi/dom/repo/", pypiEndpoint);
 
         AwsException e = assertThrows(AwsException.class,
                 () -> service.getRepositoryEndpoint(REGION, "dom", null, "repo", "not-a-format", null));
@@ -1021,6 +1030,138 @@ class CodeArtifactServiceTest {
                 "dom", null, "repo", "generic", null, "my-pkg", "1.0.0", "a.txt", "not-the-current-revision"));
         assertEquals("ResourceNotFoundException", wrongRevision.getErrorCode());
         assertEquals("1.0.0", wrongRevision.getExtendedData().get("resourceId"));
+        assertEquals("package-version", wrongRevision.getExtendedData().get("resourceType"));
+    }
+
+    @Test
+    void getPackageVersionAssetBridgesToReposiliteForMavenSinceNoGenericRecordCanExist() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created =
+                service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        byte[] content = "jar bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("my-artifact"), eq("1.0.0"), eq("my-artifact-1.0.0.jar"))).thenReturn(Optional.of(content));
+
+        PackageVersionAssetResult result = service.getPackageVersionAsset(REGION, "dom", null, "repo", "maven",
+                "com.example", "my-artifact", "1.0.0", "my-artifact-1.0.0.jar", null);
+
+        assertEquals("jar bytes", new String(result.asset().getContent(), StandardCharsets.UTF_8));
+        assertEquals(sha256Hex((repoId + "/com.example/my-artifact/1.0.0").getBytes(StandardCharsets.UTF_8)),
+                result.packageVersionRevision());
+    }
+
+    @Test
+    void getPackageVersionAssetSynthesizesADifferentRevisionForTheSameCoordinatesInADifferentRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        byte[] content = "jar bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.fetchPackageVersionAsset(anyString(), eq("dom"), anyString(), eq("com.example"),
+                eq("my-artifact"), eq("1.0.0"), eq("my-artifact-1.0.0.jar"))).thenReturn(Optional.of(content));
+
+        PackageVersionAssetResult fromA = service.getPackageVersionAsset(REGION, "dom", null, "repo-a", "maven",
+                "com.example", "my-artifact", "1.0.0", "my-artifact-1.0.0.jar", null);
+        PackageVersionAssetResult fromB = service.getPackageVersionAsset(REGION, "dom", null, "repo-b", "maven",
+                "com.example", "my-artifact", "1.0.0", "my-artifact-1.0.0.jar", null);
+
+        assertTrue(!fromA.packageVersionRevision().equals(fromB.packageVersionRevision()),
+                "identical coordinates in two different repositories must not synthesize the same revision");
+    }
+
+    @Test
+    void getPackageVersionAssetSynthesizesTheSameRevisionForEveryAssetOfOneMavenVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(reposiliteClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), eq("com.example"),
+                eq("my-artifact"), eq("1.0.0"), eq("my-artifact-1.0.0.jar")))
+                .thenReturn(Optional.of("jar bytes".getBytes(StandardCharsets.UTF_8)));
+        when(reposiliteClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), eq("com.example"),
+                eq("my-artifact"), eq("1.0.0"), eq("my-artifact-1.0.0.pom")))
+                .thenReturn(Optional.of("pom bytes".getBytes(StandardCharsets.UTF_8)));
+
+        PackageVersionAssetResult jar = service.getPackageVersionAsset(REGION, "dom", null, "repo", "maven",
+                "com.example", "my-artifact", "1.0.0", "my-artifact-1.0.0.jar", null);
+        String jarRevision = jar.packageVersionRevision();
+
+        // A client that described the version once and now fetches a second asset pinned to that
+        // same revision must not get a spurious not-found just because this asset's own bytes
+        // differ from the first one's.
+        PackageVersionAssetResult pom = service.getPackageVersionAsset(REGION, "dom", null, "repo", "maven",
+                "com.example", "my-artifact", "1.0.0", "my-artifact-1.0.0.pom", jarRevision);
+
+        assertEquals(jarRevision, pom.packageVersionRevision());
+    }
+
+    @Test
+    void getPackageVersionAssetRequiresNamespaceForMaven() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION, "dom", null,
+                "repo", "maven", null, "my-artifact", "1.0.0", "my-artifact-1.0.0.jar", null));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void getPackageVersionAssetBridgesToVerdaccioForNpm() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "tarball bytes".getBytes(StandardCharsets.UTF_8);
+        when(verdaccioManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), eq("myscope"),
+                eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of(content));
+
+        PackageVersionAssetResult result = service.getPackageVersionAsset(REGION, "dom", null, "repo", "npm",
+                "myscope", "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", null);
+
+        assertEquals("tarball bytes", new String(result.asset().getContent(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void getPackageVersionAssetBridgesToPypiserver() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "wheel bytes".getBytes(StandardCharsets.UTF_8);
+        when(pypiserverManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my_pkg-1.0.0-py3-none-any.whl"))).thenReturn(Optional.of(content));
+
+        PackageVersionAssetResult result = service.getPackageVersionAsset(REGION, "dom", null, "repo", "pypi",
+                null, "my-pkg", "1.0.0", "my_pkg-1.0.0-py3-none-any.whl", null);
+
+        assertEquals("wheel bytes", new String(result.asset().getContent(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void getPackageVersionAssetReturns404WhenTheSidecarHasNoSuchAssetForAContainerBackedFormat() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(pypiserverManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("missing.whl"))).thenReturn(Optional.empty());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION, "dom", null,
+                "repo", "pypi", null, "my-pkg", "1.0.0", "missing.whl", null));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertEquals("missing.whl", e.getExtendedData().get("resourceId"));
+        assertEquals("asset", e.getExtendedData().get("resourceType"));
+    }
+
+    @Test
+    void getPackageVersionAssetValidatesTheCallerProvidedRevisionForAContainerBackedFormatToo() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "wheel bytes".getBytes(StandardCharsets.UTF_8);
+        when(pypiserverManager.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my_pkg-1.0.0.whl"))).thenReturn(Optional.of(content));
+        String realRevision = service.getPackageVersionAsset(REGION, "dom", null, "repo", "pypi", null, "my-pkg",
+                "1.0.0", "my_pkg-1.0.0.whl", null).packageVersionRevision();
+
+        PackageVersionAssetResult matching = service.getPackageVersionAsset(REGION, "dom", null, "repo", "pypi",
+                null, "my-pkg", "1.0.0", "my_pkg-1.0.0.whl", realRevision);
+        assertEquals("wheel bytes", new String(matching.asset().getContent(), StandardCharsets.UTF_8));
+
+        AwsException wrongRevision = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION,
+                "dom", null, "repo", "pypi", null, "my-pkg", "1.0.0", "my_pkg-1.0.0.whl", "not-the-real-revision"));
+        assertEquals("ResourceNotFoundException", wrongRevision.getErrorCode());
         assertEquals("package-version", wrongRevision.getExtendedData().get("resourceType"));
     }
 

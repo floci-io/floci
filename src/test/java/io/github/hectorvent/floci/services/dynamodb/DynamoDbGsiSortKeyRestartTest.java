@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
@@ -52,14 +53,14 @@ class DynamoDbGsiSortKeyRestartTest {
         ObjectNode req = mapper.createObjectNode();
         req.put("TableName", TABLE);
         req.putArray("KeySchema").addObject().put("AttributeName", "PK").put("KeyType", "HASH");
-        var attrDefs = req.putArray("AttributeDefinitions");
+        ArrayNode attrDefs = req.putArray("AttributeDefinitions");
         attrDefs.addObject().put("AttributeName", "PK").put("AttributeType", "S");
         attrDefs.addObject().put("AttributeName", "GSI1PK").put("AttributeType", "S");
         attrDefs.addObject().put("AttributeName", "GSI1SK").put("AttributeType", "S");
         req.put("BillingMode", "PAY_PER_REQUEST");
         ObjectNode gsi = req.putArray("GlobalSecondaryIndexes").addObject();
         gsi.put("IndexName", "GSI1");
-        var gsiKeySchema = gsi.putArray("KeySchema");
+        ArrayNode gsiKeySchema = gsi.putArray("KeySchema");
         gsiKeySchema.addObject().put("AttributeName", "GSI1PK").put("KeyType", "HASH");
         gsiKeySchema.addObject().put("AttributeName", "GSI1SK").put("KeyType", "RANGE");
         gsi.putObject("Projection").put("ProjectionType", "ALL");

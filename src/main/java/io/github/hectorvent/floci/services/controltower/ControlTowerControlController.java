@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.controltower;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -39,16 +40,16 @@ public class ControlTowerControlController {
 
     @POST @Path("/enable-control")
     public Response enable(@Context HttpHeaders headers, String body) {
-        var result = service.enable(account(), region(headers), parse(body));
+        ControlTowerControlService.EnableResult result = service.enable(account(), region(headers), parse(body));
         return Response.ok(objectMapper.createObjectNode().put("arn", result.arn())
                 .put("operationIdentifier", result.operationIdentifier())).build();
     }
 
     @POST @Path("/list-enabled-controls")
     public Response list(@Context HttpHeaders headers, String body) {
-        var result = service.list(region(headers), parse(body));
+        ControlTowerControlService.ListResult result = service.list(region(headers), parse(body));
         ObjectNode response = objectMapper.createObjectNode();
-        var array = response.putArray("enabledControls");
+        ArrayNode array = response.putArray("enabledControls");
         result.controls().forEach(control -> array.add(summary(control)));
         if (result.nextToken() != null) response.put("nextToken", result.nextToken());
         return Response.ok(response).build();
@@ -81,7 +82,7 @@ public class ControlTowerControlController {
     @POST @Path("/get-control-operation")
     public Response operation(@Context HttpHeaders headers, String body) {
         JsonNode request = parse(body);
-        var operation = service.operation(account(), region(headers), requireText(request, "operationIdentifier"));
+        ControlTowerControlService.ControlOperation operation = service.operation(account(), region(headers), requireText(request, "operationIdentifier"));
         ObjectNode node = objectMapper.createObjectNode();
         node.put("operationIdentifier", operation.operationIdentifier());
         node.put("operationType", operation.operationType());

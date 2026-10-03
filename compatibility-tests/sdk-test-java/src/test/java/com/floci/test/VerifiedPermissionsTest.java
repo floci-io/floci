@@ -7,6 +7,8 @@ import software.amazon.awssdk.services.verifiedpermissions.model.ActionIdentifie
 import software.amazon.awssdk.services.verifiedpermissions.model.Decision;
 import software.amazon.awssdk.services.verifiedpermissions.model.EntitiesDefinition;
 import software.amazon.awssdk.services.verifiedpermissions.model.EntityIdentifier;
+import software.amazon.awssdk.services.verifiedpermissions.model.GetPolicyStoreResponse;
+import software.amazon.awssdk.services.verifiedpermissions.model.IsAuthorizedResponse;
 import software.amazon.awssdk.services.verifiedpermissions.model.PolicyDefinition;
 import software.amazon.awssdk.services.verifiedpermissions.model.PolicyEffect;
 import software.amazon.awssdk.services.verifiedpermissions.model.PolicyType;
@@ -36,7 +38,7 @@ class VerifiedPermissionsTest {
                             .tags(Map.of("project", "floci")))
                     .policyStoreId();
 
-            var store = avp.getPolicyStore(request -> request.policyStoreId(policyStoreId).tags(true));
+            GetPolicyStoreResponse store = avp.getPolicyStore(request -> request.policyStoreId(policyStoreId).tags(true));
             assertThat(store.policyStoreId()).isEqualTo(policyStoreId);
             assertThat(store.tags()).containsEntry("project", "floci");
 
@@ -73,7 +75,7 @@ class VerifiedPermissionsTest {
                       {"uid":{"type":"Demo::Document","id":"doc1"},"attrs":{"tenant":"t1"},"parents":[]}
                     ]
                     """;
-            var decision = avp.isAuthorized(request -> request
+            IsAuthorizedResponse decision = avp.isAuthorized(request -> request
                     .policyStoreId(policyStoreId)
                     .principal(EntityIdentifier.builder().entityType("Demo::User").entityId("alice").build())
                     .action(ActionIdentifier.builder().actionType("Demo::Action").actionId("read").build())

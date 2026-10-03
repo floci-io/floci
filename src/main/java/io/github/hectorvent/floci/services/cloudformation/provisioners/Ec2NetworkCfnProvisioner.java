@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
@@ -285,7 +286,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             ObjectNode prior = inPlacePrior(r, resourceId, ctx);
             ObjectNode tags = prior.putObject("tags");
             currentTags.forEach(tags::put);
-            var applied = prior.putArray("appliedKeys");
+            ArrayNode applied = prior.putArray("appliedKeys");
             desired.keySet().forEach(applied::add);
             writeInPlacePrior(r, prior);
         }

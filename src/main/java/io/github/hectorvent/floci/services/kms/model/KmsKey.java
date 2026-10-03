@@ -16,6 +16,10 @@ public class KmsKey {
     private boolean enabled = true;
     private String keyState = "Enabled"; // Enabled, Disabled, PendingDeletion, PendingImport
     private String origin = "AWS_KMS";
+    // CUSTOMER for keys a customer created, AWS for the per-service keys AWS ships under the
+    // reserved alias/aws/* aliases. DescribeKey reports it, and it is what tells a caller the
+    // key cannot be deleted, retagged or repolicied.
+    private String keyManager = "CUSTOMER";
     private String expirationModel;
     private long validTo;
     private KmsImportParameters importParameters;
@@ -63,6 +67,9 @@ public class KmsKey {
 
     public String getOrigin() { return origin; }
     public void setOrigin(String origin) { this.origin = origin; }
+
+    public String getKeyManager() { return keyManager; }
+    public void setKeyManager(String keyManager) { this.keyManager = keyManager; }
 
     public String getExpirationModel() { return expirationModel; }
     public void setExpirationModel(String expirationModel) { this.expirationModel = expirationModel; }

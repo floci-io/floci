@@ -23,6 +23,7 @@ import software.amazon.awssdk.services.codedeploy.model.DeploymentReadyAction;
 import software.amazon.awssdk.services.codedeploy.model.DeploymentStatus;
 import software.amazon.awssdk.services.codedeploy.model.DeploymentStyle;
 import software.amazon.awssdk.services.codedeploy.model.DeploymentType;
+import software.amazon.awssdk.services.codedeploy.model.GetApplicationResponse;
 import software.amazon.awssdk.services.codedeploy.model.GetDeploymentConfigResponse;
 import software.amazon.awssdk.services.codedeploy.model.GetDeploymentGroupResponse;
 import software.amazon.awssdk.services.codedeploy.model.GetDeploymentResponse;
@@ -132,7 +133,7 @@ class CodeDeployTest {
     @Test
     @Order(5)
     void getApplication() {
-        var resp = codedeploy.getApplication(r -> r.applicationName("sdk-lambda-app"));
+        GetApplicationResponse resp = codedeploy.getApplication(r -> r.applicationName("sdk-lambda-app"));
         assertThat(resp.application().applicationName()).isEqualTo("sdk-lambda-app");
         assertThat(resp.application().computePlatform()).isEqualTo(ComputePlatform.LAMBDA);
         assertThat(resp.application().linkedToGitHub()).isFalse();

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshiftserverless;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -148,7 +149,7 @@ class RedshiftServerlessServiceTest {
                 service.listNamespaces(REGION, null, null).items().stream()
                         .map(Namespace::getNamespaceName).toList());
 
-        var firstPage = service.listNamespaces(REGION, 1, null);
+        PaginatedResult<Namespace> firstPage = service.listNamespaces(REGION, 1, null);
         assertEquals(List.of("alpha-ns"), firstPage.items().stream().map(Namespace::getNamespaceName).toList());
         assertEquals(List.of("beta-ns"), service.listNamespaces(REGION, 1, firstPage.nextToken()).items().stream()
                 .map(Namespace::getNamespaceName).toList());

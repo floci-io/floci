@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.rum;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -110,7 +111,7 @@ public class RumController {
         RumService.Page page = service.listAppMonitors(
                 regionResolver.resolveRegion(headers), maxResults, nextToken);
         ObjectNode response = objectMapper.createObjectNode();
-        var summaries = response.putArray("AppMonitorSummaries");
+        ArrayNode summaries = response.putArray("AppMonitorSummaries");
         for (AppMonitor monitor : page.monitors()) {
             ObjectNode summary = objectMapper.createObjectNode();
             summary.put("Created", monitor.getCreated());

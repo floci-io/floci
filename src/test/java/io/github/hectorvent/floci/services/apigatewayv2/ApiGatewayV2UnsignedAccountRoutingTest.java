@@ -42,7 +42,7 @@ class ApiGatewayV2UnsignedAccountRoutingTest {
     }
 
     private String createApiGraph(String accountId, String functionName) {
-        String authorization = authorization(accountId, "apigatewayv2");
+        String authorization = authorization(accountId, "apigateway");
         String apiId = given()
                 .contentType(ContentType.JSON)
                 .header("Authorization", authorization)
@@ -102,7 +102,7 @@ class ApiGatewayV2UnsignedAccountRoutingTest {
     private void createApiWithId(String accountId, String apiId, int expectedStatus) {
         given()
                 .contentType(ContentType.JSON)
-                .header("Authorization", authorization(accountId, "apigatewayv2"))
+                .header("Authorization", authorization(accountId, "apigateway"))
                 .body("""
                         {
                           "name":"account-owned-api",

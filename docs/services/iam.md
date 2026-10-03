@@ -499,7 +499,7 @@ authorization means touching the request context and STS session shape, which is
 
 | Action | Description |
 |--------|-------------|
-| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles, MFA devices) and IAM quota values. `Providers` counts OIDC providers only; SAML providers are not included. Resources Floci does not track (server certificates) are reported as zero rather than omitted. |
+| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles, MFA devices) and IAM quota values. `Providers` counts OIDC providers only; SAML providers are not included. Resources Floci does not track (the account password) are reported as zero rather than omitted. |
 | GetAccountAuthorizationDetails | Returns every user, group and role in the account, and the policies relevant to them: every local (customer-managed) policy, and every AWS-managed policy actually attached to or used as a permissions boundary by something in the account. |
 | GenerateCredentialReport | Generates (or, within 4 hours of the last one, reuses) the account's credential report. |
 | GetCredentialReport | Returns the most recently generated credential report as Base64-encoded CSV. |
@@ -544,13 +544,39 @@ Only the set of enabled features is stored, and enabling a feature twice is idem
 model root credentials or root sessions themselves, so the flags change what `ListOrganizationsFeatures`
 returns and nothing else.
 
-### Unmodeled Lists
+### Server Certificates
 
 | Action | Description |
 |--------|-------------|
-| ListServerCertificates | Always returns an empty list. |
+| UploadServerCertificate | Stores a PEM certificate, its private key and an optional chain under a name unique to the account. |
+| GetServerCertificate | Returns a stored certificate and its chain, never the private key. |
+| UpdateServerCertificate | Renames a certificate and/or changes its path; the ARN moves with it. |
+| DeleteServerCertificate | Deletes a stored certificate. |
+| ListServerCertificates | Lists certificate metadata, filtered by `PathPrefix`. |
+| TagServerCertificate | Adds tags to a server certificate. |
+| UntagServerCertificate | Removes tags from a server certificate. |
+| ListServerCertificateTags | Lists tags stored for a server certificate. |
 
-Server certificates are not stored, and no action creates them.
+The uploaded material is really parsed, because two of this operation's modeled errors cannot be
+answered otherwise. `CertificateBody` (and `CertificateChain`, when given) must be readable PEM or
+the upload is `MalformedCertificate`, and the private key must actually match the certificate's
+public key or it is `KeyPairMismatch`. The match is a sign-then-verify check, so it holds for RSA
+and EC alike. `Expiration` is read from the certificate's own `notAfter` rather than stored
+separately, so it cannot drift from the certificate it describes.
+
+The private key is stored and never returned. AWS marks `privateKeyType` sensitive and models it
+only on the upload, so neither `GetServerCertificate` nor `ListServerCertificates` echoes it back.
+`ListServerCertificates` returns metadata only, as AWS documents: it "does not return the
+certificate body, certificate chain, or private key".
+
+`ServerCertificateId` uses AWS's `ASCA` prefix for certificates. `GetAccountSummary`'s
+`ServerCertificates` count is backed by this store rather than reporting zero.
+
+One modeled error is not raised: AWS returns `DeleteConflict` from `DeleteServerCertificate` when a
+load balancer still references the certificate. Floci cannot determine that yet, because ELB
+Classic and CloudFront store certificate identifiers without resolving them against IAM. Tracked in
+[#4875](https://github.com/floci-io/floci/issues/4875), which covers both directions: rejecting a
+reference to a certificate that does not exist, and refusing to delete one that is in use.
 
 ## AWS Managed Policies
 
@@ -649,7 +675,7 @@ the route's rule miss.
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries registered `ResourcePolicyProvider` SPI implementations (such as S3 bucket policies) during request authorization:
 
-- Resource policy statements are matched against the caller (`Principal` and `NotPrincipal` clauses), each principal type naming only its own kind of caller, as on AWS: `"*"` matches anyone; `{"AWS": "*"}` matches IAM identities and AWS services; any other `AWS` entry (a user, role, account id or account root) matches IAM identities only, and a role session matches a `Principal` naming its role through the role's own ARN, path included; `{"Service": "<name>"}` matches that service exactly. `{"Service": "*"}`, which AWS does not accept, matches nothing, and `Federated` and `CanonicalUser` entries never match an IAM caller.
+- Resource policy statements are matched against the caller (`Principal` and `NotPrincipal` clauses), each principal type naming only its own kind of caller, as on AWS: `"*"` matches anyone; `{"AWS": "*"}` matches IAM identities and AWS services; any other `AWS` entry (a user, role, account id or account root) matches IAM identities only, and a role session matches a `Principal` naming its role through the role's own ARN, path included; `{"Service": "<name>"}` matches that service exactly. `{"CanonicalUser": "<id>"}`, which S3 bucket policies accept, names an account by its S3 canonical user ID and matches that account's IAM identities, as an account principal does; Floci's canonical ID for an account is the account id, as its S3 ACLs report it. `{"Service": "*"}`, which AWS does not accept, matches nothing, and `Federated` entries never match an IAM caller.
 - An explicit **Deny** in a resource policy overrides any allows.
 - In cross-account scenarios or resource-controlled access, an explicit **Allow** in a resource policy grants access to the principal.
 - For detailed S3 bucket policy behavior and configuration, see [S3 Bucket Policy Enforcement](s3.md#bucket-policy-enforcement).
@@ -700,6 +726,31 @@ These identities always bypass enforcement (backward-compatible defaults):
 | Credential the filter cannot map to policies, such as a session carrying no role ARN | Allowed: it is a real credential, so rejecting it would refuse an authenticated caller |
 | No `Authorization` header | Allowed — unauthenticated path (e.g. health checks) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
+
+**IAM's own resources are mostly not named.** When enforcement evaluates a request, the target
+resource comes from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB,
+Kinesis, Secrets Manager, SSM, KMS, and, within IAM, only the server-certificate operations. Every
+other IAM action is evaluated against `*`, so a statement naming a specific user, role, policy,
+instance profile, MFA device or identity provider does not constrain it: a `Deny` on
+`arn:aws:iam::123456789012:user/bob` does not stop `DeleteUser` from running, and an `Allow`
+scoped to one role does not limit `DeleteRole` to it. Action-level matching works normally, so
+denying `iam:DeleteUser` outright does take effect; it is only the resource half that is missing.
+
+This is the behaviour IAM has always had here rather than a recent change, and it errs toward
+permissive, which is the direction worth knowing about. Closing it means mapping the resource of
+every dispatched IAM action, which is tracked in
+[#4979](https://github.com/floci-io/floci/issues/4979) rather than bundled into the
+server-certificate work that mapped the first few.
+
+**A certificate rename names two resources.** `UpdateServerCertificate` is evaluated against both
+the certificate's current ARN and the ARN that `NewServerCertificateName` or `NewPath` would
+produce, because AWS requires the principal to hold permission on the old name and the new one: a
+principal allowed to update `ProductionCert` but not `ProdCert` cannot rename the first into the
+second. A request naming several resources is authorized once per resource, so a `Deny` on either
+name refuses the rename, and the certificate keeps its original name and path. An update that
+changes neither the name nor the path names a single resource. The destination ARN is built beside
+the stored one, keeping the certificate's own partition and account, since a rename moves a
+certificate within an account rather than between partitions.
 
 **Exception:** a bare 12-digit account-id key that equals its own account and sits under
 an effective SCP ceiling is **not** treated as an unknown key — it is evaluated against

@@ -16,34 +16,34 @@ class S3NotificationModelTest {
 
     @Test
     void matchesKeyWithNullFilterRulesFromJacksonDeserialization() {
-        var qn = new QueueNotification("id", "arn:aws:sqs:us-east-1:000000000000:q",
+        QueueNotification qn = new QueueNotification("id", "arn:aws:sqs:us-east-1:000000000000:q",
                 List.of("s3:ObjectCreated:*"), null);
         assertTrue(qn.matchesKey("anything"));
 
-        var tn = new TopicNotification("id", "arn:aws:sns:us-east-1:000000000000:t",
+        TopicNotification tn = new TopicNotification("id", "arn:aws:sns:us-east-1:000000000000:t",
                 List.of("s3:ObjectCreated:*"), null);
         assertTrue(tn.matchesKey("anything"));
 
-        var ln = new LambdaNotification("id", "arn:aws:lambda:us-east-1:000000000000:function:test",
+        LambdaNotification ln = new LambdaNotification("id", "arn:aws:lambda:us-east-1:000000000000:function:test",
                 List.of("s3:ObjectCreated:*"), null);
         assertTrue(ln.matchesKey("anything"));
     }
 
     @Test
     void matchesKeyWithEmptyFilterRulesMatchesAll() {
-        var qn = new QueueNotification("id", "arn", List.of("s3:ObjectCreated:*"));
+        QueueNotification qn = new QueueNotification("id", "arn", List.of("s3:ObjectCreated:*"));
         assertTrue(qn.matchesKey("anything"));
     }
 
     @Test
     void matchesKeyEnforcesAllRules() {
-        var qn = new QueueNotification("id", "arn", List.of("s3:ObjectCreated:*"),
+        QueueNotification qn = new QueueNotification("id", "arn", List.of("s3:ObjectCreated:*"),
                 List.of(new FilterRule("prefix", "images/"), new FilterRule("suffix", ".jpg")));
         assertTrue(qn.matchesKey("images/photo.jpg"));
         assertFalse(qn.matchesKey("images/photo.png"));
         assertFalse(qn.matchesKey("docs/photo.jpg"));
 
-        var ln = new LambdaNotification("id", "arn", List.of("s3:ObjectCreated:*"),
+        LambdaNotification ln = new LambdaNotification("id", "arn", List.of("s3:ObjectCreated:*"),
                 List.of(new FilterRule("prefix", "images/"), new FilterRule("suffix", ".jpg")));
         assertTrue(ln.matchesKey("images/photo.jpg"));
         assertFalse(ln.matchesKey("images/photo.png"));

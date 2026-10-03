@@ -390,7 +390,7 @@ class TlsCertificateHostnameTest {
 
         Path userCert = tempDir.resolve("user.crt");
         Path userKey = tempDir.resolve("user.key");
-        var user = new CertificateGenerator().generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
+        CertificateGenerator.GeneratedCertificate user = new CertificateGenerator().generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
         Files.writeString(userCert, user.certificatePem());
         Files.writeString(userKey, user.privateKeyPem());
         System.setProperty("floci.tls.enabled", "true");
@@ -411,7 +411,7 @@ class TlsCertificateHostnameTest {
         // The exact SAN list TlsConfigSource would compute for this configuration, so only the
         // issuer check can trigger regeneration here.
         List<String> sans = TlsConfigSource.DEFAULT_SAN_HOSTNAMES;
-        var legacy = gen.generateSelfSignedCertificate("localhost", sans, KeyAlgorithm.RSA_2048);
+        CertificateGenerator.GeneratedCertificate legacy = gen.generateSelfSignedCertificate("localhost", sans, KeyAlgorithm.RSA_2048);
         Files.writeString(tlsDir.resolve("floci-server.crt"), legacy.certificatePem());
         Files.writeString(tlsDir.resolve("floci-server.key"), legacy.privateKeyPem());
         Files.writeString(tlsDir.resolve("floci-server.metadata.json"),

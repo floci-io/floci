@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.controlcatalog;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -111,7 +112,7 @@ class ControlCatalogControllerIntegrationTest {
     @Test
     void listControlsSupportsImplementationFilterAndPagination() {
         String filter = "{\"Filter\":{\"Implementations\":{\"Types\":[\"AWS::Organizations::Policy::RESOURCE_CONTROL_POLICY\"]}}}";
-        var firstPage = given()
+        Response firstPage = given()
                 .contentType("application/json")
                 .header("Authorization", auth("us-east-1"))
                 .body(filter)
@@ -125,7 +126,7 @@ class ControlCatalogControllerIntegrationTest {
                 .extract().response();
 
         List<String> allArns = new ArrayList<>(firstPage.path("Controls.Arn"));
-        var secondPage = given()
+        Response secondPage = given()
                 .contentType("application/json")
                 .header("Authorization", auth("us-east-1"))
                 .body(filter)
@@ -138,7 +139,7 @@ class ControlCatalogControllerIntegrationTest {
                 .extract().response();
         allArns.addAll(secondPage.path("Controls.Arn"));
 
-        var finalPage = given()
+        Response finalPage = given()
                 .contentType("application/json")
                 .header("Authorization", auth("us-east-1"))
                 .body(filter)

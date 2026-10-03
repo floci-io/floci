@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
@@ -258,7 +260,7 @@ public class Ec2MetadataServer {
             return;
         }
         StringBuilder sb = new StringBuilder();
-        for (var sg : inst.getSecurityGroups()) {
+        for (GroupIdentifier sg : inst.getSecurityGroups()) {
             if (!sb.isEmpty()) {
                 sb.append("\n");
             }
@@ -372,14 +374,18 @@ public class Ec2MetadataServer {
         if (inst == null) {
             return;
         }
-        String body = instanceIdentityDocument(inst, config.defaultAccountId());
+        String body = instanceIdentityDocument(inst, config.defaultAccountId(), config.defaultAvailabilityZone());
         ctx.response().setStatusCode(200)
                 .putHeader("content-type", "application/json")
                 .end(body);
     }
 
-    static String instanceIdentityDocument(Instance inst, String accountId) {
-        String az = inst.getPlacement() != null ? inst.getPlacement().getAvailabilityZone() : "us-east-1a"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+    /**
+     * {@code defaultAvailabilityZone} answers for an instance with no placement, the same configured
+     * zone {@code /latest/meta-data/placement/availability-zone} reports for it.
+     */
+    static String instanceIdentityDocument(Instance inst, String accountId, String defaultAvailabilityZone) {
+        String az = inst.getPlacement() != null ? inst.getPlacement().getAvailabilityZone() : defaultAvailabilityZone;
         String architecture = inst.getArchitecture() == null || inst.getArchitecture().isBlank()
                 ? "x86_64"
                 : inst.getArchitecture();
@@ -469,7 +475,7 @@ public class Ec2MetadataServer {
         if (instance == null || instance.getTags() == null) {
             return "";
         }
-        for (var tag : instance.getTags()) {
+        for (Tag tag : instance.getTags()) {
             if (tag.getKey() == null || tag.getKey().isBlank()) {
                 continue;
             }
@@ -485,7 +491,7 @@ public class Ec2MetadataServer {
         if (instance == null || instance.getTags() == null || key == null) {
             return Optional.empty();
         }
-        for (var tag : instance.getTags()) {
+        for (Tag tag : instance.getTags()) {
             if (key.equals(tag.getKey())) {
                 return Optional.of(nvl(tag.getValue()));
             }

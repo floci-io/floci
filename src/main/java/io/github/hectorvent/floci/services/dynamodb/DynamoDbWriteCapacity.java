@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.dynamodb;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 
@@ -46,9 +48,9 @@ final class DynamoDbWriteCapacity {
         }
 
         double total() {
-            var sum = table;
-            for (var units : gsi.values()) sum += units;
-            for (var units : lsi.values()) sum += units;
+            double sum = table;
+            for (Double units : gsi.values()) sum += units;
+            for (Double units : lsi.values()) sum += units;
             return sum;
         }
 
@@ -58,9 +60,9 @@ final class DynamoDbWriteCapacity {
         }
 
         Cost plus(Cost other) {
-            var mergedGsi = new LinkedHashMap<>(gsi);
+            LinkedHashMap<String, Double> mergedGsi = new LinkedHashMap<>(gsi);
             other.gsi().forEach((name, units) -> mergedGsi.merge(name, units, Double::sum));
-            var mergedLsi = new LinkedHashMap<>(lsi);
+            LinkedHashMap<String, Double> mergedLsi = new LinkedHashMap<>(lsi);
             other.lsi().forEach((name, units) -> mergedLsi.merge(name, units, Double::sum));
             LinkedHashMap<String, Double> mergedVector = new LinkedHashMap<>(vectorBytes);
             other.vectorBytes().forEach((name, bytes) -> mergedVector.merge(name, bytes, Double::sum));
@@ -70,23 +72,23 @@ final class DynamoDbWriteCapacity {
 
     /** oldItem and newItem are the stored images before and after the write; either may be null. */
     static Cost forWrite(TableDefinition table, JsonNode oldItem, JsonNode newItem) {
-        var tableUnits = (double) Math.max(1, Math.max(sizeUnits(oldItem), sizeUnits(newItem)));
-        var gsiUnits = new LinkedHashMap<String, Double>();
-        var gsis = table.getGlobalSecondaryIndexes();
+        double tableUnits = (double) Math.max(1, Math.max(sizeUnits(oldItem), sizeUnits(newItem)));
+        LinkedHashMap<String, Double> gsiUnits = new LinkedHashMap<>();
+        List<GlobalSecondaryIndex> gsis = table.getGlobalSecondaryIndexes();
         if (gsis != null) {
-            for (var gsi : gsis) {
-                var units = indexUnits(table, gsi.getKeySchema(), gsi.getProjectionType(),
+            for (GlobalSecondaryIndex gsi : gsis) {
+                double units = indexUnits(table, gsi.getKeySchema(), gsi.getProjectionType(),
                         gsi.getNonKeyAttributes(), oldItem, newItem);
                 if (units > 0) {
                     gsiUnits.put(gsi.getIndexName(), units);
                 }
             }
         }
-        var lsiUnits = new LinkedHashMap<String, Double>();
-        var lsis = table.getLocalSecondaryIndexes();
+        LinkedHashMap<String, Double> lsiUnits = new LinkedHashMap<>();
+        List<LocalSecondaryIndex> lsis = table.getLocalSecondaryIndexes();
         if (lsis != null) {
-            for (var lsi : lsis) {
-                var units = indexUnits(table, lsi.getKeySchema(), lsi.getProjectionType(),
+            for (LocalSecondaryIndex lsi : lsis) {
+                double units = indexUnits(table, lsi.getKeySchema(), lsi.getProjectionType(),
                         lsi.getNonKeyAttributes(), oldItem, newItem);
                 if (units > 0) {
                     lsiUnits.put(lsi.getIndexName(), units);
@@ -178,8 +180,8 @@ final class DynamoDbWriteCapacity {
         if (keySchema == null) {
             return 0;
         }
-        var oldView = indexView(table, keySchema, projectionType, nonKeyAttributes, oldItem);
-        var newView = indexView(table, keySchema, projectionType, nonKeyAttributes, newItem);
+        JsonNode oldView = indexView(table, keySchema, projectionType, nonKeyAttributes, oldItem);
+        JsonNode newView = indexView(table, keySchema, projectionType, nonKeyAttributes, newItem);
         if (oldView == null) {
             if (newView == null) {
                 return 0;
@@ -208,7 +210,7 @@ final class DynamoDbWriteCapacity {
         if (item == null) {
             return null;
         }
-        for (var element : keySchema) {
+        for (KeySchemaElement element : keySchema) {
             if (!item.has(element.getAttributeName())) {
                 return null;
             }
@@ -216,19 +218,19 @@ final class DynamoDbWriteCapacity {
         if (projectionType == null || "ALL".equals(projectionType)) {
             return item;
         }
-        var keep = new LinkedHashSet<String>();
+        LinkedHashSet<String> keep = new LinkedHashSet<>();
         keep.add(table.getPartitionKeyName());
         if (table.getSortKeyName() != null) {
             keep.add(table.getSortKeyName());
         }
-        for (var element : keySchema) {
+        for (KeySchemaElement element : keySchema) {
             keep.add(element.getAttributeName());
         }
         if ("INCLUDE".equals(projectionType) && nonKeyAttributes != null) {
             keep.addAll(nonKeyAttributes);
         }
-        var view = JsonNodeFactory.instance.objectNode();
-        for (var name : keep) {
+        ObjectNode view = JsonNodeFactory.instance.objectNode();
+        for (String name : keep) {
             if (item.has(name)) {
                 view.set(name, item.get(name));
             }
@@ -238,8 +240,8 @@ final class DynamoDbWriteCapacity {
 
     private static boolean indexKeyChanged(List<KeySchemaElement> keySchema,
                                            JsonNode oldItem, JsonNode newItem) {
-        for (var element : keySchema) {
-            var name = element.getAttributeName();
+        for (KeySchemaElement element : keySchema) {
+            String name = element.getAttributeName();
             if (!oldItem.get(name).equals(newItem.get(name))) {
                 return true;
             }

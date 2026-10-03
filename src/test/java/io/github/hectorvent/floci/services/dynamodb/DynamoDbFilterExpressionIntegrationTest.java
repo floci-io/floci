@@ -367,7 +367,7 @@ class DynamoDbFilterExpressionIntegrationTest {
 
     private void scanWithFilter(String filterExpression, String exprAttrValuesJson,
                                  String exprAttrNamesJson, int expectedCount) {
-        var body = new StringBuilder();
+        StringBuilder body = new StringBuilder();
         body.append("{");
         body.append("\"TableName\": \"").append(TABLE_NAME).append("\",");
         body.append("\"FilterExpression\": \"").append(filterExpression).append("\",");

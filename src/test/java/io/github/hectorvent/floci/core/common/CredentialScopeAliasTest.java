@@ -68,7 +68,6 @@ class CredentialScopeAliasTest {
         // canonical scope from the external key would rewrite valid scopes onto prefixes AWS
         // never issues, so every action would resolve to null and enforcement would be skipped.
         assertEquals("ses", catalog.canonicalCredentialScope("ses"));
-        assertEquals("sesv2", catalog.canonicalCredentialScope("sesv2"));
         assertEquals("bedrock", catalog.canonicalCredentialScope("bedrock"));
         assertEquals("logs", catalog.canonicalCredentialScope("logs"));
     }

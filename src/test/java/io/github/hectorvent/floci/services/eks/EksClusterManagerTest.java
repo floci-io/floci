@@ -104,16 +104,17 @@ class EksClusterManagerTest {
         cluster.setArn("arn:aws:eks:us-west-2:123456789012:cluster/demo");
         cluster.setCreatedAt(Instant.parse("2026-09-17T00:00:00Z"));
         assertEquals("/_floci/eks/clusters/demo/token-webhook/scope/123456789012"
-                + "/us-west-2/2026-09-17T00:00:00Z", EksClusterManager.webhookPath(cluster));
+                + "/us-west-2/2026-09-17T00:00:00Z", EksClusterManager.webhookPath(cluster, "cn-north-1"));
     }
 
     @Test
     void webhookPathHandlesMissingArnOrCreatedAtGracefully() {
+        // Without an ARN the region is the deployment default the caller passes, not us-east-1.
         Cluster cluster = new Cluster();
         cluster.setName("demo");
         cluster.setAccountId("123456789012");
         assertEquals("/_floci/eks/clusters/demo/token-webhook/scope/123456789012"
-                + "/us-east-1/1970-01-01T00:00:00Z", EksClusterManager.webhookPath(cluster));
+                + "/cn-north-1/1970-01-01T00:00:00Z", EksClusterManager.webhookPath(cluster, "cn-north-1"));
     }
 
     @Test

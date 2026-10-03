@@ -129,6 +129,13 @@ public final class CfnRollback {
     public static final String SQS_UPDATE_SNAPSHOT_ATTR = "__FlociSqsUpdateSnapshot";
 
     /**
+     * Holds the settings a Cognito user pool or user pool client had before an in-place update
+     * changed them, so a failed stack update can put them back. Written by
+     * {@code CognitoCfnProvisioner} before its update call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String COGNITO_UPDATE_SNAPSHOT_ATTR = "__FlociCognitoUpdateSnapshot";
+
+    /**
      * Holds the configuration an Auto Scaling group carried before an in-place update changed it,
      * so a failed stack update can restore it.
      */
@@ -139,6 +146,13 @@ public final class CfnRollback {
      * so a failed stack update can roll it back.
      */
     public static final String LAUNCH_TEMPLATE_UPDATE_SNAPSHOT_ATTR = "__FlociLaunchTemplateUpdateSnapshot";
+
+    /**
+     * Holds the settings a Lambda MicroVMs network connector had before an in-place update changed
+     * them, so a failed stack update can put them back. Written by {@code LambdaMicrovmsCfnProvisioner}
+     * before its update call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String NETWORK_CONNECTOR_UPDATE_SNAPSHOT_ATTR = "__FlociNetworkConnectorUpdateSnapshot";
 
     private CfnRollback() {
     }

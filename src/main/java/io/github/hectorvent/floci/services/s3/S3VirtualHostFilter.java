@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayCustomDomainFilter;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontDistributionFilter;
 import io.github.hectorvent.floci.services.cognito.CognitoCustomDomainFilter;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -160,10 +161,11 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             return;
         }
 
-        // A higher-priority Host filter (CloudFront, Cognito custom domain) may have already
-        // routed this request. Use its server-side marker rather than trusting a
-        // user-controlled path prefix.
-        if (Boolean.TRUE.equals(requestContext.getProperty(CloudFrontDistributionFilter.ROUTED_PROPERTY))
+        // A higher-priority Host filter (API Gateway custom domain, CloudFront, Cognito custom
+        // domain) may have already routed this request. Use its server-side marker rather than
+        // trusting a user-controlled path prefix.
+        if (Boolean.TRUE.equals(requestContext.getProperty(ApiGatewayCustomDomainFilter.ROUTED_PROPERTY))
+                || Boolean.TRUE.equals(requestContext.getProperty(CloudFrontDistributionFilter.ROUTED_PROPERTY))
                 || requestContext.getProperty(CognitoCustomDomainFilter.POOL_PROPERTY) != null) {
             return;
         }

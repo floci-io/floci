@@ -32,11 +32,11 @@ class RulePersistenceTest {
         rule.setScheduleExpression("rate(5 minutes)");
         rule.setState(RuleState.ENABLED);
 
-        var writer = new PersistentStorage<String, Rule>(
+        PersistentStorage<String, Rule> writer = new PersistentStorage<>(
                 filePath, new TypeReference<Map<String, Rule>>() {});
         writer.put(key, rule);
 
-        var reader = new PersistentStorage<String, Rule>(
+        PersistentStorage<String, Rule> reader = new PersistentStorage<>(
                 filePath, new TypeReference<Map<String, Rule>>() {});
         reader.load();
 
@@ -72,7 +72,7 @@ class RulePersistenceTest {
                 """.formatted(key);
         Files.writeString(filePath, legacyJson);
 
-        var store = new PersistentStorage<String, Rule>(
+        PersistentStorage<String, Rule> store = new PersistentStorage<>(
                 filePath, new TypeReference<Map<String, Rule>>() {});
         store.load();
 

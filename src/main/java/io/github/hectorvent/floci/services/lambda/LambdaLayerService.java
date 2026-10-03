@@ -432,7 +432,7 @@ public class LambdaLayerService {
             return;
         }
         try {
-            var account = AwsArnUtils.accountOrDefault(lv.getLayerVersionArn(), "000000000000");
+            String account = AwsArnUtils.accountOrDefault(lv.getLayerVersionArn(), "000000000000");
             s3Service.deleteObject(LambdaService.tasksBucketName(region),
                     LambdaService.layerObjectKey(account, lv.getLayerName(), lv.getVersion()));
         } catch (Exception e) {

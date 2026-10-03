@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -111,7 +112,7 @@ class SesEventPayloadTest {
     void send_emailTagsTolerateNullValueAndDuplicateKey() {
         ObjectNode node = SesEventPayload.build(mapper, SesRecipientEvent.of("SEND", Cause.SIMULATOR, List.of()), "msg-1", "from@example.com", null, "000000000000", "", List.of("to@example.com"), List.of(), List.of(), List.of("to@example.com"), "cs", List.of(new MessageTag("k", null), new MessageTag("k", "v2")), List.of(), ts);
 
-        var arr = node.get("mail").get("tags").get("k");
+        JsonNode arr = node.get("mail").get("tags").get("k");
         assertEquals(2, arr.size(), "duplicate keys append into the same array");
         assertEquals("", arr.get(0).asText());
         assertEquals("v2", arr.get(1).asText());

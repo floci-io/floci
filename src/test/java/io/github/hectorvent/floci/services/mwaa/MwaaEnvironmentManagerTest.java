@@ -326,6 +326,25 @@ class MwaaEnvironmentManagerTest {
     }
 
     @Test
+    void anEnvironmentWithoutAnArnIsNamedInTheConfiguredDefaultRegion() {
+        EmulatorConfig.DockerConfig dockerConfig = Mockito.mock(EmulatorConfig.DockerConfig.class);
+        when(dockerConfig.resourceNamespace()).thenReturn(Optional.empty());
+        EmulatorConfig chinaConfig = Mockito.mock(EmulatorConfig.class);
+        when(chinaConfig.docker()).thenReturn(dockerConfig);
+        when(chinaConfig.defaultRegion()).thenReturn("cn-north-1");
+
+        Environment environment = new Environment();
+        environment.setName("my-env");
+        environment.setAccountId("000000000000");
+
+        assertEquals("floci-aws-mwaa-000000000000.cn-north-1.my-env-db",
+                MwaaEnvironmentManager.dbContainerName(chinaConfig, environment));
+        assertEquals("cn-north-1", MwaaEnvironmentManager.environmentRegion(environment, "cn-north-1"));
+        environment.setArn("arn:aws:airflow:eu-west-1:000000000000:environment/my-env");
+        assertEquals("eu-west-1", MwaaEnvironmentManager.environmentRegion(environment, "cn-north-1"));
+    }
+
+    @Test
     void scopedContainerNamesDifferForSameNameEnvironments() {
         Environment eastEnvironment = new Environment();
         eastEnvironment.setName("shared-name");

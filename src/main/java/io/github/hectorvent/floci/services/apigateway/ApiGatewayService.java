@@ -590,20 +590,17 @@ public class ApiGatewayService implements ResourceProvider {
 
         integration.setContentHandling((String) request.get("contentHandling"));
         integration.setCredentials((String) request.get("credentials"));
-        integration.setCacheNamespace((String) request.get("cacheNamespace"));
+        integration.setCacheNamespace(request.get("cacheNamespace") != null
+                ? (String) request.get("cacheNamespace") : resourceId);
+        integration.setResponseTransferMode(transferMode(request.get("responseTransferMode")));
+        validateTransferMode(integration.getResponseTransferMode(), integration.getType());
         if (request.get("connectionType") != null) {
             integration.setConnectionType((String) request.get("connectionType"));
         }
         integration.setConnectionId((String) request.get("connectionId"));
 
         if (request.get("timeoutInMillis") instanceof Number timeout) {
-            // AWS accepts 50ms upward; the 29s ceiling applies only to edge-optimized APIs, and
-            // Regional/private APIs (Floci's default) may exceed it, so only the floor is enforced.
-            if (timeout.intValue() < 50) {
-                throw new AwsException("BadRequestException",
-                        "Invalid timeout value: " + timeout.intValue(), 400);
-            }
-            integration.setTimeoutInMillis(timeout.intValue());
+            integration.setTimeoutInMillis(parseIntegrationTimeout(timeout));
         }
 
         if (request.get("cacheKeyParameters") instanceof List<?> cacheKeys) {
@@ -2680,6 +2677,8 @@ public class ApiGatewayService implements ResourceProvider {
     public Integration updateIntegration(String region, String apiId, String resourceId, String httpMethod, List<Map<String, String>> patchOperations) {
         Integration integration = getIntegration(region, apiId, resourceId, httpMethod);
         if (patchOperations != null) {
+            String nextType = integration.getType();
+            String nextTransferMode = integration.getResponseTransferMode();
             for (Map<String, String> op : patchOperations) {
                 String opType = op.get("op");
                 if (!"add".equals(opType) && !"replace".equals(opType)) {
@@ -2692,14 +2691,23 @@ public class ApiGatewayService implements ResourceProvider {
                 }
                 switch (path) {
                     case "/type":
+                        nextType = value;
+                        break;
                     case "/httpMethod":
                     case "/uri":
                     case "/passthroughBehavior":
+                        break;
+                    case "/timeoutInMillis":
+                        parseIntegrationTimeout(value);
+                        break;
+                    case "/responseTransferMode":
+                        nextTransferMode = transferMode(value);
                         break;
                     default:
                         throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
                 }
             }
+            validateTransferMode(nextTransferMode, nextType);
             for (Map<String, String> op : patchOperations) {
                 String path = op.get("path");
                 String value = op.get("value");
@@ -2716,6 +2724,12 @@ public class ApiGatewayService implements ResourceProvider {
                     case "/passthroughBehavior":
                         integration.setPassthroughBehavior(value);
                         break;
+                    case "/timeoutInMillis":
+                        integration.setTimeoutInMillis(parseIntegrationTimeout(value));
+                        break;
+                    case "/responseTransferMode":
+                        integration.setResponseTransferMode(transferMode(value));
+                        break;
                     default:
                         throw new IllegalStateException("Unreachable: validated above");
                 }
@@ -2723,6 +2737,36 @@ public class ApiGatewayService implements ResourceProvider {
         }
         resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));
         return integration;
+    }
+
+    private int parseIntegrationTimeout(Object value) {
+        try {
+            int timeout = Integer.parseInt(String.valueOf(value));
+            if (timeout >= 50) {
+                return timeout;
+            }
+        } catch (NumberFormatException ignored) {
+            // Return the same AWS-style error for non-numeric and out-of-range values.
+        }
+        throw new AwsException("BadRequestException", "Invalid timeout value: " + value, 400);
+    }
+
+    private String transferMode(Object value) {
+        if (value == null) {
+            return "BUFFERED";
+        }
+        if ("BUFFERED".equals(value) || "STREAM".equals(value)) {
+            return (String) value;
+        }
+        throw new AwsException("BadRequestException", "Invalid response transfer mode: " + value, 400);
+    }
+
+    private void validateTransferMode(String mode, String type) {
+        if ("STREAM".equals(mode) && !"HTTP_PROXY".equalsIgnoreCase(type)
+                && !"AWS_PROXY".equalsIgnoreCase(type)) {
+            throw new AwsException("BadRequestException",
+                    "Response transfer mode STREAM requires HTTP_PROXY or AWS_PROXY integration type", 400);
+        }
     }
 
     // ──────────────────────────── Tags ────────────────────────────
@@ -3632,7 +3676,8 @@ public class ApiGatewayService implements ResourceProvider {
         integrationRequest.put("uri", integrationExt.get("uri"));
         integrationRequest.put("passthroughBehavior", integrationExt.get("passthroughBehavior"));
         for (String field : List.of("contentHandling", "timeoutInMillis", "connectionType",
-                "connectionId", "credentials", "cacheNamespace", "cacheKeyParameters", "tlsConfig")) {
+                "connectionId", "credentials", "cacheNamespace", "cacheKeyParameters", "tlsConfig",
+                "responseTransferMode")) {
             if (integrationExt.get(field) != null) {
                 integrationRequest.put(field, integrationExt.get(field));
             }

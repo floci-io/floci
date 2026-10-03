@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.config;
 
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
@@ -216,7 +217,7 @@ class TlsHttp2HostRoutingIntegrationTest {
                 FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
                 List<String> sans = new ArrayList<>(TlsConfigSource.DEFAULT_SAN_HOSTNAMES);
                 sans.add(API_DOMAIN);
-                var leaf = ca.issueServerCertificate("localhost", sans, KeyAlgorithm.RSA_2048, null);
+                CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("localhost", sans, KeyAlgorithm.RSA_2048, null);
                 Files.writeString(TLS_DIR.resolve("floci-server.crt"), leaf.certificatePem());
                 Files.writeString(TLS_DIR.resolve("floci-server.key"), leaf.privateKeyPem());
             } catch (IOException e) {

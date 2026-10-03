@@ -29,6 +29,10 @@ public class CopyObjectOptions {
     private String checksumAlgorithm;
     // Whether annotations travel with the copy: COPY (the default) or EXCLUDE.
     private String annotationDirective;
+    // Destination preconditions (If-Match / If-None-Match), checked atomically with the write.
+    private String ifMatch;
+    private String ifNoneMatch;
+    private CopySourceConditions copySourceConditions = CopySourceConditions.NONE;
 
     public String getMetadataDirective() { return metadataDirective; }
     public CopyObjectOptions withMetadataDirective(String metadataDirective) { this.metadataDirective = metadataDirective; return this; }
@@ -104,4 +108,16 @@ public class CopyObjectOptions {
 
     public String getAnnotationDirective() { return annotationDirective; }
     public CopyObjectOptions withAnnotationDirective(String annotationDirective) { this.annotationDirective = annotationDirective; return this; }
+
+    public String getIfMatch() { return ifMatch; }
+    public CopyObjectOptions withIfMatch(String ifMatch) { this.ifMatch = ifMatch; return this; }
+
+    public String getIfNoneMatch() { return ifNoneMatch; }
+    public CopyObjectOptions withIfNoneMatch(String ifNoneMatch) { this.ifNoneMatch = ifNoneMatch; return this; }
+
+    public CopySourceConditions getCopySourceConditions() { return copySourceConditions; }
+    public CopyObjectOptions withCopySourceConditions(CopySourceConditions copySourceConditions) {
+        this.copySourceConditions = copySourceConditions != null ? copySourceConditions : CopySourceConditions.NONE;
+        return this;
+    }
 }

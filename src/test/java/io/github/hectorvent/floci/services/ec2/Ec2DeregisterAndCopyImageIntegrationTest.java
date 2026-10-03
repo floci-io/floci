@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -61,7 +62,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-west-2/ec2/aws4_request";
 
     private String ec2(String auth, String action, String... formParams) {
-        var req = given().formParam("Action", action).header("Authorization", auth);
+        RequestSpecification req = given().formParam("Action", action).header("Authorization", auth);
         for (int i = 0; i < formParams.length; i += 2) {
             req = req.formParam(formParams[i], formParams[i + 1]);
         }

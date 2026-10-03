@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eventbridge.model;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -12,7 +13,7 @@ class InputTransformerTest {
 
     @Test
     void fromJson_parsesPathsMapAndTemplate() throws Exception {
-        var node = M.readTree("{\"InputPathsMap\":{\"e\":\"$.detail.eventName\"},"
+        JsonNode node = M.readTree("{\"InputPathsMap\":{\"e\":\"$.detail.eventName\"},"
                 + "\"InputTemplate\":\"{\\\"e\\\":<e>}\"}");
         InputTransformer t = InputTransformer.fromJson(node);
         assertEquals("$.detail.eventName", t.getInputPathsMap().get("e"));

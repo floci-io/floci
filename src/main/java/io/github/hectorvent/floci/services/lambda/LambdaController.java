@@ -769,10 +769,24 @@ public class LambdaController {
         putSnapStart(node, fn);
         putLoggingConfig(node, fn);
         putRuntimeVersionConfig(node, fn);
+        putDurableConfig(node, fn);
 
         @SuppressWarnings("unchecked")
         Map<String, Object> result = objectMapper.convertValue(node, Map.class);
         return result;
+    }
+
+    /** Only durable functions carry a DurableConfig; AWS omits the member for every other function. */
+    private void putDurableConfig(ObjectNode node, LambdaFunction fn) {
+        if (!fn.isDurable()) {
+            return;
+        }
+        ObjectNode durable = node.putObject("DurableConfig");
+        durable.put("ExecutionTimeout", fn.getDurableExecutionTimeout());
+        durable.put("RetentionPeriodInDays", fn.getDurableRetentionPeriodInDays());
+        if (fn.getDurableKmsKeyArn() != null) {
+            durable.put("KMSKeyArn", fn.getDurableKmsKeyArn());
+        }
     }
 
     /**

@@ -10,18 +10,23 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -45,6 +50,9 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
     @InjectMock
     LambdaService lambdaService;
 
+    /** How to delete each thing the test created, pushed as it is created and run newest first. */
+    private final Deque<Runnable> cleanup = new ArrayDeque<>();
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -58,6 +66,18 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
         Mockito.when(lambdaService.invoke(any(), any(), any(), any())).thenReturn(ok);
     }
 
+    /**
+     * Deletes what the test created, newest first: a secret before the user that made it, and a
+     * user's access key and inline policy before the user, as DeleteUser requires. A test whose
+     * setup stopped partway deletes only what it got to create.
+     */
+    @AfterEach
+    void deleteWhatTheTestCreated() {
+        while (!cleanup.isEmpty()) {
+            cleanup.pop().run();
+        }
+    }
+
     @Test
     void rotateSecretIsDeniedWhenCallerCannotInvokeTheRotationFunction() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
@@ -68,6 +88,7 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
         String secretName = "rotate-denied-" + suffix;
         secretsManager(accessKeyId, "CreateSecret",
                 "{\"Name\":\"" + secretName + "\",\"SecretString\":\"v1\"}").statusCode(200);
+        deleteSecretAfterwards(secretName);
 
         secretsManager(accessKeyId, "RotateSecret",
                 "{\"SecretId\":\"" + secretName + "\",\"RotationLambdaARN\":\"" + functionArn + "\"}")
@@ -87,6 +108,7 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
         String secretName = "rotate-presigned-" + suffix;
         secretsManager(accessKeyId, "CreateSecret",
                 "{\"Name\":\"" + secretName + "\",\"SecretString\":\"v1\"}").statusCode(200);
+        deleteSecretAfterwards(secretName);
 
         String amzDate = AMZ_DATE_FMT.format(Instant.now());
         given()
@@ -122,6 +144,7 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
         String secretName = "rotate-by-name-" + suffix;
         secretsManager(accessKeyId, "CreateSecret",
                 "{\"Name\":\"" + secretName + "\",\"SecretString\":\"v1\"}").statusCode(200);
+        deleteSecretAfterwards(secretName);
 
         secretsManager(accessKeyId, "RotateSecret",
                 "{\"SecretId\":\"" + secretName + "\",\"RotationLambdaARN\":\"" + functionName + "\"}")
@@ -129,6 +152,7 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
 
         Mockito.verify(lambdaService, Mockito.timeout(5000).atLeastOnce())
                 .invoke(any(), eq(functionArn), any(), any());
+        awaitRotationFinished(secretName);
     }
 
     @Test
@@ -143,6 +167,7 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
         String secretName = "rotate-allowed-" + suffix;
         secretsManager(accessKeyId, "CreateSecret",
                 "{\"Name\":\"" + secretName + "\",\"SecretString\":\"v1\"}").statusCode(200);
+        deleteSecretAfterwards(secretName);
 
         secretsManager(accessKeyId, "RotateSecret",
                 "{\"SecretId\":\"" + secretName + "\",\"RotationLambdaARN\":\"" + functionArn + "\"}")
@@ -150,6 +175,7 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
 
         Mockito.verify(lambdaService, Mockito.timeout(5000).atLeastOnce())
                 .invoke(any(), eq(functionArn), any(), any());
+        awaitRotationFinished(secretName);
     }
 
     private static ValidatableResponse secretsManager(String accessKeyId, String operation, String body) {
@@ -163,15 +189,35 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
         .then();
     }
 
-    private static String createUserWithPolicy(String userName, String policyDocument) {
+    /**
+     * Lets the rotation finish before cleanup deletes the secret, which it would otherwise go on
+     * trying to update.
+     */
+    private static void awaitRotationFinished(String secretName) {
+        await().atMost(Duration.ofSeconds(5)).until(() -> secretsManager(ACCOUNT_ID, "DescribeSecret",
+                "{\"SecretId\":\"" + secretName + "\"}").statusCode(200).extract().path("LastRotatedDate") != null);
+    }
+
+    private void deleteSecretAfterwards(String secretName) {
+        cleanup.push(() -> secretsManager(ACCOUNT_ID, "DeleteSecret",
+                "{\"SecretId\":\"" + secretName + "\",\"ForceDeleteWithoutRecovery\":true}").statusCode(200));
+    }
+
+    private String createUserWithPolicy(String userName, String policyDocument) {
         adminIam("CreateUser", Map.of("UserName", userName)).statusCode(200);
+        cleanup.push(() -> adminIam("DeleteUser", Map.of("UserName", userName)).statusCode(200));
         adminIam("PutUserPolicy", Map.of(
                 "UserName", userName,
                 "PolicyName", "inline",
                 "PolicyDocument", policyDocument)).statusCode(200);
-        return adminIam("CreateAccessKey", Map.of("UserName", userName))
+        cleanup.push(() -> adminIam("DeleteUserPolicy",
+                Map.of("UserName", userName, "PolicyName", "inline")).statusCode(200));
+        String accessKeyId = adminIam("CreateAccessKey", Map.of("UserName", userName))
                 .statusCode(200)
                 .extract().path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
+        cleanup.push(() -> adminIam("DeleteAccessKey",
+                Map.of("UserName", userName, "AccessKeyId", accessKeyId)).statusCode(200));
+        return accessKeyId;
     }
 
     private static ValidatableResponse adminIam(String action, Map<String, String> params) {

@@ -29,12 +29,12 @@ class StepFunctionsUnresolvableJsonPathIntegrationTest {
     /** The exact reproduction from issue #2521. */
     @Test
     void unresolvableParametersPathFailsTheExecution() throws Exception {
-        var definition = """
+        String definition = """
                 {"StartAt":"Pick","States":{
                   "Pick":{"Type":"Pass","Parameters":{"missing.$":"$.nope.deep"},"End":true}}}
                 """;
 
-        var describe = run("unresolvable-jsonpath", definition, "{\"other\":1}");
+        Response describe = run("unresolvable-jsonpath", definition, "{\"other\":1}");
 
         assertEquals("FAILED", describe.jsonPath().getString("status"), describe.body().asString());
         assertEquals("States.Runtime", describe.jsonPath().getString("error"));
@@ -50,7 +50,7 @@ class StepFunctionsUnresolvableJsonPathIntegrationTest {
      */
     @Test
     void catchAllDoesNotSwallowTheFailure() throws Exception {
-        var definition = """
+        String definition = """
                 {"StartAt":"M","States":{
                   "M":{"Type":"Map","ItemsPath":"$.items",
                     "Parameters":{"missing.$":"$.nope"},
@@ -59,7 +59,7 @@ class StepFunctionsUnresolvableJsonPathIntegrationTest {
                   "Caught":{"Type":"Pass","End":true}}}
                 """;
 
-        var describe = run("unresolvable-jsonpath-catch-all", definition, "{\"items\":[1,2]}");
+        Response describe = run("unresolvable-jsonpath-catch-all", definition, "{\"items\":[1,2]}");
 
         assertEquals("FAILED", describe.jsonPath().getString("status"), describe.body().asString());
         assertEquals("States.Runtime", describe.jsonPath().getString("error"));
@@ -68,12 +68,12 @@ class StepFunctionsUnresolvableJsonPathIntegrationTest {
     /** An out-of-range array index still resolves to null and the execution succeeds. */
     @Test
     void outOfRangeArrayIndexStillSucceeds() throws Exception {
-        var definition = """
+        String definition = """
                 {"StartAt":"Pick","States":{
                   "Pick":{"Type":"Pass","Parameters":{"idx.$":"$.items[5]"},"End":true}}}
                 """;
 
-        var describe = run("unresolvable-jsonpath-array-index", definition, "{\"items\":[1,2]}");
+        Response describe = run("unresolvable-jsonpath-array-index", definition, "{\"items\":[1,2]}");
 
         assertEquals("SUCCEEDED", describe.jsonPath().getString("status"), describe.body().asString());
         assertEquals("{\"idx\":null}", describe.jsonPath().getString("output"));
@@ -82,14 +82,14 @@ class StepFunctionsUnresolvableJsonPathIntegrationTest {
     /** ResultSelector runs through the same resolver and fails the same way. */
     @Test
     void unresolvableResultSelectorPathFailsTheExecution() throws Exception {
-        var definition = """
+        String definition = """
                 {"StartAt":"M","States":{
                   "M":{"Type":"Map","ItemsPath":"$.items",
                     "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
                     "ResultSelector":{"missing.$":"$.nope"},"End":true}}}
                 """;
 
-        var describe = run("unresolvable-jsonpath-result-selector", definition, "{\"items\":[1,2]}");
+        Response describe = run("unresolvable-jsonpath-result-selector", definition, "{\"items\":[1,2]}");
 
         assertEquals("FAILED", describe.jsonPath().getString("status"), describe.body().asString());
         assertEquals("States.Runtime", describe.jsonPath().getString("error"));
@@ -100,11 +100,11 @@ class StepFunctionsUnresolvableJsonPathIntegrationTest {
     }
 
     private Response run(String label, String definition, String input) throws InterruptedException {
-        var smArn = create(label + "-" + System.currentTimeMillis(), definition);
-        var execArn = start(smArn, input);
-        for (var i = 0; i < 50; i++) {
-            var resp = describe(execArn);
-            var status = resp.jsonPath().getString("status");
+        String smArn = create(label + "-" + System.currentTimeMillis(), definition);
+        String execArn = start(smArn, input);
+        for (int i = 0; i < 50; i++) {
+            Response resp = describe(execArn);
+            String status = resp.jsonPath().getString("status");
             if (!"RUNNING".equals(status)) {
                 return resp;
             }
@@ -115,7 +115,7 @@ class StepFunctionsUnresolvableJsonPathIntegrationTest {
     }
 
     private String create(String name, String definition) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("{\"name\":\"" + name + "\",\"definition\":" + quote(definition)
@@ -126,7 +126,7 @@ class StepFunctionsUnresolvableJsonPathIntegrationTest {
     }
 
     private String start(String smArn, String input) {
-        var resp = given()
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("{\"stateMachineArn\":\"" + smArn + "\",\"input\":" + quote(input) + "}")

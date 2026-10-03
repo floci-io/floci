@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eks;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
@@ -265,6 +266,26 @@ class EksPodIdentityAssociationServiceTest {
         assertEquals(created.associationId(), found.get().associationId());
     }
 
+    @Test
+    void anAssociationOnAClusterWithoutAnArnLivesInTheDeploymentRegionAndPartition() {
+        Cluster cluster = new Cluster();
+        cluster.setName("cn-cluster");
+        cluster.setAccountId("123456789012");
+        cluster.setStatus(ClusterStatus.ACTIVE);
+        String chinaRole = "arn:aws-cn:iam::123456789012:role/pod-role";
+        IamService iam = mock(IamService.class);
+        when(iam.findRole("123456789012", "pod-role"))
+                .thenReturn(Optional.of(new IamRole("AROA-pod", "pod-role", "/", chinaRole, "{}")));
+        EksPodIdentityAssociationService service = new EksPodIdentityAssociationService(new InMemoryStorage<>(), iam,
+                new RegionResolver("cn-north-1", "000000000000"));
+
+        PodIdentityAssociation created = service.create(cluster, new CreatePodIdentityAssociationRequest(
+                cluster.getName(), NAMESPACE, SERVICE_ACCOUNT, chinaRole, "token-cn", Map.of(), null, false, null));
+
+        assertEquals("arn:aws-cn:eks:cn-north-1:123456789012:podidentityassociation/cn-cluster/"
+                + created.associationId(), created.associationArn());
+    }
+
     private static Fixture fixture() {
         Cluster cluster = new Cluster();
         cluster.setName("test-cluster");
@@ -277,7 +298,8 @@ class EksPodIdentityAssociationServiceTest {
         when(iam.findRole("123456789012", "pod-role")).thenReturn(Optional.of(role));
 
         InMemoryStorage<String, EksPodIdentityAssociationService.StoredAssociation> storage = new InMemoryStorage<>();
-        return new Fixture(cluster, iam, role, storage, new EksPodIdentityAssociationService(storage, iam));
+        return new Fixture(cluster, iam, role, storage, new EksPodIdentityAssociationService(storage, iam,
+                new RegionResolver("us-east-1", "000000000000")));
     }
 
     private record Fixture(Cluster cluster, IamService iam, IamRole role,

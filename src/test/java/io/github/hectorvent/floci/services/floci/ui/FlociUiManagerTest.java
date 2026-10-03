@@ -23,6 +23,7 @@ import com.github.dockerjava.api.model.Container;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -1056,7 +1057,7 @@ class FlociUiManagerTest {
         server.createContext(path, exchange -> {
             exchange.getResponseHeaders().set("Content-Type", "application/json");
             exchange.sendResponseHeaders(200, body.length);
-            try (var output = exchange.getResponseBody()) {
+            try (OutputStream output = exchange.getResponseBody()) {
                 output.write(body);
             }
         });

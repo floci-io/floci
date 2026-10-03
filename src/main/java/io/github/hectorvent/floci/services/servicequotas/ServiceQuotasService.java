@@ -49,6 +49,7 @@ public class ServiceQuotasService {
             Map.entry("sns", "Amazon Simple Notification Service (Amazon SNS)"),
             Map.entry("sqs", "Amazon Simple Queue Service (Amazon SQS)"),
             Map.entry("ec2", "Amazon Elastic Compute Cloud (Amazon EC2)"),
+            Map.entry("vpc", "Amazon Virtual Private Cloud (Amazon VPC)"),
             Map.entry("dynamodb", "Amazon DynamoDB"),
             Map.entry("logs", "Amazon CloudWatch Logs"),
             Map.entry("events", "Amazon EventBridge (CloudWatch Events)"));
@@ -59,7 +60,12 @@ public class ServiceQuotasService {
             "lambda", List.of(
                     new QuotaDefinition("L-B99A9384", "Concurrent executions", GENERIC_QUOTA_VALUE, false)),
             "organizations", List.of(
-                    new QuotaDefinition("L-E619E033", "Maximum number of accounts", 50.0, true)));
+                    new QuotaDefinition("L-E619E033", "Maximum number of accounts", 50.0, true)),
+            // AWS default values: tooling such as Terraform's aws_servicequotas_service_quota
+            // compares its desired value against these before requesting an increase.
+            "vpc", List.of(
+                    new QuotaDefinition("L-FE5A380F", "NAT gateways per Availability Zone", 5.0, false),
+                    new QuotaDefinition("L-2AEEBF1A", "Rules per network ACL", 20.0, false)));
 
     private static final List<String> GENERIC_QUOTA_NAMES = List.of(
             "Resources per Region",

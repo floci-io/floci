@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -225,7 +226,7 @@ class CloudFormationEc2NetworkingIntegrationTest {
     }
 
     private static void cloudFormation(String stack, String action, String templateBody) {
-        var request = given()
+        RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
             .formParam("Action", action)
@@ -256,7 +257,7 @@ class CloudFormationEc2NetworkingIntegrationTest {
     }
 
     private static String ec2(String action, Map<String, String> params) {
-        var request = given()
+        RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", EC2_AUTH)
             .formParam("Action", action)

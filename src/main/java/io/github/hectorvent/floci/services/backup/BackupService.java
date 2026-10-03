@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.backup.model.*;
@@ -598,11 +599,16 @@ public class BackupService {
         job.setCreationDate(now);
         job.setExpectedCompletionDate(now + jobCompletionDelaySeconds);
         job.setStartBy(now + 3600L);
-        job.setAccountId(regionResolver.getAccountId());
+        String accountId = regionResolver.getAccountId();
+        job.setAccountId(accountId);
         jobStore.put(jobId, job);
 
-        scheduler.schedule(() -> transitionJob(jobId, vaultName, region), 1, TimeUnit.SECONDS);
-        scheduler.schedule(() -> completeJob(jobId, vaultName, region), jobCompletionDelaySeconds, TimeUnit.SECONDS);
+        // The scheduler thread has no request context; run in the caller's account
+        // so the account-aware stores and buildArn resolve the right partition.
+        scheduler.schedule(() -> RequestScopes.runAs(accountId,
+                () -> transitionJob(jobId, vaultName, region)), 1, TimeUnit.SECONDS);
+        scheduler.schedule(() -> RequestScopes.runAs(accountId,
+                () -> completeJob(jobId, vaultName, region)), jobCompletionDelaySeconds, TimeUnit.SECONDS);
 
         return job;
     }
@@ -622,7 +628,8 @@ public class BackupService {
         job.setState("ABORTING");
         job.setStatusMessage("Job stop requested");
         jobStore.put(jobId, job);
-        scheduler.schedule(() -> abortJob(jobId), 1, TimeUnit.SECONDS);
+        String accountId = regionResolver.getAccountId();
+        scheduler.schedule(() -> RequestScopes.runAs(accountId, () -> abortJob(jobId)), 1, TimeUnit.SECONDS);
     }
 
     public List<BackupJob> listBackupJobs(String byVaultName, String byState,

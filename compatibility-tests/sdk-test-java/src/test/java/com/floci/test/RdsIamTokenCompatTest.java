@@ -13,6 +13,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.CreateDbInstanceRequest;
+import software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse;
 import software.amazon.awssdk.services.rds.model.DeleteDbInstanceRequest;
 import software.amazon.awssdk.services.rds.model.GenerateAuthenticationTokenRequest;
 
@@ -60,7 +61,7 @@ class RdsIamTokenCompatTest {
         rds = TestFixtures.rdsClient();
         instanceId = TestFixtures.uniqueName("rds-iam");
         try {
-            var response = rds.createDBInstance(CreateDbInstanceRequest.builder()
+            CreateDbInstanceResponse response = rds.createDBInstance(CreateDbInstanceRequest.builder()
                     .dbInstanceIdentifier(instanceId)
                     .dbInstanceClass("db.t3.micro")
                     .engine("postgres")

@@ -11,11 +11,13 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Optional;
@@ -78,6 +80,46 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     @Override
     public void release(String repositoryContainerId) {
         releaseRepository(repositoryContainerId);
+    }
+
+    /**
+     * {@code namespace} is the Maven groupId; the caller is responsible for requiring it, since
+     * every real Maven coordinate has one. Builds the standard Maven repository layout path
+     * (groupId with dots as slashes, then artifactId, version, and the asset's own filename).
+     *
+     * <p>Unlike {@link #fetchArtifact(String, String)}, which the real wire-protocol GET route
+     * uses with a single caller-supplied path that is legitimately allowed to contain {@code /}
+     * (it's the whole relative GAV path), every one of this method's four coordinates is its own
+     * independent, untrusted value that is only supposed to be one path segment. Concatenating
+     * them with {@code +} the way the wire-protocol route concatenates its one path would let a
+     * {@code /} inside, say, {@code assetName} splice in extra path segments, or a value of
+     * exactly {@code ..} walk back out of the version directory it's supposed to be confined to.
+     * Each coordinate is therefore percent-encoded on its own via {@link #encodeSegment}, which
+     * escapes both of those, before being joined with the real {@code /} separators this method
+     * supplies itself.
+     */
+    @Override
+    public Optional<byte[]> fetchPackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName) {
+        ensureRepository(repositoryContainerId);
+        String baseUrl = manager.ensureReady();
+        StringBuilder path = new StringBuilder("/").append(encodeSegment(repositoryContainerId));
+        for (String namespacePart : namespace.split("\\.", -1)) {
+            path.append('/').append(encodeSegment(namespacePart));
+        }
+        path.append('/').append(encodeSegment(packageName))
+                .append('/').append(encodeSegment(version))
+                .append('/').append(encodeSegment(assetName));
+        HttpRequest request = HttpRequest.newBuilder(combine(URI.create(baseUrl), path.toString()))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        HttpResponse<byte[]> response = send(request, BodyHandlers.ofByteArray());
+        if (response.statusCode() != 200) {
+            return Optional.empty();
+        }
+        return Optional.of(response.body());
     }
 
     /** Ensures a Reposilite repository named {@code repoId} exists, creating it if not. */
@@ -365,11 +407,92 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
         }
     }
 
+    /**
+     * {@code gav} isn't necessarily a trusted constant: a caller-supplied asset name can reach
+     * here (via {@link #fetchPackageVersionAsset}'s bridge from {@code GetPackageVersionAsset}, or
+     * the raw wire-protocol GAV path segment itself), so building the URI with a plain string
+     * concatenation would let a {@code #} truncate the path at a URI fragment, or a {@code ?}
+     * reinterpret the rest as a query string, silently fetching a different, unintended path
+     * instead of the one actually requested. The three-argument {@link URI} constructor percent-
+     * encodes whatever isn't already valid inside a path while leaving the real {@code /}
+     * separators alone, unlike {@link URI#create}.
+     */
     private HttpRequest.Builder authenticated(String baseUrl, String repoId, String gav) {
         return HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + "/" + repoId + "/" + gav))
+                .uri(requestUri(baseUrl, "/" + repoId + "/" + gav))
                 .timeout(Duration.ofSeconds(30))
                 .header("Authorization", manager.basicAuthHeader());
+    }
+
+    /**
+     * {@code baseUrl} isn't always just scheme and authority: {@code FLOCI_SERVICES_CODEARTIFACT_
+     * MAVEN_URL} can point at a pre-configured Reposilite instance behind its own path prefix, so
+     * that prefix is carried over, and carried over with whatever encoding it was configured with
+     * untouched, rather than dropped or re-encoded. {@code path} can separately carry
+     * caller-supplied text (a package or asset name), so it's not safe to hand straight to
+     * {@link URI#create} either: a raw string concatenation would let a {@code #} in that text
+     * truncate the request at a URI fragment, or a {@code ?} reinterpret the rest as a query
+     * string, silently fetching a different path than the one actually requested.
+     */
+    private static URI requestUri(String baseUrl, String path) {
+        try {
+            String encodedPath = new URI(null, null, path, null, null).getRawPath();
+            return combine(URI.create(baseUrl), encodedPath);
+        } catch (URISyntaxException e) {
+            throw new IllegalStateException("Could not build a request URI for " + path, e);
+        }
+    }
+
+    /**
+     * Combines {@code base}'s scheme, authority, and own path prefix with an already
+     * percent-encoded {@code encodedPath}. {@code encodedPath} must be fully encoded going in:
+     * this method hands the combined string straight to {@link URI#create}, which only parses,
+     * rather than running it through a constructor that would try to quote it a second time and
+     * corrupt any {@code %} it finds (double-encoding, e.g. turning a deliberate {@code %2F} into
+     * {@code %252F}).
+     */
+    private static URI combine(URI base, String encodedPath) {
+        // getRawPath(), not getPath(): the configured prefix's own encoding (e.g. a literal %2F
+        // standing for an escaped slash within one opaque segment) must survive untouched. Decoding
+        // it and handing it to the URI constructor alongside the new path would re-encode the whole
+        // thing together and could turn that %2F into a literal /, changing what the prefix means to
+        // whatever sits in front of the sidecar. getRawAuthority() below is the same reasoning
+        // applied to userinfo/host, e.g. a percent-encoded character inside HTTP Basic credentials.
+        String prefix = base.getRawPath();
+        if (prefix == null || prefix.equals("/")) {
+            prefix = "";
+        } else if (prefix.endsWith("/")) {
+            prefix = prefix.substring(0, prefix.length() - 1);
+        }
+        return URI.create(base.getScheme() + "://" + base.getRawAuthority() + prefix + encodedPath);
+    }
+
+    /**
+     * Percent-encodes a single untrusted path segment so it can never be mistaken for a
+     * structural separator or a dot-segment. Every byte outside the unreserved set is escaped,
+     * including {@code /} (which the generic path-quoting {@link URI} constructor otherwise
+     * leaves alone, since a real {@code /} is legal inside a path). A segment that is exactly
+     * {@code .} or {@code ..} gets its dots escaped too: those are themselves otherwise-legal
+     * unreserved characters, but a bare {@code ..} between two real {@code /} separators is a
+     * dot-segment that something in front of the sidecar could resolve by walking back out of
+     * the directory this method intends to confine the request to.
+     */
+    private static String encodeSegment(String segment) {
+        if (segment.equals(".") || segment.equals("..")) {
+            return segment.replace(".", "%2E");
+        }
+        StringBuilder encoded = new StringBuilder();
+        for (byte b : segment.getBytes(StandardCharsets.UTF_8)) {
+            int v = b & 0xFF;
+            char c = (char) v;
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                    || c == '-' || c == '_' || c == '~' || c == '.') {
+                encoded.append(c);
+            } else {
+                encoded.append('%').append(String.format("%02X", v));
+            }
+        }
+        return encoded.toString();
     }
 
     private <T> HttpResponse<T> send(HttpRequest request, HttpResponse.BodyHandler<T> bodyHandler) {

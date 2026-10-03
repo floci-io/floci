@@ -10,11 +10,13 @@ import software.amazon.awssdk.services.codedeploy.CodeDeployClient;
 import software.amazon.awssdk.services.codedeploy.model.AppSpecContent;
 import software.amazon.awssdk.services.codedeploy.model.BatchGetDeploymentTargetsResponse;
 import software.amazon.awssdk.services.codedeploy.model.ComputePlatform;
+import software.amazon.awssdk.services.codedeploy.model.CreateApplicationResponse;
 import software.amazon.awssdk.services.codedeploy.model.CreateDeploymentGroupResponse;
 import software.amazon.awssdk.services.codedeploy.model.CreateDeploymentResponse;
 import software.amazon.awssdk.services.codedeploy.model.DeploymentOption;
 import software.amazon.awssdk.services.codedeploy.model.DeploymentStatus;
 import software.amazon.awssdk.services.codedeploy.model.DeploymentStyle;
+import software.amazon.awssdk.services.codedeploy.model.DeploymentTarget;
 import software.amazon.awssdk.services.codedeploy.model.DeploymentType;
 import software.amazon.awssdk.services.codedeploy.model.ECSService;
 import software.amazon.awssdk.services.codedeploy.model.GetDeploymentResponse;
@@ -29,8 +31,10 @@ import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.CreateClusterResponse;
 import software.amazon.awssdk.services.ecs.model.CreateServiceResponse;
 import software.amazon.awssdk.services.ecs.model.DeploymentControllerType;
+import software.amazon.awssdk.services.ecs.model.DescribeTaskSetsResponse;
 import software.amazon.awssdk.services.ecs.model.RegisterTaskDefinitionResponse;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
+import software.amazon.awssdk.services.elasticloadbalancingv2.model.Action;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.ActionTypeEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.CreateListenerResponse;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.CreateLoadBalancerResponse;
@@ -39,8 +43,10 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.model.DescribeRule
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.IpAddressType;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancerTypeEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.ProtocolEnum;
+import software.amazon.awssdk.services.elasticloadbalancingv2.model.Rule;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -167,11 +173,11 @@ class CodeDeployEcsTest {
         assertThat(listenerArn).isNotNull();
 
         DescribeRulesResponse resp = elb.describeRules(r -> r.listenerArn(listenerArn));
-        var defaultRule = resp.rules().stream()
+        Optional<Rule> defaultRule = resp.rules().stream()
                 .filter(rule -> rule.isDefault())
                 .findFirst();
         assertThat(defaultRule).isPresent();
-        var forwardAction = defaultRule.get().actions().stream()
+        Optional<Action> forwardAction = defaultRule.get().actions().stream()
                 .filter(a -> ActionTypeEnum.FORWARD.equals(a.type()))
                 .findFirst();
         assertThat(forwardAction).isPresent();
@@ -223,7 +229,7 @@ class CodeDeployEcsTest {
     @Test
     @Order(9)
     void createEcsApplication() {
-        var resp = codedeploy.createApplication(r -> r
+        CreateApplicationResponse resp = codedeploy.createApplication(r -> r
                 .applicationName(APP_NAME)
                 .computePlatform(ComputePlatform.ECS));
 
@@ -353,7 +359,7 @@ class CodeDeployEcsTest {
                 .targetIds(targetIds));
 
         assertThat(resp.deploymentTargets()).hasSize(1);
-        var target = resp.deploymentTargets().get(0);
+        DeploymentTarget target = resp.deploymentTargets().get(0);
         assertThat(target.deploymentTargetTypeAsString()).isEqualTo("ECSTarget");
         assertThat(target.ecsTarget()).isNotNull();
         assertThat(target.ecsTarget().statusAsString()).isEqualTo("Succeeded");
@@ -369,12 +375,12 @@ class CodeDeployEcsTest {
         assertThat(greenTgArn).isNotNull();
 
         DescribeRulesResponse resp = elb.describeRules(r -> r.listenerArn(listenerArn));
-        var defaultRule = resp.rules().stream()
+        Optional<Rule> defaultRule = resp.rules().stream()
                 .filter(rule -> rule.isDefault())
                 .findFirst();
 
         assertThat(defaultRule).isPresent();
-        var forwardAction = defaultRule.get().actions().stream()
+        Optional<Action> forwardAction = defaultRule.get().actions().stream()
                 .filter(a -> ActionTypeEnum.FORWARD.equals(a.type()))
                 .findFirst();
         assertThat(forwardAction).isPresent();
@@ -385,7 +391,7 @@ class CodeDeployEcsTest {
     @Order(17)
     void ecsTaskSetCreatedForGreenDeployment() {
         // The green task set should exist and be PRIMARY after deployment
-        var taskSets = ecs.describeTaskSets(r -> r
+        DescribeTaskSetsResponse taskSets = ecs.describeTaskSets(r -> r
                 .cluster(CLUSTER)
                 .service(SERVICE));
 

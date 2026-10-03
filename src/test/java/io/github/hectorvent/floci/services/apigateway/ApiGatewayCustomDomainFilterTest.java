@@ -9,6 +9,8 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
 import java.net.URI;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -36,6 +38,7 @@ class ApiGatewayCustomDomainFilterTest {
         assertEquals("/execute-api/" + API_ID + "/prod/iam", request.routedUri().getRawPath());
         assertEquals("tenant=alpha", request.routedUri().getRawQuery());
         assertEquals("/v1/iam", routeContext.signedRequestPath());
+        assertEquals(Boolean.TRUE, request.property(ApiGatewayCustomDomainFilter.ROUTED_PROPERTY));
     }
 
     @Test
@@ -50,6 +53,7 @@ class ApiGatewayCustomDomainFilterTest {
 
         assertEquals("/execute-api/" + API_ID + "/prod/orders/42", request.routedUri().getRawPath());
         assertEquals("/orders/42", routeContext.signedRequestPath());
+        assertEquals(Boolean.TRUE, request.property(ApiGatewayCustomDomainFilter.ROUTED_PROPERTY));
     }
 
     @Test
@@ -64,6 +68,7 @@ class ApiGatewayCustomDomainFilterTest {
 
         assertNull(request.routedUri());
         assertNull(routeContext.signedRequestPath());
+        assertNull(request.property(ApiGatewayCustomDomainFilter.ROUTED_PROPERTY));
     }
 
     @Test
@@ -81,6 +86,7 @@ class ApiGatewayCustomDomainFilterTest {
 
         assertNull(request.routedUri());
         assertNull(routeContext.signedRequestPath());
+        assertNull(request.property(ApiGatewayCustomDomainFilter.ROUTED_PROPERTY));
     }
 
     private static ApiGatewayService serviceWithMapping(String basePath, String stage) {
@@ -105,6 +111,7 @@ class ApiGatewayCustomDomainFilterTest {
         private final String host;
         private final URI requestUri;
         private URI routedUri;
+        private final Map<String, Object> properties = new HashMap<>();
 
         private RecordingRequest(String host, URI requestUri) {
             this.host = host;
@@ -122,12 +129,20 @@ class ApiGatewayCustomDomainFilterTest {
                             routedUri = (URI) args[0];
                             yield null;
                         }
+                        case "setProperty" -> {
+                            properties.put((String) args[0], args[1]);
+                            yield null;
+                        }
                         default -> throw new UnsupportedOperationException(method.getName());
                     });
         }
 
         private URI routedUri() {
             return routedUri;
+        }
+
+        private Object property(String name) {
+            return properties.get(name);
         }
 
         private UriInfo uriInfo() {

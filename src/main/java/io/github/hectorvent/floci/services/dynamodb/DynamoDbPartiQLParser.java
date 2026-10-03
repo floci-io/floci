@@ -1046,7 +1046,7 @@ public class DynamoDbPartiQLParser {
             throw validationEx("Not enough parameters supplied for ? placeholders");
         }
         JsonNode p = parameters.get(paramIdx++);
-        var type = DynamoDbAttributeValueValidator.typeOf(p);
+        String type = DynamoDbAttributeValueValidator.typeOf(p);
         return switch (type) {
             case "S"    -> new PVal.Str(p.get("S").asText());
             case "N"    -> new PVal.Num(p.get("N").asText());

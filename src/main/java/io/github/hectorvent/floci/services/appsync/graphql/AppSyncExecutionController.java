@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
@@ -65,6 +66,7 @@ public class AppSyncExecutionController {
     private final ObjectMapper objectMapper;
     private final AuthMiddleware authMiddleware;
     private final RequestContext requestContext;
+    private final RegionResolver regionResolver;
     private final AppSyncResolverExecutor resolverExecutor;
     private final ResolverCallbackSessions callbackSessions;
     private final ContainerReachableEndpoint reachableEndpoint;
@@ -79,6 +81,7 @@ public class AppSyncExecutionController {
                                       ObjectMapper objectMapper,
                                       AuthMiddleware authMiddleware,
                                       RequestContext requestContext,
+                                      RegionResolver regionResolver,
                                       AppSyncResolverExecutor resolverExecutor,
                                       ResolverCallbackSessions callbackSessions,
                                       ContainerReachableEndpoint reachableEndpoint) {
@@ -91,6 +94,7 @@ public class AppSyncExecutionController {
         this.objectMapper = objectMapper;
         this.authMiddleware = authMiddleware;
         this.requestContext = requestContext;
+        this.regionResolver = regionResolver;
         this.resolverExecutor = resolverExecutor;
         this.callbackSessions = callbackSessions;
         this.reachableEndpoint = reachableEndpoint;
@@ -341,7 +345,9 @@ public class AppSyncExecutionController {
 
     private AuthRequestInfo authRequestInfo(ParsedRequest parsed, HttpHeaders headers, String rawBody) {
         String accountId = requestContext.getAccountId() != null ? requestContext.getAccountId() : "000000000000";
-        String region = requestContext.getRegion() != null ? requestContext.getRegion() : "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+        String region = requestContext.getRegion() != null
+                ? requestContext.getRegion()
+                : regionResolver.getDefaultRegion();
         String requestId = headers.getHeaderString("x-amzn-RequestId");
         if (requestId == null || requestId.isBlank()) {
             requestId = UUID.randomUUID().toString();

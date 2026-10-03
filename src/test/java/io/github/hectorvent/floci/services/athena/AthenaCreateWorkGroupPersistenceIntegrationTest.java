@@ -70,7 +70,7 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
 
         assertTrue(Files.exists(WORKGROUPS_FILE), "CreateWorkGroup should create workgroups.json");
 
-        var store = new PersistentStorage<String, Map<String, Object>>(
+        PersistentStorage<String, Map<String, Object>> store = new PersistentStorage<>(
                 WORKGROUPS_FILE,
                 new TypeReference<Map<String, Map<String, Object>>>() {});
         store.load();
@@ -121,7 +121,7 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
         .then()
             .statusCode(200);
 
-        var store = new PersistentStorage<String, Map<String, Object>>(
+        PersistentStorage<String, Map<String, Object>> store = new PersistentStorage<>(
                 WORKGROUPS_FILE,
                 new TypeReference<Map<String, Map<String, Object>>>() {});
         store.load();
@@ -167,7 +167,7 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
         .then()
             .statusCode(200);
 
-        var store = new PersistentStorage<String, Map<String, Object>>(
+        PersistentStorage<String, Map<String, Object>> store = new PersistentStorage<>(
                 WORKGROUPS_FILE,
                 new TypeReference<Map<String, Map<String, Object>>>() {});
         store.load();
@@ -205,7 +205,7 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
         .then()
             .statusCode(200);
 
-        var store = new PersistentStorage<String, Map<String, Object>>(
+        PersistentStorage<String, Map<String, Object>> store = new PersistentStorage<>(
                 WORKGROUPS_FILE,
                 new TypeReference<Map<String, Map<String, Object>>>() {});
         store.load();
@@ -240,7 +240,7 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
         .then()
             .statusCode(200);
 
-        var store = new PersistentStorage<String, Map<String, Object>>(
+        PersistentStorage<String, Map<String, Object>> store = new PersistentStorage<>(
                 WORKGROUPS_FILE,
                 new TypeReference<Map<String, Map<String, Object>>>() {});
         store.load();
@@ -277,7 +277,7 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
         .then()
             .statusCode(200);
 
-        var store = new PersistentStorage<String, Map<String, Object>>(
+        PersistentStorage<String, Map<String, Object>> store = new PersistentStorage<>(
                 WORKGROUPS_FILE,
                 new TypeReference<Map<String, Map<String, Object>>>() {});
         store.load();

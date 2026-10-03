@@ -62,8 +62,8 @@ class StepFunctionsExpressStartExecutionIntegrationTest {
     }
 
     private static String createStateMachine(String name, String type, String definition) {
-        var typeField = type != null ? "\"type\": \"%s\",".formatted(type) : "";
-        var resp = given()
+        String typeField = type != null ? "\"type\": \"%s\",".formatted(type) : "";
+        Response resp = given()
                 .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""

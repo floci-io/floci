@@ -18,12 +18,13 @@ public class Integration {
     private String httpMethod;
     private String passthroughBehavior = "WHEN_NO_MATCH"; // WHEN_NO_MATCH, WHEN_NO_TEMPLATES, NEVER
     private String contentHandling;   // CONVERT_TO_BINARY, CONVERT_TO_TEXT, or null to pass through
-    private Integer timeoutInMillis;  // 50–29000; AWS caps REST integrations at 29s
+    private Integer timeoutInMillis = 29000; // AWS default; regional/private APIs may use more
     private String connectionType = "INTERNET"; // INTERNET or VPC_LINK
     private String connectionId;      // VpcLink id when connectionType is VPC_LINK
     private String credentials;       // IAM role ARN assumed for AWS integrations
     private String cacheNamespace;
     private List<String> cacheKeyParameters = new ArrayList<>();
+    private String responseTransferMode = "BUFFERED";
     private TlsConfig tlsConfig;
     private Map<String, String> requestParameters = new HashMap<>(); // integration.request.* → method.request.*
     private Map<String, String> requestTemplates = new HashMap<>();
@@ -104,6 +105,14 @@ public class Integration {
 
     public void setCacheKeyParameters(List<String> cacheKeyParameters) {
         this.cacheKeyParameters = cacheKeyParameters != null ? cacheKeyParameters : new ArrayList<>();
+    }
+
+    public String getResponseTransferMode() {
+        return responseTransferMode != null ? responseTransferMode : "BUFFERED";
+    }
+
+    public void setResponseTransferMode(String responseTransferMode) {
+        this.responseTransferMode = responseTransferMode;
     }
 
     public TlsConfig getTlsConfig() {

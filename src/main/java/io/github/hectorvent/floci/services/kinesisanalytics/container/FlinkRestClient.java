@@ -177,9 +177,9 @@ public class FlinkRestClient {
             if (resp.statusCode() != 200) {
                 return null;
             }
-            var root = mapper.readTree(resp.body());
+            JsonNode root = mapper.readTree(resp.body());
             String statusId = root.path("status").path("id").asText(null);
-            var operation = root.path("operation");
+            JsonNode operation = root.path("operation");
             boolean failed = operation.has("failure-cause");
             String location = operation.path("location").asText(null);
             return new SavepointStatus(statusId, location, failed);

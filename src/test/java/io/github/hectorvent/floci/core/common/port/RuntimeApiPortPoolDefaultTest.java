@@ -124,7 +124,9 @@ class RuntimeApiPortPoolDefaultTest {
         // configured range, so widening the default genuinely raises the concurrency ceiling.
         int base = defaultOf("runtimeApiBasePort");
         int max = defaultOf("runtimeApiMaxPort");
-        PortAllocator allocator = new PortAllocator(base, max);
+        // Every port counts as bindable so the assertion is about the configured width, not about
+        // what happens to be listening on 12000+ on the machine running the suite.
+        PortAllocator allocator = new PortAllocator(base, max, w -> { }, p -> true);
 
         java.util.Set<Integer> handed = new java.util.HashSet<>();
         for (int i = 0; i < MIN_USABLE_POOL_WIDTH; i++) {

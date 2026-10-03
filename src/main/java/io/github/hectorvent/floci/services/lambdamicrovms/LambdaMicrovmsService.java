@@ -486,8 +486,15 @@ public class LambdaMicrovmsService {
                 .toList();
     }
 
+    /**
+     * UpdateNetworkConnector: every member is optional and a null one leaves the connector's value
+     * as it is. The model lets an update change the operator role, the network protocol and the
+     * associated compute resource types as well as the subnets and security groups.
+     */
     public NetworkConnector updateConnector(String region, String id,
-                                            List<String> subnetIds, List<String> securityGroupIds) {
+                                            List<String> subnetIds, List<String> securityGroupIds,
+                                            String operatorRole, String networkProtocol,
+                                            List<String> computeResourceTypes) {
         NetworkConnector connector = getConnector(region, id);
         if (subnetIds != null && !subnetIds.isEmpty()) {
             if (subnetIds.size() > MAX_CONNECTOR_SUBNETS) {
@@ -501,6 +508,18 @@ public class LambdaMicrovmsService {
         }
         if (securityGroupIds != null) {
             connector.securityGroupIds = List.copyOf(securityGroupIds);
+        }
+        if (operatorRole != null && !operatorRole.isBlank()) {
+            connector.operatorRole = operatorRole;
+            connector.lastModified = Instant.now();
+        }
+        if (networkProtocol != null && !networkProtocol.isBlank()) {
+            connector.networkProtocol = networkProtocol;
+            connector.lastModified = Instant.now();
+        }
+        if (computeResourceTypes != null && !computeResourceTypes.isEmpty()) {
+            connector.associatedComputeResourceTypes = List.copyOf(computeResourceTypes);
+            connector.lastModified = Instant.now();
         }
         persist(connectors, region, connector.id, connector);
         return connector;

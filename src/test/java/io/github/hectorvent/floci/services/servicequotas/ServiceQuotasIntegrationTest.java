@@ -176,6 +176,37 @@ class ServiceQuotasIntegrationTest {
     }
 
     @Test
+    void vpcQuotasUseAwsQuotaCodesAsDefaultAndApplied() {
+        for (String target : new String[] {"GetAWSDefaultServiceQuota", "GetServiceQuota"}) {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "ServiceQuotasV20190624." + target)
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"ServiceCode\":\"vpc\",\"QuotaCode\":\"L-FE5A380F\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("Quota.QuotaCode", equalTo("L-FE5A380F"))
+                .body("Quota.QuotaName", equalTo("NAT gateways per Availability Zone"))
+                .body("Quota.Value", equalTo(5.0f));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "ServiceQuotasV20190624." + target)
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"ServiceCode\":\"vpc\",\"QuotaCode\":\"L-2AEEBF1A\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("Quota.QuotaCode", equalTo("L-2AEEBF1A"))
+                .body("Quota.QuotaName", equalTo("Rules per network ACL"))
+                .body("Quota.Value", equalTo(20.0f));
+        }
+    }
+
+    @Test
     void listRequestedQuotaHistoryByQuotaReturnsEmptyHistoryForKnownQuota() {
         given()
             .contentType(CONTENT_TYPE)

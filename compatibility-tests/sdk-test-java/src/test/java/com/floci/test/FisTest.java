@@ -4,19 +4,31 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.fis.FisClient;
 import software.amazon.awssdk.services.fis.model.AccountTargeting;
+import software.amazon.awssdk.services.fis.model.Action;
 import software.amazon.awssdk.services.fis.model.ActionsMode;
 import software.amazon.awssdk.services.fis.model.CreateExperimentTemplateActionInput;
+import software.amazon.awssdk.services.fis.model.CreateExperimentTemplateRequest;
 import software.amazon.awssdk.services.fis.model.CreateExperimentTemplateStopConditionInput;
 import software.amazon.awssdk.services.fis.model.CreateExperimentTemplateTargetInput;
 import software.amazon.awssdk.services.fis.model.EmptyTargetResolutionMode;
+import software.amazon.awssdk.services.fis.model.Experiment;
 import software.amazon.awssdk.services.fis.model.ExperimentStatus;
+import software.amazon.awssdk.services.fis.model.ExperimentTargetAccountConfiguration;
+import software.amazon.awssdk.services.fis.model.ExperimentTemplate;
+import software.amazon.awssdk.services.fis.model.ListActionsResponse;
+import software.amazon.awssdk.services.fis.model.ListTargetResourceTypesResponse;
+import software.amazon.awssdk.services.fis.model.ResolvedTarget;
 import software.amazon.awssdk.services.fis.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.fis.model.SafetyLever;
 import software.amazon.awssdk.services.fis.model.SafetyLeverStatus;
 import software.amazon.awssdk.services.fis.model.SafetyLeverStatusInput;
 import software.amazon.awssdk.services.fis.model.ServiceQuotaExceededException;
+import software.amazon.awssdk.services.fis.model.TargetAccountConfiguration;
+import software.amazon.awssdk.services.fis.model.TargetResourceType;
 import software.amazon.awssdk.services.fis.model.ValidationException;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -41,12 +53,12 @@ class FisTest {
         boolean targetAccountConfigurationExists = false;
 
         try (FisClient fis = TestFixtures.fisClient()) {
-            var action = fis.getAction(request -> request.id(ACTION_ID)).action();
+            Action action = fis.getAction(request -> request.id(ACTION_ID)).action();
             assertThat(action.id()).isEqualTo(ACTION_ID);
             assertThat(action.arn()).endsWith("action/" + ACTION_ID);
             assertThat(action.targets()).containsKey("Instances");
 
-            var firstActionsPage = fis.listActions(request -> request.maxResults(1));
+            ListActionsResponse firstActionsPage = fis.listActions(request -> request.maxResults(1));
             assertThat(firstActionsPage.actions()).hasSize(1);
             assertThat(firstActionsPage.nextToken()).isNotBlank();
             assertThat(fis.listActions(request -> request
@@ -87,29 +99,29 @@ class FisTest {
                     .isInstanceOfSatisfying(ValidationException.class,
                             exception -> assertThat(exception.statusCode()).isEqualTo(400));
 
-            var targetResourceType = fis.getTargetResourceType(request -> request
+            TargetResourceType targetResourceType = fis.getTargetResourceType(request -> request
                     .resourceType(RESOURCE_TYPE)).targetResourceType();
             assertThat(targetResourceType.resourceType()).isEqualTo(RESOURCE_TYPE);
 
-            var firstResourceTypesPage = fis.listTargetResourceTypes(request -> request.maxResults(1));
+            ListTargetResourceTypesResponse firstResourceTypesPage = fis.listTargetResourceTypes(request -> request.maxResults(1));
             assertThat(firstResourceTypesPage.targetResourceTypes()).hasSize(1);
             assertThat(firstResourceTypesPage.nextToken()).isNotBlank();
             assertThat(fis.listTargetResourceTypes(request -> request
                     .maxResults(1)
                     .nextToken(firstResourceTypesPage.nextToken())).targetResourceTypes()).hasSize(1);
 
-            var initialLever = fis.getSafetyLever(request -> request.id("default")).safetyLever();
+            SafetyLever initialLever = fis.getSafetyLever(request -> request.id("default")).safetyLever();
             assertThat(initialLever.id()).isEqualTo("default");
             assertThat(initialLever.arn()).endsWith("safety-lever/default");
 
-            var engagedLever = fis.updateSafetyLeverState(request -> request
+            SafetyLever engagedLever = fis.updateSafetyLeverState(request -> request
                     .id("default")
                     .state(state -> state
                             .status(SafetyLeverStatusInput.ENGAGED)
                             .reason("SDK compatibility test"))).safetyLever();
             assertThat(engagedLever.state().status()).isEqualTo(SafetyLeverStatus.ENGAGED);
 
-            var disengagedLever = fis.updateSafetyLeverState(request -> request
+            SafetyLever disengagedLever = fis.updateSafetyLeverState(request -> request
                     .id("default")
                     .state(state -> state
                             .status(SafetyLeverStatusInput.DISENGAGED)
@@ -117,7 +129,7 @@ class FisTest {
             assertThat(disengagedLever.state().status()).isEqualTo(SafetyLeverStatus.DISENGAGED);
 
             String clientToken = TestFixtures.uniqueName("fis-template");
-            var createRequest = software.amazon.awssdk.services.fis.model.CreateExperimentTemplateRequest
+            CreateExperimentTemplateRequest createRequest = CreateExperimentTemplateRequest
                     .builder()
                     .clientToken(clientToken)
                     .description("FIS SDK compatibility template")
@@ -154,7 +166,7 @@ class FisTest {
                                             "arn:aws:cloudwatch::000000000000:dashboard/fis-sdk"))))
                     .build();
 
-            var createdTemplate = fis.createExperimentTemplate(createRequest).experimentTemplate();
+            ExperimentTemplate createdTemplate = fis.createExperimentTemplate(createRequest).experimentTemplate();
             templateId = createdTemplate.id();
             String activeTemplateId = templateId;
             assertThat(activeTemplateId).isNotBlank();
@@ -173,12 +185,12 @@ class FisTest {
             assertThat(fis.createExperimentTemplate(createRequest).experimentTemplate().id())
                     .isEqualTo(activeTemplateId);
 
-            var fetchedTemplate = fis.getExperimentTemplate(request -> request.id(activeTemplateId))
+            ExperimentTemplate fetchedTemplate = fis.getExperimentTemplate(request -> request.id(activeTemplateId))
                     .experimentTemplate();
             assertThat(fetchedTemplate.id()).isEqualTo(activeTemplateId);
             assertThat(fetchedTemplate.creationTime()).isNotNull();
 
-            var updatedTemplate = fis.updateExperimentTemplate(request -> request
+            ExperimentTemplate updatedTemplate = fis.updateExperimentTemplate(request -> request
                     .id(activeTemplateId)
                     .description("Updated through the AWS SDK")).experimentTemplate();
             assertThat(updatedTemplate.description()).isEqualTo("Updated through the AWS SDK");
@@ -187,7 +199,7 @@ class FisTest {
                     .experimentTemplates())
                     .anyMatch(template -> activeTemplateId.equals(template.id()));
 
-            var createdTargetAccount = fis.createTargetAccountConfiguration(request -> request
+            TargetAccountConfiguration createdTargetAccount = fis.createTargetAccountConfiguration(request -> request
                     .clientToken(TestFixtures.uniqueName("fis-account"))
                     .experimentTemplateId(activeTemplateId)
                     .accountId(ACCOUNT_ID)
@@ -198,12 +210,12 @@ class FisTest {
             assertThat(createdTargetAccount.accountId()).isEqualTo(ACCOUNT_ID);
             assertThat(createdTargetAccount.roleArn()).isEqualTo(TARGET_ROLE_ARN);
 
-            var fetchedTargetAccount = fis.getTargetAccountConfiguration(request -> request
+            TargetAccountConfiguration fetchedTargetAccount = fis.getTargetAccountConfiguration(request -> request
                     .experimentTemplateId(activeTemplateId)
                     .accountId(ACCOUNT_ID)).targetAccountConfiguration();
             assertThat(fetchedTargetAccount.description()).isEqualTo("compatibility target account");
 
-            var updatedTargetAccount = fis.updateTargetAccountConfiguration(request -> request
+            TargetAccountConfiguration updatedTargetAccount = fis.updateTargetAccountConfiguration(request -> request
                     .experimentTemplateId(activeTemplateId)
                     .accountId(ACCOUNT_ID)
                     .roleArn(TARGET_ROLE_ARN)
@@ -232,7 +244,7 @@ class FisTest {
                     .containsEntry("suite", "sdk-compat")
                     .doesNotContainKey("owner");
 
-            var startedExperiment = fis.startExperiment(request -> request
+            Experiment startedExperiment = fis.startExperiment(request -> request
                     .clientToken(TestFixtures.uniqueName("fis-experiment"))
                     .experimentTemplateId(activeTemplateId)
                     .experimentOptions(options -> options.actionsMode(ActionsMode.SKIP_ALL))
@@ -245,7 +257,7 @@ class FisTest {
             assertThat(startedExperiment.state().status())
                     .isIn(ExperimentStatus.RUNNING, ExperimentStatus.COMPLETED);
 
-            var fetchedExperiment = fis.getExperiment(request -> request.id(experimentId)).experiment();
+            Experiment fetchedExperiment = fis.getExperiment(request -> request.id(experimentId)).experiment();
             assertThat(fetchedExperiment.id()).isEqualTo(experimentId);
             assertThat(fetchedExperiment.tags()).containsEntry("mode", "safe-preview");
 
@@ -254,7 +266,7 @@ class FisTest {
                     .maxResults(100)).experiments())
                     .anyMatch(experiment -> experimentId.equals(experiment.id()));
 
-            var resolvedTargets = fis.listExperimentResolvedTargets(request -> request
+            List<ResolvedTarget> resolvedTargets = fis.listExperimentResolvedTargets(request -> request
                     .experimentId(experimentId)
                     .targetName("instances")
                     .maxResults(100)).resolvedTargets();
@@ -262,7 +274,7 @@ class FisTest {
                     .anyMatch(target -> "instances".equals(target.targetName())
                             && RESOURCE_TYPE.equals(target.resourceType()));
 
-            var experimentTargetAccount = fis.getExperimentTargetAccountConfiguration(request -> request
+            ExperimentTargetAccountConfiguration experimentTargetAccount = fis.getExperimentTargetAccountConfiguration(request -> request
                     .experimentId(experimentId)
                     .accountId(ACCOUNT_ID)).targetAccountConfiguration();
             assertThat(experimentTargetAccount.accountId()).isEqualTo(ACCOUNT_ID);
@@ -272,7 +284,7 @@ class FisTest {
                     .experimentId(experimentId)).targetAccountConfigurations())
                     .anyMatch(configuration -> ACCOUNT_ID.equals(configuration.accountId()));
 
-            var stoppedExperiment = fis.stopExperiment(request -> request.id(experimentId)).experiment();
+            Experiment stoppedExperiment = fis.stopExperiment(request -> request.id(experimentId)).experiment();
             assertThat(stoppedExperiment.id()).isEqualTo(experimentId);
             assertThat(stoppedExperiment.state().status())
                     .isIn(ExperimentStatus.STOPPED, ExperimentStatus.COMPLETED);

@@ -11,11 +11,13 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.ByteArrayInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -67,7 +69,7 @@ class ContainerCaBundleTest {
         byte[] second = Files.readAllBytes(ContainerCaBundle.write(tlsDir, ca.certificatePath()));
 
         assertTrue(java.util.Arrays.equals(first, second));
-        try (var files = Files.list(tlsDir)) {
+        try (Stream<Path> files = Files.list(tlsDir)) {
             assertTrue(files.noneMatch(file -> file.getFileName().toString().endsWith(".tmp")), "no temp file left behind");
         }
     }
@@ -208,7 +210,7 @@ class ContainerCaBundleTest {
 
     private static List<X509Certificate> parseAll(byte[] pem) throws Exception {
         List<X509Certificate> certificates = new ArrayList<>();
-        for (var certificate : CertificateFactory.getInstance("X.509").generateCertificates(new ByteArrayInputStream(pem))) {
+        for (Certificate certificate : CertificateFactory.getInstance("X.509").generateCertificates(new ByteArrayInputStream(pem))) {
             certificates.add((X509Certificate) certificate);
         }
         return certificates;
