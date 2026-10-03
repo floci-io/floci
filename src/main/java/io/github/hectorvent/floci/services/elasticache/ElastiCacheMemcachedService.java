@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elasticache;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
@@ -31,6 +32,8 @@ public class ElastiCacheMemcachedService {
     private static final String ENGINE_VERSION = "1.6.22";
     /** Memcached's well-known port, used as the endpoint port when no backing container exists. */
     private static final int BACKEND_PORT = 11211;
+    /** The node type a create that names none is reported with, the same as for redis. */
+    private static final String DEFAULT_CACHE_NODE_TYPE = "cache.t4g.micro";
 
     private final StorageBackend<String, CacheCluster> clusters;
     /**
@@ -45,14 +48,17 @@ public class ElastiCacheMemcachedService {
     private final EmulatorConfig config;
     /** Shared with {@link ElastiCacheService}: one namespace, one set of in-flight claims. */
     private final ElastiCacheProvisioningIds provisioningIds;
+    private final RegionResolver regionResolver;
     private final ConcurrentHashMap<String, Object> clusterLocks = new ConcurrentHashMap<>();
 
     @Inject
     public ElastiCacheMemcachedService(ElastiCacheMemcachedContainerManager containerManager,
                                        StorageFactory storageFactory,
                                        EmulatorConfig config,
-                                       ElastiCacheProvisioningIds provisioningIds) {
+                                       ElastiCacheProvisioningIds provisioningIds,
+                                       RegionResolver regionResolver) {
         this.containerManager = containerManager;
+        this.regionResolver = regionResolver;
         this.config = config;
         this.provisioningIds = provisioningIds;
         this.clusters = storageFactory.create("elasticache", "elasticache-cache-clusters.json",
@@ -63,7 +69,16 @@ public class ElastiCacheMemcachedService {
                 new TypeReference<Map<String, ReplicationGroup>>() {});
     }
 
-    public CacheCluster createCacheCluster(String clusterId) {
+    /**
+     * Creates a Memcached cluster from the same request a redis cluster is created from. Only
+     * the members a Memcached cluster has are read; the rest are redis-only and ignored.
+     */
+    public CacheCluster createCacheCluster(ElastiCacheService.CreateCacheClusterRequest request) {
+        String clusterId = request.cacheClusterId();
+        if (request.numCacheNodes() != null && request.numCacheNodes() < 1) {
+            throw new AwsException("InvalidParameterValue",
+                    "NumCacheNodes must be at least 1.", 400);
+        }
         // Claimed before the store checks rather than after, because no create here or in
         // ElastiCacheService persists its record until its container has started: a store check
         // that passes is no promise the id is still free by the time this one writes. The claim
@@ -74,13 +89,14 @@ public class ElastiCacheMemcachedService {
                     "Cache cluster " + clusterId + " is already being created.", 400);
         }
         try {
-            return provisionCacheCluster(clusterId);
+            return provisionCacheCluster(request);
         } finally {
             provisioningIds.release(clusterId);
         }
     }
 
-    private CacheCluster provisionCacheCluster(String clusterId) {
+    private CacheCluster provisionCacheCluster(ElastiCacheService.CreateCacheClusterRequest request) {
+        String clusterId = request.cacheClusterId();
         // Every store that answers DescribeCacheClusters, not just this one: two records sharing
         // an id would have one describe report it twice, each with a different engine.
         if (clusters.get(clusterId).isPresent()
@@ -105,6 +121,19 @@ public class ElastiCacheMemcachedService {
         CacheCluster cluster = new CacheCluster(
                 clusterId, CacheClusterStatus.AVAILABLE, ENGINE, ENGINE_VERSION,
                 endpoint, Instant.now());
+        // What terraform's aws_elasticache_cluster reads back: anything the request set and the
+        // describe omitted would be a diff no apply can settle.
+        cluster.setNumCacheNodes(request.numCacheNodes() != null ? request.numCacheNodes() : 1);
+        cluster.setCacheNodeType(request.cacheNodeType() != null && !request.cacheNodeType().isBlank()
+                ? request.cacheNodeType() : DEFAULT_CACHE_NODE_TYPE);
+        cluster.setCacheParameterGroupName(request.cacheParameterGroupName());
+        cluster.setCacheSubnetGroupName(request.cacheSubnetGroupName());
+        cluster.setSecurityGroupIds(request.securityGroupIds() != null
+                ? new ArrayList<>(request.securityGroupIds()) : null);
+        cluster.setPreferredAvailabilityZone(request.preferredAvailabilityZone() != null
+                && !request.preferredAvailabilityZone().isBlank()
+                ? request.preferredAvailabilityZone() : regionResolver.getRegion() + "a");
+        cluster.setArn(regionResolver.buildArn("elasticache", request.region(), "cluster:" + clusterId));
         if (handle != null) {
             cluster.setContainerId(handle.getContainerId());
             cluster.setContainerHost(handle.getHost());
