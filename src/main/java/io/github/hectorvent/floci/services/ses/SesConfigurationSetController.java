@@ -145,6 +145,11 @@ public class SesConfigurationSetController {
         }
     }
 
+    /**
+     * The binding SDKs sent before the Filter member moved this operation to POST (AWS SDK for Java
+     * 2.55.8, botocore 1.43.105). It is gone from the model, but SES still answers it (probed
+     * 2026-10-03), so it stays for older SDKs and takes no filter.
+     */
     @GET
     @Path("/configuration-sets")
     public Response listConfigurationSets(@Context HttpHeaders headers,
@@ -156,9 +161,8 @@ public class SesConfigurationSetController {
     }
 
     /**
-     * The binding SDKs use since the Filter member was added; the GET above stays for older ones.
-     * Unlike ListEmailIdentities, SES ignores a key it does not know and treats an empty name as no
-     * filter (probed 2026-10-03).
+     * The binding SDKs use since the Filter member was added. Unlike ListEmailIdentities, SES
+     * ignores a key it does not know and treats an empty name as no filter (probed 2026-10-03).
      */
     @POST
     @Path("/list-configuration-sets")

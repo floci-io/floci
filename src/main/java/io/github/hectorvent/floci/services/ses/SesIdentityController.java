@@ -132,6 +132,11 @@ public class SesIdentityController {
         }
     }
 
+    /**
+     * The binding SDKs sent before the Filter member moved this operation to POST (AWS SDK for Java
+     * 2.55.8, botocore 1.43.105). It is gone from the model, but SES still answers it (probed
+     * 2026-10-03), so it stays for older SDKs and takes no filter.
+     */
     @GET
     @Path("/identities")
     public Response listEmailIdentities(@Context HttpHeaders headers,
@@ -141,7 +146,7 @@ public class SesIdentityController {
         return emailIdentitiesPage(region, Map.of(), SesListPaging.parseQueryPageSize(pageSize), nextToken);
     }
 
-    /** The binding SDKs use since the Filter member was added; the GET above stays for older ones. */
+    /** The binding SDKs use since the Filter member was added. */
     @POST
     @Path("/list-identities")
     public Response listEmailIdentitiesWithFilter(@Context HttpHeaders headers, String body) {

@@ -292,7 +292,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | Method | Path | Action |
 |---|---|---|
 | `POST` | `/v2/email/identities` | `CreateEmailIdentity` |
-| `GET` | `/v2/email/identities` | `ListEmailIdentities` |
+| `GET` | `/v2/email/identities` | `ListEmailIdentities` (SDKs before the `Filter` member; no `Filter`) |
 | `POST` | `/v2/email/list-identities` | `ListEmailIdentities` (with `Filter`) |
 | `GET` | `/v2/email/identities/{emailIdentity}` | `GetEmailIdentity` |
 | `DELETE` | `/v2/email/identities/{emailIdentity}` | `DeleteEmailIdentity` |
@@ -334,7 +334,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `DELETE` | `/v2/email/custom-verification-email-templates/{templateName}` | `DeleteCustomVerificationEmailTemplate` |
 | `POST` | `/v2/email/outbound-custom-verification-emails` | `SendCustomVerificationEmail` |
 | `POST` | `/v2/email/configuration-sets` | `CreateConfigurationSet` |
-| `GET` | `/v2/email/configuration-sets` | `ListConfigurationSets` |
+| `GET` | `/v2/email/configuration-sets` | `ListConfigurationSets` (SDKs before the `Filter` member; no `Filter`) |
 | `POST` | `/v2/email/list-configuration-sets` | `ListConfigurationSets` (with `Filter`) |
 | `GET` | `/v2/email/configuration-sets/{name}` | `GetConfigurationSet` |
 | `DELETE` | `/v2/email/configuration-sets/{name}` | `DeleteConfigurationSet` |
