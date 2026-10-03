@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbTtlIdentity;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
@@ -365,7 +366,7 @@ public class PipesPoller implements Resettable {
         LOG.infov("Pipe {0}: received {1} DynamoDB Stream record(s)", pipe.getName(), records.size());
         List<JsonNode> recordNodes = new ArrayList<>(records.size());
         for (DynamoDbStreamReader.Record record : records) {
-            ObjectNode node = record.awsRecord().deepCopy();
+            ObjectNode node = DynamoDbTtlIdentity.toEventRecord(record.awsRecord());
             node.put("eventSourceARN", pipe.getSource());
             recordNodes.add(node);
         }

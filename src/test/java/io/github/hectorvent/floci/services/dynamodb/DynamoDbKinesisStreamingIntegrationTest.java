@@ -14,7 +14,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -32,6 +35,9 @@ class DynamoDbKinesisStreamingIntegrationTest {
     // happens on a background drain. Await it before reading the stream so these assertions are deterministic.
     @Inject
     KinesisStreamingForwarder forwarder;
+
+    @Inject
+    DynamoDbService dynamoDbService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -294,7 +300,7 @@ class DynamoDbKinesisStreamingIntegrationTest {
 
     @Test
     @Order(12)
-    void deleteItemForwardsRemoveEvent() {
+    void deleteItemForwardsRemoveEvent() throws Exception {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -335,6 +341,8 @@ class DynamoDbKinesisStreamingIntegrationTest {
         String lastEncoded = recordsResponse.jsonPath().getString("Records[" + (recordCount - 1) + "].Data");
         String lastDecoded = new String(Base64.getDecoder().decode(lastEncoded));
         assertTrue(lastDecoded.contains("\"eventName\":\"REMOVE\""), "Expected REMOVE event, got: " + lastDecoded);
+        assertTrue(new ObjectMapper().readTree(lastDecoded).get("userIdentity").isNull(),
+                "a DeleteItem removal is not made by the DynamoDB service: " + lastDecoded);
     }
 
     @Test
@@ -480,6 +488,77 @@ class DynamoDbKinesisStreamingIntegrationTest {
         .then()
             .statusCode(200)
             .body("DestinationStatus", equalTo("ACTIVE"));
+    }
+
+    @Test
+    @Order(31)
+    void ttlDeletionForwardsTheDynamoDbServiceIdentity() throws Exception {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTimeToLive")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "StreamingTable",
+                    "TimeToLiveSpecification": {"Enabled": true, "AttributeName": "expireAt"}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        long past = Instant.now().getEpochSecond() - 3600;
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\": \"StreamingTable\", \"Item\": {\"pk\": {\"S\": \"expired\"}, "
+                    + "\"expireAt\": {\"N\": \"" + past + "\"}}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        dynamoDbService.deleteExpiredItems();
+        awaitCdcDelivery();
+
+        JsonNode removal = null;
+        for (JsonNode payload : kinesisPayloads()) {
+            if ("REMOVE".equals(payload.path("eventName").asText())
+                    && "expired".equals(payload.path("dynamodb").path("Keys").path("pk").path("S").asText())) {
+                removal = payload;
+            }
+        }
+        assertNotNull(removal, "the TTL deletion must be forwarded to Kinesis");
+        assertEquals(new ObjectMapper().readTree("{\"type\":\"Service\",\"principalId\":\"dynamodb.amazonaws.com\"}"),
+                removal.get("userIdentity"));
+    }
+
+    private List<JsonNode> kinesisPayloads() throws Exception {
+        String shardIterator = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "ddb-streaming-test", "ShardId": "shardId-000000000000", "ShardIteratorType": "TRIM_HORIZON"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+        List<String> encoded = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + shardIterator + "\", \"Limit\": 100}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getList("Records.Data", String.class);
+        ObjectMapper mapper = new ObjectMapper();
+        List<JsonNode> payloads = new ArrayList<>();
+        for (String data : encoded) {
+            payloads.add(mapper.readTree(Base64.getDecoder().decode(data)));
+        }
+        return payloads;
     }
 
     @Test

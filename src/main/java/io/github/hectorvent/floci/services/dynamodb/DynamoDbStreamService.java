@@ -155,6 +155,12 @@ public class DynamoDbStreamService {
 
     public void captureEvent(String eventName, JsonNode oldItem, JsonNode newItem,
                              TableDefinition table, String region) {
+        captureEvent(eventName, oldItem, newItem, table, region, false);
+    }
+
+    /** {@code ttlDeletion} marks a removal made by the time to live sweep rather than by a caller. */
+    public void captureEvent(String eventName, JsonNode oldItem, JsonNode newItem,
+                             TableDefinition table, String region, boolean ttlDeletion) {
         StreamDescription sd = streams.get(table.getTableArn());
         if (sd == null || !"ENABLED".equals(sd.getStreamStatus())) {
             return;
@@ -182,6 +188,7 @@ public class DynamoDbStreamService {
         record.setNewImage(newImage);
         record.setOldImage(oldImage);
         record.setStreamViewType(viewType);
+        record.setTtlDeletion(ttlDeletion);
 
         ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(sd.getStreamArn());
         if (deque != null) {

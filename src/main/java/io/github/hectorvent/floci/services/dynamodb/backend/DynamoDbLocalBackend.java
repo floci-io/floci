@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbTableNames;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbTtlIdentity;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
@@ -53,6 +54,7 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
 
     private static final String LOCAL_ARN_PREFIX = "arn:aws:dynamodb:ddblocal:000000000000:"; // partition-literal: DynamoDB Local's fixed ARN prefix
     private static final String LOCAL_REGION = "ddblocal";
+    private static final String LOCAL_TTL_EVENT_NAME = "UNKNOWN_TO_SDK_VERSION";
     private static final Duration READINESS_BUDGET = Duration.ofSeconds(30);
     private static final Scope PROBE = new Scope("000000000000", "us-east-1"); // partition-literal: readiness probe namespace, Local accepts any region
     private static final String REPLICAS_UNSUPPORTED = "Replicas are not supported by the DynamoDB Local backend";
@@ -171,7 +173,24 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
             }
         }
         toPublic(scope, reply.body());
+        if (reply.status() >= 200 && reply.status() < 300 && call.api() == Api.DYNAMODB_STREAMS
+                && "GetRecords".equals(action)) {
+            markTtlDeletions(reply.body());
+        }
         return reply;
+    }
+
+    // DynamoDB Local writes a TTL deletion under an event name the SDK does not know and with no identity.
+    private static void markTtlDeletions(JsonNode reply) {
+        if (reply == null) {
+            return;
+        }
+        for (JsonNode record : reply.path("Records")) {
+            if (record instanceof ObjectNode object && LOCAL_TTL_EVENT_NAME.equals(text(object, "eventName"))) {
+                object.put("eventName", "REMOVE");
+                DynamoDbTtlIdentity.putOn(object, DynamoDbTtlIdentity.Shape.STREAMS_API);
+            }
+        }
     }
 
     private Reply send(Scope scope, Api api, String action, JsonNode body) {

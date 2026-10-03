@@ -2775,12 +2775,13 @@ public class DynamoDbService {
                 }
                 deletedForTable++;
                 if (streamService != null) {
-                    streamService.captureEvent("REMOVE", removed, null, scan.table(), scan.region());
+                    streamService.captureEvent("REMOVE", removed, null, scan.table(), scan.region(), true);
                 }
                 if (kinesisForwarder != null) {
                     // Out of request scope here: pass the table owner's account explicitly so the CDC
                     // record lands in the owner's stream, not the default account's same-named stream.
-                    kinesisForwarder.forward("REMOVE", removed, null, scan.table(), scan.region(), scan.accountId());
+                    kinesisForwarder.forward("REMOVE", removed, null, scan.table(), scan.region(), scan.accountId(),
+                            true);
                 }
             }
             if (deletedForTable > 0) {
