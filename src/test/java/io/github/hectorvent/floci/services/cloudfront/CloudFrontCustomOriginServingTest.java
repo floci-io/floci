@@ -183,7 +183,7 @@ class CloudFrontCustomOriginServingTest {
         distribution.setConfig(config);
         Distribution created = cloudFrontService.createDistribution(distribution, Map.of());
 
-        var response = given()
+        Response response = given()
                 .header("Host", created.getDomainName())
                 .header("Origin", "https://viewer.example")
                 .when().get("/resource")
@@ -228,7 +228,7 @@ class CloudFrontCustomOriginServingTest {
         Distribution removeOnlyCreated =
                 cloudFrontService.createDistribution(removeOnlyDistribution, Map.of());
 
-        var removeOnlyResponse = given()
+        Response removeOnlyResponse = given()
                 .header("Host", removeOnlyCreated.getDomainName())
                 .when().get("/resource")
                 .then().statusCode(200)

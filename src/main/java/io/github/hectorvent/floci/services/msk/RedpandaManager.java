@@ -1,5 +1,9 @@
 package io.github.hectorvent.floci.services.msk;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.Ports;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -220,10 +224,10 @@ public class RedpandaManager {
         // Derive admin URL from the container
         String adminUrl;
         if (!containerDetector.isRunningInContainer()) {
-            var dockerClient = lifecycleManager.getDockerClient();
-            var inspect = dockerClient.inspectContainerCmd(cluster.getContainerId()).exec();
-            var bindings = inspect.getNetworkSettings().getPorts().getBindings();
-            var binding = bindings.get(com.github.dockerjava.api.model.ExposedPort.tcp(ADMIN_PORT));
+            DockerClient dockerClient = lifecycleManager.getDockerClient();
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(cluster.getContainerId()).exec();
+            Map<ExposedPort, Ports.Binding[]> bindings = inspect.getNetworkSettings().getPorts().getBindings();
+            Ports.Binding[] binding = bindings.get(ExposedPort.tcp(ADMIN_PORT));
             if (binding != null && binding.length > 0) {
                 adminUrl = "http://localhost:" + binding[0].getHostPortSpec() + ADMIN_READY_PATH;
             } else {

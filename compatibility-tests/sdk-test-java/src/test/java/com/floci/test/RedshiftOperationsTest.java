@@ -31,16 +31,20 @@ import software.amazon.awssdk.services.redshift.model.DescribeClusterParameterGr
 import software.amazon.awssdk.services.redshift.model.DescribeClusterSnapshotsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterSnapshotsResponse;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterSubnetGroupsRequest;
+import software.amazon.awssdk.services.redshift.model.DescribeClusterSubnetGroupsResponse;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersResponse;
 import software.amazon.awssdk.services.redshift.model.DescribeSnapshotCopyGrantsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeSnapshotCopyGrantsResponse;
 import software.amazon.awssdk.services.redshift.model.DescribeOrderableClusterOptionsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeTagsRequest;
+import software.amazon.awssdk.services.redshift.model.DescribeTagsResponse;
 import software.amazon.awssdk.services.redshift.model.ModifyClusterIamRolesRequest;
 import software.amazon.awssdk.services.redshift.model.ModifyClusterIamRolesResponse;
 import software.amazon.awssdk.services.redshift.model.ModifyClusterRequest;
+import software.amazon.awssdk.services.redshift.model.ModifyClusterResponse;
 import software.amazon.awssdk.services.redshift.model.RebootClusterRequest;
+import software.amazon.awssdk.services.redshift.model.RebootClusterResponse;
 import software.amazon.awssdk.services.redshift.model.RestoreFromClusterSnapshotRequest;
 import software.amazon.awssdk.services.redshift.model.RestoreFromClusterSnapshotResponse;
 import software.amazon.awssdk.services.redshift.model.Snapshot;
@@ -292,7 +296,7 @@ class RedshiftOperationsTest {
                 .build());
         subnetGroupsToCleanup.add(subnetGroupName);
 
-        var describedGroups = client.describeClusterSubnetGroups(
+        DescribeClusterSubnetGroupsResponse describedGroups = client.describeClusterSubnetGroups(
                 DescribeClusterSubnetGroupsRequest.builder()
                         .clusterSubnetGroupName(subnetGroupName)
                         .build());
@@ -315,7 +319,7 @@ class RedshiftOperationsTest {
                 .tags(Tag.builder().key("env").value("test").build())
                 .build());
 
-        var described = client.describeTags(DescribeTagsRequest.builder()
+        DescribeTagsResponse described = client.describeTags(DescribeTagsRequest.builder()
                 .resourceName(arn)
                 .build());
         assertThat(described.taggedResources()).anyMatch(t -> "env".equals(t.tag().key()) && "test".equals(t.tag().value()));
@@ -325,7 +329,7 @@ class RedshiftOperationsTest {
                 .tagKeys("env")
                 .build());
 
-        var modified = client.modifyCluster(ModifyClusterRequest.builder()
+        ModifyClusterResponse modified = client.modifyCluster(ModifyClusterRequest.builder()
                 .clusterIdentifier(clusterId)
                 .nodeType("ra3.xlplus")
                 .build());
@@ -352,7 +356,7 @@ class RedshiftOperationsTest {
                 .isNotEmpty()
                 .allMatch(o -> "ra3.xlplus".equals(o.nodeType()));
 
-        var rebooted = client.rebootCluster(RebootClusterRequest.builder()
+        RebootClusterResponse rebooted = client.rebootCluster(RebootClusterRequest.builder()
                 .clusterIdentifier(clusterId)
                 .build());
         assertThat(rebooted.cluster().clusterStatus()).isEqualTo("available");

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -22,7 +23,7 @@ class IamUpdateGroupConsumerTest {
             "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request";
 
     private static Response call(String action, String... formParams) {
-        var request = given().formParam("Action", action).header("Authorization", AUTH_HEADER);
+        RequestSpecification request = given().formParam("Action", action).header("Authorization", AUTH_HEADER);
         for (int i = 0; i < formParams.length; i += 2) {
             request = request.formParam(formParams[i], formParams[i + 1]);
         }

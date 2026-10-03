@@ -6,10 +6,16 @@ import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.sso.SsoClient;
+import software.amazon.awssdk.services.sso.model.ListAccountRolesResponse;
+import software.amazon.awssdk.services.sso.model.ListAccountsResponse;
+import software.amazon.awssdk.services.sso.model.RoleCredentials;
 import software.amazon.awssdk.services.ssoadmin.SsoAdminClient;
+import software.amazon.awssdk.services.ssoadmin.model.InstanceMetadata;
 import software.amazon.awssdk.services.ssoadmin.model.PrincipalType;
 import software.amazon.awssdk.services.ssoadmin.model.TargetType;
 import software.amazon.awssdk.services.ssooidc.SsoOidcClient;
+import software.amazon.awssdk.services.ssooidc.model.RegisterClientResponse;
+import software.amazon.awssdk.services.ssooidc.model.StartDeviceAuthorizationResponse;
 import software.amazon.awssdk.services.sts.StsClient;
 
 import java.net.URI;
@@ -34,7 +40,7 @@ class SsoPortalTest {
         try (SsoAdminClient admin = TestFixtures.ssoAdminClient();
              SsoOidcClient oidc = TestFixtures.ssoOidcClient();
              SsoClient portal = TestFixtures.ssoPortalClient()) {
-            var instance = admin.listInstances(request -> {}).instances().get(0);
+            InstanceMetadata instance = admin.listInstances(request -> {}).instances().get(0);
             String suffix = UUID.randomUUID().toString().substring(0, 8);
             String userId = "11111111-2222-3333-4444-555555555555";
             String permissionSetArn = admin.createPermissionSet(request -> request
@@ -50,12 +56,12 @@ class SsoPortalTest {
                     .principalType(PrincipalType.USER)
                     .principalId(userId));
 
-            var client = oidc.registerClient(request -> request
+            RegisterClientResponse client = oidc.registerClient(request -> request
                     .clientName("Portal SDK " + suffix)
                     .clientType("public")
                     .grantTypes("urn:ietf:params:oauth:grant-type:device_code")
                     .scopes("sso:account:access"));
-            var authorization = oidc.startDeviceAuthorization(request -> request
+            StartDeviceAuthorizationResponse authorization = oidc.startDeviceAuthorization(request -> request
                     .clientId(client.clientId())
                     .clientSecret(client.clientSecret())
                     .startUrl("https://example.awsapps.com/start"));
@@ -67,14 +73,14 @@ class SsoPortalTest {
                     .deviceCode(authorization.deviceCode()))
                     .accessToken();
 
-            var response = portal.listAccounts(request -> request
+            ListAccountsResponse response = portal.listAccounts(request -> request
                     .accessToken(accessToken)
                     .maxResults(100));
             assertThat(response.accountList())
                     .extracting(software.amazon.awssdk.services.sso.model.AccountInfo::accountId)
                     .contains(accountId);
 
-            var roles = portal.listAccountRoles(request -> request
+            ListAccountRolesResponse roles = portal.listAccountRoles(request -> request
                     .accessToken(accessToken)
                     .accountId(accountId)
                     .maxResults(100));
@@ -82,7 +88,7 @@ class SsoPortalTest {
                     .extracting(software.amazon.awssdk.services.sso.model.RoleInfo::roleName)
                     .contains("PortalSdk" + suffix);
 
-            var credentials = portal.getRoleCredentials(request -> request
+            RoleCredentials credentials = portal.getRoleCredentials(request -> request
                     .accessToken(accessToken)
                     .accountId(accountId)
                     .roleName("PortalSdk" + suffix))

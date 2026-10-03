@@ -50,7 +50,7 @@ public record SpectrumColumn(String name, Type type) {
 
         public String postgresType() {
             return switch (this) {
-                case VARCHAR -> "VARCHAR";
+                case VARCHAR -> "VARCHAR(256)";
                 case CHAR -> "CHAR";
                 case INTEGER -> "INTEGER";
                 case BIGINT -> "BIGINT";

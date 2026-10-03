@@ -6,8 +6,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -1665,8 +1667,8 @@ class SamTransformIntegrationTest {
 
     private static byte[] buildHandlerZip() {
         try {
-            var baos = new java.io.ByteArrayOutputStream();
-            try (var zos = new java.util.zip.ZipOutputStream(baos)) {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
                 zos.putNextEntry(new java.util.zip.ZipEntry("index.js"));
                 zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(java.nio.charset.StandardCharsets.UTF_8));
                 zos.closeEntry();

@@ -17,6 +17,7 @@ import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Map;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
@@ -87,7 +88,7 @@ class EksTokenMinterTest {
 
     @Test
     void parsesClusterNameAndRegionFromTheGeneratedShape() throws Exception {
-        var args = EksTokenMinter.parseArgs(execNode("""
+        EksTokenMinter.ExecArgs args = EksTokenMinter.parseArgs(execNode("""
                 command: aws
                 args: [--region, us-west-2, eks, get-token, --cluster-name, my-cluster, --output, json]
                 """), name -> {
@@ -100,7 +101,7 @@ class EksTokenMinterTest {
 
     @Test
     void parsesClusterNameAndExplicitRegion() throws Exception {
-        var args = EksTokenMinter.parseArgs(execNode("""
+        EksTokenMinter.ExecArgs args = EksTokenMinter.parseArgs(execNode("""
                 command: aws
                 args: [eks, get-token, --cluster-name, my-cluster, --region, eu-west-1]
                 """), name -> {
@@ -113,7 +114,7 @@ class EksTokenMinterTest {
 
     @Test
     void fallsBackToAwsRegionEnvVar() throws Exception {
-        var args = EksTokenMinter.parseArgs(execNode("""
+        EksTokenMinter.ExecArgs args = EksTokenMinter.parseArgs(execNode("""
                 command: aws
                 args: [eks, get-token, --cluster-name, my-cluster]
                 """), name -> "AWS_REGION".equals(name) ? "ap-south-1" : null);
@@ -123,7 +124,7 @@ class EksTokenMinterTest {
 
     @Test
     void fallsBackToAwsDefaultRegionEnvVarWhenAwsRegionIsUnset() throws Exception {
-        var args = EksTokenMinter.parseArgs(execNode("""
+        EksTokenMinter.ExecArgs args = EksTokenMinter.parseArgs(execNode("""
                 command: aws
                 args: [eks, get-token, --cluster-name, my-cluster]
                 """), name -> "AWS_DEFAULT_REGION".equals(name) ? "ca-central-1" : null);
@@ -189,7 +190,7 @@ class EksTokenMinterTest {
         // AWS CLI's argument parser accepts any unambiguous prefix of a long option, and
         // role-arn is the only get-token option starting with "role", so these are just as
         // valid to a real invocation as the --role form update-kubeconfig actually generates.
-        for (var abbreviation : new String[]{"--role-a", "--role-ar"}) {
+        for (String abbreviation : new String[]{"--role-a", "--role-ar"}) {
             assertThatThrownBy(() -> EksTokenMinter.parseArgs(execNode("""
                     command: aws
                     args: [eks, get-token, --cluster-name, my-cluster, %s, arn:aws:iam::111122223333:role/x]
@@ -211,12 +212,12 @@ class EksTokenMinterTest {
 
     @Test
     void mintedTokenDecodesToAWellFormedPresignedGetCallerIdentityUrl() throws Exception {
-        var token = EksTokenMinter.mint("my-cluster", "us-west-2", CREDENTIALS);
+        String token = EksTokenMinter.mint("my-cluster", "us-west-2", CREDENTIALS);
 
         assertThat(token).startsWith("k8s-aws-v1.");
-        var url = decode(token);
-        var uri = URI.create(url);
-        var query = parseQuery(uri);
+        String url = decode(token);
+        URI uri = URI.create(url);
+        Map<String, String> query = parseQuery(uri);
 
         assertThat(uri.getScheme()).isEqualTo("https");
         assertThat(uri.getHost()).isEqualTo("sts.us-west-2.amazonaws.com");
@@ -237,14 +238,14 @@ class EksTokenMinterTest {
         // it): canonical request -> string to sign -> HMAC-derived signing key -> signature.
         // Structural assertions elsewhere only prove the token has the right shape; this proves
         // the actual signature bytes are what the spec says they should be for these inputs.
-        var credentials = new EksTokenMinter.AwsCredentials(
+        EksTokenMinter.AwsCredentials credentials = new EksTokenMinter.AwsCredentials(
                 "AKIAIOSFODNN7EXAMPLE",
                 "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
                 "FQoGZXIvYXdzEXAMPLESESSIONTOKENvaluevaluevalue");
-        var clock = Clock.fixed(Instant.parse("2024-01-15T12:00:00Z"), ZoneOffset.UTC);
+        Clock clock = Clock.fixed(Instant.parse("2024-01-15T12:00:00Z"), ZoneOffset.UTC);
 
-        var token = EksTokenMinter.mint("my-cluster", "us-west-2", credentials, clock);
-        var query = parseQuery(URI.create(decode(token)));
+        String token = EksTokenMinter.mint("my-cluster", "us-west-2", credentials, clock);
+        Map<String, String> query = parseQuery(URI.create(decode(token)));
 
         assertThat(query.get("X-Amz-Date")).isEqualTo("20240115T120000Z");
         assertThat(query.get("X-Amz-Credential"))
@@ -255,16 +256,16 @@ class EksTokenMinterTest {
 
     @Test
     void includesSecurityTokenWhenSessionTokenIsPresent() throws Exception {
-        var credentials = new EksTokenMinter.AwsCredentials("AKIAEXAMPLE", "secret", "session-token");
-        var query = parseQuery(URI.create(decode(EksTokenMinter.mint("my-cluster", "us-west-2", credentials))));
+        EksTokenMinter.AwsCredentials credentials = new EksTokenMinter.AwsCredentials("AKIAEXAMPLE", "secret", "session-token");
+        Map<String, String> query = parseQuery(URI.create(decode(EksTokenMinter.mint("my-cluster", "us-west-2", credentials))));
 
         assertThat(query.get("X-Amz-Security-Token")).isEqualTo("session-token");
     }
 
     @Test
     void signatureIsBoundToTheClusterName() throws Exception {
-        var forClusterA = signatureOf(EksTokenMinter.mint("cluster-a", "us-west-2", CREDENTIALS));
-        var forClusterB = signatureOf(EksTokenMinter.mint("cluster-b", "us-west-2", CREDENTIALS));
+        String forClusterA = signatureOf(EksTokenMinter.mint("cluster-a", "us-west-2", CREDENTIALS));
+        String forClusterB = signatureOf(EksTokenMinter.mint("cluster-b", "us-west-2", CREDENTIALS));
 
         // The whole point of x-k8s-aws-id being a signed header: a token minted for one
         // cluster must not verify against another, so the two signatures must differ.
@@ -273,56 +274,56 @@ class EksTokenMinterTest {
 
     @Test
     void signsChinaRegionsAgainstTheChinaStsSuffix() throws Exception {
-        var uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "cn-north-1", CREDENTIALS)));
+        URI uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "cn-north-1", CREDENTIALS)));
 
         assertThat(uri.getHost()).isEqualTo("sts.cn-north-1.amazonaws.com.cn");
     }
 
     @Test
     void signsGovCloudRegionsAgainstTheStandardStsSuffix() throws Exception {
-        var uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "us-gov-west-1", CREDENTIALS)));
+        URI uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "us-gov-west-1", CREDENTIALS)));
 
         assertThat(uri.getHost()).isEqualTo("sts.us-gov-west-1.amazonaws.com");
     }
 
     @Test
     void signsIsoRegionsAgainstTheIsoStsSuffix() throws Exception {
-        var uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "us-iso-east-1", CREDENTIALS)));
+        URI uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "us-iso-east-1", CREDENTIALS)));
 
         assertThat(uri.getHost()).isEqualTo("sts.us-iso-east-1.c2s.ic.gov");
     }
 
     @Test
     void signsIsoBRegionsAgainstTheIsoBStsSuffix() throws Exception {
-        var uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "us-isob-east-1", CREDENTIALS)));
+        URI uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "us-isob-east-1", CREDENTIALS)));
 
         assertThat(uri.getHost()).isEqualTo("sts.us-isob-east-1.sc2s.sgov.gov");
     }
 
     @Test
     void signsIsoERegionsAgainstTheIsoEStsSuffix() throws Exception {
-        var uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "eu-isoe-west-1", CREDENTIALS)));
+        URI uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "eu-isoe-west-1", CREDENTIALS)));
 
         assertThat(uri.getHost()).isEqualTo("sts.eu-isoe-west-1.cloud.adc-e.uk");
     }
 
     @Test
     void signsIsoFRegionsAgainstTheIsoFStsSuffix() throws Exception {
-        var uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "us-isof-south-1", CREDENTIALS)));
+        URI uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "us-isof-south-1", CREDENTIALS)));
 
         assertThat(uri.getHost()).isEqualTo("sts.us-isof-south-1.csp.hci.ic.gov");
     }
 
     @Test
     void signsEuscRegionsAgainstTheEuscStsSuffix() throws Exception {
-        var uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "eusc-de-east-1", CREDENTIALS)));
+        URI uri = URI.create(decode(EksTokenMinter.mint("my-cluster", "eusc-de-east-1", CREDENTIALS)));
 
         assertThat(uri.getHost()).isEqualTo("sts.eusc-de-east-1.amazonaws.eu");
     }
 
     @Test
     void execEnvSuppliesCredentialsAheadOfTheProcessEnvironment() throws Exception {
-        var supplier = EksTokenMinter.tokenSupplierIfRecognized(execNode("""
+        Supplier<String> supplier = EksTokenMinter.tokenSupplierIfRecognized(execNode("""
                 command: aws
                 args: [eks, get-token, --cluster-name, my-cluster, --region, us-west-2]
                 env:
@@ -332,7 +333,7 @@ class EksTokenMinterTest {
                     value: secret-from-exec-env
                 """)).orElseThrow();
 
-        var query = parseQuery(URI.create(decode(supplier.get())));
+        Map<String, String> query = parseQuery(URI.create(decode(supplier.get())));
 
         // Proves exec.env, not whatever AWS_ACCESS_KEY_ID happens to be in Floci's own
         // environment, drove credential resolution -- the bug aws eks update-kubeconfig
@@ -342,7 +343,7 @@ class EksTokenMinterTest {
 
     @Test
     void execEnvProfileTakesPrecedenceOverAmbientStaticKeys(@TempDir Path tempDir) throws Exception {
-        var credentialsFile = tempDir.resolve("credentials");
+        Path credentialsFile = tempDir.resolve("credentials");
         Files.writeString(credentialsFile, """
                 [work]
                 aws_access_key_id = AKIAFROMPROFILE
@@ -359,7 +360,7 @@ class EksTokenMinterTest {
             default -> null;
         };
 
-        var credentials = EksTokenMinter.resolveCredentials(execEnv, ambientEnv);
+        EksTokenMinter.AwsCredentials credentials = EksTokenMinter.resolveCredentials(execEnv, ambientEnv);
 
         assertThat(credentials.accessKeyId()).isEqualTo("AKIAFROMPROFILE");
     }
@@ -371,7 +372,7 @@ class EksTokenMinterTest {
                 "AWS_ACCESS_KEY_ID", "AKIAFROMEXECENV",
                 "AWS_SECRET_ACCESS_KEY", "secret-from-exec-env");
 
-        var credentials = EksTokenMinter.resolveCredentials(execEnv, name -> null);
+        EksTokenMinter.AwsCredentials credentials = EksTokenMinter.resolveCredentials(execEnv, name -> null);
 
         assertThat(credentials.accessKeyId()).isEqualTo("AKIAFROMEXECENV");
     }
@@ -387,7 +388,7 @@ class EksTokenMinterTest {
                 "AWS_SECRET_ACCESS_KEY", "secret-from-exec-env");
         UnaryOperator<String> ambientEnv = name -> "AWS_SESSION_TOKEN".equals(name) ? "unrelated-ambient-token" : null;
 
-        var credentials = EksTokenMinter.resolveCredentials(execEnv, ambientEnv);
+        EksTokenMinter.AwsCredentials credentials = EksTokenMinter.resolveCredentials(execEnv, ambientEnv);
 
         assertThat(credentials.sessionToken()).isNull();
     }
@@ -404,7 +405,7 @@ class EksTokenMinterTest {
             default -> null;
         };
 
-        var credentials = EksTokenMinter.resolveCredentials(execEnv, ambientEnv);
+        EksTokenMinter.AwsCredentials credentials = EksTokenMinter.resolveCredentials(execEnv, ambientEnv);
 
         assertThat(credentials.sessionToken()).isNull();
     }
@@ -434,7 +435,7 @@ class EksTokenMinterTest {
 
     @Test
     void execEnvSuppliesRegionFallbackAheadOfTheProcessEnvironment() throws Exception {
-        var supplier = EksTokenMinter.tokenSupplierIfRecognized(execNode("""
+        Supplier<String> supplier = EksTokenMinter.tokenSupplierIfRecognized(execNode("""
                 command: aws
                 args: [eks, get-token, --cluster-name, my-cluster]
                 env:
@@ -446,7 +447,7 @@ class EksTokenMinterTest {
                     value: secret-from-exec-env
                 """)).orElseThrow();
 
-        var uri = URI.create(decode(supplier.get()));
+        URI uri = URI.create(decode(supplier.get()));
 
         assertThat(uri.getHost()).isEqualTo("sts.eu-central-1.amazonaws.com");
     }

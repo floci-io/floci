@@ -54,14 +54,14 @@ class AutoScalingReconcilerTest {
 
     @Test
     void stopTerminatesReconcilerThread() throws Exception {
-        var asgService = mock(AutoScalingService.class);
-        var ec2Service = mock(Ec2Service.class);
-        var elbV2Service = mock(ElbV2Service.class);
-        var reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
-        var preexisting = Thread.getAllStackTraces().keySet();
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        Set<Thread> preexisting = Thread.getAllStackTraces().keySet();
 
         reconciler.start();
-        var reconcilerThread = Thread.getAllStackTraces().keySet().stream()
+        Thread reconcilerThread = Thread.getAllStackTraces().keySet().stream()
                 .filter(t -> "asg-reconciler".equals(t.getName()) && !preexisting.contains(t))
                 .findFirst().orElseThrow();
 

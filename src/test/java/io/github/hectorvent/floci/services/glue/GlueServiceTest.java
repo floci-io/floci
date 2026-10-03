@@ -319,7 +319,7 @@ class GlueServiceTest {
         plain.setStorageDescriptor(sd);
         glueService.createTable("db1", plain);
 
-        var tables = glueService.getTables("db1");
+        List<Table> tables = glueService.getTables("db1");
 
         assertEquals(2, tables.size());
         for (Table t : tables) {

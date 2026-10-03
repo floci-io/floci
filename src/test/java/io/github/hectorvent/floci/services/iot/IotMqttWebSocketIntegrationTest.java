@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.CertificateMetadata;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -492,7 +493,7 @@ public class IotMqttWebSocketIntegrationTest {
                 }
                 FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
                 List<String> sans = List.of("localhost", "127.0.0.1", "*.localhost.floci.io");
-                var leaf = ca.issueServerCertificate("localhost", sans, KeyAlgorithm.RSA_2048, null);
+                CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("localhost", sans, KeyAlgorithm.RSA_2048, null);
                 Files.writeString(TLS_DIR.resolve("floci-server.crt"), leaf.certificatePem());
                 Files.writeString(TLS_DIR.resolve("floci-server.key"), leaf.privateKeyPem());
                 Files.writeString(TLS_DIR.resolve("floci-server.metadata.json"),

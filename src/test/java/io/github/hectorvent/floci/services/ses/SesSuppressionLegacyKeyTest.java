@@ -5,6 +5,9 @@ import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -57,11 +60,12 @@ class SesSuppressionLegacyKeyTest {
 
     @Test
     void sendTimeSuppressionReasonReachesLegacyEntry() {
-        // The event / send-time path (resolveSuppressionReason, collectSuppressedReasons)
-        // must also honor the legacy key, or a legacy entry stays deletable but no longer
-        // suppresses sends. Default fresh account suppresses [BOUNCE, COMPLAINT].
+        // The send-time path (collectSuppressedReasons) must also honor the legacy key, or a
+        // legacy entry stays deletable but no longer suppresses sends. Default fresh account
+        // suppresses [BOUNCE, COMPLAINT].
         seedLegacyEntry();
-        assertEquals("BOUNCE", service.resolveSuppressionReason(LEGACY_ADDR, null, REGION));
+        assertEquals(Map.of(LEGACY_ADDR, "BOUNCE"),
+                service.collectSuppressedReasons(List.of(LEGACY_ADDR), null, REGION));
     }
 
     @Test

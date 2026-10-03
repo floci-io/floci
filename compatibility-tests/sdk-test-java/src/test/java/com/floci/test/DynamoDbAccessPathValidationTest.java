@@ -16,7 +16,9 @@ import software.amazon.awssdk.services.dynamodb.model.KeyType;
 import software.amazon.awssdk.services.dynamodb.model.LocalSecondaryIndex;
 import software.amazon.awssdk.services.dynamodb.model.Projection;
 import software.amazon.awssdk.services.dynamodb.model.ProjectionType;
+import software.amazon.awssdk.services.dynamodb.model.QueryResponse;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
+import software.amazon.awssdk.services.dynamodb.model.ScanResponse;
 import software.amazon.awssdk.services.dynamodb.model.Select;
 
 import java.util.Map;
@@ -97,7 +99,7 @@ class DynamoDbAccessPathValidationTest {
 
     @Test
     void acceptsTableKeyConditionsInEitherOrder() {
-        var response = ddb.query(request -> request
+        QueryResponse response = ddb.query(request -> request
                 .tableName(TABLE)
                 .keyConditionExpression("sk >= :sk AND pk = :pk")
                 .expressionAttributeValues(Map.of(
@@ -160,7 +162,7 @@ class DynamoDbAccessPathValidationTest {
 
     @Test
     void acceptsProjectedGsiAttributesAndLsiTableFetch() {
-        var gsiResponse = ddb.query(request -> request
+        QueryResponse gsiResponse = ddb.query(request -> request
                 .tableName(TABLE)
                 .indexName("status-index")
                 .keyConditionExpression("#status = :status")
@@ -169,7 +171,7 @@ class DynamoDbAccessPathValidationTest {
                 .projectionExpression("pk, #status, summary"));
         assertThat(gsiResponse.count()).isZero();
 
-        var lsiResponse = ddb.query(request -> request
+        QueryResponse lsiResponse = ddb.query(request -> request
                 .tableName(TABLE)
                 .indexName("alternate-index")
                 .keyConditionExpression("pk = :pk")
@@ -177,7 +179,7 @@ class DynamoDbAccessPathValidationTest {
                 .select(Select.ALL_ATTRIBUTES));
         assertThat(lsiResponse.count()).isZero();
 
-        var lsiScanResponse = ddb.scan(request -> request
+        ScanResponse lsiScanResponse = ddb.scan(request -> request
                 .tableName(TABLE)
                 .indexName("alternate-index")
                 .projectionExpression("details"));

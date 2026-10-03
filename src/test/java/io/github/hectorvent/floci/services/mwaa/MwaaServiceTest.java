@@ -120,10 +120,10 @@ class MwaaServiceTest {
                 createRequest("arn:aws:s3:::west-bucket", "dags"));
         String westToken = (String) mwaaService.createCliToken("shared-name").get("CliToken");
 
-        assertTrue(mwaaService.isValidCliToken(MwaaService.environmentIdentity(westEnvironment), westToken));
-        assertFalse(mwaaService.isValidCliToken(MwaaService.environmentIdentity(westEnvironment), eastToken));
-        assertTrue(mwaaService.isValidCliToken(MwaaService.environmentIdentity(eastEnvironment), eastToken));
-        assertFalse(mwaaService.isValidCliToken(MwaaService.environmentIdentity(eastEnvironment), westToken));
+        assertTrue(mwaaService.isValidCliToken(mwaaService.environmentIdentity(westEnvironment), westToken));
+        assertFalse(mwaaService.isValidCliToken(mwaaService.environmentIdentity(westEnvironment), eastToken));
+        assertTrue(mwaaService.isValidCliToken(mwaaService.environmentIdentity(eastEnvironment), eastToken));
+        assertFalse(mwaaService.isValidCliToken(mwaaService.environmentIdentity(eastEnvironment), westToken));
     }
 
     @Test
@@ -535,9 +535,9 @@ class MwaaServiceTest {
         Map<String, Object> response = mwaaService.createCliToken("cli-token-env");
         String token = (String) response.get("CliToken");
         assertNotNull(token);
-        assertTrue(mwaaService.isValidCliToken(MwaaService.environmentIdentity(
+        assertTrue(mwaaService.isValidCliToken(mwaaService.environmentIdentity(
                 mwaaService.getEnvironment("cli-token-env")), token));
-        assertFalse(mwaaService.isValidCliToken(MwaaService.environmentIdentity(
+        assertFalse(mwaaService.isValidCliToken(mwaaService.environmentIdentity(
                 mwaaService.getEnvironment("cli-token-env")), "not-a-real-token"));
         assertFalse(mwaaService.isValidCliToken("other-env", token));
     }
@@ -637,7 +637,7 @@ class MwaaServiceTest {
             assertEquals(EnvironmentStatus.CREATE_FAILED, environment.getStatus());
             verify(portAllocator).release(8701);
             verify(environmentManager).stopEnvironment(environment);
-            verify(proxyManager).stopProxy(MwaaService.environmentIdentity(environment));
+            verify(proxyManager).stopProxy(mwaaService.environmentIdentity(environment));
         }
 
         @Test

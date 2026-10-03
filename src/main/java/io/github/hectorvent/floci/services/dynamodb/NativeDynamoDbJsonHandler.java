@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.CreateTableRequest;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.GsiThroughputUpdate;
+import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.KinesisDestination;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.OnDemandThroughput;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.TableSettings;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.Throughput;
@@ -2253,31 +2254,31 @@ public class NativeDynamoDbJsonHandler {
                     400);
         }
 
-        String resolvedTableName = tableService.enableKinesisStreamingDestination(
-                tableName, streamArn, precision, region);
-
-        ObjectNode response = objectMapper.createObjectNode();
-        response.put("TableName", resolvedTableName);
-        response.put("StreamArn", streamArn);
-        response.put("DestinationStatus", "ACTIVE");
-        response.put("DestinationStatusDescription", "Kinesis streaming is enabled for this table");
-        response.putObject("EnableKinesisStreamingConfiguration")
-                .put("ApproximateCreationDateTimePrecision", precision);
-        return Response.ok(response).build();
+        return Response.ok(kinesisDestinationResponse(
+                tableService.enableKinesisStreamingDestination(tableName, streamArn, precision, region))).build();
     }
 
     private Response handleDisableKinesisStreamingDestination(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
         String streamArn = request.path("StreamArn").asText();
 
-        String resolvedTableName = tableService.disableKinesisStreamingDestination(tableName, streamArn, region);
+        return Response.ok(kinesisDestinationResponse(
+                tableService.disableKinesisStreamingDestination(tableName, streamArn, region))).build();
+    }
 
+    /**
+     * The shape Enable and Disable both answer with: TableName, StreamArn, DestinationStatus and
+     * EnableKinesisStreamingConfiguration. DestinationStatusDescription belongs to Describe only.
+     */
+    private ObjectNode kinesisDestinationResponse(KinesisDestination result) {
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("TableName", resolvedTableName);
-        response.put("StreamArn", streamArn);
-        response.put("DestinationStatus", "DISABLED");
-        response.put("DestinationStatusDescription", "Kinesis streaming is disabled for this table");
-        return Response.ok(response).build();
+        response.put("TableName", result.tableName());
+        response.put("StreamArn", result.streamArn());
+        response.put("DestinationStatus", result.destinationStatus());
+        response.putObject("EnableKinesisStreamingConfiguration")
+                .put("ApproximateCreationDateTimePrecision",
+                        result.approximateCreationDateTimePrecision());
+        return response;
     }
 
     private Response handleDescribeKinesisStreamingDestination(JsonNode request, String region) {
@@ -2755,7 +2756,7 @@ public class NativeDynamoDbJsonHandler {
                 sseDescription.put("KMSMasterKeyArn", table.getKmsMasterKeyArn() != null
                         ? table.getKmsMasterKeyArn()
                         : NativeDynamoDbTableService.defaultKmsMasterKeyArn(
-                                AwsArnUtils.regionOrDefault(table.getTableArn(), "us-east-1"))); // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+                                AwsArnUtils.parse(table.getTableArn()).region()));
             }
             node.set("SSEDescription", sseDescription);
         }

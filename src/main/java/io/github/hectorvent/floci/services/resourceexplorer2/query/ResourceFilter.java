@@ -41,7 +41,7 @@ public final class ResourceFilter {
      */
     public static boolean matches(ExplorerResource resource, ParsedQuery query,
                                   Set<String> taggableResourceTypes) {
-        for (var filter : query.filters()) {
+        for (ParsedQuery.Filter filter : query.filters()) {
             boolean anyValueMatches = filter.values().stream()
                     .anyMatch(v -> matchesValue(resource, filter.attribute(), v, taggableResourceTypes));
             if (filter.negated()) {
@@ -63,7 +63,7 @@ public final class ResourceFilter {
     private static boolean matchesKeywords(ExplorerResource resource, List<ParsedQuery.Keyword> keywords) {
         boolean sawPositive = false;
         boolean anyPositiveMatched = false;
-        for (var keyword : keywords) {
+        for (ParsedQuery.Keyword keyword : keywords) {
             boolean matched = matchesKeyword(resource, keyword.value());
             if (keyword.negated()) {
                 if (matched) {

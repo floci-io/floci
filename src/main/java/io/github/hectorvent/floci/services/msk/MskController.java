@@ -57,14 +57,14 @@ public class MskController {
     @GET
     @Path("/v1/clusters")
     public Response listClusters() {
-        var clusters = mskService.listProvisionedClusters().stream().map(this::toClusterViewV1).toList();
+        List<Map<String, Object>> clusters = mskService.listProvisionedClusters().stream().map(this::toClusterViewV1).toList();
         return Response.ok(Map.of("clusterInfoList", clusters)).build();
     }
 
     @GET
     @Path("/api/v2/clusters")
     public Response listClustersV2() {
-        var clusters = mskService.listClusters().stream().map(this::toClusterViewV2).toList();
+        List<Map<String, Object>> clusters = mskService.listClusters().stream().map(this::toClusterViewV2).toList();
         return Response.ok(Map.of("clusterInfoList", clusters)).build();
     }
 
@@ -121,7 +121,7 @@ public class MskController {
                                         @QueryParam("nextToken") String nextToken) {
         PaginatedResult<MskConfiguration> result = mskService.listConfigurations(
                 Pagination.parseMaxResults(maxResultsParam, "BadRequestException"), nextToken);
-        var configurations = result.items().stream()
+        List<Map<String, Object>> configurations = result.items().stream()
                 .map(this::toConfigurationView)
                 .toList();
 

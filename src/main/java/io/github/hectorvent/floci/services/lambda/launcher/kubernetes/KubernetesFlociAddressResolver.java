@@ -10,6 +10,8 @@ import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Enumeration;
+import java.util.Optional;
 
 /**
  * Resolves the address Lambda pods use to reach the Floci process: the Runtime API
@@ -53,7 +55,7 @@ public class KubernetesFlociAddressResolver {
      * Docker/embedded-DNS specific.
      */
     public String flociBaseUrl() {
-        var scheme = config.tls().enabled() ? "https" : "http";
+        String scheme = config.tls().enabled() ? "https" : "http";
         return scheme + "://" + resolve() + ":" + mainPort();
     }
 
@@ -75,10 +77,10 @@ public class KubernetesFlociAddressResolver {
     }
 
     private String doResolve() {
-        var override = config.services().lambda().kubernetes().flociAddress()
+        Optional<String> override = config.services().lambda().kubernetes().flociAddress()
                 .filter(s -> !s.isBlank());
         if (override.isPresent()) {
-            var address = override.get().trim();
+            String address = override.get().trim();
             // Reachability can only be judged from the pods' network, not from here,
             // but anything beyond hostname/IP characters is always a mistake worth
             // failing on: the value is embedded in URLs and in single-quoted
@@ -115,7 +117,7 @@ public class KubernetesFlociAddressResolver {
         // IPv4 only: an IPv6 literal would need bracketing in every URL this address
         // feeds, and busybox wget cannot fetch from unbracketed IPv6 hosts.
         try {
-            var local = InetAddress.getLocalHost();
+            InetAddress local = InetAddress.getLocalHost();
             if (local instanceof Inet4Address && !local.isLoopbackAddress()) {
                 return local.getHostAddress();
             }
@@ -123,15 +125,15 @@ public class KubernetesFlociAddressResolver {
             LOG.debugv("getLocalHost failed, scanning interfaces: {0}", e.getMessage());
         }
         try {
-            var interfaces = NetworkInterface.getNetworkInterfaces();
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
             while (interfaces.hasMoreElements()) {
-                var nic = interfaces.nextElement();
+                NetworkInterface nic = interfaces.nextElement();
                 if (!nic.isUp() || nic.isLoopback()) {
                     continue;
                 }
-                var addresses = nic.getInetAddresses();
+                Enumeration<InetAddress> addresses = nic.getInetAddresses();
                 while (addresses.hasMoreElements()) {
-                    var address = addresses.nextElement();
+                    InetAddress address = addresses.nextElement();
                     if (address instanceof Inet4Address && !address.isLoopbackAddress()) {
                         return address.getHostAddress();
                     }

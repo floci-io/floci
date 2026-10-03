@@ -6,6 +6,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class QueryParserTest {
@@ -84,7 +86,7 @@ class QueryParserTest {
             ParsedQuery query = QueryParser.parse("service:ec2");
             assertTrue(query.keywords().isEmpty());
             assertEquals(1, query.filters().size());
-            var filter = query.filters().getFirst();
+            ParsedQuery.Filter filter = query.filters().getFirst();
             assertEquals(FilterAttribute.SERVICE, filter.attribute());
             assertEquals(1, filter.values().size());
             assertEquals("ec2", filter.values().getFirst().value());
@@ -102,7 +104,7 @@ class QueryParserTest {
         @Test
         void resourceTypeFilter() {
             ParsedQuery query = QueryParser.parse("resourcetype:s3:bucket");
-            var filter = query.filters().getFirst();
+            ParsedQuery.Filter filter = query.filters().getFirst();
             assertEquals(FilterAttribute.RESOURCE_TYPE, filter.attribute());
             assertEquals("s3:bucket", filter.values().getFirst().value());
         }
@@ -185,7 +187,7 @@ class QueryParserTest {
         @Test
         void twoValuesCommaOr() {
             ParsedQuery query = QueryParser.parse("region:us-east-1,us-west-2");
-            var filter = query.filters().getFirst();
+            ParsedQuery.Filter filter = query.filters().getFirst();
             assertEquals(2, filter.values().size());
             assertEquals("us-east-1", filter.values().get(0).value());
             assertEquals("us-west-2", filter.values().get(1).value());
@@ -194,7 +196,7 @@ class QueryParserTest {
         @Test
         void threeValuesCommaOr() {
             ParsedQuery query = QueryParser.parse("resourcetype:rds:db,s3:bucket,dynamodb:table");
-            var filter = query.filters().getFirst();
+            ParsedQuery.Filter filter = query.filters().getFirst();
             assertEquals(3, filter.values().size());
             assertEquals("rds:db", filter.values().get(0).value());
             assertEquals("s3:bucket", filter.values().get(1).value());
@@ -204,7 +206,7 @@ class QueryParserTest {
         @Test
         void doubleCommaProducesEmptySegment() {
             ParsedQuery query = QueryParser.parse("region:us-east-1,,us-west-2");
-            var filter = query.filters().getFirst();
+            ParsedQuery.Filter filter = query.filters().getFirst();
             assertEquals(3, filter.values().size());
             assertEquals("us-east-1", filter.values().get(0).value());
             assertEquals("", filter.values().get(1).value());
@@ -218,7 +220,7 @@ class QueryParserTest {
         @Test
         void negatedFilter() {
             ParsedQuery query = QueryParser.parse("-service:ec2");
-            var filter = query.filters().getFirst();
+            ParsedQuery.Filter filter = query.filters().getFirst();
             assertTrue(filter.negated());
             assertEquals(FilterAttribute.SERVICE, filter.attribute());
             assertEquals("ec2", filter.values().getFirst().value());
@@ -227,7 +229,7 @@ class QueryParserTest {
         @Test
         void negatedFilterWithCommaOr() {
             ParsedQuery query = QueryParser.parse("-region:us-east-1,us-west-2");
-            var filter = query.filters().getFirst();
+            ParsedQuery.Filter filter = query.filters().getFirst();
             assertTrue(filter.negated());
             assertEquals(2, filter.values().size());
         }
@@ -239,7 +241,7 @@ class QueryParserTest {
         @Test
         void wildcardSuffix() {
             ParsedQuery query = QueryParser.parse("region:us*");
-            var value = query.filters().getFirst().values().getFirst();
+            ParsedQuery.FilterValue value = query.filters().getFirst().values().getFirst();
             assertEquals("us", value.value());
             assertTrue(value.prefixMatch());
         }
@@ -247,7 +249,7 @@ class QueryParserTest {
         @Test
         void wildcardWithCommaOr() {
             ParsedQuery query = QueryParser.parse("resourcetype:ec2:*,s3:bucket");
-            var values = query.filters().getFirst().values();
+            List<ParsedQuery.FilterValue> values = query.filters().getFirst().values();
             assertEquals("ec2:", values.get(0).value());
             assertTrue(values.get(0).prefixMatch());
             assertEquals("s3:bucket", values.get(1).value());
@@ -261,7 +263,7 @@ class QueryParserTest {
         @Test
         void escapedCommaInFilterValue() {
             ParsedQuery query = QueryParser.parse("tag.key:comma\\,literal");
-            var filter = query.filters().getFirst();
+            ParsedQuery.Filter filter = query.filters().getFirst();
             assertEquals(1, filter.values().size());
             assertEquals("comma,literal", filter.values().getFirst().value());
         }
@@ -289,7 +291,7 @@ class QueryParserTest {
         @Test
         void escapedWildcardIsLiteralNotAPrefixMatch() {
             ParsedQuery query = QueryParser.parse("tag.value:literal\\*");
-            var value = query.filters().getFirst().values().getFirst();
+            ParsedQuery.FilterValue value = query.filters().getFirst().values().getFirst();
             assertEquals("literal*", value.value());
             assertFalse(value.prefixMatch());
         }
@@ -306,7 +308,7 @@ class QueryParserTest {
         void aQuotedPhraseNeutralisesEveryOperatorInside() {
             // Nothing in the quotes is an operator: no negation, no comma-OR, no wildcard.
             ParsedQuery query = QueryParser.parse("tag.key:\"-a,b*\"");
-            var filter = query.filters().getFirst();
+            ParsedQuery.Filter filter = query.filters().getFirst();
             assertFalse(filter.negated());
             assertEquals(1, filter.values().size());
             assertEquals("-a,b*", filter.values().getFirst().value());
@@ -356,17 +358,17 @@ class QueryParserTest {
             assertEquals(0, query.keywords().size());
             assertEquals(3, query.filters().size());
 
-            var regionFilter = query.filters().stream()
+            ParsedQuery.Filter regionFilter = query.filters().stream()
                     .filter(f -> f.attribute() == FilterAttribute.REGION).findFirst().orElseThrow();
             assertTrue(regionFilter.values().getFirst().prefixMatch());
             assertEquals("us", regionFilter.values().getFirst().value());
             assertFalse(regionFilter.negated());
 
-            var serviceFilter = query.filters().stream()
+            ParsedQuery.Filter serviceFilter = query.filters().stream()
                     .filter(f -> f.attribute() == FilterAttribute.SERVICE).findFirst().orElseThrow();
             assertEquals("ec2", serviceFilter.values().getFirst().value());
 
-            var tagFilter = query.filters().stream()
+            ParsedQuery.Filter tagFilter = query.filters().stream()
                     .filter(f -> f.attribute() == FilterAttribute.TAG).findFirst().orElseThrow();
             assertTrue(tagFilter.negated());
             assertEquals("stage=prod", tagFilter.values().getFirst().value());

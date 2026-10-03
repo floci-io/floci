@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudfront;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestHost;
+import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
@@ -125,7 +126,7 @@ public class CloudFrontServingController {
     @Path("/{proxy:.*}")
     public Response get(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
                         @Context HttpHeaders headers, @Context UriInfo uriInfo) {
-        var request = currentVertxRequest.getCurrent().request();
+        HttpServerRequest request = currentVertxRequest.getCurrent().request();
         String rawViewerPath = rawViewerPath(request.uri());
         return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
                 uriInfo.getRequestUri().getScheme(),
@@ -139,7 +140,7 @@ public class CloudFrontServingController {
     @Path("/{proxy:.*}")
     public Response head(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
                          @Context HttpHeaders headers, @Context UriInfo uriInfo) {
-        var request = currentVertxRequest.getCurrent().request();
+        HttpServerRequest request = currentVertxRequest.getCurrent().request();
         String rawViewerPath = rawViewerPath(request.uri());
         return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
                 uriInfo.getRequestUri().getScheme(),
@@ -153,7 +154,7 @@ public class CloudFrontServingController {
     @Path("/{proxy:.*}")
     public Response options(@PathParam("distId") String distId, @PathParam("proxy") String proxy,
                             @Context HttpHeaders headers, @Context UriInfo uriInfo) {
-        var request = currentVertxRequest.getCurrent().request();
+        HttpServerRequest request = currentVertxRequest.getCurrent().request();
         String rawViewerPath = rawViewerPath(request.uri());
         return serve(distId, rawViewerPath, decodedViewerPath(rawViewerPath),
                 uriInfo.getRequestUri().getScheme(),
@@ -576,7 +577,7 @@ public class CloudFrontServingController {
 
         String oaiId = originAccessIdentityId(origin);
         if (oaiId != null) {
-            var oai = service.getCloudFrontOriginAccessIdentity(oaiId);
+            CloudFrontOriginAccessIdentity oai = service.getCloudFrontOriginAccessIdentity(oaiId);
             s3Service.authorizeCloudFrontOaiGetObject(
                     bucket, key, oaiId, oai.getS3CanonicalUserId());
             return;

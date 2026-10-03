@@ -6,7 +6,9 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.util.UUID;
+import java.util.zip.GZIPInputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -184,7 +186,7 @@ class CloudTrailAdvancedSelectorsIntegrationTest {
     }
 
     private static String gunzip(byte[] gz) throws Exception {
-        try (var gzin = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(gz))) {
+        try (GZIPInputStream gzin = new GZIPInputStream(new ByteArrayInputStream(gz))) {
             return new String(gzin.readAllBytes());
         }
     }

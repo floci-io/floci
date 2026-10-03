@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -431,7 +432,7 @@ class CloudFrontDistributionServingTest {
                         defaultSigner.keyGroupId(),
                         privateSigner.keyGroupId()));
 
-        var created = given()
+        Response created = given()
                 .contentType("application/xml")
                 .body(body)
             .when()
@@ -450,7 +451,7 @@ class CloudFrontDistributionServingTest {
                 .extract().response();
 
         String configPath = created.header("Location") + "/config";
-        var config = given()
+        Response config = given()
             .when()
                 .get(configPath)
             .then()
@@ -518,7 +519,7 @@ class CloudFrontDistributionServingTest {
                         defaultSigner.keyGroupId(),
                         privateSigner.keyGroupId()));
 
-        var created = given()
+        Response created = given()
                 .contentType("application/xml")
                 .body(body)
             .when()
@@ -532,7 +533,7 @@ class CloudFrontDistributionServingTest {
                 .extract().response();
 
         String configPath = created.header("Location") + "/config";
-        var config = given()
+        Response config = given()
             .when()
                 .get(configPath)
             .then()

@@ -13,8 +13,16 @@ import software.amazon.awssdk.services.bedrockagentcorecontrol.model.CreateApiKe
 import software.amazon.awssdk.services.bedrockagentcorecontrol.model.CreateOauth2CredentialProviderRequest;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.model.CreateOauth2CredentialProviderResponse;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.model.CredentialProviderVendorType;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.model.DeleteApiKeyCredentialProviderResponse;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.model.DeleteOauth2CredentialProviderResponse;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.model.GetApiKeyCredentialProviderResponse;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.model.GetOauth2CredentialProviderResponse;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.model.ListApiKeyCredentialProvidersResponse;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.model.ListOauth2CredentialProvidersResponse;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.model.Oauth2ProviderConfigInput;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.model.SecretSourceType;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.model.UpdateApiKeyCredentialProviderResponse;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.model.UpdateOauth2CredentialProviderResponse;
 
 import java.util.UUID;
 
@@ -62,7 +70,7 @@ class BedrockAgentCoreCredentialProviderTest {
     @Test
     @Order(2)
     void getApiKeyCredentialProvider() {
-        var response = client.getApiKeyCredentialProvider(builder -> builder.name(apiKeyProviderName));
+        GetApiKeyCredentialProviderResponse response = client.getApiKeyCredentialProvider(builder -> builder.name(apiKeyProviderName));
 
         assertThat(response.name()).isEqualTo(apiKeyProviderName);
         assertThat(response.apiKeySecretSourceAsString()).isEqualTo("MANAGED");
@@ -74,7 +82,7 @@ class BedrockAgentCoreCredentialProviderTest {
     @Test
     @Order(3)
     void listApiKeyCredentialProviders() {
-        var response = client.listApiKeyCredentialProviders(builder -> builder.maxResults(100));
+        ListApiKeyCredentialProvidersResponse response = client.listApiKeyCredentialProviders(builder -> builder.maxResults(100));
 
         assertThat(response.credentialProviders())
                 .anyMatch(provider -> apiKeyProviderName.equals(provider.name()));
@@ -83,7 +91,7 @@ class BedrockAgentCoreCredentialProviderTest {
     @Test
     @Order(4)
     void updateApiKeyCredentialProvider() {
-        var response = client.updateApiKeyCredentialProvider(builder -> builder
+        UpdateApiKeyCredentialProviderResponse response = client.updateApiKeyCredentialProvider(builder -> builder
                 .name(apiKeyProviderName)
                 .apiKey("rotated-value")
                 .apiKeySecretSource(SecretSourceType.MANAGED));
@@ -96,7 +104,7 @@ class BedrockAgentCoreCredentialProviderTest {
     @Test
     @Order(5)
     void deleteApiKeyCredentialProvider() {
-        var response = client.deleteApiKeyCredentialProvider(builder -> builder.name(apiKeyProviderName));
+        DeleteApiKeyCredentialProviderResponse response = client.deleteApiKeyCredentialProvider(builder -> builder.name(apiKeyProviderName));
         assertThat(response.sdkHttpResponse().statusCode()).isEqualTo(204);
     }
 
@@ -123,7 +131,7 @@ class BedrockAgentCoreCredentialProviderTest {
     @Test
     @Order(7)
     void getOauth2CredentialProvider() {
-        var response = client.getOauth2CredentialProvider(builder -> builder.name(oauth2ProviderName));
+        GetOauth2CredentialProviderResponse response = client.getOauth2CredentialProvider(builder -> builder.name(oauth2ProviderName));
 
         assertThat(response.name()).isEqualTo(oauth2ProviderName);
         assertThat(response.credentialProviderVendorAsString()).isEqualTo("GithubOauth2");
@@ -136,7 +144,7 @@ class BedrockAgentCoreCredentialProviderTest {
     @Test
     @Order(8)
     void listOauth2CredentialProviders() {
-        var response = client.listOauth2CredentialProviders(builder -> builder.maxResults(20));
+        ListOauth2CredentialProvidersResponse response = client.listOauth2CredentialProviders(builder -> builder.maxResults(20));
 
         assertThat(response.credentialProviders())
                 .anyMatch(provider -> oauth2ProviderName.equals(provider.name())
@@ -146,7 +154,7 @@ class BedrockAgentCoreCredentialProviderTest {
     @Test
     @Order(9)
     void updateOauth2CredentialProvider() {
-        var response = client.updateOauth2CredentialProvider(builder -> builder
+        UpdateOauth2CredentialProviderResponse response = client.updateOauth2CredentialProvider(builder -> builder
                 .name(oauth2ProviderName)
                 .credentialProviderVendor(CredentialProviderVendorType.GITHUB_OAUTH2)
                 .oauth2ProviderConfigInput(Oauth2ProviderConfigInput.fromGithubOauth2ProviderConfig(config -> config
@@ -165,7 +173,7 @@ class BedrockAgentCoreCredentialProviderTest {
     @Test
     @Order(10)
     void deleteOauth2CredentialProvider() {
-        var response = client.deleteOauth2CredentialProvider(builder -> builder.name(oauth2ProviderName));
+        DeleteOauth2CredentialProviderResponse response = client.deleteOauth2CredentialProvider(builder -> builder.name(oauth2ProviderName));
         assertThat(response.sdkHttpResponse().statusCode()).isEqualTo(204);
     }
 }

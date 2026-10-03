@@ -99,7 +99,9 @@ public class LambdaNetworkConnectorsController {
         JsonNode request = parse(body);
         JsonNode vpc = request.path("Configuration").path("VpcEgressConfiguration");
         NetworkConnector connector = service.updateConnector(
-                region, identifier, stringList(vpc.path("SubnetIds")), stringList(vpc.path("SecurityGroupIds")));
+                region, identifier, stringList(vpc.path("SubnetIds")), stringList(vpc.path("SecurityGroupIds")),
+                text(request, "OperatorRole"), text(vpc, "NetworkProtocol"),
+                stringList(vpc.path("AssociatedComputeResourceTypes")));
         return Response.status(202).entity(connectorNode(connector, ConnectorShape.UPDATE)).build();
     }
 

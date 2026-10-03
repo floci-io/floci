@@ -11,8 +11,10 @@ import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
+import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
@@ -89,7 +91,7 @@ class EcsJsonHandlerTaskDefinitionPersistenceTest {
         assertEquals("ARM64", td.getRuntimePlatform().cpuArchitecture());
         assertEquals("LINUX", td.getRuntimePlatform().operatingSystemFamily());
 
-        var logConfiguration = td.getContainerDefinitions().getFirst().getLogConfiguration();
+        LogConfiguration logConfiguration = td.getContainerDefinitions().getFirst().getLogConfiguration();
         assertNotNull(logConfiguration, "logConfiguration must survive a restart");
         assertEquals("awslogs", logConfiguration.logDriver());
         assertEquals("/ecs/restart-family", logConfiguration.options().get("awslogs-group"));
@@ -119,7 +121,7 @@ class EcsJsonHandlerTaskDefinitionPersistenceTest {
                 """);
         handler.handle("RegisterTaskDefinition", registerReq, REGION);
 
-        var created = service.createService(null, "force-svc", "force-fam:1", 0,
+        EcsServiceModel created = service.createService(null, "force-svc", "force-fam:1", 0,
                 LaunchType.FARGATE, List.of(), null, REGION);
         String firstId = created.getDeploymentId();
 

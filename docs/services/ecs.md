@@ -436,13 +436,19 @@ Known differences from AWS:
   and rolls the running tasks: a replacement on the new deployment starts first, then
   the task from the previous deployment is drained one reconciler tick later. The
   `deployments` list still reports a single `PRIMARY` throughout.
-- `updatedAt` equals `createdAt`. AWS advances it as a rollout progresses; Floci has no
-  intermediate rollout state to report.
-- `deploymentConfiguration` (including the circuit breaker), `healthCheckGracePeriodSeconds`,
-  `serviceRegistries` and the placement constraints and strategies are stored and reported as
-  given, so a client that reads them back sees no drift, but the reconciler does not act on them:
-  it converges to `desiredCount` without a maximum or minimum percent, registers nothing in Cloud
-  Map, and places tasks without evaluating constraints.
+- `updatedAt` starts at `createdAt` and advances when the deployment status changes.
+- `deploymentConfiguration` is stored and reported as given. The deployment circuit breaker
+  counts tasks that fail to start and moves a deployment through `STOP_REQUESTED` to `STOPPED`,
+  or, with rollback enabled, through `ROLLBACK_IN_PROGRESS` to `ROLLBACK_SUCCESSFUL` or
+  `ROLLBACK_FAILED`. A rollback restores the most recent successful service revision while
+  retaining the service's current `desiredCount`. `DescribeServiceDeployments` reports the
+  rollback target and reason under `rollback`, and configured and triggered alarm names under
+  `alarms`. Enabled
+  CloudWatch deployment alarms are also checked during reconciliation and fail the deployment
+  when any configured alarm is in `ALARM`. Floci stops monitoring alarms when tasks converge;
+  AWS continues monitoring through the deployment bake time. `healthCheckGracePeriodSeconds`, `serviceRegistries`
+  and placement constraints and strategies are stored and reported but are not enforced; task
+  placement does not evaluate constraints.
 - `StopServiceDeployment` is not implemented.
 
 #### ECS EventBridge events
@@ -454,10 +460,10 @@ and mock mode.
 | `detail-type` | When | Key `detail` fields |
 |---|---|---|
 | `ECS Task State Change` | a task starts or stops | `lastStatus`, `desiredStatus`, `taskDefinitionArn`, `group`, `startedBy`, `stoppedReason`, `containers[].exitCode` |
-| `ECS Deployment State Change` | a service deployment starts, is in progress, or reaches steady state | `eventType` (always `INFO`), `eventName`, `deploymentId` |
+| `ECS Deployment State Change` | a service deployment starts, fails, rolls back, or reaches steady state | `eventType` (`ERROR` on failure, otherwise `INFO`), `eventName`, `deploymentId` |
 
 `eventName` is one of `SERVICE_DEPLOYMENT_STARTED`, `SERVICE_DEPLOYMENT_IN_PROGRESS`,
-`SERVICE_DEPLOYMENT_COMPLETED`.
+`SERVICE_DEPLOYMENT_COMPLETED`, `SERVICE_DEPLOYMENT_FAILED`.
 
 Known differences from AWS:
 
@@ -466,7 +472,7 @@ Known differences from AWS:
   `PROVISIONING -> PENDING -> ACTIVATING -> RUNNING` and a stop emits
   `DEACTIVATING -> STOPPING -> DEPROVISIONING -> STOPPED`, one `ECS Task State Change`
   per phase, so rules that filter on `detail.lastStatus` behave as on AWS.
-- `SERVICE_DEPLOYMENT_FAILED` and the deployment circuit breaker are not emitted.
+- `SERVICE_DEPLOYMENT_FAILED` is not emitted.
 - `SubmitTaskStateChange` / `SubmitContainerStateChange` remain ACK-only; Floci drives
   the task lifecycle itself rather than via agent submissions.
 

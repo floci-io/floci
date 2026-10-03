@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import com.dashjoin.jsonata.Jsonata;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -23,10 +25,10 @@ class JsonataEdgeCaseTest {
     // ---------------------------------------------------------------
     @Test
     void objectConstructor_returnsMap() throws Exception {
-        var input = Map.of("input", Map.of("name", "Alice", "age", 30));
+        Map<String, Map<String, Object>> input = Map.of("input", Map.of("name", "Alice", "age", 30));
 
-        var expr = jsonata("{\"name\": $states.input.name, \"age\": $states.input.age}");
-        var frame = expr.createFrame();
+        Jsonata expr = jsonata("{\"name\": $states.input.name, \"age\": $states.input.age}");
+        Jsonata.Frame frame = expr.createFrame();
         frame.bind("states", input);
 
         Object result = expr.evaluate(null, frame);
@@ -46,10 +48,10 @@ class JsonataEdgeCaseTest {
     // ---------------------------------------------------------------
     @Test
     void missingField_returnsNullNotThrows() throws Exception {
-        var input = Map.of("input", Map.of("name", "Alice"));
+        Map<String, Map<String, String>> input = Map.of("input", Map.of("name", "Alice"));
 
-        var expr = jsonata("$states.input.nonexistent");
-        var frame = expr.createFrame();
+        Jsonata expr = jsonata("$states.input.nonexistent");
+        Jsonata.Frame frame = expr.createFrame();
         frame.bind("states", input);
 
         Object result = expr.evaluate(null, frame);
@@ -60,8 +62,8 @@ class JsonataEdgeCaseTest {
     @Test
     void missingVariable_returnsNull() throws Exception {
         // No binding at all for $states
-        var expr = jsonata("$states.input.name");
-        var frame = expr.createFrame();
+        Jsonata expr = jsonata("$states.input.name");
+        Jsonata.Frame frame = expr.createFrame();
 
         Object result = expr.evaluate(null, frame);
 
@@ -86,24 +88,24 @@ class JsonataEdgeCaseTest {
         ));
 
         // Deep path access
-        var expr1 = jsonata("$states.input.user.address.city");
-        var frame1 = expr1.createFrame();
+        Jsonata expr1 = jsonata("$states.input.user.address.city");
+        Jsonata.Frame frame1 = expr1.createFrame();
         frame1.bind("states", nested);
         Object city = expr1.evaluate(null, frame1);
 
         assertEquals("Springfield", city);
 
         // Access into an array element
-        var expr2 = jsonata("$states.input.user.tags[0]");
-        var frame2 = expr2.createFrame();
+        Jsonata expr2 = jsonata("$states.input.user.tags[0]");
+        Jsonata.Frame frame2 = expr2.createFrame();
         frame2.bind("states", nested);
         Object firstTag = expr2.evaluate(null, frame2);
 
         assertEquals("admin", firstTag);
 
         // Construct an object from deep paths
-        var expr3 = jsonata("{\"city\": $states.input.user.address.city, \"firstTag\": $states.input.user.tags[0]}");
-        var frame3 = expr3.createFrame();
+        Jsonata expr3 = jsonata("{\"city\": $states.input.user.address.city, \"firstTag\": $states.input.user.tags[0]}");
+        Jsonata.Frame frame3 = expr3.createFrame();
         frame3.bind("states", nested);
         Object combined = expr3.evaluate(null, frame3);
 
@@ -119,15 +121,15 @@ class JsonataEdgeCaseTest {
     // ---------------------------------------------------------------
     @Test
     void convertValue_jacksonToMapRoundTrip() throws Exception {
-        var jsonNode = mapper.readTree("""
+        JsonNode jsonNode = mapper.readTree("""
                 {"input": {"name": "Bob", "scores": [10, 20, 30]}}
                 """);
 
         @SuppressWarnings("unchecked")
         Map<String, Object> asMap = mapper.convertValue(jsonNode, Map.class);
 
-        var expr = jsonata("$sum($states.input.scores)");
-        var frame = expr.createFrame();
+        Jsonata expr = jsonata("$sum($states.input.scores)");
+        Jsonata.Frame frame = expr.createFrame();
         frame.bind("states", asMap);
         Object result = expr.evaluate(null, frame);
 
@@ -145,13 +147,13 @@ class JsonataEdgeCaseTest {
         //
         // $states.result.Items where Items = [{...}] — $states.result is a plain object,
         // so .Items should return the List as-is, NOT the single element.
-        var input = Map.of("result", Map.of(
+        Map<String, Map<String, Object>> input = Map.of("result", Map.of(
                 "Items", List.of(Map.of("id", "item1", "name", "Widget One")),
                 "Count", 1
         ));
 
-        var expr = jsonata("$states.result.Items");
-        var frame = expr.createFrame();
+        Jsonata expr = jsonata("$states.result.Items");
+        Jsonata.Frame frame = expr.createFrame();
         frame.bind("states", input);
         Object result = expr.evaluate(null, frame);
 
@@ -163,15 +165,15 @@ class JsonataEdgeCaseTest {
 
     @Test
     void multiElementArray_propertyAccess_returnsList() throws Exception {
-        var input = Map.of("result", Map.of(
+        Map<String, Map<String, List<Map<String, String>>>> input = Map.of("result", Map.of(
                 "Items", List.of(
                         Map.of("id", "item1"),
                         Map.of("id", "item2")
                 )
         ));
 
-        var expr = jsonata("$states.result.Items");
-        var frame = expr.createFrame();
+        Jsonata expr = jsonata("$states.result.Items");
+        Jsonata.Frame frame = expr.createFrame();
         frame.bind("states", input);
         Object result = expr.evaluate(null, frame);
 
@@ -191,12 +193,12 @@ class JsonataEdgeCaseTest {
         // This is correct JSONata behavior (and what AWS does too).
         // To force an array, callers should use [$states.result.Items.{"id": id}]
         // or $toArray(...) if available.
-        var input = Map.of("result", Map.of(
+        Map<String, Map<String, List<Map<String, String>>>> input = Map.of("result", Map.of(
                 "Items", List.of(Map.of("id", "item1", "name", "Widget One"))
         ));
 
-        var expr = jsonata("$states.result.Items.{\"id\": id, \"name\": name}");
-        var frame = expr.createFrame();
+        Jsonata expr = jsonata("$states.result.Items.{\"id\": id, \"name\": name}");
+        Jsonata.Frame frame = expr.createFrame();
         frame.bind("states", input);
         Object result = expr.evaluate(null, frame);
 
@@ -214,12 +216,12 @@ class JsonataEdgeCaseTest {
     void objectMapping_singleElement_wrappedInArray_forcesArray() throws Exception {
         // Workaround: wrap the mapping expression in [] to force array output.
         // [$states.result.Items.{"id": id}] — even for 1-element sequences, result is an array.
-        var input = Map.of("result", Map.of(
+        Map<String, Map<String, List<Map<String, String>>>> input = Map.of("result", Map.of(
                 "Items", List.of(Map.of("id", "item1", "name", "Widget One"))
         ));
 
-        var expr = jsonata("[$states.result.Items.{\"id\": id, \"name\": name}]");
-        var frame = expr.createFrame();
+        Jsonata expr = jsonata("[$states.result.Items.{\"id\": id, \"name\": name}]");
+        Jsonata.Frame frame = expr.createFrame();
         frame.bind("states", input);
         Object result = expr.evaluate(null, frame);
 

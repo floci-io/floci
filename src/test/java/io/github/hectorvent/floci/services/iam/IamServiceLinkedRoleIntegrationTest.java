@@ -5,6 +5,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesRegex;
 import static org.hamcrest.Matchers.startsWith;
 
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -484,7 +485,7 @@ class IamServiceLinkedRoleIntegrationTest {
     }
 
     private static void refusedAsUnmodifiable(String action, String... formParams) {
-        var request = given().header("Authorization", AUTH_HEADER).formParam("Action", action);
+        RequestSpecification request = given().header("Authorization", AUTH_HEADER).formParam("Action", action);
         for (int i = 0; i < formParams.length; i += 2) {
             request = request.formParam(formParams[i], formParams[i + 1]);
         }

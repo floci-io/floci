@@ -3,8 +3,10 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -41,7 +43,7 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
     IamService iamService;
 
     private String iam(String action, String... kv) {
-        var req = given()
+        RequestSpecification req = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", IAM_AUTH)
             .formParam("Action", action);
@@ -77,7 +79,7 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
                 io.github.hectorvent.floci.services.iam.model.IamRole> roles =
                 (io.github.hectorvent.floci.core.storage.StorageBackend<String,
                         io.github.hectorvent.floci.services.iam.model.IamRole>) rolesField.get(target);
-        var role = roles.get(roleName).orElseThrow();
+        IamRole role = roles.get(roleName).orElseThrow();
         // isServiceLinkedRole() alone triggers the guard; the path must also look like a real
         // service-linked path since the guard's error message parses the principal back out of it.
         role.setPath("/aws-service-role/example.amazonaws.com/");

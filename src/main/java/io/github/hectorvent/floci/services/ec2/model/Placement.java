@@ -10,6 +10,7 @@ public class Placement {
     private String availabilityZone;
     private String tenancy = "default";
     private String groupName;
+    private String hostId;
 
     public Placement() {}
 
@@ -25,4 +26,7 @@ public class Placement {
 
     public String getGroupName() { return groupName; }
     public void setGroupName(String groupName) { this.groupName = groupName; }
+
+    public String getHostId() { return hostId; }
+    public void setHostId(String hostId) { this.hostId = hostId; }
 }

@@ -110,6 +110,7 @@ public class CodePipelineService {
     private final CodeDeployService codeDeployService;
     private final LambdaService lambdaService;
     private final S3Service s3Service;
+    private final CodePipelineEventPublisher eventPublisher;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final ScheduledExecutorService sourcePoller = Executors.newSingleThreadScheduledExecutor();
     private final KeyedLockPool pipelineLocks = new KeyedLockPool();
@@ -135,16 +136,33 @@ public class CodePipelineService {
                         CodeBuildService codeBuildService, CodeDeployService codeDeployService,
                         LambdaService lambdaService, S3Service s3Service) {
         this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
-                DEFAULT_SOURCE_POLL_INTERVAL_MS);
+                detachedEventPublisher(mapper), DEFAULT_SOURCE_POLL_INTERVAL_MS);
+    }
+
+    public CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
+                               CodeBuildService codeBuildService, CodeDeployService codeDeployService,
+                               LambdaService lambdaService, S3Service s3Service,
+                               EmulatorConfig config) {
+        this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
+                config, detachedEventPublisher(mapper));
     }
 
     @Inject
     public CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
                                CodeBuildService codeBuildService, CodeDeployService codeDeployService,
                                LambdaService lambdaService, S3Service s3Service,
-                               EmulatorConfig config) {
+                               EmulatorConfig config, CodePipelineEventPublisher eventPublisher) {
         this(storageFactory, mapper, codeBuildService, codeDeployService, lambdaService, s3Service,
+                eventPublisher,
                 resolveSourcePollInterval(config.services().codepipeline().sourcePollIntervalMs()));
+    }
+
+    /**
+     * A publisher with no EventBridge or SNS behind it, for the constructors built without CDI.
+     * Publishing is best-effort, so each event is logged as undeliverable and dropped.
+     */
+    private static CodePipelineEventPublisher detachedEventPublisher(ObjectMapper mapper) {
+        return new CodePipelineEventPublisher(null, null, mapper);
     }
 
     /**
@@ -165,7 +183,7 @@ public class CodePipelineService {
     private CodePipelineService(StorageFactory storageFactory, ObjectMapper mapper,
                                 CodeBuildService codeBuildService, CodeDeployService codeDeployService,
                                 LambdaService lambdaService, S3Service s3Service,
-                                long sourcePollIntervalMs) {
+                                CodePipelineEventPublisher eventPublisher, long sourcePollIntervalMs) {
         this.pipelineStore = storageFactory.create(
                 "codepipeline", "codepipeline-pipelines.json", new TypeReference<Map<String, CodePipelinePipeline>>() {});
         this.executionStore = storageFactory.create(
@@ -177,6 +195,7 @@ public class CodePipelineService {
         this.codeDeployService = codeDeployService;
         this.lambdaService = lambdaService;
         this.s3Service = s3Service;
+        this.eventPublisher = eventPublisher;
         this.sourcePollIntervalMs = sourcePollIntervalMs;
     }
 
@@ -244,6 +263,7 @@ public class CodePipelineService {
                         execution.setActionExecutions(new ArrayList<>());
                         execution.setStageExecutionStatuses(new LinkedHashMap<>());
                         putExecution(execution);
+                        eventPublisher.pipelineStateChange(execution, "RESUMED");
                         executor.submit(() -> runExecution(pipeline, execution));
                     }, () -> {
                         execution.setStatus("Failed");
@@ -562,6 +582,7 @@ public class CodePipelineService {
                     "The pipeline has reached the limit for concurrent pipeline executions", 400);
         }
         applyExecutionMode(execution);
+        eventPublisher.pipelineStateChange(execution, "STARTED");
         try {
             executor.submit(() -> runExecution(pipeline, execution));
         } catch (RejectedExecutionException exception) {
@@ -569,6 +590,7 @@ public class CodePipelineService {
             execution.setStatusSummary("Pipeline execution could not be scheduled.");
             execution.setLastUpdateTime(now());
             putExecution(execution);
+            eventPublisher.pipelineStateChange(execution, "FAILED");
             throw new AwsException("ConflictException",
                     "Your request cannot be handled because the pipeline is busy handling ongoing activities. "
                             + "Try again later.", 400);
@@ -623,6 +645,7 @@ public class CodePipelineService {
                     });
         }
         putExecution(execution);
+        eventPublisher.pipelineStateChange(execution, "STOPPING");
         return mapper.createObjectNode().put("pipelineExecutionId", execution.getPipelineExecutionId());
     }
 
@@ -1404,6 +1427,7 @@ public class CodePipelineService {
         execution.getStageExecutionStatuses().put(stageName, "InProgress");
         execution.setLastUpdateTime(now());
         putExecution(execution);
+        eventPublisher.stageStateChange(execution, stageName, "STARTED");
 
         ConditionOutcome entry = evaluateConditions(execution, stage, "BEFORE_ENTRY");
         if (entry == ConditionOutcome.SKIP_STAGE) {
@@ -1416,15 +1440,18 @@ public class CodePipelineService {
         if (entry == ConditionOutcome.FAIL) {
             failForCondition(execution, stageName, "BEFORE_ENTRY");
             execution.getStageExecutionStatuses().put(stageName, "Failed");
+            eventPublisher.stageStateChange(execution, stageName, "FAILED");
             return false;
         }
 
         runStage(pipeline, execution, stage, retryMode, previousStatuses);
         if ("Failed".equals(execution.getStatus())) {
             execution.getStageExecutionStatuses().put(stageName, "Failed");
+            eventPublisher.stageStateChange(execution, stageName, "FAILED");
             return false;
         }
         if (finishIfStopped(execution)) {
+            eventPublisher.stageStateChange(execution, stageName, "STOPPED");
             return false;
         }
 
@@ -1433,12 +1460,14 @@ public class CodePipelineService {
         if (evaluateConditions(execution, stage, "ON_SUCCESS") != ConditionOutcome.PASS) {
             failForCondition(execution, stageName, "ON_SUCCESS");
             execution.getStageExecutionStatuses().put(stageName, "Failed");
+            eventPublisher.stageStateChange(execution, stageName, "FAILED");
             return false;
         }
         execution.getStageExecutionStatuses().put(stageName, "Succeeded");
         execution.setCurrentStage(null);
         execution.setLastUpdateTime(now());
         putExecution(execution);
+        eventPublisher.stageStateChange(execution, stageName, "SUCCEEDED");
         return true;
     }
 
@@ -1652,6 +1681,15 @@ public class CodePipelineService {
                 activeRuns.remove(runKey(execution));
             }
         });
+        String terminalState = switch (execution.getStatus()) {
+            case "Succeeded" -> "SUCCEEDED";
+            case "Failed" -> "FAILED";
+            case "Stopped" -> "STOPPED";
+            default -> null;
+        };
+        if (terminalState != null) {
+            eventPublisher.pipelineStateChange(execution, terminalState);
+        }
     }
 
     // Failed and stopped executions keep their artifacts so a stage retry can reuse them. Once a newer
@@ -1742,6 +1780,7 @@ public class CodePipelineService {
             execution.getActionExecutions().add(state);
             putExecution(execution);
         }
+        eventPublisher.actionStateChange(execution, state, "STARTED");
         try {
             executeProvider(pipeline, execution, action, state);
             if ("InProgress".equals(state.getStatus())) {
@@ -1761,6 +1800,15 @@ public class CodePipelineService {
         } finally {
             state.setLastUpdateTime(now());
             putExecution(execution);
+            String terminalState = switch (state.getStatus()) {
+                case "Succeeded" -> "SUCCEEDED";
+                case "Failed" -> "FAILED";
+                case "Abandoned" -> "ABANDONED";
+                default -> null;
+            };
+            if (terminalState != null) {
+                eventPublisher.actionStateChange(execution, state, terminalState);
+            }
         }
     }
 
@@ -1770,7 +1818,7 @@ public class CodePipelineService {
         String owner = state.getOwner();
         String provider = state.getProvider();
         if ("Approval".equals(category) && "Manual".equals(provider)) {
-            waitForApproval(execution, state);
+            waitForApproval(execution, action, state);
             return;
         }
         if ("Source".equals(category) && "GitHub".equals(provider) && "ThirdParty".equals(owner)
@@ -2220,10 +2268,18 @@ public class CodePipelineService {
         state.setExternalExecutionId(result.path("pipelineExecutionId").asText());
     }
 
-    private void waitForApproval(CodePipelineExecution execution, ActionExecution state) throws InterruptedException {
+    private void waitForApproval(CodePipelineExecution execution, JsonNode action,
+                                 ActionExecution state) throws InterruptedException {
         state.setToken(UUID.randomUUID().toString());
         state.setSummary("Waiting for approval.");
         putExecution(execution);
+        String notificationArn = action.path("configuration").path("NotificationArn").asText(null);
+        if (notificationArn != null && !notificationArn.isBlank()) {
+            eventPublisher.approvalNeeded(execution, state, notificationArn,
+                    action.path("configuration").path("CustomData").asText(null),
+                    action.path("configuration").path("ExternalEntityLink").asText(null),
+                    now() + TimeUnit.DAYS.toSeconds(7));
+        }
         while ("InProgress".equals(state.getStatus()) && !execution.isStopRequested()) {
             TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);
         }

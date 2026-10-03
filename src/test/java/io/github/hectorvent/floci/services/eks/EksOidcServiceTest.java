@@ -87,7 +87,7 @@ class EksOidcServiceTest {
         // not be the owner, and an unresolved issuer is treated as a third-party provider — so the
         // token would be accepted with no validation at all.
         StorageBackend<String, ClusterOidcKey> raw = new InMemoryStorage<>();
-        var accountAware = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        AccountAwareStorageBackend<ClusterOidcKey> accountAware = new AccountAwareStorageBackend<>(raw, null, "000000000000");
         EksOidcService service = new EksOidcService(new StorageFactory(null, null) {
             @Override
             @SuppressWarnings("unchecked")

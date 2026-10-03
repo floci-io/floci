@@ -3,7 +3,9 @@ package com.floci.test;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.controlcatalog.ControlCatalogClient;
 import software.amazon.awssdk.services.controlcatalog.model.ControlFilter;
+import software.amazon.awssdk.services.controlcatalog.model.GetControlResponse;
 import software.amazon.awssdk.services.controlcatalog.model.ImplementationFilter;
+import software.amazon.awssdk.services.controlcatalog.model.ListControlsResponse;
 import software.amazon.awssdk.services.controlcatalog.model.ResourceNotFoundException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -21,12 +23,12 @@ class ControlCatalogTest {
     @Test
     void controlLookupAndFilteringUseAwsSdkContracts() {
         try (ControlCatalogClient client = TestFixtures.controlCatalogClient()) {
-            var control = client.getControl(request -> request.controlArn(CONTROL_ARN));
+            GetControlResponse control = client.getControl(request -> request.controlArn(CONTROL_ARN));
             assertEquals(CONTROL_ARN, control.arn());
             assertEquals(RCP, control.implementation().type());
             assertEquals("CT.S3.PV.5", control.implementation().identifier());
 
-            var page = client.listControls(request -> request
+            ListControlsResponse page = client.listControls(request -> request
                     .maxResults(2)
                     .filter(ControlFilter.builder()
                             .implementations(ImplementationFilter.builder().types(RCP).build())
@@ -37,7 +39,7 @@ class ControlCatalogTest {
             assertTrue(page.controls().stream().allMatch(item -> item.governedProviders().contains("AWS")));
             assertFalse(page.nextToken().isBlank());
 
-            var secondPage = client.listControls(request -> request
+            ListControlsResponse secondPage = client.listControls(request -> request
                     .maxResults(2)
                     .nextToken(page.nextToken())
                     .filter(ControlFilter.builder()
@@ -47,7 +49,7 @@ class ControlCatalogTest {
             assertEquals(2, secondPage.controls().size());
             assertFalse(secondPage.nextToken().isBlank());
 
-            var finalPage = client.listControls(request -> request
+            ListControlsResponse finalPage = client.listControls(request -> request
                     .maxResults(2)
                     .nextToken(secondPage.nextToken())
                     .filter(ControlFilter.builder()
@@ -56,7 +58,7 @@ class ControlCatalogTest {
                             .build()));
             assertEquals(1, finalPage.controls().size());
             assertNull(finalPage.nextToken());
-            var arns = new HashSet<String>();
+            HashSet<String> arns = new HashSet<>();
             page.controls().forEach(item -> arns.add(item.arn()));
             secondPage.controls().forEach(item -> arns.add(item.arn()));
             finalPage.controls().forEach(item -> arns.add(item.arn()));

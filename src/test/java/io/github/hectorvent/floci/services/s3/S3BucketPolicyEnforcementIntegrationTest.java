@@ -242,6 +242,98 @@ class S3BucketPolicyEnforcementIntegrationTest {
     }
 
     @Test
+    void aBucketPolicyNamingTheCallersAccountGrantsACrossAccountCopy() {
+        // The CopyObject source check matched a bucket policy's Principal against the caller's ARN as
+        // a string, so a grant to the caller's account let it read the object but not copy it.
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "bp-account-" + suffix;
+        S3RequestSigner owner = sourceBucketInAccountA(source);
+        S3RequestSigner reader = createAccountAdmin("reader-" + suffix, ACCOUNT_B).signer();
+        String destination = "bp-account-dst-" + suffix;
+        createBucketAs(destination, reader);
+
+        allowGetObject(owner, source, "{\"AWS\":\"" + ACCOUNT_B + "\"}");
+
+        assertReadAndCopy(reader, source, destination, 200);
+    }
+
+    @Test
+    void aBucketPolicyNamingARoleWithAPathGrantsItsSessions() {
+        // S3's own checks matched a role session through a role ARN rebuilt from the session ARN,
+        // which drops the role's path, so a grant naming role/team/<name> never reached it.
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "bp-path-" + suffix;
+        S3RequestSigner owner = sourceBucketInAccountA(source);
+        S3RequestSigner session = sessionOfRoleUnderTeamPath("bp-path-role-" + suffix, ACCOUNT_B);
+        String destination = "bp-path-dst-" + suffix;
+        createBucketAs(destination, createAccountAdmin("dst-owner-" + suffix, ACCOUNT_B).signer());
+
+        allowGetObject(owner, source, "{\"AWS\":\"arn:aws:iam::" + ACCOUNT_B + ":role/team/bp-path-role-" + suffix + "\"}");
+
+        assertReadAndCopy(session, source, destination, 200);
+    }
+
+    @Test
+    void aBucketPolicyNamingAnAccountByItsCanonicalIdGrantsThatAccount() {
+        // A bucket policy can name an account by its S3 canonical user ID (IAM User Guide, "AWS account
+        // principals"), and Floci's canonical ID for an account is its account id.
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "bp-canonical-" + suffix;
+        S3RequestSigner owner = sourceBucketInAccountA(source);
+        S3RequestSigner reader = createAccountAdmin("reader-" + suffix, ACCOUNT_B).signer();
+        String destination = "bp-canonical-dst-" + suffix;
+        createBucketAs(destination, reader);
+
+        allowGetObject(owner, source, "{\"CanonicalUser\":\"999988887777\"}");
+        assertReadAndCopy(reader, source, destination, 403);
+
+        allowGetObject(owner, source, "{\"CanonicalUser\":\"" + ACCOUNT_B + "\"}");
+        assertReadAndCopy(reader, source, destination, 200);
+    }
+
+    /** Creates a bucket in account A holding {@code o.txt}, and returns its owner, an account-A administrator. */
+    private static S3RequestSigner sourceBucketInAccountA(String bucket) {
+        S3RequestSigner owner = createAccountAdmin("owner-" + bucket, ACCOUNT_A).signer();
+        createBucketAs(bucket, owner);
+        putObjectAs(bucket, "o.txt", "payload", owner);
+        return owner;
+    }
+
+    private static void allowGetObject(S3RequestSigner owner, String bucket, String principal) {
+        putBucketPolicyAs(bucket, """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":%s,
+                  "Action":"s3:GetObject","Resource":"arn:aws:s3:::%s/*"}]}""".formatted(principal, bucket), owner);
+    }
+
+    private static void assertReadAndCopy(S3RequestSigner caller, String source, String destination, int status) {
+        given().filter(caller).when().get("/" + source + "/o.txt").then().statusCode(status);
+        given().filter(caller).header("x-amz-copy-source", "/" + source + "/o.txt")
+                .when().put("/" + destination + "/" + UUID.randomUUID() + ".txt").then().statusCode(status);
+    }
+
+    /** A session of a role under the {@code /team/} path, allowed s3:* by its own policy. */
+    private static S3RequestSigner sessionOfRoleUnderTeamPath(String role, String accountId) {
+        given().formParam("Action", "CreateRole").formParam("RoleName", role).formParam("Path", "/team/")
+                .formParam("AssumeRolePolicyDocument", """
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                          "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole"}]}""".formatted(accountId))
+                .header("Authorization", auth(accountId, "iam")).when().post("/").then().statusCode(200);
+        given().formParam("Action", "PutRolePolicy").formParam("RoleName", role).formParam("PolicyName", "s3")
+                .formParam("PolicyDocument", """
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}""")
+                .header("Authorization", auth(accountId, "iam")).when().post("/").then().statusCode(200);
+        ExtractableResponse<Response> assumed = given().formParam("Action", "AssumeRole")
+                .formParam("RoleArn", "arn:aws:iam::" + accountId + ":role/team/" + role)
+                .formParam("RoleSessionName", "s")
+                .header("Authorization", auth(accountId, "sts")).when().post("/")
+                .then().statusCode(200).extract();
+        return S3RequestSigner.signedAs(
+                assumed.path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId"),
+                assumed.path("AssumeRoleResponse.AssumeRoleResult.Credentials.SecretAccessKey"),
+                assumed.path("AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken"));
+    }
+
+    @Test
     void enforcesBucketPolicyForSignedCallers() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String bucket = "bp-enforce-" + suffix;

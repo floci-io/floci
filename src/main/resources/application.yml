@@ -42,7 +42,8 @@ quarkus:
     resources:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
       # catalog (ec2/image-catalog.yaml), SageMaker reads its instance type
-      # catalog (sagemaker/instance-type-catalog.yaml), AppSync's GraphQL
+      # catalog (sagemaker/instance-type-catalog.yaml), KMS reads its AWS managed
+      # key catalog (kms/aws-managed-keys.yaml), AppSync's GraphQL
       # parser reads its message bundles, EC2 security group enforcement builds
       # its helper image from docker/*.Dockerfile, and API Gateway's Velocity
       # engine reads its default properties at runtime via
@@ -60,6 +61,7 @@ quarkus:
         - ec2/*.yaml
         - docker/*.Dockerfile
         - sagemaker/*.yaml
+        - kms/*.yaml
         - eks/*.json
         - aws/*.json
         - cloudformation/*.json
@@ -366,6 +368,8 @@ floci:
       poll-interval-ms: 1000
       async-retry-delay-seconds: 60           # FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS - a failed Event invocation waits this before its first retry and twice this before its second (AWS: 1 min, then 2); 0 retries back to back
       container-idle-timeout-seconds: 300
+      # warm-pool-max-per-function:           # FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION - idle containers kept per function (default max(4, cpus))
+      warm-pool-max-total: 0                  # FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL - idle containers kept across all functions, LRU evicted beyond it; 0 = unbounded
       region-concurrency-limit: 1000
       unreserved-concurrency-min: 100
       accept-external-layer-arns: false       # FLOCI_SERVICES_LAMBDA_ACCEPT_EXTERNAL_LAYER_ARNS - accept a Layers ARN from another account (content is never mounted). AWS answers these through the layer resource policy, which Floci does not model, so the default refuses them like AWS refuses a non-public one. Turn on to attach public layers such as Powertools.

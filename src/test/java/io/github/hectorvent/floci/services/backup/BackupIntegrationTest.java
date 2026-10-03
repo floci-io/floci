@@ -40,17 +40,21 @@ class BackupIntegrationTest {
      * nothing to do with the behaviour under test.
      */
     private static void awaitJobCompleted(String backupJobId) {
+        awaitJobState(AUTH, backupJobId, "COMPLETED");
+    }
+
+    private static void awaitJobState(String auth, String backupJobId, String expected) {
         await().atMost(Duration.ofSeconds(10))
                 .pollInterval(Duration.ofMillis(25))
                 .until(() -> {
                     String state = given()
-                        .header("Authorization", AUTH)
+                        .header("Authorization", auth)
                     .when()
                         .get("/backup-jobs/" + backupJobId)
                     .then()
                         .statusCode(200)
                         .extract().path("State");
-                    return "COMPLETED".equals(state);
+                    return expected.equals(state);
                 });
     }
 
@@ -1344,6 +1348,77 @@ class BackupIntegrationTest {
         given().header("Authorization", AUTH)
         .when().get("/backup-vaults/" + vault + "/notification-configuration")
         .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    // ── Non-default account ────────────────────────────────────────────────────
+    // Job transitions run on a scheduler thread with no request context. Without the
+    // caller's account bound there, the account-aware stores resolve 000000000000, so a
+    // job started from any other account is never found: it stays CREATED, writes no
+    // recovery point, and the vault's empty-guard lets a vault that should hold one be
+    // deleted.
+
+    private static final String OTHER_ACCOUNT_AUTH =
+            "AWS4-HMAC-SHA256 Credential=210987654321/20260205/us-east-1/backup/aws4_request";
+
+    @Test
+    @Order(160)
+    void aBackupJobInANonDefaultAccountCompletesInThatAccount() {
+        String vault = "other-account-vault";
+        given().header("Authorization", OTHER_ACCOUNT_AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        String jid = given().header("Authorization", OTHER_ACCOUNT_AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "arn:aws:dynamodb:us-east-1:210987654321:table/my-table",
+                  "IamRoleArn": "arn:aws:iam::210987654321:role/backup-role"
+                }
+                """.formatted(vault))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+
+        awaitJobState(OTHER_ACCOUNT_AUTH, jid, "COMPLETED");
+        String rpArn = given().header("Authorization", OTHER_ACCOUNT_AUTH)
+        .when().get("/backup-jobs/" + jid).then().statusCode(200)
+            .extract().path("RecoveryPointArn");
+
+        given().header("Authorization", OTHER_ACCOUNT_AUTH)
+        .when().get("/backup-vaults/" + vault + "/recovery-points/")
+        .then().statusCode(200)
+            .body("RecoveryPoints", hasSize(1))
+            .body("RecoveryPoints[0].RecoveryPointArn", equalTo(rpArn))
+            .body("RecoveryPoints[0].RecoveryPointArn", containsString(":210987654321:"));
+
+        given().header("Authorization", OTHER_ACCOUNT_AUTH)
+        .when().get("/backup-vaults/" + vault)
+        .then().statusCode(200).body("NumberOfRecoveryPoints", equalTo(1));
+
+        given().header("Authorization", OTHER_ACCOUNT_AUTH)
+        .when().delete("/backup-vaults/" + vault)
+        .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+    }
+
+    @Test
+    @Order(161)
+    void aStoppedBackupJobInANonDefaultAccountReachesAborted() {
+        String vault = "other-account-abort-vault";
+        given().header("Authorization", OTHER_ACCOUNT_AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        String jid = given().header("Authorization", OTHER_ACCOUNT_AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "arn:aws:dynamodb:us-east-1:210987654321:table/my-table",
+                  "IamRoleArn": "arn:aws:iam::210987654321:role/backup-role"
+                }
+                """.formatted(vault))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+
+        given().header("Authorization", OTHER_ACCOUNT_AUTH).contentType("application/json").body("{}")
+        .when().post("/backup-jobs/" + jid).then().statusCode(204);
+
+        awaitJobState(OTHER_ACCOUNT_AUTH, jid, "ABORTED");
     }
 
 }

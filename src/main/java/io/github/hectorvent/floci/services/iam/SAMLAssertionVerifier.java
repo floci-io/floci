@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
+import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
@@ -43,7 +44,7 @@ final class SAMLAssertionVerifier {
     static Verified verify(String encoded, SAMLProvider provider, Instant now) throws InvalidAssertionException {
         try {
             byte[] bytes = Base64.getDecoder().decode(encoded);
-            var document = SAMLXml.document(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+            Document document = SAMLXml.document(new String(bytes, StandardCharsets.UTF_8));
             Element assertion = document.getDocumentElement();
             if ("Response".equals(assertion.getLocalName())) {
                 assertion = first(assertion, SAML, "Assertion");
@@ -74,7 +75,7 @@ final class SAMLAssertionVerifier {
                 }
             }
             X509Certificate certificate = certificate(provider.getCertificate());
-            var context = new DOMValidateContext(certificate.getPublicKey(), signature);
+            DOMValidateContext context = new DOMValidateContext(certificate.getPublicKey(), signature);
             context.setProperty("org.jcp.xml.dsig.secureValidation", Boolean.TRUE);
             XMLSignature xmlSignature = XMLSignatureFactory.getInstance("DOM").unmarshalXMLSignature(context);
             if (xmlSignature.getSignedInfo().getReferences().size() != 1

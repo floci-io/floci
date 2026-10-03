@@ -142,7 +142,7 @@ class ReloadingKeyManagerTest {
 
     @Test
     void keyManagerOfLoadsThePemKeyStoreOfTheOptions() {
-        var leaf = new CertificateGenerator().generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
+        CertificateGenerator.GeneratedCertificate leaf = new CertificateGenerator().generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
         PemKeyCertOptions options = new PemKeyCertOptions()
                 .addCertValue(Buffer.buffer(leaf.certificatePem()))
                 .addKeyValue(Buffer.buffer(leaf.privateKeyPem()));

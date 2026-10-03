@@ -26,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -487,10 +488,10 @@ class SsmCommandServiceDirectExecutionTest {
 
         assertEquals("InProgress", command.getStatus());
         assertEquals("In Progress", command.getStatusDetails());
-        waitForInvocationStatus(service, command.getCommandId(), "i-container", "us-west-2", "Success");
-        Command updatedCommand = service.listCommands(command.getCommandId(), null, "us-west-2").getFirst();
-        assertEquals(1, updatedCommand.getCompletedCount());
-        assertEquals(0, command.getErrorCount());
+        // The invocation turns Success before the command rollup runs, so wait on the rollup itself.
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertEquals(1,
+                service.listCommands(command.getCommandId(), null, "us-west-2").getFirst().getCompletedCount()));
+        assertEquals(0, service.listCommands(command.getCommandId(), null, "us-west-2").getFirst().getErrorCount());
         assertEquals("Success",
                 service.getCommandInvocation(command.getCommandId(), "i-container", "us-west-2").getStatus());
         assertEquals("Pending",
@@ -738,35 +739,15 @@ class SsmCommandServiceDirectExecutionTest {
                 service.getCommandInvocation(command.getCommandId(), "i-container", "us-west-2").getStatus());
     }
 
-    private static String waitForCommandStatus(SsmCommandService service, String commandId, String region) throws InterruptedException {
-        for (int i = 0; i < 250; i++) {
-            Command command = service.listCommands(commandId, null, region).getFirst();
-            if (!"InProgress".equals(command.getStatus())) {
-                return command.getStatus();
-            }
-            TimeUnit.MILLISECONDS.sleep(20);
-        }
-        return service.listCommands(commandId, null, region).getFirst().getStatus();
+    private static String waitForCommandStatus(SsmCommandService service, String commandId, String region) {
+        return await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(20))
+                .until(() -> service.listCommands(commandId, null, region).getFirst().getStatus(),
+                        status -> !"InProgress".equals(status));
     }
 
-    private static void waitForInvocationStatus(SsmCommandService service, String commandId, String instanceId, String region, String status) throws InterruptedException {
-        for (int i = 0; i < 50; i++) {
-            if (status.equals(service.getCommandInvocation(commandId, instanceId, region).getStatus())) {
-                return;
-            }
-            TimeUnit.MILLISECONDS.sleep(20);
-        }
-    }
-
-    private static int waitForMessageCount(SsmCommandService service, String instanceId) throws InterruptedException {
-        for (int i = 0; i < 50; i++) {
-            int messageCount = service.getMessages(instanceId, "request-id", 30).size();
-            if (messageCount > 0) {
-                return messageCount;
-            }
-            TimeUnit.MILLISECONDS.sleep(20);
-        }
-        return 0;
+    private static int waitForMessageCount(SsmCommandService service, String instanceId) {
+        return await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(20))
+                .until(() -> service.getMessages(instanceId, "request-id", 30).size(), count -> count > 0);
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {

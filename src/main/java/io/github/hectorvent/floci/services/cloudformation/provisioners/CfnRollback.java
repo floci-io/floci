@@ -140,6 +140,13 @@ public final class CfnRollback {
      */
     public static final String LAUNCH_TEMPLATE_UPDATE_SNAPSHOT_ATTR = "__FlociLaunchTemplateUpdateSnapshot";
 
+    /**
+     * Holds the settings a Lambda MicroVMs network connector had before an in-place update changed
+     * them, so a failed stack update can put them back. Written by {@code LambdaMicrovmsCfnProvisioner}
+     * before its update call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String NETWORK_CONNECTOR_UPDATE_SNAPSHOT_ATTR = "__FlociNetworkConnectorUpdateSnapshot";
+
     private CfnRollback() {
     }
 

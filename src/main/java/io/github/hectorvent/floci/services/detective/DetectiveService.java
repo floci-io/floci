@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.detective.model.DetectiveMember;
 import io.github.hectorvent.floci.services.detective.model.DetectiveState;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
+import io.github.hectorvent.floci.services.organizations.model.Organization;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -50,7 +51,7 @@ public class DetectiveService implements Resettable {
 
     public synchronized void enableAdmin(String region, String callerAccountId, String accountId) {
         requireAccountId(accountId);
-        var organization = organizationsService.describeOrganization(callerAccountId);
+        Organization organization = organizationsService.describeOrganization(callerAccountId);
         if (!callerAccountId.equals(organization.getMasterAccountId())) {
             throw new AwsException("AccessDeniedException",
                     "Only the organization management account can designate the Detective administrator account.", 403);

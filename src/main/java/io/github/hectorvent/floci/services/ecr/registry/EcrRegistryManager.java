@@ -34,6 +34,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -284,7 +285,7 @@ public class EcrRegistryManager {
         // Check for existing container to adopt. The registry survives shutdown by design and is
         // adopted BY NAME, so look up the pre-migration name too: otherwise an upgraded emulator
         // orphans the old container while it still holds the registry host port and its data.
-        var existing = lifecycleManager.findByName(name);
+        Optional<Container> existing = lifecycleManager.findByName(name);
         String adoptedName = name;
         if (existing.isEmpty()) {
             adoptedName = legacyRegistryContainerName();
@@ -630,7 +631,7 @@ public class EcrRegistryManager {
             ContainerInfo info = lifecycleManager.adopt(containerId, List.of(CONTAINER_INTERNAL_PORT));
             // The control plane reaches the backing registry through this published loopback
             // binding when Floci runs on the host. In Docker, httpClient() uses container DNS.
-            var published = info.publishedHostPort(CONTAINER_INTERNAL_PORT);
+            OptionalInt published = info.publishedHostPort(CONTAINER_INTERNAL_PORT);
             if (published.isPresent()) {
                 this.hostPort = published.getAsInt();
             } else {

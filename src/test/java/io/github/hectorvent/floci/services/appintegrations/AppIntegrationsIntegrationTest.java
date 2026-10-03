@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.appintegrations;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ExtractableResponse;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -220,7 +222,7 @@ class AppIntegrationsIntegrationTest {
     @Test
     @Order(11)
     void createDataIntegration() {
-        var response = given()
+        ExtractableResponse<Response> response = given()
             .contentType("application/json")
             .body("""
                 {

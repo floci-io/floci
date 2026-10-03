@@ -314,7 +314,7 @@ public class KinesisJsonHandler {
     private Response handleRegisterStreamConsumer(JsonNode request, String region) {
         String streamArn = request.path("StreamARN").asText();
         String consumerName = request.path("ConsumerName").asText();
-        var consumer = service.registerStreamConsumer(streamArn, consumerName, region);
+        KinesisConsumer consumer = service.registerStreamConsumer(streamArn, consumerName, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Consumer", consumerToNode(consumer));
         return Response.ok(response).build();
@@ -332,7 +332,7 @@ public class KinesisJsonHandler {
         String streamArn = request.has("StreamARN") ? request.path("StreamARN").asText() : null;
         String consumerName = request.has("ConsumerName") ? request.path("ConsumerName").asText() : null;
         String consumerArn = request.has("ConsumerARN") ? request.path("ConsumerARN").asText() : null;
-        var consumer = service.describeStreamConsumer(streamArn, consumerName, consumerArn, region);
+        KinesisConsumer consumer = service.describeStreamConsumer(streamArn, consumerName, consumerArn, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("ConsumerDescription", consumerToNode(consumer));
         return Response.ok(response).build();
@@ -340,7 +340,7 @@ public class KinesisJsonHandler {
 
     private Response handleListStreamConsumers(JsonNode request, String region) {
         String streamArn = request.path("StreamARN").asText();
-        var consumers = service.listStreamConsumers(streamArn, region);
+        List<KinesisConsumer> consumers = service.listStreamConsumers(streamArn, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("Consumers");
         consumers.forEach(c -> array.add(consumerToNode(c)));

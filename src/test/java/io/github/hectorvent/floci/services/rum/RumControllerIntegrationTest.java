@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rum;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -323,7 +324,7 @@ class RumControllerIntegrationTest {
     }
 
     private static Response list(String authorization, String maxResults, String nextToken) {
-        var request = given()
+        RequestSpecification request = given()
                 .header("Authorization", authorization);
         if (maxResults != null) {
             request.queryParam("maxResults", maxResults);

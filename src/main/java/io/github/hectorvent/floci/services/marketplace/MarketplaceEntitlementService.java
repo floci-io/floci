@@ -15,6 +15,7 @@ import jakarta.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -109,9 +110,9 @@ public class MarketplaceEntitlementService implements Resettable {
         if (filter == null || filter.isNull()) {
             return true;
         }
-        var fields = filter.fields();
+        Iterator<Map.Entry<String, JsonNode>> fields = filter.fields();
         while (fields.hasNext()) {
-            var entry = fields.next();
+            Map.Entry<String, JsonNode> entry = fields.next();
             String actual = switch (entry.getKey()) {
                 case "CUSTOMER_IDENTIFIER" -> entitlement.customerIdentifier();
                 case "CUSTOMER_AWS_ACCOUNT_ID" -> entitlement.customerAwsAccountId();
