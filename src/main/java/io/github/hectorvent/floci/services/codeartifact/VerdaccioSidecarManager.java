@@ -144,10 +144,10 @@ public class VerdaccioSidecarManager implements RepositorySidecarManager, Contai
      * <p>{@code namespace}, {@code packageName}, and {@code assetName} are each their own
      * independently caller-supplied value, only meant to be one path segment; {@code
      * packagePath} and the final {@code /-/<assetName>} suffix supply the real {@code /}
-     * separators themselves, around each value already percent-encoded on its own via {@link
-     * #encodeSegment}. Without that, a {@code /} inside, say, {@code assetName} would be
-     * indistinguishable from one of those real separators and could splice in extra path
-     * segments.
+     * separators themselves, around each value already percent-encoded on its own via
+     * {@link SidecarUriUtils#encodeSegment(String)}. Without that, a {@code /} inside, say,
+     * {@code assetName} would be indistinguishable from one of those real separators and could
+     * splice in extra path segments.
      */
     @Override
     public Optional<byte[]> fetchPackageVersionAsset(String repositoryContainerId, String domain, String repository,
@@ -158,7 +158,8 @@ public class VerdaccioSidecarManager implements RepositorySidecarManager, Contai
         if (!versionHasAsset(baseUrl, packagePath, version, assetName)) {
             return Optional.empty();
         }
-        URI uri = combine(URI.create(baseUrl), "/" + packagePath + "/-/" + encodeSegment(assetName));
+        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/" + packagePath + "/-/"
+                + SidecarUriUtils.encodeSegment(assetName));
         HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
         HttpResponse<byte[]> response;
         try {
@@ -178,12 +179,12 @@ public class VerdaccioSidecarManager implements RepositorySidecarManager, Contai
 
     private static String packagePath(String namespace, String packageName) {
         return namespace == null
-                ? encodeSegment(packageName)
-                : "@" + encodeSegment(namespace) + "/" + encodeSegment(packageName);
+                ? SidecarUriUtils.encodeSegment(packageName)
+                : "@" + SidecarUriUtils.encodeSegment(namespace) + "/" + SidecarUriUtils.encodeSegment(packageName);
     }
 
     private boolean versionHasAsset(String baseUrl, String packagePath, String version, String assetName) {
-        HttpRequest request = HttpRequest.newBuilder(combine(URI.create(baseUrl), "/" + packagePath))
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), "/" + packagePath))
                 .timeout(Duration.ofSeconds(10)).GET().build();
         HttpResponse<String> response;
         try {
@@ -210,60 +211,6 @@ public class VerdaccioSidecarManager implements RepositorySidecarManager, Contai
         String tarballUrl = versionNode.path("dist").path("tarball").asText("");
         String tarballFilename = tarballUrl.substring(tarballUrl.lastIndexOf('/') + 1);
         return assetName.equals(tarballFilename);
-    }
-
-    /**
-     * Combines {@code base}'s scheme, authority, and own path prefix (this manager's own {@code
-     * baseUrl} is always a bare container address today with no path, but the sibling Reposilite
-     * client's equivalent helper does need this for its externally configurable URL, so this
-     * stays consistent with it) with an already percent-encoded {@code encodedPath}, built from
-     * {@link #encodeSegment}-encoded, caller-supplied segments. {@code encodedPath} must be fully
-     * encoded going in: this hands the combined string straight to {@link URI#create}, which
-     * only parses, rather than running it through a constructor that would try to quote it a
-     * second time and corrupt any {@code %} it finds (double-encoding, e.g. turning a deliberate
-     * {@code %2F} into {@code %252F}).
-     */
-    private static URI combine(URI base, String encodedPath) {
-        // getRawPath(), not getPath(): if baseUrl's own path carries any encoding (an escaped
-        // slash within one opaque segment, say), it must survive untouched rather than being
-        // decoded and re-encoded alongside the new path, which could change what it means to
-        // whatever sits in front of the sidecar. getRawAuthority() below is the same reasoning
-        // applied to userinfo/host.
-        String prefix = base.getRawPath();
-        if (prefix == null || prefix.equals("/")) {
-            prefix = "";
-        } else if (prefix.endsWith("/")) {
-            prefix = prefix.substring(0, prefix.length() - 1);
-        }
-        return URI.create(base.getScheme() + "://" + base.getRawAuthority() + prefix + encodedPath);
-    }
-
-    /**
-     * Percent-encodes a single untrusted path segment so it can never be mistaken for a
-     * structural separator or a dot-segment. Every byte outside the unreserved set is escaped,
-     * including {@code /} (otherwise legal inside a path, and so otherwise indistinguishable
-     * from one of the real separators this class inserts around it). A segment that is exactly
-     * {@code .} or {@code ..} gets its dots escaped too: those are themselves otherwise-legal
-     * unreserved characters, but a bare {@code ..} between two real {@code /} separators is a
-     * dot-segment that something in front of the sidecar could resolve by walking back out of
-     * the directory this method intends to confine the request to.
-     */
-    private static String encodeSegment(String segment) {
-        if (segment.equals(".") || segment.equals("..")) {
-            return segment.replace(".", "%2E");
-        }
-        StringBuilder encoded = new StringBuilder();
-        for (byte b : segment.getBytes(StandardCharsets.UTF_8)) {
-            int v = b & 0xFF;
-            char c = (char) v;
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-                    || c == '-' || c == '_' || c == '~' || c == '.') {
-                encoded.append(c);
-            } else {
-                encoded.append('%').append(String.format("%02X", v));
-            }
-        }
-        return encoded.toString();
     }
 
     private PerKeyContainerPool.StartedContainer startContainer(String npmRepositoryId, String publicUrl) {

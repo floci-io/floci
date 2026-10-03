@@ -18,7 +18,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
@@ -105,9 +104,10 @@ public class PypiserverSidecarManager implements RepositorySidecarManager, Conta
      * {@code assetName} itself embeds {@code version} the way every real PyPI filename does
      * (PEP 427/517 naming) rather than trusting the caller's {@code version} argument on its own.
      *
-     * <p>{@code assetName} is percent-encoded via {@link #encodeSegment} before joining it to
-     * the fixed {@code /packages/} prefix: without that, a {@code /} inside it would be
-     * indistinguishable from a real path separator and could splice in extra path segments.
+     * <p>{@code assetName} is percent-encoded via {@link SidecarUriUtils#encodeSegment(String)}
+     * before joining it to the fixed {@code /packages/} prefix: without that, a {@code /} inside
+     * it would be indistinguishable from a real path separator and could splice in extra path
+     * segments.
      */
     @Override
     public Optional<byte[]> fetchPackageVersionAsset(String repositoryContainerId, String domain, String repository,
@@ -119,7 +119,7 @@ public class PypiserverSidecarManager implements RepositorySidecarManager, Conta
         if (!packageIndexListsAsset(baseUrl, packageName, assetName)) {
             return Optional.empty();
         }
-        URI uri = combine(URI.create(baseUrl), "/packages/" + encodeSegment(assetName));
+        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/packages/" + SidecarUriUtils.encodeSegment(assetName));
         HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
         HttpResponse<byte[]> response;
         try {
@@ -138,58 +138,6 @@ public class PypiserverSidecarManager implements RepositorySidecarManager, Conta
     }
 
     /**
-     * Combines {@code base}'s scheme, authority, and own path prefix (this manager's own {@code
-     * baseUrl} is always a bare container address today with no path, but the sibling Reposilite
-     * client's equivalent helper does need this for its externally configurable URL, so this
-     * stays consistent with it) with an already percent-encoded {@code encodedPath}, built from
-     * {@link #encodeSegment}-encoded, caller-supplied segments. {@code encodedPath} must be fully
-     * encoded going in: this hands the combined string straight to {@link URI#create}, which
-     * only parses, rather than running it through a constructor that would try to quote it a
-     * second time and corrupt any {@code %} it finds (double-encoding, e.g. turning a deliberate
-     * {@code %2F} into {@code %252F}).
-     */
-    private static URI combine(URI base, String encodedPath) {
-        // getRawPath(), not getPath(): if baseUrl's own path carries any encoding, it must
-        // survive untouched rather than being decoded and re-encoded alongside the new path.
-        // getRawAuthority() below is the same reasoning applied to userinfo/host.
-        String prefix = base.getRawPath();
-        if (prefix == null || prefix.equals("/")) {
-            prefix = "";
-        } else if (prefix.endsWith("/")) {
-            prefix = prefix.substring(0, prefix.length() - 1);
-        }
-        return URI.create(base.getScheme() + "://" + base.getRawAuthority() + prefix + encodedPath);
-    }
-
-    /**
-     * Percent-encodes a single untrusted path segment so it can never be mistaken for a
-     * structural separator or a dot-segment. Every byte outside the unreserved set is escaped,
-     * including {@code /} (otherwise legal inside a path, and so otherwise indistinguishable
-     * from one of the real separators this class inserts around it). A segment that is exactly
-     * {@code .} or {@code ..} gets its dots escaped too: those are themselves otherwise-legal
-     * unreserved characters, but a bare {@code ..} between two real {@code /} separators is a
-     * dot-segment that something in front of the sidecar could resolve by walking back out of
-     * the directory this method intends to confine the request to.
-     */
-    private static String encodeSegment(String segment) {
-        if (segment.equals(".") || segment.equals("..")) {
-            return segment.replace(".", "%2E");
-        }
-        StringBuilder encoded = new StringBuilder();
-        for (byte b : segment.getBytes(StandardCharsets.UTF_8)) {
-            int v = b & 0xFF;
-            char c = (char) v;
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-                    || c == '-' || c == '_' || c == '~' || c == '.') {
-                encoded.append(c);
-            } else {
-                encoded.append('%').append(String.format("%02X", v));
-            }
-        }
-        return encoded.toString();
-    }
-
-    /**
      * PEP 503 normalization: lowercase, runs of {@code -_.} collapsed to one {@code -}, same as
      * {@code CodeArtifactPypiController}'s own pre-upload index check. {@code -} and {@code _}
      * collapsing to the same character here is what lets this match a filename's own escaped
@@ -202,7 +150,8 @@ public class PypiserverSidecarManager implements RepositorySidecarManager, Conta
 
     private boolean packageIndexListsAsset(String baseUrl, String packageName, String assetName) {
         String normalized = normalizePackageName(packageName);
-        URI uri = combine(URI.create(baseUrl), "/simple/" + encodeSegment(normalized) + "/");
+        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/simple/" + SidecarUriUtils.encodeSegment(normalized)
+                + "/");
         HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
         HttpResponse<String> response;
         try {
