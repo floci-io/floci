@@ -51,6 +51,7 @@ public final class SqlParameterParser {
         StringBuilder out = new StringBuilder(sql.length());
         List<String> order = new ArrayList<>();
         int len = sql.length();
+        int bracketDepth = 0;
         int i = 0;
         while (i < len) {
             char c = sql.charAt(i);
@@ -90,13 +91,34 @@ public final class SqlParameterParser {
                 continue;
             }
 
+            if (c == '[') {
+                bracketDepth++;
+                out.append(c);
+                i++;
+                continue;
+            }
+
+            if (c == ']') {
+                if (bracketDepth > 0) {
+                    bracketDepth--;
+                }
+                out.append(c);
+                i++;
+                continue;
+            }
+
             if (c == ':') {
                 if (i + 1 < len && sql.charAt(i + 1) == ':') {
                     out.append("::");
                     i += 2;
                     continue;
                 }
-                if (i + 1 < len && isNameStart(sql.charAt(i + 1))) {
+                char next = i + 1 < len ? sql.charAt(i + 1) : '\0';
+                boolean named = isNameStart(next);
+                boolean positional = bracketDepth == 0
+                        && Character.isDigit(next)
+                        && (i == 0 || !isNamePart(sql.charAt(i - 1)));
+                if (named || positional) {
                     int j = i + 1;
                     while (j < len && isNamePart(sql.charAt(j))) {
                         j++;

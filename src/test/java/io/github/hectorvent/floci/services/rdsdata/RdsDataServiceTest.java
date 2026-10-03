@@ -437,6 +437,31 @@ class RdsDataServiceTest {
     }
 
     @Test
+    void bindsNumericParameterNamesOnPostgres() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        harness.createEventsTable();
+
+        ObjectNode insert = harness.request("insert into data_api_events(name) values (:1)");
+        ArrayNode insertParams = objectMapper.createArrayNode();
+        insertParams.add(stringParam("1", "numeric-one"));
+        insert.set("parameters", insertParams);
+        assertEquals(1L, harness.service.executeStatement(insert, REGION)
+                .get("numberOfRecordsUpdated").asLong());
+
+        ObjectNode select = harness.request("select :1::text as a, :2::text as b");
+        ArrayNode selectParams = objectMapper.createArrayNode();
+        selectParams.add(stringParam("1", "bound-one"));
+        selectParams.add(stringParam("2", "bound-two"));
+        select.set("parameters", selectParams);
+        ArrayNode row = (ArrayNode) harness.service.executeStatement(select, REGION)
+                .get("records").get(0);
+
+        assertEquals("bound-one", row.get(0).get("stringValue").asText());
+        assertEquals("bound-two", row.get(1).get("stringValue").asText());
+        assertEquals(1L, harness.countEvents());
+    }
+
+    @Test
     void rejectsSqlParameterWithoutMatchingValue() throws Exception {
         TestHarness harness = new TestHarness();
         harness.createTables();
