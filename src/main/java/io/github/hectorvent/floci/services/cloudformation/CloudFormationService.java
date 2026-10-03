@@ -2938,9 +2938,8 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * Resolves a stack by name or ARN. When an ARN is provided the stack name
-     * is extracted from the ARN path segment ({@code …:stack/<name>/<id>}).
-     * Falls back to a linear scan matching on stackId for robustness.
+     * Resolves a live stack by name or ARN. An ARN is a stack id and resolves only to the stack
+     * carrying that exact id, never to a newer stack that reused the name.
      */
     private Stack resolveStack(String stackNameOrArn, String region) {
         return resolveStack(stackNameOrArn, region, currentAccount());
@@ -2966,7 +2965,9 @@ public class CloudFormationService implements ResourceProvider {
             String extractedName = extractStackNameFromArn(stackNameOrArn);
             if (extractedName != null) {
                 stack = stacks.get(stackKey(accountId, extractedName, region));
-                if (stack != null) {
+                // A stack id names one stack: a live stack that reused the name is a different
+                // stack, so the id resolves to it only when the ids match.
+                if (stack != null && stackNameOrArn.equals(stack.getStackId())) {
                     return stack;
                 }
             }

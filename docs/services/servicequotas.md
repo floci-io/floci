@@ -11,7 +11,9 @@ them — CodeBuild's `L-2DC20C30` ("Concurrently running builds") and Lambda's `
 values are deliberately generous so local pipelines that gate on quota headroom, such
 as AWS Landing Zone Accelerator, never stall on a limit the emulator does not enforce. The
 Organizations `Maximum number of accounts` quota uses AWS quota code `L-E619E033` and a local value
-of 50.
+of 50. VPC's `L-FE5A380F` ("NAT gateways per Availability Zone", 5) and `L-2AEEBF1A` ("Rules per
+network ACL", 20) carry their AWS default values, so tooling that compares a desired value against
+the default before requesting an increase takes the same path it would against AWS.
 
 Applied quotas and AWS default quotas return the same data, and quota values are static.
 `RequestServiceQuotaIncrease` is accepted and validated but does not change any quota value —

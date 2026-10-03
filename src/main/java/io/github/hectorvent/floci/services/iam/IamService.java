@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.CertificateMaterialException;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
@@ -28,6 +30,7 @@ import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -39,7 +42,9 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.PrivateKey;
 import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
@@ -134,6 +139,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final int IAM_PATH_MAX_LENGTH = 512;
     private static final int MAX_TAGS_PER_RESOURCE = 50;
     /**
+     * The IAM User Guide's quota table gives "Server certificates per account" as 20, with 20 as
+     * the maximum it can be raised to, so this is a real ceiling rather than a default.
+     */
+    private static final int MAX_SERVER_CERTIFICATES = 20;
+    /** {@code certificateBodyType} and {@code privateKeyType} are both 1 to 16384 characters. */
+    private static final int MAX_CERTIFICATE_BODY_LENGTH = 16384;
+    /** {@code certificateChainType} is far larger, at 1 to 2097152. */
+    private static final int MAX_CERTIFICATE_CHAIN_LENGTH = 2097152;
+    /**
      * "You can register up to eight MFA devices of any combination of the currently supported MFA
      * types" (IAM User Guide). Floci models only virtual devices, so this bounds those alone.
      */
@@ -201,6 +215,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final StorageBackend<String, CredentialReport> credentialReports;
     /** Virtual MFA devices, keyed by serial number, which for a virtual device is its own ARN. */
     private final StorageBackend<String, VirtualMfaDevice> virtualMfaDevices;
+    /** Server certificates, keyed by name, which is unique within the account. */
+    private final StorageBackend<String, ServerCertificate> serverCertificates;
+    /**
+     * Guards the check-then-write on a server certificate. Upload checks the name is free before
+     * storing, and UpdateServerCertificate checks a new name is free before moving to it, so two
+     * requests racing the same name would otherwise both pass the check.
+     */
+    private final Object serverCertificateLock = new Object();
     /**
      * Guards every check-then-write on an MFA device. Assignment is the reason it has to exist:
      * EnableMFADevice reads the device to confirm it is unassigned and reads the user's device
@@ -241,6 +263,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-org-root-features.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-credential-reports.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-virtual-mfa-devices.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-server-certificates.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null)
@@ -270,8 +293,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
-                seedDeployerPrincipal, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                regionResolver, seedDeployerPrincipal, null);
     }
 
     // 8-backend constructor (no org-root-features): kept for existing callers/tests;
@@ -293,7 +316,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 accountAliases, passwordPolicies, new InMemoryStorage<>(), oidcProviders,
                 serviceLinkedRoleDeletions, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal, seededAccountAlias);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
+                seedDeployerPrincipal, seededAccountAlias);
     }
 
     // 9-backend constructor (no alias/OIDC/SLR backends): kept for existing callers/tests;
@@ -312,8 +336,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), passwordPolicies, new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), orgRootFeatures,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
-                seedDeployerPrincipal, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                regionResolver, seedDeployerPrincipal, null);
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -331,6 +355,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, OrganizationRootFeatures> orgRootFeatures,
                StorageBackend<String, CredentialReport> credentialReports,
                StorageBackend<String, VirtualMfaDevice> virtualMfaDevices,
+               StorageBackend<String, ServerCertificate> serverCertificates,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
@@ -349,6 +374,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.orgRootFeatures = orgRootFeatures;
         this.credentialReports = credentialReports;
         this.virtualMfaDevices = virtualMfaDevices;
+        this.serverCertificates = serverCertificates;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
@@ -1213,9 +1239,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * keys; quota values are cross-checked against AWS's published IAM service quotas
      * (docs.aws.amazon.com/general/latest/gr/iam-service.html), though floci itself enforces
      * only the 5-versions-per-policy cap in {@link #createPolicyVersion}. Resources floci does
-     * not track at all (server certificates, account password - stub-empty elsewhere in this
-     * handler) are reported as zero rather than omitted, so callers indexing into the full AWS
-     * field set don't hit a missing-key error.
+     * not track at all (the account password) are reported as zero rather than omitted, so
+     * callers indexing into the full AWS field set don't hit a missing-key error.
      */
     public Map<String, Long> getAccountSummary() {
         long localPolicyCount = 0;
@@ -1253,7 +1278,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         summary.put("RolePolicySizeQuota", 10240L);
         summary.put("AccessKeysPerUserQuota", 2L);
         summary.put("SigningCertificatesPerUserQuota", 2L);
-        summary.put("ServerCertificates", 0L);
+        summary.put("ServerCertificates", (long) serverCertificates.scan(k -> true).size());
         summary.put("ServerCertificatesQuota", 20L);
         summary.put("Providers", (long) oidcProviders.scan(k -> true).size());
         List<VirtualMfaDevice> mfaDevices = virtualMfaDevices.scan(k -> true);
@@ -2034,6 +2059,235 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                             + " characters, either a bare forward slash or a string that begins and ends "
                             + "with a forward slash.", 400);
         }
+    }
+
+    // Server certificates
+    // =========================================================================
+
+    /**
+     * Stores an uploaded server certificate. The PEM material is really parsed and the key really
+     * checked against the certificate, so a caller cannot store something unusable: AWS models
+     * MalformedCertificate and KeyPairMismatch on this operation, and neither can be answered
+     * without reading the material. {@code Expiration} is read off the certificate rather than
+     * stored separately, so it cannot drift from what it describes.
+     */
+    public ServerCertificate uploadServerCertificate(String name, String path, String certificateBody,
+                                                     String privateKeyPem, String certificateChain,
+                                                     Map<String, String> tags) {
+        validateIamResourceName(name, "ServerCertificateName");
+        validateIamPath(path, "Path");
+        if (certificateBody == null || certificateBody.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter CertificateBody.", 400);
+        }
+        if (privateKeyPem == null || privateKeyPem.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter PrivateKey.", 400);
+        }
+        // Length before parsing: an over-long body is a request-shape error, and rejecting it here
+        // keeps a multi-megabyte string from reaching the PEM reader at all.
+        checkMaterialLength(certificateBody, "CertificateBody", MAX_CERTIFICATE_BODY_LENGTH);
+        checkMaterialLength(privateKeyPem, "PrivateKey", MAX_CERTIFICATE_BODY_LENGTH);
+        checkMaterialLength(certificateChain, "CertificateChain", MAX_CERTIFICATE_CHAIN_LENGTH);
+        if (tags != null && tags.size() > MAX_TAGS_PER_RESOURCE) {
+            throw new AwsException("LimitExceeded",
+                    "Cannot exceed quota for TagsPerServerCertificate: " + MAX_TAGS_PER_RESOURCE, 409);
+        }
+        X509Certificate certificate = parseUploadedCertificate(certificateBody, "CertificateBody");
+        if (certificateChain != null) {
+            // An omitted chain is fine, an empty one is not: certificateChainType has a minimum
+            // of 1, so a present-but-empty value breaks the request shape. Anything longer is
+            // parsed, which is what makes a whitespace-only chain a malformed certificate rather
+            // than silently storing no chain at all.
+            if (certificateChain.isEmpty()) {
+                throw new AwsException("ValidationError",
+                        "1 validation error detected: Value at 'CertificateChain' failed to satisfy "
+                                + "constraint: Member must have length greater than or equal to 1", 400);
+            }
+            parseUploadedChain(certificateChain);
+        }
+        PrivateKey privateKey;
+        try {
+            privateKey = Pem.parsePrivateKey(privateKeyPem);
+        } catch (CertificateMaterialException e) {
+            // The key itself is unreadable, which AWS reports as a malformed certificate too:
+            // MalformedCertificate covers the uploaded material, not only the certificate body.
+            throw new AwsException("MalformedCertificate",
+                    "The private key is not a valid PEM private key.", 400);
+        }
+        boolean matches;
+        try {
+            matches = Pem.isPair(privateKey, certificate.getPublicKey());
+        } catch (Exception e) {
+            // A key and certificate of different algorithms cannot be compared by signing, which
+            // is itself a mismatch rather than a server-side failure.
+            LOG.debugv("Server certificate key pair could not be verified: {0}", e.getMessage());
+            matches = false;
+        }
+        if (!matches) {
+            throw new AwsException("KeyPairMismatch",
+                    "The public key certificate and the private key do not match.", 400);
+        }
+
+        String normalizedPath = normalizePath(path);
+        ServerCertificate stored = new ServerCertificate();
+        stored.setServerCertificateName(name);
+        stored.setServerCertificateId("ASCA" + randomId(16));
+        stored.setPath(normalizedPath);
+        stored.setArn(iamArn("server-certificate", normalizedPath, name));
+        stored.setCertificateBody(certificateBody);
+        stored.setPrivateKey(privateKeyPem);
+        stored.setCertificateChain(certificateChain);
+        stored.setExpiration(certificate.getNotAfter().toInstant());
+        stored.setTags(tags);
+        synchronized (serverCertificateLock) {
+            if (containsNameIgnoreCase(serverCertificates, ServerCertificate::getServerCertificateName, name)) {
+                throw new AwsException("EntityAlreadyExists",
+                        "The Server Certificate with name " + name + " already exists.", 409);
+            }
+            // Counted under the same lock as the write, so concurrent uploads cannot both see
+            // room for one more and together exceed the quota.
+            if (serverCertificates.scan(k -> true).size() >= MAX_SERVER_CERTIFICATES) {
+                throw new AwsException("LimitExceeded",
+                        "Cannot exceed quota for ServerCertificatesPerAccount: "
+                                + MAX_SERVER_CERTIFICATES, 409);
+            }
+            serverCertificates.put(name, stored);
+        }
+        LOG.infov("Uploaded IAM server certificate: {0}", name);
+        return stored;
+    }
+
+    private void checkMaterialLength(String value, String paramName, int limit) {
+        if (value != null && value.length() > limit) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at '" + paramName
+                            + "' failed to satisfy constraint: Member must have length less than "
+                            + "or equal to " + limit, 400);
+        }
+    }
+
+    /**
+     * Every certificate in an uploaded chain, not just the first. A PEM reader stops at the first
+     * block, so checking the chain with one call would store a chain whose later certificates are
+     * unreadable and only surface them when something tried to use it.
+     */
+    private void parseUploadedChain(String chainPem) {
+        int blocks = 0;
+        for (String block : chainPem.split("(?<=-----END CERTIFICATE-----)")) {
+            if (block.isBlank()) {
+                continue;
+            }
+            parseUploadedCertificate(block, "CertificateChain");
+            blocks++;
+        }
+        if (blocks == 0) {
+            throw new AwsException("MalformedCertificate",
+                    "CertificateChain is not a valid PEM certificate.", 400);
+        }
+    }
+
+    /** Parses uploaded PEM, reporting AWS's MalformedCertificate rather than a parse exception. */
+    private X509Certificate parseUploadedCertificate(String pem, String paramName) {
+        try {
+            return Pem.parseCertificate(pem);
+        } catch (CertificateMaterialException e) {
+            LOG.debugv("Rejected unparseable {0}: {1}", paramName, e.getMessage());
+            throw new AwsException("MalformedCertificate",
+                    paramName + " is not a valid PEM certificate.", 400);
+        }
+    }
+
+    /** The certificate, when one is stored under that name, for callers that must not throw. */
+    public Optional<ServerCertificate> findServerCertificate(String name) {
+        return name == null ? Optional.empty() : serverCertificates.get(name);
+    }
+
+    public ServerCertificate getServerCertificate(String name) {
+        validateIamResourceName(name, "ServerCertificateName");
+        return serverCertificates.get(name)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "The Server Certificate with name " + name + " cannot be found.", 404));
+    }
+
+    public List<ServerCertificate> listServerCertificates(String pathPrefix) {
+        String prefix = pathPrefix != null && !pathPrefix.isEmpty() ? pathPrefix : "/";
+        return serverCertificates.scan(k -> true).stream()
+                .filter(c -> c.getPath().startsWith(prefix))
+                .sorted(Comparator.comparing(ServerCertificate::getServerCertificateName))
+                .toList();
+    }
+
+    /**
+     * Renames or moves a server certificate. The stored material is untouched, so the certificate
+     * keeps its id and expiry; only the name, path and the ARN built from them change.
+     */
+    public ServerCertificate updateServerCertificate(String name, String newName, String newPath) {
+        validateIamResourceName(name, "ServerCertificateName");
+        if (newName != null) {
+            validateIamResourceName(newName, "NewServerCertificateName");
+        }
+        validateIamPath(newPath, "NewPath");
+        synchronized (serverCertificateLock) {
+            ServerCertificate existing = getServerCertificate(name);
+            String targetName = newName != null ? newName : name;
+            // Excluded by id, not by name: a rename that only changes case would otherwise match
+            // the certificate against itself, the same reason updateUser compares user ids here.
+            boolean taken = resourcesInCurrentAccount(serverCertificates)
+                    .filter(other -> !other.getServerCertificateId().equals(existing.getServerCertificateId()))
+                    .anyMatch(other -> other.getServerCertificateName().equalsIgnoreCase(targetName));
+            if (taken) {
+                throw new AwsException("EntityAlreadyExists",
+                        "The Server Certificate with name " + targetName + " already exists.", 409);
+            }
+            if (newPath != null) {
+                existing.setPath(normalizePath(newPath));
+            }
+            existing.setServerCertificateName(targetName);
+            existing.setArn(iamArnBeside(existing.getArn(), "server-certificate",
+                    existing.getPath(), targetName));
+            if (!targetName.equals(name)) {
+                serverCertificates.delete(name);
+            }
+            serverCertificates.put(targetName, existing);
+            return existing;
+        }
+    }
+
+    public void deleteServerCertificate(String name) {
+        validateIamResourceName(name, "ServerCertificateName");
+        synchronized (serverCertificateLock) {
+            getServerCertificate(name);
+            serverCertificates.delete(name);
+        }
+        LOG.infov("Deleted IAM server certificate: {0}", name);
+    }
+
+    public void tagServerCertificate(String name, Map<String, String> newTags) {
+        validateIamResourceName(name, "ServerCertificateName");
+        synchronized (serverCertificateLock) {
+            ServerCertificate certificate = getServerCertificate(name);
+            certificate.setTags(mergeTagsWithinQuota(certificate.getTags(), newTags,
+                    "TagsPerServerCertificate", false));
+            serverCertificates.put(certificate.getServerCertificateName(), certificate);
+        }
+    }
+
+    public void untagServerCertificate(String name, List<String> tagKeys) {
+        validateIamResourceName(name, "ServerCertificateName");
+        synchronized (serverCertificateLock) {
+            ServerCertificate certificate = getServerCertificate(name);
+            Map<String, String> remaining = new LinkedHashMap<>(certificate.getTags());
+            if (tagKeys != null) {
+                tagKeys.forEach(remaining::remove);
+            }
+            certificate.setTags(remaining);
+            serverCertificates.put(certificate.getServerCertificateName(), certificate);
+        }
+    }
+
+    public Map<String, String> listServerCertificateTags(String name) {
+        return getServerCertificate(name).getTags();
     }
 
     // Virtual MFA devices

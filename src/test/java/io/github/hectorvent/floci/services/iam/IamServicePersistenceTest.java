@@ -230,7 +230,7 @@ class IamServicePersistenceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), devices,
+                new InMemoryStorage<>(), devices, new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, null);
     }
 
