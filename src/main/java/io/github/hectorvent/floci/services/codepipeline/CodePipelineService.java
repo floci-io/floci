@@ -1443,8 +1443,9 @@ public class CodePipelineService {
         execution.getStageExecutionStatuses().put(stageName, "InProgress");
         execution.setLastUpdateTime(now());
         putExecution(execution);
-        eventPublisher.stageStateChange(execution, stageName, "STARTED");
 
+        // Evaluated before STARTED is published: AWS documents no skipped-stage event, so a stage
+        // skipped by its beforeEntry condition emits no stage events at all.
         ConditionOutcome entry = evaluateConditions(execution, stage, "BEFORE_ENTRY");
         if (entry == ConditionOutcome.SKIP_STAGE) {
             execution.getStageExecutionStatuses().put(stageName, "Skipped");
@@ -1453,6 +1454,7 @@ public class CodePipelineService {
             putExecution(execution);
             return true;
         }
+        eventPublisher.stageStateChange(execution, stageName, "STARTED");
         if (entry == ConditionOutcome.FAIL) {
             failForCondition(execution, stageName, "BEFORE_ENTRY");
             execution.getStageExecutionStatuses().put(stageName, "Failed");

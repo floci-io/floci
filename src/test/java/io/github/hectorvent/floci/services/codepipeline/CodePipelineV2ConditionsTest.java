@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -18,8 +19,10 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.time.Duration;
+import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,7 +38,9 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -265,6 +270,47 @@ class CodePipelineV2ConditionsTest {
                 mapper.createObjectNode().put("pipelineName", "skipper"), REGION, ACCOUNT)
                 .path("actionExecutionDetails");
         assertFalse(actions.findValuesAsText("stageName").contains("Deploy"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void beforeEntrySkipEmitsNoStageEventsForTheSkippedStage() {
+        // Catches: a stage skipped by beforeEntry publishing a STARTED stage event with no terminal event.
+        EventBridgeService eventBridge = mock(EventBridgeService.class);
+        service = new CodePipelineService(storageFactory, mapper, mock(CodeBuildService.class),
+                mock(CodeDeployService.class), lambdaService, s3Service,
+                new CodePipelineEventPublisher(eventBridge, null, mapper), 500L,
+                TimeUnit.SECONDS.toNanos(5), () -> { });
+        ObjectNode deploy = lambdaStage("Deploy");
+        addRule(deploy, "beforeEntry", "SKIP", "VariableCheck")
+                .put("Variable", "#{variables.go}").put("Value", "yes").put("Operator", "EQ");
+        createPipeline("skip-events", sourceStage(), deploy);
+
+        String executionId = startExecution("skip-events");
+        awaitStatus("skip-events", executionId, "Succeeded");
+
+        ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
+        verify(eventBridge, atLeastOnce()).putEvents(events.capture(), anyString(), anyString());
+        List<String> deployStageStates = new ArrayList<>();
+        for (List<Map<String, Object>> batch : events.getAllValues()) {
+            for (Map<String, Object> entry : batch) {
+                if ("CodePipeline Stage Execution State Change".equals(entry.get("DetailType"))) {
+                    JsonNode detail = parseDetail((String) entry.get("Detail"));
+                    if ("Deploy".equals(detail.path("stage").asText())) {
+                        deployStageStates.add(detail.path("state").asText());
+                    }
+                }
+            }
+        }
+        assertEquals(List.of(), deployStageStates);
+    }
+
+    private JsonNode parseDetail(String detail) {
+        try {
+            return mapper.readTree(detail);
+        } catch (IOException e) {
+            return fail("Unparseable event detail: " + detail);
+        }
     }
 
     @Test
